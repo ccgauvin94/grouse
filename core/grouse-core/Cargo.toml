@@ -1,0 +1,31 @@
+[package]
+name = "grouse-core"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Stable ACP client crate for Grouse, built on the official agent-client-protocol SDK"
+repository = "https://github.com/ccgauvin94/grouse"
+
+# cdylib for uniffi's library-mode bindgen (Android/Swift) + a KDE C ABI later;
+# rlib so the CLI and grouse-unstable can consume this crate directly.
+[lib]
+crate-type = ["cdylib", "rlib", "staticlib"]
+
+[dependencies]
+agent-client-protocol = { version = "2.0.0", features = ["unstable_elicitation"] }
+async-tungstenite = { version = "0.34", default-features = false, features = ["tokio-rustls-webpki-roots"] }
+futures = "0.3"
+# The shared iroh roam transport (CONTRACT §2/§6) — the RUST crate, not the C
+# ABI. Pinned to the checked-out revision of the public grouse-roam-core repo.
+grouse-roam-core = { git = "https://github.com/ccgauvin94/grouse-roam-core.git", rev = "69530b376387212c29e710e70c79bc71d731ac33" }
+parking_lot = "0.12"
+# `ring` (and NOT aws-lc-rs) so rustls has exactly one crypto provider and
+# `ClientConfig::builder()` can install it automatically.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+# default-features = false: tokio-rustls' default `aws_lc_rs` would collide with
+# the `ring` provider above.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+uniffi = "0.32"

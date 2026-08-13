@@ -1,0 +1,25 @@
+# Rust
+target/
+**/target/
+
+# Android
+clients/android/.gradle/
+clients/android/build/
+clients/android/app/build/
+clients/android/local.properties
+*.apk
+
+# Qt / CMake
+build/
+clients/desktop/build/
+CMakeLists.txt.user
+*.user
+
+# Flatpak
+.flatpak-builder/
+flatpak-repo/
+*.flatpak
+
+# Secrets / environment
+.env
+.env.*

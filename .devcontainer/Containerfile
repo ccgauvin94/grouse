@@ -1,0 +1,65 @@
+# grouse core + CLI devcontainer image.
+#
+# Base: Rocky Linux 9 — the same OS the home server (deployment target) runs, so
+# the core's native build deps and dynamic libraries match production.
+#
+# Rust toolchain: installed via rustup, pinned to a specific stable release
+# (override with `podman build --build-arg RUST_VERSION=<ver>`). We do NOT use the
+# distro rust/cargo because Rocky 9 does not ship a Rust toolchain in its base
+# repos, and rustup gives a reproducible toolchain that stays in lockstep with
+# the CI matrix. The toolchain is installed per-user (owned by the `dev` user) so
+# cargo's registry cache is writable without root.
+
+FROM rockylinux:9
+
+# Match the invoking user so files written to a bind-mounted /workspace (e.g.
+# the target/ directory) end up owned by the right uid/gid. Override at build
+# time if your UID/GID differ.
+ARG RUST_VERSION=1.97.1
+ARG UID=1000
+ARG GID=1000
+
+# Native build deps for the Rust core + CLI.
+#
+#   gcc gcc-c++ make cmake clang  — C/C++ toolchain for crates that build native
+#                                   code (cc/cmake build scripts, ring, etc.)
+#   openssl-devel + pkgconf-pkg-config — the ACP SDK's WebSocket/TLS path
+#                                   (native-tls / openssl-sys) needs the OpenSSL
+#                                   headers and pkg-config to locate them
+#   perl      — required to build ring / openssl-src
+#   git       — fetching git dependencies (curl-minimal is already in the base
+#               image and is what rustup's installer uses)
+#   ca-certificates — TLS trust for the cargo registry and rustup
+RUN dnf -y install --setopt=install_weak_deps=False \
+        gcc gcc-c++ make cmake clang \
+        openssl-devel pkgconf pkgconf-pkg-config \
+        perl git ca-certificates \
+    && dnf -y clean all \
+    && rm -rf /var/cache/dnf
+# Non-root dev user. With a rootless podman userns (`--userns=keep-id`) this
+# uid/gid maps back to the host user, so repo artifacts keep the right owner.
+RUN groupadd --gid "${GID}" dev \
+    && useradd --uid "${UID}" --gid "${GID}" --create-home --shell /bin/bash dev
+
+# Install Rust as the dev user (per-user toolchain). clippy + rustfmt are
+# included because CI runs `cargo clippy` and the container should match CI.
+USER dev
+ENV CARGO_HOME=/home/dev/.cargo \
+    RUSTUP_HOME=/home/dev/.rustup \
+    PATH=/home/dev/.cargo/bin:${PATH}
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y \
+        --default-toolchain "${RUST_VERSION}" \
+        --profile minimal \
+        --component clippy,rustfmt \
+    && cargo --version \
+    && rustc --version
+
+# Reset to root so the workspace mount and user mapping are controlled at run
+# time (see scripts/dev-env.sh and devcontainer.json); the dev user runs the
+# actual build/test commands.
+USER root
+
+WORKDIR /workspace
+
+CMD ["/bin/bash"]

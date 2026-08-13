@@ -1,0 +1,23 @@
+{
+  "name": "grouse — Rust core + CLI",
+  "build": {
+    "dockerfile": "Containerfile"
+  },
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  "remoteUser": "dev",
+  "updateRemoteUserUID": false,
+  "runArgs": ["--userns=keep-id"],
+  "postCreateCommand": "rustc --version && cargo --version && echo && echo 'Build core + CLI:' && echo '  cargo build --manifest-path core/Cargo.toml' && echo '  cargo build --manifest-path clients/cli/Cargo.toml' && echo 'Test core:' && echo '  cargo test --manifest-path core/Cargo.toml'",
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer"],
+      "settings": {
+        "rust-analyzer.linkedProjects": [
+          "core/Cargo.toml",
+          "clients/cli/Cargo.toml"
+        ]
+      }
+    }
+  }
+}

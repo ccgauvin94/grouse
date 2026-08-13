@@ -1,0 +1,13 @@
+[package]
+name = "grouse-unstable"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "goose-fork _goose/unstable/* compatibility shim (retiring as the GDK absorbs each feature)"
+repository = "https://github.com/ccgauvin94/grouse"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+grouse-core = { path = "../grouse-core" }
