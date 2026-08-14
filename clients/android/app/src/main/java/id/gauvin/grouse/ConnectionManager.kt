@@ -1502,6 +1502,19 @@ class ConnectionManager private constructor(context: Context) {
         // spinning.
         if (method.startsWith("_goose/unstable/tools/list")) discovering = null
         if (method.startsWith("_goose/unstable/config/extensions/list")) extensionsBusy.value = false
+        // Automatic probes (fired at connect / on screen open) are background traffic —
+        // the old client rendered their failures as subtle background errors. Snackbar
+        // only user-initiated calls; a dead probe (e.g. supported-models against a
+        // provider the box can't reach) must not greet the user with an alarm at login.
+        val quiet = listOf(
+            "_goose/unstable/tools/list",
+            "_goose/unstable/session/extensions/list",
+            "_goose/unstable/providers/supported-models/list",
+            "_goose/unstable/sources/list",
+            "_goose/unstable/session/info",
+            "_goose/unstable/session/update",
+        ).any { method.startsWith(it) }
+        if (quiet) { android.util.Log.w("Grouse", "quiet probe error: $method: $message"); return }
         backgroundNotice.value = "$method: $message"
         android.util.Log.w("Grouse", "background rpc error: $method: $message")
     }
@@ -1736,7 +1749,10 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun currentServerConfig(): ServerConfig = ServerConfig(
         host = store.host,
-        port = store.port.toUShortOrNull() ?: 3284u,
+        // Empty port = the wss default (443). The old client let OkHttp resolve an empty
+        // port to 443; goosed on goose.gauvin.id only listens on 443 (3284 is LAN-only),
+        // so defaulting to 3284 here broke the "host + key, no port" setup that worked.
+        port = store.port.toUShortOrNull() ?: 443u,
         secretKey = store.secretKey,
         // The app has always spoken wss to goosed (trust-all TLS); no TLS toggle exists.
         useTls = true,
@@ -1745,7 +1761,6 @@ class ConnectionManager private constructor(context: Context) {
         clientId = "grouse",
         initialRecipeId = null,
     )
-
     // ---------------------------------------------------------------------------
     // Unstable payload parsers (the core hands the raw JSON reply payloads)
     // ---------------------------------------------------------------------------
