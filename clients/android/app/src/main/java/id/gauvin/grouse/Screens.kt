@@ -1907,7 +1907,7 @@ fun ConfigPanel(
 
 /** Model picker: a READ-ONLY dropdown. Pick from goose's featured models + ones seen before for the
  *  CURRENT provider (provider-scoped, so LocalAI and OpenRouter never mix, and now also live-fetched
- *  from the provider's actual backend -- see AcpClient.listSupportedModels/ConnectionManager), or
+ *  from the provider's actual backend -- see ConnectionManager/onSupportedModels), or
  *  pick "Custom model…" to type any model id in a dialog. Free text is needed for OpenRouter slugs
  *  goose doesn't "feature" (e.g. poolside/laguna-s-2.1) and any local model id not yet in the list. */
 @OptIn(ExperimentalMaterial3Api::class)

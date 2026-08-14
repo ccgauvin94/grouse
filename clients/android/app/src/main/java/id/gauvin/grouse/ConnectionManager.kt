@@ -4,55 +4,62 @@ import android.content.Context
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import androidx.compose.runtime.mutableStateOf
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
+import uniffi.grouse_core.ConfigChoice
+import uniffi.grouse_core.ConfigOption as CoreConfigOption
+import uniffi.grouse_core.ConnectionStatus
+import uniffi.grouse_core.Core
+import uniffi.grouse_core.CoreListener
+import uniffi.grouse_core.GrouseUnstable
+import uniffi.grouse_core.GrouseUnstableListener
+import uniffi.grouse_core.Message
+import uniffi.grouse_core.PermissionOutcome
+import uniffi.grouse_core.PermissionRequest
+import uniffi.grouse_core.PermissionOption
+import uniffi.grouse_core.ProjectSummary
+import uniffi.grouse_core.Prompt
+import uniffi.grouse_core.PromptBlock
+import uniffi.grouse_core.SendExpect
+import uniffi.grouse_core.ServerConfig
+import uniffi.grouse_core.SessionSummary
+import uniffi.grouse_core.StreamEvent
+import uniffi.grouse_core.ToolCallKind
+import uniffi.grouse_core.TranscriptEvent
 import uniffi.grouse_roam_core.cardFingerprint
 import uniffi.grouse_roam_core.identityGenerate
 import uniffi.grouse_roam_core.identityPublicKey
-import uniffi.grouse_roam_core.roamConnect
 
 /** The three drawer session categories. See ConnectionManager.sessionKind(). */
 enum class SessionKind { ASSISTANT, CHAT, CODE }
 
-private val chatMessageSeq = java.util.concurrent.atomic.AtomicLong(0)
-/** Stable per-message id so the chat LazyColumn keys on identity, not position. copy() preserves it,
- *  so the streaming message keeps the same id as its text grows → its composition is reused, not rebuilt. */
-data class ChatMessage(
-    val role: String,
-    val text: String,
-    val images: List<ImageBlock> = emptyList(),
-    // Extra detail for a "tool" message: the tool's rawInput (command/args) — Desktop shows this,
-    // Grouse was discarding it and only keeping the title. Unused by other roles.
-    val detail: String = "",
-    // Tool-role only: goose's toolCallId (correlates tool_call_update notifications),
-    // lifecycle status (in_progress/completed/failed), and the tool's OUTPUT text when the
-    // completion update carried content. Live sessions only — replays don't reconstruct these.
-    val toolCallId: String = "",
-    val status: String = "",
-    val output: String = "",
-    val id: Long = chatMessageSeq.getAndIncrement(),
-    // Generation stats, stamped onto the assistant message when the turn ends. Held per message
-    // rather than as one "latest" value so long-pressing any reply can show its own numbers;
-    // replayed history has none, because the server transcript does not carry them.
-    val usage: AcpEvent.MessageUsage? = null,
-    // MCP-App ("mcpapp" role) only: the server-hosted template that renders this tool's output,
-    // and the cache key it was fetched under. `detail` holds the tool input JSON the template
-    // consumes. appHtml is empty while the fetch is in flight — the renderer shows a plain tool
-    // row until it lands, and forever if it never does.
-    val appKey: String = "",
-    val appHtml: String = "",
-)
-
 /**
- * Process-scoped owner of the ACP connection + chat state. A singleton (not a ViewModel) so
- * it survives navigation/config changes and can later be shared with a background service,
- * share intents, tiles, etc. Compose observes its snapshot state directly.
+ * Process-scoped owner of the grouse-core connection + chat state. A singleton (not a
+ * ViewModel) so it survives navigation/config changes and can later be shared with a
+ * background service, share intents, tiles, etc. Compose observes its snapshot state directly.
+ *
+ * THE MODEL: the Rust core owns the connection, the session list, the active session's
+ * transcript, caches, reconnect/backoff, and remote-change resync (CONTRACT). This controller
+ * mirrors the core's events into the app's state holders and translates its records into the
+ * app DTOs (Dtos.kt). It never reimplements client logic.
+ *
+ * Threading: the uniffi listeners fire on the core's worker thread; every callback marshals
+ * onto the main looper before touching Compose state.
  */
 class ConnectionManager private constructor(context: Context) {
     val store = SecureStore(context)
@@ -73,11 +80,57 @@ class ConnectionManager private constructor(context: Context) {
     private fun dequeue(): PendingSend? =
         (if (pendingSends.isEmpty()) null else pendingSends.removeFirst()).also { queuedCount.value = pendingSends.size }
     private fun clearQueue() { pendingSends.clear(); queuedCount.value = 0 }
-    // True between sendPrompt and TurnDone. `busy` is UI state and is also set while merely
+    // True between sendPrompt and RunEnded. `busy` is UI state and is also set while merely
     // queued, so it cannot answer "is the wire busy" -- this can.
     private var turnInFlight = false
-    // messageId of the chunk currently streaming into the open bubble (replay only).
-    private var streamMsgId: String? = null
+
+    // --- grouse-core (the wire is the core's; these are the only handles we hold) ----------
+    // The core owns the socket, reconnect/backoff, the transcript, and the caches. `unstable`
+    // is the _goose/unstable/* shim (recipes, schedules, skills, extensions, tools, config).
+    private val core = Core(object : CoreListener {
+        override fun onStatus(status: ConnectionStatus) { main.post { onCoreStatus(status) } }
+        override fun onSessions(sessions: List<SessionSummary>) { main.post { onCoreSessions(sessions) } }
+        override fun onTranscript(event: TranscriptEvent) { main.post { onCoreTranscript(event) } }
+        override fun onStream(event: StreamEvent) { main.post { onCoreStream(event) } }
+        override fun onConfig(options: List<CoreConfigOption>) { main.post { onCoreConfig(options) } }
+        override fun onPermissionRequest(request: PermissionRequest) { main.post { onCorePermission(request) } }
+        override fun onSessionTouched(sessionId: String, title: String, updatedAt: String) {
+            main.post { onCoreSessionTouched(sessionId, title, updatedAt) }
+        }
+        override fun onProjects(projects: List<ProjectSummary>) { main.post { onCoreProjects(projects) } }
+        override fun onRoamPeerStatus(label: String, status: String) { main.post { onRoamPeerStatus(label, status) } }
+        override fun onRoamSessions(label: String, sessions: List<SessionSummary>) {
+            main.post { onRoamSessions(label, sessions) }
+        }
+    })
+    private val unstable = GrouseUnstable(object : GrouseUnstableListener {
+        override fun onExport(data: String) { main.post { exportData.value = data } }
+        override fun onRecipeParams(parameters: String) { main.post { onRecipeParams(parameters) } }
+        override fun onElicitation(schema: String) { main.post { onElicitation(schema) } }
+        override fun onCompactionStatus(message: String) { main.post { onCompactionStatus(message) } }
+        override fun onMessageUsage(outputTokens: ULong, elapsedMs: ULong, timeToFirstTokenMs: ULong, cost: Double) {
+            main.post { onMessageUsage(outputTokens, elapsedMs, timeToFirstTokenMs, cost) }
+        }
+        override fun onAppResource(key: String, html: String) { main.post { onAppResource(key, html) } }
+        override fun onRecipes(recipes: String) { main.post { onRecipes(recipes) } }
+        override fun onSchedules(schedules: String) { main.post { onSchedules(schedules) } }
+        override fun onProjects(projects: String) { main.post { onUnstableProjects(projects) } }
+        override fun onSkills(skills: String) { main.post { onSkills(skills) } }
+        override fun onTools(sessionId: String, tools: String) { main.post { onTools(sessionId, tools) } }
+        override fun onExtensions(extensions: String) { main.post { onExtensions(extensions) } }
+        override fun onSessionExtensions(sessionId: String, extensions: String) {
+            main.post { onSessionExtensions(sessionId, extensions) }
+        }
+        override fun onConfigValue(key: String, value: String) { main.post { onConfigValue(key, value) } }
+        override fun onSupportedModels(provider: String, models: String) {
+            main.post { onSupportedModels(provider, models) }
+        }
+        override fun onSessionProbe(sessionId: String, updatedAt: String, messageCount: Long) {
+            // The core owns resync now (probe → in-place replay); the app never probes.
+        }
+        override fun onToolResult(text: String, isError: Boolean) { main.post { onToolResult(text, isError) } }
+        override fun onError(method: String, message: String) { main.post { onUnstableError(method, message) } }
+    })
 
     val messages = mutableStateListOf<ChatMessage>()
     val status = mutableStateOf("not connected")
@@ -103,24 +156,26 @@ class ConnectionManager private constructor(context: Context) {
         recipes.value.firstOrNull { it.filePath.isNotEmpty() && it.filePath == job.source }
 
     fun refreshSchedules() {
-        client?.listSchedules()
-        client?.listRecipes()
+        unstable.schedulesList()
+        unstable.recipesList()
     }
 
-    fun setSchedulePaused(id: String, paused: Boolean) { client?.pauseSchedule(id, paused) }
+    fun setSchedulePaused(id: String, paused: Boolean) {
+        if (paused) unstable.schedulesPause(id) else unstable.schedulesUnpause(id)
+    }
 
-    fun runScheduleNow(id: String) { client?.runScheduleNow(id) }
+    fun runScheduleNow(id: String) { unstable.schedulesRunNow(id) }
 
-    fun deleteSchedule(id: String) { client?.deleteSchedule(id) }
+    fun deleteSchedule(id: String) { unstable.schedulesDelete(id) }
 
-    fun setScheduleCron(id: String, cron: String) { client?.updateScheduleCron(id, cron) }
+    fun setScheduleCron(id: String, cron: String) { unstable.schedulesUpdate(id, cron) }
 
-    fun setRecipeCron(recipeId: String, cron: String?) { client?.scheduleRecipe(recipeId, cron) }
+    fun setRecipeCron(recipeId: String, cron: String?) { unstable.recipesSchedule(recipeId, cron) }
 
-    fun deleteRecipe(recipeId: String) { client?.deleteRecipe(recipeId) }
+    fun deleteRecipe(recipeId: String) { unstable.recipesDelete(recipeId) }
 
     /** Save an edited recipe. The caller hands back a full DTO derived from RecipeInfo.raw. */
-    fun saveRecipe(recipeId: String, dto: JsonObject) { client?.saveRecipe(recipeId, dto) }
+    fun saveRecipe(recipeId: String, dto: JsonObject) { unstable.recipesSave(recipeId, dto.toString()) }
 
     /** Replace one top-level string field, dropping it when blank. */
     fun recipeWith(r: RecipeInfo, field: String, value: String): JsonObject =
@@ -143,13 +198,13 @@ class ConnectionManager private constructor(context: Context) {
      *  demand -- they change rarely and there is no notification when they do. */
     val skills = mutableStateOf<List<SkillInfo>>(emptyList())
 
-    fun refreshSkills() { client?.listSkills() }
+    fun refreshSkills() { unstable.sourcesList("skill") }
 
     fun saveSkill(s: SkillInfo, content: String) {
-        client?.updateSkill(s.path, s.name, s.description, content)
+        unstable.sourcesUpdate("skill", s.path, s.name, s.description, content)
     }
 
-    fun deleteSkill(path: String) { client?.deleteSkill(path) }
+    fun deleteSkill(path: String) { unstable.sourcesDelete("skill", path) }
 
     fun sessionsByProject(): List<Pair<String, List<SessionInfo>>> {
         val byName = projects.value.associate { it.id to it.name }
@@ -163,25 +218,21 @@ class ConnectionManager private constructor(context: Context) {
             }
     }
 
-    fun refreshProjects() { client?.listProjects() }
+    fun refreshProjects() { unstable.sourcesList("project") }
 
     /** Start a chat already filed under [projectId].
      *
-     *  cwd is the configured working directory regardless: a project no longer decides where tools run, so a chat in
-     *  "cooking" and a chat in "hacking" share a working directory and differ only by the field
-     *  that actually means membership. Filing happens once the server hands back a session id --
-     *  session/new has no projectId parameter. */
+     *  Filing happens once the server hands back a session id -- session/new has no
+     *  projectId parameter. The core decides the new session's cwd (the connect-time cwd). */
     fun newChatInProject(projectId: String, cwd: String? = null) {
         pendingProjectFiling = projectId
-        // A rooted project passes the directory the chat should work in; an ordinary one does
-        // not, and its chats run at the default cwd exactly as before.
         newSession(cwd = cwd ?: store.workingDir, kind = SessionKind.CHAT)
     }
 
     /** Set while a new-chat-in-project is in flight; consumed when Ready delivers the id. */
     private var pendingProjectFiling: String? = null
     fun fileSession(sessionId: String, projectId: String?) {
-        client?.assignSessionProject(sessionId, projectId)
+        unstable.sessionProject(sessionId, projectId)
         sessions.value = sessions.value.map {
             if (it.sessionId == sessionId) it.copy(projectId = projectId) else it
         }
@@ -201,16 +252,8 @@ class ConnectionManager private constructor(context: Context) {
     val permissions = mutableStateListOf<AcpEvent.Permission>()   // pending approvals, oldest first
     val elicitations = mutableStateListOf<AcpEvent.Elicitation>() // pending input forms, oldest first
     // Last background RPC failure (sidebar refresh, config read...). Shown as a toast by the
-    // UI and cleared; never a transcript bubble. See the AcpEvent.Error handler.
+    // UI and cleared; never a transcript bubble.
     val backgroundNotice = mutableStateOf<String?>(null)
-    // The current session's running turn id (from session_info_update's activeRunId _meta).
-    // Non-null while a run is live == steering is possible; cleared on TurnDone.
-    private var activeRunId: String? = null
-    // Resume-probe correlation: bumped per probe AND per reply, so a stale timeout can't
-    // fire after its probe was answered. syncStamp is the last known (updatedAt, count) —
-    // null means "no baseline", which a probe records without triggering a replay.
-    private var probeToken = 0
-    private var syncStamp: Pair<String?, Int>? = null
     // A session/export result waiting for the UI to hand to the Android share sheet.
     val exportData = mutableStateOf<String?>(null)
     // Handed in by OS entry points (share sheet, shortcut, tile), consumed by the UI.
@@ -220,25 +263,23 @@ class ConnectionManager private constructor(context: Context) {
     // A notification tap that should open a specific session (finished-turn alert). Consumed in MainActivity.
     val pendingOpenSession = mutableStateOf<String?>(null)
     // Draft attachments live here (process-scoped) so a rotation/recreation doesn't drop picked
-    // images — and base64 payloads stay out of the saved-state Bundle (TransactionTooLarge).
+    // images -- and base64 payloads stay out of the saved-state Bundle (TransactionTooLarge).
     val draftAttachments = mutableStateListOf<ImageBlock>()
     val dynamicColor = mutableStateOf(store.dynamicColor)
     val showAllProviders = mutableStateOf(store.showAllProviders)
     // Live model list for the CURRENT provider, from the server, in memory only -- never
-    // persisted. See the AcpEvent.Config/SupportedModels handlers for why.
+    // persisted.
     val knownModels = mutableStateOf(emptySet<String>())
-    // Guards listSupportedModels() to fire once per provider per connection, not on every Config
+    // Guards supportedModels() to fire once per provider per connection, not on every Config
     // event (which fires on every option change, not just provider switches).
     private var liveModelsFetchedFor: String? = null
     val extensions = mutableStateOf<List<ExtInfo>>(emptyList())
     val extensionsBusy = mutableStateOf(false)
-    // Names of the CURRENT session's enabled extensions — drives the in-chat "N tools" indicator
+    // Names of the CURRENT session's enabled extensions -- drives the in-chat "N tools" indicator
     // and its management sheet. Refreshed on every session open (Ready); optimistically updated by
     // toggleSessionExtension since add/remove replies are empty (no server re-list to react to).
     val sessionExtensionNames = mutableStateOf<List<String>>(emptyList())
-    // Full extension objects for the CURRENT session (same reply as the names above). On a
-    // federated session these are the PEER's DTOs — the only objects that may be written back
-    // to it — and the tool sheet's row source, since the peer's global catalog is unreachable.
+    // Full extension objects for the CURRENT session (same reply as the names above).
     val sessionExtensionInfos = mutableStateOf<List<ExtInfo>>(emptyList())
     // Peer extensions toggled OFF this session, kept so their row (and DTO) survives to be
     // toggled back on. Cleared on session open; local sessions never need it because their
@@ -252,8 +293,7 @@ class ConnectionManager private constructor(context: Context) {
     // discoverTools() and cached here for the process lifetime. Absent = not discovered yet.
     val toolCatalog = mutableStateOf<Map<String, List<String>>>(emptyMap())
     // Extension whose full catalogue is being discovered; its tools/list reply is the catalogue,
-    // not the live set, so the Tools handler must not treat it as sessionTools. Held as the full
-    // ExtInfo so the restore step can round-trip the same object it discovered with.
+    // not the live set, so the Tools handler must not treat it as sessionTools.
     private var discovering: ExtInfo? = null
 
     /** toolCatalog key. A peer's extension can share a name with a local one while exposing a
@@ -265,34 +305,21 @@ class ConnectionManager private constructor(context: Context) {
     fun catalogOf(e: ExtInfo): List<String>? = toolCatalog.value[catKey(e)]
 
     /** True when a session-scoped tool operation with this ExtInfo would be unsound: the
-     *  current session lives on a peer but the DTO is local (e.g. the Settings extension page
-     *  open while a remote chat is current). Callers must no-op rather than push it. */
+     *  current session lives on a peer but the DTO is local (or vice versa). Callers must
+     *  no-op rather than push it. */
     private fun wrongNode(e: ExtInfo): Boolean =
         (roamPeer(currentSession.value) != null) != e.fromPeer
     // Per-message generation stats (tok/s, cost) for the most recently finished assistant reply.
     // Cleared when a new turn starts so stale numbers don't linger under the next streaming bubble.
     val lastMessageUsage = mutableStateOf<AcpEvent.MessageUsage?>(null)
 
-    /** Fetch the extension list over ACP (agent-global). Reply lands as AcpEvent.Extensions.
+    /** Fetch the extension list (agent-global). Reply lands as onExtensions.
      *  goose ≥1.42 dropped goosed's REST /config/extensions; this uses the ACP method instead. */
     fun loadExtensions() {
-        val c = client ?: run { extensions.value = emptyList(); extensionsBusy.value = false; return }
+        if (!live) { extensions.value = emptyList(); extensionsBusy.value = false; return }
         extensionsBusy.value = true
-        c.listExtensions()
+        unstable.listGlobalExtensions()
     }
-
-    // Per-session-type extension profiles (Assistant/Chat/Code) were REMOVED 2026-07-25. They were
-    // a third layer on top of the two goose actually defines, and the three fought each other: goose
-    // seeds a session from config.yaml, the profile then diffed it back to a stored set, and the
-    // in-chat sheet edited the result -- so "what tools does this chat have" had three owners and no
-    // single answer. Goose's own model is the two below, and it is enough:
-    //
-    //   config/extensions/set-enabled  -> writes config.yaml, the default every NEW session starts from
-    //   session/extensions/{add,remove} -> this session only, never persisted
-    //
-    // Settings owns the first, the in-chat sheet owns the second. If a whole class of session needs a
-    // different tool set, that is what a recipe's `extensions:` block is for -- goose already scopes
-    // per-run there, with `available_tools` to trim inside an extension.
 
     /** Group `ext__tool` names into ext -> [tool]. ONLY mcp-type extensions namespace their tools
      *  this way: developer's are bare (`shell`, `edit`, `tree`), summon's is `delegate`, skills' is
@@ -307,11 +334,23 @@ class ConnectionManager private constructor(context: Context) {
      *  namespace their tools, and only namespaced tools can be mapped back to an owner. */
     fun toolsAttributable(e: ExtInfo): Boolean = e.type == "mcp"
 
-    /** Ask goose for this session's active tools; lands as AcpEvent.Tools. */
-    fun refreshTools() { discovering = null; client?.listTools() }
+    /** Ask the server for this session's active tools; lands as onTools. The unstable surface
+     *  routes to the MAIN connection only, so peer-owned sessions are skipped (see the roam note). */
+    fun refreshTools() {
+        discovering = null
+        val sid = core.activeSessionId() ?: return
+        if (roamPeer(currentSession.value) != null) return
+        unstable.listTools(sid)
+    }
 
     /** Everything the in-chat tool sheet displays, refreshed together on open. */
-    fun refreshSessionSheet() { refreshTools(); client?.listSessionExtensions() }
+    fun refreshSessionSheet() { refreshTools(); sessionExtensionsList() }
+
+    private fun sessionExtensionsList() {
+        val sid = core.activeSessionId() ?: return
+        if (roamPeer(currentSession.value) != null) return
+        unstable.sessionExtensionsList(sid)
+    }
 
     /** Discover an extension's FULL tool set. goose only reports ALLOWED tools, so the only way to
      *  see what an allowlist is hiding is to briefly run the extension unfiltered: re-add it
@@ -326,19 +365,21 @@ class ConnectionManager private constructor(context: Context) {
         // change -- "the session tools list isn't accurate". Refresh cheaply instead.
         if (toolCatalog.value.containsKey(catKey(ext))) { refreshTools(); return }
         if (wrongNode(ext)) { refreshTools(); return }
-        val c = client ?: return
+        val sid = core.activeSessionId() ?: return
+        if (roamPeer(currentSession.value) != null) { refreshTools(); return }
         val unfiltered = JsonObject(ext.raw.toMutableMap().apply {
             put("available_tools", JsonArray(emptyList()))
         })
         discovering = ext
-        c.removeSessionExtension(ext.name)
-        c.addSessionExtension(unfiltered)   // its reply triggers listTools -- see AcpClient
+        unstable.sessionExtensionsRemove(sid, ext.name)
+        unstable.sessionExtensionsAdd(sid, toExtensionDto(unfiltered).toString())
+        // the add re-lists tools + session extensions (core side) -- see onTools
     }
 
     /** Restrict `ext` to `allowed` for THIS session only (no config.yaml write). Empty = all. */
     fun setSessionTools(ext: ExtInfo, allowed: Set<String>) {
         if (wrongNode(ext)) return
-        val c = client ?: return
+        val sid = core.activeSessionId() ?: return
         val full = catalogOf(ext).orEmpty()
         // An allowlist equal to the whole catalogue is the same as no allowlist, and storing []
         // keeps it that way if the extension later gains tools.
@@ -347,27 +388,27 @@ class ConnectionManager private constructor(context: Context) {
             put("available_tools", JsonArray(list.map { JsonPrimitive(it) }))
         })
         discovering = null
-        c.removeSessionExtension(ext.name)
-        c.addSessionExtension(scoped)       // its reply triggers listTools
+        unstable.sessionExtensionsRemove(sid, ext.name)
+        unstable.sessionExtensionsAdd(sid, toExtensionDto(scoped).toString())
     }
 
     /** Save `allowed` as the GLOBAL default for `ext` (config.yaml; applies to new chats). */
     fun setDefaultTools(ext: ExtInfo, allowed: Set<String>) {
-        val c = client ?: return
         val full = toolCatalog.value[ext.name].orEmpty()
         val list = if (allowed.size >= full.size && full.isNotEmpty()) emptyList() else allowed.toList()
         val updated = JsonObject(ext.raw.toMutableMap().apply {
             put("available_tools", JsonArray(list.map { JsonPrimitive(it) }))
         })
         extensionsBusy.value = true
-        c.addExtensionConfig(updated, ext.enabled)
+        unstable.addExtension(toExtensionDto(updated).toString(), ext.enabled)
     }
 
     /** Enable/disable an extension globally (affects new chats); the reply refreshes the list. */
     fun toggleExtension(e: ExtInfo, enabled: Boolean) {
-        val c = client ?: return
         extensionsBusy.value = true
-        c.setExtensionEnabled(e.configKey, enabled)
+        // The core's set-enabled takes the extension NAME (its wire param is `name`, not the
+        // config.yaml key the old client sent).
+        unstable.setExtensionEnabled(e.name, enabled)
     }
 
     /** Enable/disable one extension for just THIS session (session-scoped API — never touches
@@ -375,12 +416,13 @@ class ConnectionManager private constructor(context: Context) {
      *  sessionExtensionNames is updated immediately rather than waiting on a re-list. */
     fun toggleSessionExtension(e: ExtInfo, enabled: Boolean) {
         if (wrongNode(e)) return
+        val sid = core.activeSessionId() ?: return
         if (enabled) {
-            client?.addSessionExtension(e.raw)
+            unstable.sessionExtensionsAdd(sid, toExtensionDto(e.raw).toString())
             sessionExtensionNames.value = sessionExtensionNames.value + e.name
             detachedPeerExts.value = detachedPeerExts.value.filterNot { it.name == e.name }
         } else {
-            client?.removeSessionExtension(e.name)
+            unstable.sessionExtensionsRemove(sid, e.name)
             sessionExtensionNames.value = sessionExtensionNames.value - e.name
             // Keep the peer DTO so the row survives to be re-enabled; the peer's global
             // catalog can't be listed, so a dropped row would be gone until reopen.
@@ -396,64 +438,55 @@ class ConnectionManager private constructor(context: Context) {
     fun setShowAllProviders(v: Boolean) { store.showAllProviders = v; showAllProviders.value = v }
 
     private val main = Handler(Looper.getMainLooper())
-    private var client: AcpClient? = null
-    private var clientGen = 0   // bumped per open(); drops events from superseded clients
     // MCP-App template cache: "$extension|$uri" -> HTML. Templates are static per server
     // version and shared across tools/messages/sessions, so one fetch serves everything —
     // including transcript replays, which re-emit every historical tool_call.
     private val appHtmlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val appFetchInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
-    private var streamingRole: String? = null
     private var live = false
     private var connecting = false
     private var lastSessionId: String? = null
-    // True between a ReplayStart wiping `messages` and the following Ready, which re-adds the
-    // bubbles of any still-queued prompts (they aren't in the server history the replay rebuilt).
+    // True when a Clear wiped `messages` while prompts were still queued (their bubbles are
+    // not in the server history); the Ready handler re-adds them.
     private var replayWiped = false
-    // Replay scroll-pinning: the chat list is keyed, so each replayed bubble inserted at index 0
-    // can drift the key-anchored viewport off the exact bottom, after which the atBottom-gated
-    // autoscroll stops and history lands scrolled mid-list. While a replay is rebuilding, the UI
-    // pins unconditionally; the tick fires one final snap when the rebuild completes.
+    // Replay scroll-pinning: while the core rebuilds the transcript (Clear → chunks), the UI
+    // pins unconditionally; the tick fires one final snap when Ready completes the rebuild.
     val replayActive = mutableStateOf(false)
     val replayDoneTick = mutableStateOf(0)
     // Replayed source messages counted so far — feeds the "Loading… N" title while a big
     // history streams in. Without it a long replay sat on a static "Connecting…" and looked
     // hung; the count proves it is advancing.
     val replayProgress = mutableStateOf(0)
-    // Replays rebuild into this buffer instead of mutating `messages`; Ready swaps it in only
-    // when the content actually differs. The common background-reconnect replay is identical,
-    // so the visible list is never touched and the scroll position survives by construction —
-    // every capture/restore scheme raced the UI's own collectors and lost.
-    private val replayBuffer = mutableListOf<ChatMessage>()
-    private fun t(): MutableList<ChatMessage> =
-        if (replayActive.value) replayBuffer else messages
-    // The cwd resolved for the in-flight open() -- persisted to store.lastSessionCwd once Ready
-    // fires (Ready itself carries no cwd; this is the single source of truth for what we asked for).
-    private var pendingOpenCwd: String = ""
 
     private val optionIds = listOf("provider", "model", "mode", "thinking_effort")
+
+    /** The ServerConfig the app last handed the core (mirrors the core's own last_config, so
+     *  this process knows whether a fresh `connect()` is needed before new/open intents). */
+    private var lastConfig: ServerConfig? = null
+    /** Set when the first `connect()` of the process (or a config change) created a transient
+     *  session; the Ready handler then opens the real target. */
+    private var pendingResumeAfterConnect: String? = null
+    /** Saved provider/model/mode picks re-applied once per connection (the core does not
+     *  re-apply them; the old client's applyDesired did). */
+    private var desiredApplied = false
 
     val configured: Boolean get() = store.hasKey()
 
     /** Connect using the already-saved host/port/key (post-unlock auto-connect). */
     fun connectSaved() { if (store.hasKey()) open(resume = null) }
 
-    // --- Roam (direct iroh pairing) --------------------------------------------
-    // A peer is a `serve --roam` (or `roam share`) host reached directly over
-    // iroh — no hub, no `roam:` ids: the peer IS a first-class goose. The phone
-    // connects with its own iroh identity (SecureStore) and a pasted card; the
-    // host must have accepted this device's key (`roam peers accept`). One
-    // active roam connection at a time, parallel to the WS host path.
+    // --- Roam (parallel iroh peers) -------------------------------------------
+    // The CORE owns the peer registry (CONTRACT §6): `roam_connect(card, label)` dials a peer
+    // in browse mode (sessions arrive as onRoamSessions), `roam_open_session(label, id)` makes
+    // it the chat owner, `roam_disconnect(label)` closes it. The app only mirrors which peer
+    // owns the chat (for the UI) and stores the pasted cards (the dialing identity is the
+    // core's own, generated + persisted by the core).
     data class RoamPeer(val name: String, val card: String, val fingerprint: String)
 
     val roamPeers = mutableStateListOf<RoamPeer>()
-    /** Name of the peer this connection is dialed to, or null (WS mode). */
+    /** Name of the peer that owns the current chat, or null (main connection). */
     @Volatile var currentRoamPeer: String? = null
         private set
-    // Last session opened ON EACH peer, so a reconnect resumes it instead of
-    // dropping the user into a sessionless state. Separate from the WS path's
-    // store.lastSessionId — a peer's session id means nothing to the local host.
-    private val roamLastSession = mutableMapOf<String, String>()
 
     fun loadRoamPeers() {
         roamPeers.clear()
@@ -462,7 +495,10 @@ class ConnectionManager private constructor(context: Context) {
         }
     }
 
-    /** The device's iroh secret key, created once and held in SecureStore. */
+    /** The device's iroh secret key, created once and held in SecureStore.
+     *  DISPLAY ONLY: the core generates + persists its OWN roam identity on first use (its
+     *  data dir is not reachable from the app), so the key a host sees in `peers list` at dial
+     *  time is the core's, not this one. Kept so the pairing screen has a key to show. */
     fun roamIdentity(): String = store.roamIdentity
         ?: identityGenerate().also { store.roamIdentity = it }
 
@@ -485,62 +521,39 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     fun disconnectRoam() {
+        val peer = currentRoamPeer ?: return
         currentRoamPeer = null
-        client?.close(); client = null
-        live = false; connecting = false; online.value = false
-        status.value = ""
-        messages.clear(); currentSession.value = null
+        core.roamDisconnect(peer)
+        sessions.value = sessions.value.filterNot { roamPeer(it.sessionId) == peer }
+        if (roamPeer(currentSession.value) == peer) {
+            messages.clear(); currentSession.value = null
+        }
     }
 
-    /** Dial a peer and bind the ACP session layer over the roam stream. `resume`
-     *  is the peer-side session to load (last session on that peer, or the one
-     *  the user just picked); null on first connect leaves the app sessionless
-     *  until the user picks — session/new would litter the host's session list. */
+    /** Dial a peer and bind the chat to it. `resume` is the peer-side session to open (last
+     *  session on that peer, or the one the user just picked); null on first connect leaves the
+     *  app sessionless until the user picks -- session/new would litter the host's session list.
+     *  `createSession` (a new chat ON the peer) has no core intent -- the peer registry only
+     *  opens EXISTING peer sessions (CONTRACT §6) -- so it degrades to browse: the peer's
+     *  sessions are listed and the user picks one. */
     fun connectRoam(name: String, resume: String? = null, createSession: Boolean = false) {
         val peer = roamPeers.firstOrNull { it.name == name } ?: return
         currentRoamPeer = name
-        client?.close()
-        live = false; connecting = true; online.value = false
-        busy.value = false; streamingRole = null; compacting.value = false
-        turnInFlight = false; activeRunId = null
-        replayWiped = false; replayActive.value = false
-        resetGen = -1
-        pendingOpenCwd = ""   // no local cwd: session/load asks the PEER for the real one
-        liveModelsFetchedFor = null
-        messages.clear(); currentSession.value = resume
-        status.value = "connecting to ${peer.name}…"
-        val gen = ++clientGen
-        Thread({
-            val link = try {
-                RoamStreamLink(roamConnect(roamIdentity(), peer.card, "grouse-android"))
-            } catch (t: Throwable) {
-                main.post {
-                    if (gen == clientGen) {
-                        status.value = "roam: ${t.message ?: "connect failed"}"
-                        connecting = false; currentRoamPeer = null
-                    }
-                }
-                return@Thread
-            }
-            main.post {
-                if (gen != clientGen) { link.close(); return@post }
-                val c = AcpClient("roam://${peer.name}", "", roam = link) { ev ->
-                    main.post { if (gen == clientGen) onEvent(ev) }
-                }
-                c.autoNewSession = createSession
-                c.resumeSessionId = resume
-                c.resumeCwdKnown = false          // ask the peer for the session's real cwd
-                c.desiredOptions = emptyMap()     // the peer's own config applies
-                c.desiredRecipeId = pendingRecipeId.also { pendingRecipeId = null }
-                client = c
-                c.connect()
-            }
-        }, "grouse-roam-dial").apply { isDaemon = true; start() }
+        // The core generates + persists the device identity itself; browse-mode dial.
+        core.roamConnect(peer.card, name)
+        if (resume != null) {
+            messages.clear(); currentSession.value = resume
+            core.roamOpenSession(name, resume)
+        } else {
+            messages.clear(); currentSession.value = null
+            status.value = "connecting to ${peer.name}…"
+            // its sessions arrive via on_roam_sessions
+        }
     }
 
-    /** Reconnect whatever is current: the roam peer (resuming the open session)
-     *  or the WS host. Every reconnect call site routes through here so roam
-     *  mode can't accidentally dial the WS path with a peer session id. */
+    /** Reconnect whatever is current: the roam peer (resuming the open session) or the WS host.
+     *  Every reconnect call site routes through here so roam mode can't accidentally dial the WS
+     *  path with a peer session id. */
     private fun reconnectToCurrent() {
         val peer = currentRoamPeer
         if (peer != null) connectRoam(peer, resume = lastSessionId)
@@ -593,68 +606,63 @@ class ConnectionManager private constructor(context: Context) {
         return h to p
     }
 
-    /** Reconnect silently after Android drops the socket in the background. The resume always
-     *  replays: the server history is rebuilt into the transcript on every session/load (see
-     *  AcpEvent.ReplayStart), which both repopulates after a background process kill and picks up
-     *  turns another client (Desktop, deliver.sh) added to this session while we were away. */
+    /** Reconnect silently after Android drops the socket in the background. The core reconnects
+     *  on its own (backoff, resume) — this only nudges the give-up case or the first connect. */
     fun ensureConnected() {
-        val peer = currentRoamPeer
-        if (peer != null) {
-            if (live || connecting) return
-            connectRoam(peer, resume = lastSessionId)
-            return
-        }
         if (!store.hasKey() || live || connecting) return
-        open(resume = lastSessionId)
-    }
-
-    // A turn was streaming when the socket died. goosed streams a turn ONLY to the connection
-    // that prompted it (protocol fact, not a bug here), so the remainder is invisible to the
-    // replacement socket and the chat looks frozen mid-tool-calls. Best available recovery:
-    // after reconnecting, replay the session a few times so the finished turn shows up.
-    private var droppedMidTurn = false
-    private var resyncTicks = 0
-    private fun turnResyncTick() {
-        if (resyncTicks <= 0) return
-        resyncTicks--
-        // The user started something new (or left) — their action wins; stop quietly.
-        if (busy.value || turnInFlight || !appForeground) return
-        lastSessionId?.let { reconnectToCurrent() }
-        if (resyncTicks > 0) main.postDelayed(::turnResyncTick, 8_000)
+        val sid = lastSessionId ?: store.lastSessionId
+        if (sid != null && lastConfig != null) core.openSession(sid)
+        else if (sid != null) open(resume = sid)
+        else open(resume = null)
     }
 
     /** Refresh sessions AND the projects that label them. Kept as one call so the two can never
      *  drift -- a session list newer than the project list renders groups labelled by raw id. */
-    fun refreshSidebar() { client?.listSessions(); client?.listProjects() }
+    fun refreshSidebar() { core.listSessions(); unstable.sourcesList("project") }
 
     /** Archive a session: history stays on disk, it just leaves the list. The soft option --
-     *  deleteSession is the permanent one (goose ≥1.44; the old "no delete" note is obsolete). */
+     *  deleteSession is the permanent one. */
     fun archiveSession(sessionId: String) {
-        client?.archiveSession(sessionId)
+        core.archiveSession(sessionId)
         sessions.value = sessions.value.filterNot { it.sessionId == sessionId }   // optimistic
         if (sessionId == store.assistantSessionId) store.assistantSessionId = null
     }
 
     /** Serialize a session server-side; the reply lands in [exportData] and the UI opens the
      *  Android share sheet with it. */
-    fun exportSession(sessionId: String) { client?.exportSession(sessionId) }
+    fun exportSession(sessionId: String) { unstable.exportSession(sessionId) }
 
     /** Publish this device's UnifiedPush endpoint into the server's config (GROUSE_PUSH_ENDPOINT),
-     *  so the server's senders always POST to the current token. This is what makes a reinstall /
-     *  endpoint-rotation self-heal instead of silently pushing at a dead token. Best-effort. */
+     *  so the server's senders always POST to the current token. Best-effort. */
     fun publishPushEndpoint(url: String) {
-        if (url.isNotBlank()) client?.upsertConfig("GROUSE_PUSH_ENDPOINT", url)
+        if (url.isNotBlank()) unstable.configUpsert("GROUSE_PUSH_ENDPOINT", url)
     }
 
     /** Answer a pending elicitation form and drop it from the queue. */
     fun answerElicitation(e: AcpEvent.Elicitation, values: Map<String, JsonPrimitive>?, cancelled: Boolean = false) {
-        client?.respondElicitation(e.requestKey, values, cancelled)
+        if (e.recipeParams) {
+            // Recipe-params answers ride the same UI but a different wire shape:
+            // {action:"submit"|"cancel", values:{key:string}} — values must be STRINGS
+            // (RecipeParamsResponse is HashMap<String,String> server-side).
+            if (cancelled || values == null) unstable.respondRecipeParams("cancel", "{}")
+            else unstable.respondRecipeParams(
+                "submit",
+                buildJsonObject { values.forEach { (k, v) -> put(k, v.content) } }.toString())
+        } else {
+            when {
+                cancelled -> unstable.respondElicitation("cancel", "")
+                values == null -> unstable.respondElicitation("decline", "")
+                else -> unstable.respondElicitation(
+                    "accept",
+                    buildJsonObject { values.forEach { (k, v) -> put(k, v) } }.toString())
+            }
+        }
         elicitations.remove(e)
     }
 
     /** Delete a session outright (history gone server-side). Archive remains the soft option. */
     fun deleteSession(sessionId: String) {
-        client?.deleteSession(sessionId)
+        core.deleteSession(sessionId)
         sessions.value = sessions.value.filterNot { it.sessionId == sessionId }   // optimistic
         if (sessionId == store.assistantSessionId) store.assistantSessionId = null
     }
@@ -662,18 +670,18 @@ class ConnectionManager private constructor(context: Context) {
     /** Move a chat into a project (or back to /state): the sanctioned working_dir rewrite.
      *  Also the in-app repair for sessions stranded by a renamed project directory. */
     fun moveSession(sessionId: String, cwd: String) {
-        client?.updateWorkingDir(sessionId, cwd)
+        unstable.workingDirUpdate(sessionId, cwd)
         sessions.value = sessions.value.map {          // optimistic
             if (it.sessionId == sessionId) it.copy(cwd = cwd) else it
         }
         store.rememberSessionCwds(listOf(sessionId to cwd))
     }
 
-    /** Set a session's title (goose _goose/unstable/session/rename; the reply re-lists). */
+    /** Set a session's title (the reply re-lists). */
     fun renameSession(sessionId: String, title: String) {
         val t = title.trim()
         if (t.isEmpty()) return
-        client?.renameSession(sessionId, t)
+        core.renameSession(sessionId, t)
         sessions.value = sessions.value.map {          // optimistic
             if (it.sessionId == sessionId) it.copy(title = t) else it
         }
@@ -681,23 +689,19 @@ class ConnectionManager private constructor(context: Context) {
 
     fun openSession(sessionId: String, knownKind: SessionKind? = null) {
         // Cancel any deferred "open the assistant thread" -- the user has since picked a specific
-        // session and that choice wins. Without this, a pendingOpenAssistant set while offline (its
-        // refreshSidebar() is a no-op with no client) survives until the NEXT Sessions event, which
-        // arrives from the refreshSidebar() in this very open()'s Ready handler -- and then reopens
-        // the assistant on top of the session just chosen. The chat visibly switches and the next
-        // message lands in the assistant thread.
+        // session and that choice wins.
         pendingOpenAssistant = false
+        pendingAssistantRename = false
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
-        // Roam: the session lives on the peer — reconnect the roam link resuming it.
-        // (Its cwd is resolved by asking the peer; see connectRoam/resumeCwdKnown.)
-        val peer = currentRoamPeer
-        if (peer != null) { connectRoam(peer, resume = sessionId); return }
-        // A caller resuming a session it already has cached (e.g. connectHome's assistant shortcut)
-        // can pass knownKind to skip the sessions.value lookup, which may not be populated yet on a
-        // cold start; open() falls back to that lookup (then CHAT) when knownKind is null.
-        val kind = knownKind ?: sessions.value.firstOrNull { it.sessionId == sessionId }
-            ?.let { ConnectionManager.sessionKind(it) }
-        open(resume = sessionId, kind = kind)
+        // Roam: the session lives on the peer -- the core routes the chat to it.
+        val peer = roamPeer(sessionId)
+        if (peer != null) {
+            currentRoamPeer = peer
+            core.roamOpenSession(peer, sessionId)
+            return
+        }
+        currentRoamPeer = null
+        open(resume = sessionId, kind = knownKind)
     }
 
     fun newSession(
@@ -706,16 +710,15 @@ class ConnectionManager private constructor(context: Context) {
         recipeId: String? = null,
     ) {
         pendingOpenAssistant = false      // same as openSession: an explicit choice cancels it
+        pendingAssistantRename = false
         messages.clear(); lastSessionId = null; currentSession.value = null; config.value = emptyList()
-        // Roam: a new chat is session/new ON THE PEER (autoNewSession=true) — the
-        // local cwd is meaningless there, and the peer's own config applies.
-        val peer = currentRoamPeer
-        if (peer != null) { pendingRecipeId = recipeId; connectRoam(peer, createSession = true); return }
+        // A new chat always leaves any peer-owned session (the core clears its own routing too).
+        currentRoamPeer = null
         pendingRecipeId = recipeId
-        open(resume = null, cwd = cwd, kind = kind)
+        open(resume = null, kind = kind)
     }
 
-    /** Carried to the next session/new. Cleared by open() once handed to the client, so a plain
+    /** Carried to the next session/new. Consumed by open() once handed to the core, so a plain
      *  chat started afterwards does not inherit the recipe. */
     @Volatile private var pendingRecipeId: String? = null
 
@@ -730,19 +733,16 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Run one shell command server-side via a DIRECT tool call and report (error, output).
      *
-     *  No model is involved: a throwaway AcpClient opens a session at /state purely to get a
-     *  sessionId, then invokes developer__shell through goose's _goose/unstable/tools/call --
-     *  deterministic, exact output, near-instant. Because the session never receives a prompt
-     *  it has ZERO messages, and session/list filters message-less sessions, so it never
-     *  appears anywhere -- no archiving dance needed. (The earlier version prompted the fast
-     *  model to run commands; it was slow, paraphrased output, and its session flashed into
-     *  the list until archived.) */
+     *  No model is involved: the core invokes developer__shell through `tools/call` on the
+     *  bound session -- deterministic, exact output, near-instant. Because the session never
+     *  receives a prompt it gains no messages (the old throwaway-session variant was needed
+     *  only because the hand-rolled client had no direct-call path on the live wire). */
     private fun runUtilityTool(command: String, timeoutMs: Long = 30_000, onDone: (String?, String) -> Unit) =
         runToolDirect("shell", kotlinx.serialization.json.buildJsonObject {
             put("command", kotlinx.serialization.json.JsonPrimitive(command))
         }, timeoutMs, onDone)
 
-    /** Invoke ONE tool on a throwaway session and hand back its text, with no model turn.
+    /** Invoke ONE tool directly and hand back its text, with no model turn.
      *  Generalised out of runUtilityTool, which was the shell-only special case. */
     private fun runToolDirect(
         tool: String,
@@ -750,47 +750,29 @@ class ConnectionManager private constructor(context: Context) {
         timeoutMs: Long = 30_000,
         onDone: (String?, String) -> Unit,
     ) {
-        val url = "wss://${store.host}:${store.port}/acp"
-        var boot: AcpClient? = null
-        var finished = false
+        val sid = core.activeSessionId()
+        if (sid == null || !core.ready()) { onDone("not ready — no session", ""); return }
+        var done = false
         lateinit var watchdog: Runnable
+        lateinit var entry: PendingToolCall
         fun finish(err: String?, out: String) {
-            if (finished) return
-            finished = true
+            if (done) return
+            done = true
             main.removeCallbacks(watchdog)
-            val b = boot
-            main.postDelayed({ b?.close() }, 500)
-            boot = null
+            toolCallQueue.removeAll { it === entry }
             onDone(err, out)
         }
         watchdog = Runnable { finish("Timed out talking to the server.", "") }
         main.postDelayed(watchdog, timeoutMs)
-        boot = AcpClient(url, store.secretKey) { ev ->
-            main.post {
-                if (finished) return@post
-                when (ev) {
-                    is AcpEvent.Ready -> {
-                        // Builtin developer tools are UNPREFIXED ("shell", not developer__shell —
-                        // matches permission.yaml's bare names). Small delay: extensions attach
-                        // async after session/new.
-                        val sid = ev.sessionId
-                        main.postDelayed({ if (!finished) boot?.callTool(sid, tool, args) }, 800)
-                    }
-                    is AcpEvent.DirectToolResult ->
-                        if (ev.isError) finish(ev.text.ifBlank { "tool call failed" }, ev.text)
-                        else finish(null, ev.text)
-                    // No UI here — never let a form OR approval request hang the utility call.
-                    is AcpEvent.Elicitation -> boot?.respondElicitation(ev.requestKey, null, cancelled = true)
-                    is AcpEvent.Permission -> boot?.respondPermission(ev.toolCallId, null)
-                    is AcpEvent.Error -> finish(ev.text, "")
-                    else -> {}
-                }
-            }
-        }.also {
-            it.desiredCwd = store.workingDir
-            it.connect()
-        }
+        entry = PendingToolCall(::finish)
+        toolCallQueue.addLast(entry)
+        unstable.toolsCall(sid, tool, args.toString())
     }
+
+    private data class PendingToolCall(val onDone: (String?, String) -> Unit)
+    // Direct tool replies arrive on one listener slot; the core executes tools_call requests
+    // sequentially per connection, so a FIFO matches replies to callers exactly.
+    private val toolCallQueue = ArrayDeque<PendingToolCall>()
 
     private fun cleanProjectName(raw: String): String? {
         val name = raw.trim().trim('/').removePrefix("projects/")
@@ -800,8 +782,6 @@ class ConnectionManager private constructor(context: Context) {
         return name
     }
 
-    /** Create /projects/<name> on the server (null = success, else error). Deterministic
-     *  direct mkdir -- no model. */
     /** Create a project on the server.
      *
      *  Was `mkdir -p /projects/<name>` over a shell tool, because a project WAS a directory.
@@ -825,7 +805,7 @@ class ConnectionManager private constructor(context: Context) {
             else -> null
         }
         if (bad != null) { onResult(bad); return }
-        client?.createProject(name)
+        unstable.sourcesCreate("project", name, "", "")
         // The reply dispatch re-lists projects; report success now so the dialog can close.
         onResult(null)
     }
@@ -843,15 +823,7 @@ class ConnectionManager private constructor(context: Context) {
         ) { err, text -> onResult(err, text) }
     }
 
-    /** Delete a project: archive its chats, drop it from recents, and remove the server
-     *  directory ONLY if empty (rmdir, never rm -rf -- a non-empty project keeps its files
-     *  and merely disappears from the list). Reports a human-readable outcome note. */
     /** Delete a project and unfile its chats.
-     *
-     *  This used to `rmdir` a directory and lean on the shell's exit code for its message, which
-     *  is why an earlier pass left it calling `true` and reporting success while the project
-     *  stayed in the list -- nothing server-side was ever deleted. It now calls sources/delete
-     *  with the project's source path.
      *
      *  Chats are UNFILED rather than archived: a project is only a label now, so deleting it
      *  should not hide conversations. Removing the label leaves them in Unfiled, where they can
@@ -862,7 +834,7 @@ class ConnectionManager private constructor(context: Context) {
             ?: run { onResult("No such project."); return }
         val affected = sessions.value.filter { it.projectId == proj.id }
         affected.forEach { fileSession(it.sessionId, null) }
-        client?.deleteProject(proj.path)
+        unstable.sourcesDelete("project", proj.path)
         projects.value = projects.value.filterNot { it.id == proj.id }   // optimistic; reply re-lists
         onResult(
             if (affected.isEmpty()) "Project deleted."
@@ -870,15 +842,11 @@ class ConnectionManager private constructor(context: Context) {
         )
     }
 
-    /** The persistent "goose-assistant" thread (briefings/proactive/voice land here), if it exists. */
     /** The assistant thread's id.
      *
-     *  The CACHED id wins over the title lookup, not the other way round. Two reasons, both
-     *  measured: session/list omits sessions with no content, so a freshly reset thread is
-     *  invisible to a title search; and resets had left FOUR sessions titled "goose-assistant" at
-     *  once (two of them empty), so a title search is ambiguous as well as blind. The cached id is
-     *  the one this app actually created and renamed, so it is the authoritative answer; the title
-     *  lookup is the fallback for a fresh install that has no cache yet. */
+     *  The CACHED id wins over the title lookup, not the other way round (see the note in the
+     *  Sessions handler). The cached id is the one this app actually created and renamed, so it
+     *  is the authoritative answer; the title lookup is the fallback for a fresh install. */
     fun assistantSessionId(): String? =
         store.assistantSessionId
             ?: sessions.value.firstOrNull { it.title == ASSISTANT_TITLE }?.sessionId
@@ -889,33 +857,26 @@ class ConnectionManager private constructor(context: Context) {
     @Volatile private var pendingOpenAssistant = false
 
     /** Open the privileged assistant thread; if the session list isn't loaded yet, refresh it and
-     *  open as soon as it arrives (see the Sessions event handler). */
+     *  open as soon as it arrives (see the Sessions handler). */
     fun openAssistant() {
         val id = assistantSessionId()
         if (id != null) { openSession(id, knownKind = SessionKind.ASSISTANT); return }
         // No id yet: defer until a session list arrives -- but only if one can actually arrive.
-        // With no client, refreshSidebar() does nothing and the flag would sit armed indefinitely.
-        if (client != null) { pendingOpenAssistant = true; refreshSidebar() }
+        // With no live connection, refreshSidebar() does nothing and the flag would sit armed
+        // indefinitely.
+        if (live) { pendingOpenAssistant = true; refreshSidebar() }
         else beginAssistantThread()
     }
 
     // --- Assistant-thread reset / (re)create ---
-    // The reset is bound to the SPECIFIC connection generation it opens (resetGen), so an
-    // unrelated Ready — e.g. the user tapping another chat before the fresh session connects —
-    // can never be mistaken for the reset's session and wrongly renamed to ASSISTANT_TITLE
-    // (which would grant that chat the privileged auto-approve policy). Both renames run on that
-    // one live socket in order, so nothing is lost to a close race. If a different open()
-    // supersedes the pending reset, it's abandoned cleanly (see open()).
-    private var resetGen = -1                 // clientGen of the reset-initiated connect
-    // resetOldId (the thread to rename aside once the fresh one went live) is GONE: reset no
-    // longer creates a replacement thread, so there is never an old one to archive.
+    // The reset is IN-PLACE: /clear keeps the thread's session id (deliver.sh compacts the
+    // same way), so the id never changes and nothing needs re-pointing. The rename-to-Assistant
+    // path only fires when a NEW thread was created (no thread existed); an explicit
+    // newSession/openSession after beginAssistantThread supersedes the pending rename, so a
+    // stray Ready can never title the wrong chat.
+    @Volatile private var pendingAssistantRename = false
 
     /** Clear the assistant thread IN PLACE, keeping its session id.
-     *
-     *  Used to archive the thread under a dated name and stand up a fresh one -- which changed
-     *  the id, so every client had to detect the rename and follow it. That is precisely the
-     *  mechanism that forked the thread on 2026-07-26 and again on 2026-07-30, and it is why the
-     *  nightly rotation was replaced by compaction.
      *
      *  `/clear` is a goose slash command: execute_command intercepts the literal text before any
      *  model turn and replace_conversation swaps in an empty conversation. History is discarded
@@ -932,14 +893,11 @@ class ConnectionManager private constructor(context: Context) {
      *  /clear has to be sent as a prompt ON that session. */
     private var pendingClearOnReady: String? = null
 
-    /** Open a fresh session that will become the ASSISTANT_TITLE thread once live. `archiveOld`,
-     *  if non-null, is renamed aside first (reset); null just creates a new assistant thread
-     *  (recovery when none exists). Binds to the connection generation this open() creates. */
+    /** Open a fresh session that will become the ASSISTANT_TITLE thread once live. */
     private fun beginAssistantThread() {
-        resetGen = clientGen + 1              // the gen newSession()'s open() is about to create
+        pendingAssistantRename = true
         newSession(kind = SessionKind.ASSISTANT)
     }
-
 
     // --- Server-side goose config (global config.yaml, edited over ACP) ---
     /** Current server values, populated by loadServerConfig(); empty until read. */
@@ -947,13 +905,7 @@ class ConnectionManager private constructor(context: Context) {
     val serverFastModel = mutableStateOf("")
     /** Generic mirror of config/read replies, keyed by config key — the phone-writable
      *  server settings channel (schedule times, etc.). */
-    val serverConfig = androidx.compose.runtime.mutableStateMapOf<String, String>()
-
-    // loadAssistantExtensions / discoverAssistantTools / setAssistantTools lived here and are
-    // GONE (2026-08-01). They edited the Assistant session's extension set from the settings
-    // screen, which is the same thing the in-chat tools sheet does for whatever chat you are in
-    // -- two code paths for one operation, and only one of them was ever exercised. The thread
-    // is a chat; its tools are set in it.
+    val serverConfig = mutableStateMapOf<String, String>()
 
     /** Observable master switch (mirrors SecureStore.assistantEnabled for the drawer). */
     val assistantEnabled = mutableStateOf(store.assistantEnabled)
@@ -972,34 +924,34 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     /** Read + write server-side goose config (the deliver.sh schedule keys live there). */
-    fun readServerConfig(vararg keys: String) { keys.forEach { client?.readConfig(it) } }
+    fun readServerConfig(vararg keys: String) { keys.forEach { unstable.configRead(it) } }
     fun writeServerConfig(key: String, value: String) {
-        client?.upsertConfig(key, value)
+        unstable.configUpsert(key, value)
         serverConfig[key] = value   // optimistic
     }
 
     /** Read the app-editable global goose settings so Settings can show current values. */
     fun loadServerConfig() {
-        client?.readConfig("GOOSE_CONTEXT_LIMIT")
-        client?.readConfig("GOOSE_FAST_MODEL")
+        unstable.configRead("GOOSE_CONTEXT_LIMIT")
+        unstable.configRead("GOOSE_FAST_MODEL")
     }
 
     /** Upsert a global goose setting (takes effect for NEW sessions/tasks), then re-read to confirm. */
     fun setServerConfig(key: String, value: String) {
-        client?.upsertConfig(key, value)
-        client?.readConfig(key)
+        unstable.configUpsert(key, value)
+        unstable.configRead(key)
     }
 
     fun setOption(configId: String, value: String) {
         store.saveOption(configId, value)
-        client?.setConfigOption(configId, value)
+        core.setConfigOption(configId, value)
     }
 
     fun send(text: String, images: List<ImageBlock> = emptyList()) {
         // Keep the images ON the message so the bubble renders the actual thumbnail(s), not a
         // "[📎 N]" placeholder. (Live-session only — a session reloaded from the server replays
         // text; images aren't reconstructed from the replayed content blocks.)
-        messages.add(ChatMessage("user", text, images)); streamingRole = null; busy.value = true
+        messages.add(ChatMessage("user", text, images)); busy.value = true
         lastMessageUsage.value = null   // stale stats from the previous turn shouldn't linger
         startService()   // keep the socket alive if the user backgrounds mid-turn
         if (images.isNotEmpty() && store.describeImages) { describeThenSend(text, images); return }
@@ -1050,30 +1002,42 @@ class ConnectionManager private constructor(context: Context) {
         // bound session — a send in that window used to ERROR ("not ready — no session")
         // instead of queueing, which was the visible "app must reconnect" failure. Queue;
         // the Ready handler flushes.
-        if (live && client?.ready == true && !turnInFlight) {
+        if (live && core.ready() && !turnInFlight) {
             turnInFlight = true
             lastSessionId?.let { store.pendingPushSessionId = it }
-            client?.sendPrompt(text, images, expect = currentSession.value)
-        } else if (live && client?.ready == true && activeRunId != null && images.isEmpty()) {
-            // A turn is running AND we know its run id: STEER — inject into the live turn
-            // instead of waiting for it to end. The server validates the id, so a run that
-            // ended between typing and sending fails loudly (foreground error) rather than
-            // spawning a stray turn. Images still queue: steering is text-only by design.
-            client?.steer(text, activeRunId!!)
+            sendPromptBlocks(text, images, expect = currentSession.value)
         } else if (live) {
             // A turn is already running. Queue rather than firing a second sendPrompt into the
             // same session -- concurrent prompts interleave in the transcript and the second
-            // reply is attributed to the wrong question. Flushed on TurnDone.
+            // reply is attributed to the wrong question. Flushed on RunEnded.
+            // (Mid-turn STEERING is gone: the core does not surface the active run id, so the
+            // old session/steer injection is unreachable — queued sends wait for the turn end.)
             enqueue(PendingSend(text, images))
         } else {
-            // Not connected yet (initial connect / silent reconnect window): queue and connect,
-            // rather than calling sendPrompt against a session-less client (which just errors and
-            // loses the message). Flushed in the Ready branch. The resume's replay wipes the local
+            // Not connected yet (initial connect / silent reconnect window): queue and let the
+            // core's own reconnect deliver the flush. The resume's replay wipes the local
             // transcript (including this just-added bubble); Ready re-adds the queued bubbles on
-            // top of the rebuilt history -- see the ReplayStart/Ready handlers.
+            // top of the rebuilt history.
             enqueue(PendingSend(text, images))
             if (!connecting) reconnectToCurrent()
         }
+    }
+
+    /** Build a Prompt and hand it to the core. The core rejects a send whose `expect` session
+     *  mismatches its bound session — silently, so the mismatch is surfaced here instead. */
+    private fun sendPromptBlocks(text: String, images: List<ImageBlock>, expect: String?) {
+        val bound = core.activeSessionId()
+        if (expect != null && expect != bound) {
+            messages.add(ChatMessage("error",
+                "not sent — this chat isn't loaded yet (showing $expect, socket on $bound). Try again."))
+            busy.value = false; turnInFlight = false
+            return
+        }
+        val blocks = mutableListOf<PromptBlock>()
+        if (text.isNotBlank()) blocks.add(PromptBlock.Text(text))
+        images.forEach { img -> blocks.add(PromptBlock.Image(img.mimeType, img.dataB64)) }
+        if (blocks.isEmpty()) { busy.value = false; turnInFlight = false; return }
+        core.sendPrompt(Prompt(blocks), expect?.let { SendExpect(it) })
     }
 
     /** Send once connected — used by notification replies, which may arrive disconnected. */
@@ -1083,48 +1047,16 @@ class ConnectionManager private constructor(context: Context) {
         appForeground = fg
         if (fg) {
             notifier.cancelAlert()
-            ensureConnected()
-            // This block used to REOPEN THE SESSION UNCONDITIONALLY on every foreground —
-            // a 2-second alt-tab paid a full session/load replay of the whole transcript,
-            // which is exactly the "whole app reconnects every time I look away" complaint.
-            // Now: one cheap session/info probe. Three outcomes:
-            //   reply, nothing changed  -> do nothing (the overwhelmingly common case)
-            //   reply, updatedAt/count moved -> another client touched the session; replay
-            //   no reply in 10s         -> socket died while frozen and OkHttp hasn't
-            //                              noticed (`live` is stale) — force a reconnect,
-            //                              which ensureConnected can't do (it trusts `live`).
-            // No probe (and no watchdog) while a replay is streaming: the chunks themselves
-            // prove the socket is alive, a reply would queue behind the stream (a huge replay
-            // can outrun the window), and a force-reconnect would restart the whole replay.
-            if (live && !busy.value && !turnInFlight && !replayActive.value &&
-                !(currentRoamPeer != null && lastSessionId == null)) {
-                (lastSessionId ?: store.lastSessionId)?.let { sid ->
-                    val tok = ++probeToken
-                    client?.probeSession(sid)
-                    main.postDelayed({
-                        if (tok == probeToken && appForeground && !turnInFlight && !replayActive.value) {
-                            live = false
-                            reconnectToCurrent()
-                        }
-                    }, 10_000)
-                }
-            }
-            // Re-ask the server for its model list every time we come back. It was previously
-            // fetched ONCE per provider per connection (guarded by liveModelsFetchedFor, which
-            // only resets in open()), so a long-lived socket never noticed the set changing --
-            // models renamed or added server-side stayed invisible until a full reconnect, and
-            // ensureConnected() above can't force one because it early-returns on `live`.
-            // One /v1/models round trip through goose; cheap enough to just redo on resume.
+            // The core owns reconnect + remote-change resync, so nothing to nudge beyond a
+            // live re-ask of the server's model list (models renamed/added server-side stay
+            // invisible until then — cheap, one /v1/models round trip through goose).
             if (live) {
                 config.value.firstOrNull { it.id == "provider" }?.currentValue
                     ?.takeIf { it.isNotBlank() }
-                    ?.let { client?.listSupportedModels(it) }
+                    ?.let { unstable.supportedModels(it) }
             }
             if (!store.persistentConnection && !busy.value) stopService()
         } else {
-            // Losing focus is the last reliable moment before a possible process kill —
-            // snapshot the transcript now so a cold relaunch can repaint it instantly.
-            saveTranscriptCache()
             if (store.persistentConnection) startService()
         }
     }
@@ -1154,543 +1086,794 @@ class ConnectionManager private constructor(context: Context) {
     private fun lastAssistantText(): String =
         messages.lastOrNull { it.role == "assistant" }?.text ?: "Turn finished."
 
-    /** Stop the running turn — reliably, even if goose is wedged mid-turn and won't honor the
-     *  polite ACP cancel. We send the cancel, free the UI immediately, then reconnect (resume):
-     *  reopening bumps the client generation so any late events from the stuck connection are
-     *  dropped, and the fresh client comes back idle. The reconnect's replay rebuilds the
-     *  transcript to whatever the server persisted of the cancelled turn. */
+    /** Stop the running turn. The core sends the ACP cancel; the server ends the turn and the
+     *  queue drains on RunEnded. Stop means stop: queued prompts are dropped, not deferred. */
     fun cancel() {
-        client?.cancel()
-        streamingRole = null
+        core.cancel()
         busy.value = false
         turnInFlight = false   // wire is free again; without this the queue never drains
         clearQueue()           // Stop means stop: don't let queued prompts fire after a cancel
-        if (store.hasKey() || currentRoamPeer != null) reconnectToCurrent()
     }
 
     /** Compact the conversation history to reclaim context (goose /compact command). */
     fun compact() {
         busy.value = true
         compacting.value = true   // client-initiated: don't wait for the server's own status echo
-        client?.sendPrompt("/compact")
+        sendPromptBlocks("/compact", emptyList(), expect = currentSession.value)
     }
 
     /** Answer the given approval request; null optionId denies (cancelled). */
     fun answerPermission(p: AcpEvent.Permission, optionId: String?) {
-        client?.respondPermission(p.toolCallId, optionId)
+        core.respondPermission(p.toolCallId,
+            if (optionId != null) PermissionOutcome.Selected(optionId) else PermissionOutcome.Cancelled)
         permissions.remove(p)
     }
 
-    // --- Transcript snapshot cache ---------------------------------------------------------
-    // The replay buffer keeps the transcript on screen through a live reconnect, but it can't
-    // help when Android kills the process: a cold start has an empty `messages` and the user
-    // stares at the full-screen "Connecting…" until session/load finishes replaying. Snapshot
-    // the text bubbles to disk on every focus loss, and seed `messages` from the snapshot when
-    // a resume starts with an empty transcript — the replay then swaps in the server truth
-    // through the existing buffer without the blank screen ever appearing.
-    private fun transcriptCacheFile(sid: String): java.io.File =
-        java.io.File(java.io.File(appContext.filesDir, "transcripts").apply { mkdirs() },
-            sid.replace(Regex("[^A-Za-z0-9_-]"), "_") + ".json")
+    // ---------------------------------------------------------------------------
+    // Core event translation (all handlers run on the main thread)
+    // ---------------------------------------------------------------------------
 
-    private fun saveTranscriptCache() {
-        val sid = currentSession.value ?: lastSessionId ?: return
-        // Mid-replay `messages` holds the last fully-shown transcript (pre-replay content or the
-        // cold-start paint) — still a valid snapshot, and the only one a process kill during a
-        // long load would leave. No replayActive gate: every path keeps messages in step with
-        // currentSession (openSession clears before painting; newSession nulls both), and an
-        // empty list is caught below. The next background after Ready overwrites this.
-        // Text bubbles only: tool cards, MCP-app views and usage stats don't survive a replay
-        // either, so caching them would just make the swap-in visibly churn.
-        val snap = messages.filter { (it.role == "user" || it.role == "assistant") && it.text.isNotBlank() }
-            .takeLast(60)
-        if (snap.isEmpty()) return
-        runCatching {
-            val arr = org.json.JSONArray()
-            snap.forEach { m -> arr.put(org.json.JSONObject().put("r", m.role).put("t", m.text)) }
-            transcriptCacheFile(sid).writeText(arr.toString())
+    private fun onCoreStatus(st: ConnectionStatus) {
+        when (st) {
+            ConnectionStatus.Ready -> onCoreReady()
+            ConnectionStatus.Connecting -> {
+                connecting = true
+                status.value = "connecting…"
+            }
+            ConnectionStatus.Syncing -> status.value = "loading session…"
+            ConnectionStatus.Disconnected -> {
+                live = false; connecting = false; online.value = false
+                replayActive.value = false
+                status.value = "not connected"
+            }
+            is ConnectionStatus.Error -> {
+                live = false; connecting = false; online.value = false
+                replayActive.value = false
+                status.value = st.message
+            }
         }
-        // The cache is a cold-start nicety, never user data: cap it so a long-lived install
-        // doesn't accumulate one file per session ever opened. Best-effort, like the write.
-        pruneTranscriptCache(java.io.File(appContext.filesDir, "transcripts"), keep = 20)
     }
 
-    private fun loadTranscriptCache(sid: String): List<ChatMessage> = runCatching {
-        val f = transcriptCacheFile(sid)
-        if (!f.exists()) return emptyList()
-        val arr = org.json.JSONArray(f.readText())
-        (0 until arr.length()).map { i ->
-            val o = arr.getJSONObject(i)
-            ChatMessage(o.getString("r"), o.getString("t"))
+    private fun onCoreReady() {
+        live = true; connecting = false; online.value = true
+        val sid = core.activeSessionId()
+        if (sid == null) return
+        // A first-process connect() (or a config change) created a transient session first;
+        // the real target opens now. Skip the transient's bookkeeping entirely.
+        val deferred = pendingResumeAfterConnect
+        if (deferred != null) {
+            pendingResumeAfterConnect = null
+            if (pendingRecipeId != null) core.newSession(pendingRecipeId.also { pendingRecipeId = null })
+            else core.openSession(deferred)
+            return
         }
-    }.getOrElse { emptyList() }
+        // A roam peer owns the chat: Ready here is the MAIN connection's — don't repoint the
+        // on-screen session at it.
+        if (currentRoamPeer == null) {
+            lastSessionId = sid
+            store.lastSessionId = sid
+            currentSession.value = sid
+            // A chat started from inside a project gets filed the moment it has an id --
+            // session/new takes no projectId, so membership is a second call.
+            pendingProjectFiling?.let { pid ->
+                pendingProjectFiling = null
+                fileSession(sid, pid)
+            }
+            pendingClearOnReady?.let { target ->
+                pendingClearOnReady = null
+                if (target == sid) {
+                    messages.clear()          // the replay we just took is about to be void
+                    core.sendPrompt(Prompt(listOf(PromptBlock.Text("/clear"))), SendExpect(sid))
+                }
+            }
+            if (pendingAssistantRename) {
+                pendingAssistantRename = false
+                core.renameSession(sid, ASSISTANT_TITLE)
+                store.assistantSessionId = sid
+            }
+            // Populate the in-chat "N tools" indicator and the per-extension tool lists.
+            // MCP-backed extensions come up asynchronously AFTER the session is ready: a
+            // tools/list fired here returns only the builtins (measured). Ask again shortly
+            // for the full picture rather than caching a half-built one. (Peer-owned sessions
+            // are skipped: the unstable surface routes to the main connection only.)
+            detachedPeerExts.value = emptyList()
+            unstable.listTools(sid)
+            main.postDelayed({ if (live && core.activeSessionId() == sid) unstable.listTools(sid) }, 2500)
+            unstable.sessionExtensionsList(sid)
+            core.listSessions()   // so the Assistant thread can be resolved by title
+        }
+        // A rebuild (replay or cache path) just finished: unpin the list and snap to bottom
+        // when content actually streamed in.
+        if (replayActive.value) {
+            replayActive.value = false
+            replayDoneTick.value++   // ChatScreen: new content -> snap to bottom
+        }
+        // Prompts still waiting in the queue aren't in the server history (they haven't
+        // been sent). Re-add their bubbles on top, in queue order, so the user's unsent
+        // messages don't vanish from the screen (the rebuild wiped them).
+        if (replayWiped) {
+            replayWiped = false
+            pendingSends.forEach { messages.add(ChatMessage("user", it.text, it.images)) }
+        }
+        // Send ONE queued prompt (bubbles were already added when queued); RunEnded drains
+        // the rest. Firing the whole deque at once would interleave the prompts in the
+        // transcript and misattribute each reply — the exact failure the queue exists to prevent.
+        dequeue()?.let { p ->
+            store.pendingPushSessionId = sid
+            turnInFlight = true
+            busy.value = true
+            sendPromptBlocks(p.text, p.images, expect = currentSession.value)
+        }
+    }
+
+    private fun onCoreSessions(list: List<SessionSummary>) {
+        sessions.value = list.map { it.toInfo() }
+        // Only seed the cache when empty. It used to be written on every session list,
+        // which let an OLD session sharing the title clobber the id of the thread this app
+        // had just created. Newest title match wins, in case stale duplicates linger.
+        if (store.assistantSessionId == null)
+            sessions.value.filter { it.title == ASSISTANT_TITLE }
+                .maxByOrNull { it.updatedAt }?.let { store.assistantSessionId = it.sessionId }
+        if (pendingOpenAssistant) {
+            pendingOpenAssistant = false
+            val id = assistantSessionId()
+            // If no assistant thread exists (e.g. an interrupted reset, or a fresh box),
+            // recreate one instead of silently no-oping so openAssistant() can never dead-end.
+            if (id != null) openSession(id, knownKind = SessionKind.ASSISTANT) else beginAssistantThread()
+        }
+    }
+
+    /** Mirror the core's transcript into `messages`. Clear rebuilds from the core's snapshot
+     *  (a fresh cached transcript arrives as Clear + nothing else; a live replay arrives as
+     *  Clear + chunks). The app's bubbles are per-message ids allocated here; the core's
+     *  message ids correlate Updates to the right bubble. */
+    private fun onCoreTranscript(event: TranscriptEvent) {
+        when (event) {
+            is TranscriptEvent.Clear -> {
+                messages.clear()
+                coreKeyToAppId.clear()
+                pendingToolStash.clear()
+                if (pendingSends.isNotEmpty()) replayWiped = true
+                val snap = core.transcript()
+                snap.forEach { appendFromMessage(it) }
+                // Empty snapshot = a rebuild is about to stream (show "Loading… N"); a
+                // non-empty one is the instant cache paint (no loading state).
+                replayActive.value = snap.isEmpty()
+                replayProgress.value = 0
+            }
+            is TranscriptEvent.Append -> appendFromMessage(event.message)
+            is TranscriptEvent.Update -> updateFromMessage(event.message)
+        }
+    }
+
+    /** Core message id ("" for live bubbles, tool_call_id for tool rows) -> app bubble id. */
+    private val coreKeyToAppId = HashMap<String, Long>()
+    /** The on_stream ToolCall for a tool bubble arrives just before its on_transcript Append;
+     *  keyed by tool_call_id (== the Append's message id). */
+    private data class ToolCallStash(val kind: ToolCallKind?, val detail: String)
+    private val pendingToolStash = HashMap<String, ToolCallStash>()
+
+    private fun appendFromMessage(m: Message) {
+        val appId = chatMessageSeq.getAndIncrement()
+        val bubble = if (m.role == "tool") {
+            val stash = pendingToolStash.remove(m.id)
+            buildToolBubble(m, stash, appId)
+        } else {
+            ChatMessage(if (m.role == "agent") "assistant" else m.role, m.content, id = appId)
+        }
+        messages.add(bubble)
+        if (m.id.isNotEmpty()) coreKeyToAppId[m.id] = appId
+        if (replayActive.value) replayProgress.value++
+    }
+
+    private fun buildToolBubble(m: Message, stash: ToolCallStash?, appId: Long): ChatMessage {
+        val kind = stash?.kind
+        return when (kind) {
+            is ToolCallKind.Chart -> ChatMessage("chart", kind.spec, id = appId)
+            is ToolCallKind.McpApp -> ChatMessage(
+                "mcpapp", m.content, detail = kind.input, toolCallId = m.id,
+                appKey = kind.appKey, appHtml = appHtmlCache[kind.appKey] ?: "",
+                id = appId,
+            ).also {
+                // Fetch the template once per key; the bubble renders as a plain tool row
+                // until it lands. Peer-owned sessions can't fetch (unstable routes to the
+                // main connection), so they stay plain rows.
+                if (kind.appKey.isNotEmpty() && !appHtmlCache.containsKey(kind.appKey) &&
+                    appFetchInFlight.add(kind.appKey) && roamPeer(currentSession.value) == null
+                ) {
+                    core.activeSessionId()?.let { sid -> unstable.resourcesRead(sid, kind.uri, kind.extension) }
+                }
+            }
+            else -> ChatMessage(
+                "tool", m.content,
+                detail = stash?.detail.orEmpty(),
+                toolCallId = m.id,
+                // Live calls stream with a lifecycle; a snapshot/rebuild (no stash) is
+                // finished history and renders as a plain wrench.
+                status = if (stash != null) "in_progress" else "",
+                id = appId,
+            )
+        }
+    }
+
+    private fun updateFromMessage(m: Message) {
+        val idx = if (m.id.isNotEmpty()) {
+            coreKeyToAppId[m.id]?.let { appId -> messages.indexOfFirst { it.id == appId } } ?: -1
+        } else {
+            // Live text bubble (empty key): the core's stream bubble is always the last one.
+            messages.lastIndex
+        }
+        if (idx < 0 || idx >= messages.size) return
+        val cur = messages[idx]
+        messages[idx] = cur.copy(
+            role = if (m.role == "agent") "assistant" else m.role,
+            text = m.content,
+        )
+    }
+
+    private fun onCoreStream(event: StreamEvent) {
+        when (event) {
+            is StreamEvent.ToolCall -> pendingToolStash[event.toolCallId] =
+                ToolCallStash(event.kind, event.detail)
+            is StreamEvent.ToolCallUpdate -> {
+                val i = messages.indexOfLast { it.toolCallId == event.id }
+                if (i >= 0) messages[i] = messages[i].copy(
+                    status = event.status.ifBlank { messages[i].status },
+                    // Live shell chunks APPEND (capped — a verbose build log must not grow
+                    // a transcript entry without bound); the final completion update still
+                    // replaces, so the finished chip shows the tool's real result.
+                    output = when {
+                        event.live -> (messages[i].output + event.output).takeLast(4000)
+                        event.output.isNotBlank() -> event.output
+                        else -> messages[i].output
+                    },
+                )
+            }
+            is StreamEvent.Usage -> usage.value =
+                AcpEvent.Usage(event.used.toInt(), event.size.toInt(), event.cost, event.currency)
+            is StreamEvent.RunEnded -> onRunEnded(event.stopReason)
+            // Text chunks are mirrored through on_transcript (Append/Update); nothing to do.
+            is StreamEvent.AgentChunk, is StreamEvent.UserChunk, is StreamEvent.ThoughtChunk -> {}
+        }
+    }
+
+    private fun onRunEnded(stopReason: String) {
+        compacting.value = false
+        turnInFlight = false
+        // We got the authoritative completion straight from our own socket -- stop waiting
+        // on the Stop-hook push for this turn so a later turn from another client in the
+        // same (possibly shared) session doesn't spuriously match the stale flag.
+        store.pendingPushSessionId = null
+        // Drain one queued prompt, if any: send it and STAY busy, so the UI never flickers
+        // idle between a queue and its turn.
+        val queued = dequeue()
+        busy.value = queued != null
+        if (!appForeground) notifier.postReply(lastAssistantText())
+        if (queued != null) {
+            // Send the queued prompt now that the wire is free. Service stays up (we are
+            // still busy), so backgrounding between the two turns is safe.
+            turnInFlight = true
+            lastSessionId?.let { store.pendingPushSessionId = it }
+            sendPromptBlocks(queued.text, queued.images, expect = currentSession.value)
+        } else if (!store.persistentConnection) stopService()
+    }
+
+    private fun onCoreConfig(options: List<CoreConfigOption>) {
+        if (options.isEmpty()) return
+        config.value = options.map { it.toApp() }
+        // A federated session's options are the PEER's (session/load passes them
+        // through). Persisting them would overwrite the sticky local defaults with
+        // the peer's model/provider, and fetching "supported models" would ask
+        // the LOCAL provider registry about the peer's provider id. Display only.
+        if (roamPeer(currentSession.value) != null) return
+        // Persist the true current values so re-apply on reconnect can't drift.
+        config.value.forEach { if (it.currentValue.isNotBlank()) store.saveOption(it.id, it.currentValue) }
+        // Re-apply persisted picks once per connection (provider first for the model cascade).
+        if (!desiredApplied) {
+            desiredApplied = true
+            val saved = store.savedOptions(optionIds)
+            if (saved.isNotEmpty()) {
+                val current = config.value.associate { it.id to it.currentValue }
+                for (id in listOf("provider", "model", "mode", "thinking_effort")) {
+                    val want = saved[id] ?: continue
+                    if (want.isNotBlank() && want != current[id]) core.setConfigOption(id, want)
+                }
+            }
+        }
+        // Models come from the SERVER, live, and are never persisted. Ask the server,
+        // show the answer, keep nothing.
+        val provider = config.value.firstOrNull { it.id == "provider" }?.currentValue ?: ""
+        if (provider != liveModelsFetchedFor) {
+            // Provider changed (or first Config): drop the previous provider's list
+            // immediately so its slugs cannot be shown under the new one, even briefly.
+            knownModels.value = emptySet()
+            liveModelsFetchedFor = provider
+            if (provider.isNotBlank()) unstable.supportedModels(provider)
+        }
+    }
+
+    private fun onCorePermission(request: PermissionRequest) {
+        permissions.add(AcpEvent.Permission(
+            request.toolCallId, request.title, request.detail,
+            request.options.map { PermOption(it.optionId, it.name, it.kind) }))
+        if (!appForeground) notifier.postApprovalNeeded(request.title)
+    }
+
+    private fun onCoreSessionTouched(sessionId: String, title: String, updatedAt: String) {
+        // Live title/updatedAt sync (auto-naming after the first turn, renames from any
+        // client) — previously only visible after a full session re-list.
+        sessions.value = sessions.value.map {
+            if (it.sessionId == sessionId) it.copy(
+                title = if (title.isNotBlank()) title else it.title,
+                updatedAt = if (updatedAt.isNotBlank()) updatedAt else it.updatedAt,
+            ) else it
+        }
+    }
+
+    /** The stable on_projects path is never emitted by the core (projects are an unstable
+     *  sources/list feature); kept for completeness. */
+    private fun onCoreProjects(projects: List<ProjectSummary>) {
+        this.projects.value = projects.map { it.toInfo() }
+    }
+
+    private fun onRoamPeerStatus(label: String, st: String) {
+        when {
+            st == "ready" -> {
+                // Peer connected; its sessions arrive via on_roam_sessions.
+            }
+            st == "disconnected" -> {
+                if (currentRoamPeer == label) {
+                    currentRoamPeer = null
+                    if (roamPeer(currentSession.value) == label) {
+                        messages.clear(); currentSession.value = null
+                    }
+                }
+                sessions.value = sessions.value.filterNot { roamPeer(it.sessionId) == label }
+                if (currentRoamPeer == null) status.value = "not connected"
+            }
+            st.startsWith("error") -> {
+                if (currentRoamPeer == label) currentRoamPeer = null
+                status.value = "roam: $label — ${st.removePrefix("error:")}"
+            }
+            else -> {}
+        }
+    }
+
+    private fun onRoamSessions(label: String, sessions: List<SessionSummary>) {
+        // Merge the peer's sessions into the drawer (their ids are `roam:<label>:<id>`
+        // prefixed, which the drawer partitions on).
+        val infos = sessions.map { it.toInfo() }
+        this.sessions.value =
+            this.sessions.value.filterNot { roamPeer(it.sessionId) == label } + infos
+    }
+
+    // ---------------------------------------------------------------------------
+    // Unstable event translation
+    // ---------------------------------------------------------------------------
+
+    private fun onUnstableError(method: String, message: String) {
+        // A failed sidebar/config refresh is not the conversation's problem: no
+        // transcript bubble. But the flags those calls set MUST clear, or the failure
+        // sticks: a dead tools/list left `discovering` armed and the NEXT tools reply
+        // triggered a spurious allowlist write; a dead extensions/list left the sheet
+        // spinning.
+        if (method.startsWith("_goose/unstable/tools/list")) discovering = null
+        if (method.startsWith("_goose/unstable/config/extensions/list")) extensionsBusy.value = false
+        backgroundNotice.value = "$method: $message"
+        android.util.Log.w("Grouse", "background rpc error: $method: $message")
+    }
+
+    private fun onRecipes(json: String) {
+        recipes.value = parseRecipes(json)
+    }
+
+    private fun onSchedules(json: String) {
+        schedules.value = parseSchedules(json)
+    }
+
+    private fun onUnstableProjects(json: String) {
+        projects.value = parseProjects(json)
+    }
+
+    private fun onSkills(json: String) {
+        skills.value = parseSkills(json)
+    }
+
+    private fun onTools(sessionId: String, toolsJson: String) {
+        val g = group(parseToolNames(toolsJson))
+        val target = discovering
+        if (target != null) {
+            // Catalogue read: record the full set, then restore the session's real
+            // setting by round-tripping the SAME ExtInfo the discovery ran with.
+            toolCatalog.value = toolCatalog.value + (catKey(target) to g[target.name].orEmpty())
+            discovering = null
+            val allowed = (target.raw["available_tools"] as? JsonArray)
+                ?.mapNotNull { it.jsonPrimitive.contentOrNull }?.toSet().orEmpty()
+            setSessionTools(target, if (allowed.isEmpty()) g[target.name].orEmpty().toSet() else allowed)
+        } else if (sessionId == core.activeSessionId() || sessionId == currentSession.value) {
+            sessionTools.value = g
+        }
+    }
+
+    private fun onExtensions(json: String) {
+        extensions.value = parseGlobalExtensions(json)
+        extensionsBusy.value = false
+    }
+
+    private fun onSessionExtensions(sessionId: String, json: String) {
+        // Only the session the UI is showing (stale replies from a switched session must
+        // not clobber the current sheet).
+        if (sessionId != currentSession.value) return
+        val infos = parseSessionExtensions(json)
+        sessionExtensionNames.value = infos.map { it.name }
+        sessionExtensionInfos.value = infos
+        // A re-listed name is attached again; its detached-row copy is stale.
+        detachedPeerExts.value = detachedPeerExts.value.filterNot { it.name in sessionExtensionNames.value.toSet() }
+    }
+
+    private fun onConfigValue(key: String, value: String) {
+        when (key) {
+            "GOOSE_CONTEXT_LIMIT" -> serverContextLimit.value = value
+            "GOOSE_FAST_MODEL" -> serverFastModel.value = value
+        }
+        serverConfig[key] = value   // generic mirror for settings UIs
+    }
+
+    private fun onSupportedModels(provider: String, modelsJson: String) {
+        // Straight replace, in memory only. Ignore a reply for a provider we have since
+        // switched away from, so a slow response can't repopulate the wrong list.
+        val currentProvider = config.value.firstOrNull { it.id == "provider" }?.currentValue
+        if (provider == currentProvider) knownModels.value = parseModelNames(modelsJson)
+    }
+
+    private fun onCompactionStatus(message: String) {
+        // Substring match on goose's own status copy: both start and end lines are type
+        // Notice, so "notice vs progress" can't gate the indicator -- the text itself is
+        // the only stable signal. If a future goose upgrade rewords these, this just stops
+        // firing (fails safe: no spinner, never a wrong one).
+        val m = message.lowercase()
+        if (m.contains("compact")) compacting.value = true
+        if (m.contains("complete") || m.contains("error")) compacting.value = false
+    }
+
+    private fun onMessageUsage(outputTokens: ULong, elapsedMs: ULong, timeToFirstTokenMs: ULong, cost: Double) {
+        val elapsed = elapsedMs.toLong()
+        if (elapsed <= 0) return   // can't derive a tok/s rate from a zero/missing duration
+        val ev = AcpEvent.MessageUsage(
+            outputTokens.toInt(), elapsed, timeToFirstTokenMs.toLong(),
+            cost.takeIf { it > 0 })
+        lastMessageUsage.value = ev
+        // Stamp the reply this belongs to. Usage arrives at the end of a turn, so the
+        // most recent assistant message is the one it describes.
+        val idx = messages.indexOfLast { it.role == "assistant" }
+        if (idx >= 0) messages[idx] = messages[idx].copy(usage = ev)
+    }
+
+    private fun onAppResource(key: String, html: String) {
+        appFetchInFlight.remove(key)
+        if (html.isNotBlank()) {
+            appHtmlCache[key] = html
+            for (i in messages.indices)
+                if (messages[i].role == "mcpapp" && messages[i].appKey == key && messages[i].appHtml.isEmpty())
+                    messages[i] = messages[i].copy(appHtml = html)
+        }
+    }
+
+    private val elicitSeq = java.util.concurrent.atomic.AtomicInteger(1)
+
+    /** A tool/extension requested structured input (elicitation/create, form mode). */
+    private fun onElicitation(schemaJson: String) {
+        val schema = try {
+            Json.parseToJsonElement(schemaJson).jsonObject
+        } catch (e: Exception) { null } ?: return
+        val required = (schema["required"] as? JsonArray).orEmpty()
+            .mapNotNull { it.jsonPrimitive.contentOrNull }.toSet()
+        val fields = (schema["properties"] as? JsonObject).orEmpty().entries.map { (name, raw) ->
+            val o = raw as? JsonObject ?: JsonObject(emptyMap())
+            // Single-select comes as either untagged `enum` values or titled `oneOf`
+            // [{const, title}] options; both collapse to Choice(value, label).
+            val options =
+                (o["oneOf"] as? JsonArray).orEmpty().mapNotNull { el ->
+                    val eo = el as? JsonObject ?: return@mapNotNull null
+                    val v = eo["const"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    Choice(v, eo["title"]?.jsonPrimitive?.contentOrNull ?: v)
+                }.ifEmpty {
+                    (o["enum"] as? JsonArray).orEmpty().mapNotNull { el ->
+                        el.jsonPrimitive.contentOrNull?.let { Choice(it, it) }
+                    }
+                }
+            AcpEvent.ElicitField(
+                name = name,
+                type = o["type"]?.jsonPrimitive?.contentOrNull ?: "string",
+                title = o["title"]?.jsonPrimitive?.contentOrNull ?: name,
+                description = o["description"]?.jsonPrimitive?.contentOrNull ?: "",
+                options = options,
+                required = name in required,
+            )
+        }
+        elicitations.add(AcpEvent.Elicitation(
+            "elicit-" + elicitSeq.getAndIncrement(),
+            "Input requested",
+            schema["title"]?.jsonPrimitive?.contentOrNull ?: "",
+            fields))
+    }
+
+    /** A recipe with declared parameters, started via _meta.recipeId. Rendered through the
+     *  SAME form UI as elicitations; the answer is routed to respond_recipe_params by the
+     *  `recipeParams` flag, because the response shapes differ. */
+    private fun onRecipeParams(parametersJson: String) {
+        val params = try {
+            Json.parseToJsonElement(parametersJson) as? JsonArray
+        } catch (e: Exception) { null } ?: return
+        val fields = params.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val key = o["key"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val default = o["default"]?.jsonPrimitive?.contentOrNull
+            val desc = o["description"]?.jsonPrimitive?.contentOrNull ?: ""
+            AcpEvent.ElicitField(
+                name = key,
+                type = o["input_type"]?.jsonPrimitive?.contentOrNull ?: "string",
+                title = key,
+                // No `default` slot in the form model — surface it in the description so
+                // the value is at least visible and copyable.
+                description = if (default != null) "$desc (default: $default)" else desc,
+                options = (o["options"] as? JsonArray).orEmpty().mapNotNull {
+                    it.jsonPrimitive.contentOrNull?.let { v -> Choice(v, v) }
+                },
+                required = o["requirement"]?.jsonPrimitive?.contentOrNull == "required",
+            )
+        }
+        elicitations.add(AcpEvent.Elicitation(
+            "recipeparams-" + elicitSeq.getAndIncrement(),
+            "This recipe needs parameters", "Recipe parameters", fields,
+            recipeParams = true))
+    }
+
+    /** Reply to a DIRECT tool invocation. The core executes tools_call requests sequentially,
+     *  so the FIFO matches replies to callers in order. */
+    private fun onToolResult(text: String, isError: Boolean) {
+        val entry = toolCallQueue.removeFirstOrNull() ?: return
+        entry.onDone(if (isError) text.ifBlank { "tool call failed" } else null, text)
+    }
+
+    // ---------------------------------------------------------------------------
+    // The core connect entry point (all session opens funnel through here)
+    // ---------------------------------------------------------------------------
 
     private fun open(resume: String?, cwd: String? = null, kind: SessionKind? = null) {
-        // Cold start (or session switch): paint the cached transcript immediately so the reader
-        // sees content, not a Connecting screen, while the replay rebuilds the real one.
-        if (resume != null && messages.isEmpty())
-            loadTranscriptCache(resume).takeIf { it.isNotEmpty() }?.let { messages.addAll(it) }
-        // If a reset/create-assistant is pending but THIS open() isn't the one it scheduled
-        // (clientGen+1 != resetGen), a different navigation superseded it — abandon it so a later
-        // unrelated Ready can't complete a stale rename.
-        if (resetGen >= 0) {
-            if (clientGen + 1 != resetGen) { resetGen = -1 }
-        }
-        client?.close()
-        live = false; connecting = true; online.value = false
-        // A new client can't receive the old client's TurnDone, so clear turn state here.
+        // If a reset/create-assistant is pending but THIS open isn't the one that scheduled
+        // it, abandon it so a later unrelated Ready can't complete a stale rename. (Explicit
+        // newSession/openSession already clear the flag; this is the belt-and-suspenders.)
+        if (pendingAssistantRename && resume != null) pendingAssistantRename = false
+        // A new client can't receive the old turn's RunEnded, so clear turn state here.
         // Otherwise a hung/dropped turn leaves busy=true and every new chat + reconnect
-        // inherits a stuck "goose is thinking…" with nothing sent. Same logic for compacting:
-        // it's only cleared by TurnDone/Error/a matched CompactionStatus on the SAME client — if
-        // you switch sessions or background mid-compact, the old client gets superseded (dropped
-        // by the clientGen guard) before any of those arrive, and compacting (global, not
-        // per-session) stays stuck true forever after, permanently hiding the usage line under it
-        // (they're if/else-if) on every session including ones that were never compacting at all.
-        busy.value = false; streamingRole = null; compacting.value = false
-            // The superseded client will never report TurnDone here, so free the wire.
-            turnInFlight = false
-        activeRunId = null   // a stale run id belongs to the superseded session; steer would target the wrong run
+        // inherits a stuck "goose is thinking…" with nothing sent. Same logic for compacting.
+        busy.value = false; compacting.value = false
+        turnInFlight = false
+        live = false; connecting = true; online.value = false
         liveModelsFetchedFor = null   // re-fetch supported models fresh on every new connection
-        replayWiped = false
-        replayActive.value = false
-        val url = "wss://${store.host}:${store.port}/acp"
-        status.value = if (resume == null) "connecting to $url" else "loading session…"
-        val saved = store.savedOptions(optionIds)
-        // Resolve the cwd for this open(): an explicit param wins (new session creation always
-        // knows its own target); otherwise, for a resume, prefer the cached SessionInfo's cwd
-        // (sessions.value, if already loaded) and fall back to the last-persisted cwd for a cold
-        // start before any session/list round-trip has happened. session/load's cwd param SILENTLY
-        // REWRITES the session's working_dir if wrong, so this must be right, not just "close enough".
-        // There used to be an "assistant hard rule" here pinning that thread to /state BY
-        // CONSTRUCTION. It stopped being true on 2026-07-30, when conversational sessions moved
-        // under <home>/Projects/ so Goose Desktop would group them as projects -- and
-        // because session/load REWRITES working_dir, this line did not merely guess wrong, it
-        // actively dragged the Assistant back to /state within seconds of every correction,
-        // including edits made directly in the sessions DB. Ask the server instead; after
-        // the default cwd was fixed this was the ONE remaining hardcoded /state, and it silently
-        // undid that fix.
-        //
-        // Resolution order for a resume: live cache -> the per-session cwd map -> ASK THE SERVER
-        // (null: the client queries _goose/unstable/session/info before session/load). NEVER a
-        // guess: session/load rewrites working_dir when handed the wrong cwd, and a global
-        // last-used guess re-homed the assistant thread into a project once.
-        val resolvedCwd: String? = cwd?.takeIf { it.isNotBlank() } ?: if (resume == null) store.workingDir else
-            sessions.value.firstOrNull { it.sessionId == resume }?.cwd?.takeIf { it.isNotBlank() }
-                ?: store.sessionCwd(resume)
-        pendingOpenCwd = resolvedCwd ?: ""
-        // Tag this client's events with a generation; a just-closed client still fires
-        // onClosed/onFailure asynchronously and its stale "disconnected" must not flip us offline
-        // after the new client is already live.
-        val gen = ++clientGen
-        client = AcpClient(url, store.secretKey) { ev -> main.post { if (gen == clientGen) onEvent(ev) } }.also {
-            it.desiredOptions = if (resume == null) saved else emptyMap()
-            it.resumeSessionId = resume
-            it.resumeCwd = resolvedCwd ?: store.workingDir
-            it.resumeCwdKnown = resolvedCwd != null
-            it.desiredCwd = resolvedCwd ?: store.workingDir
-            it.desiredRecipeId = pendingRecipeId.also { _ -> pendingRecipeId = null }
-            it.connect()
+        desiredApplied = false
+        replayActive.value = false; replayProgress.value = 0; replayWiped = false
+        val cfg = currentServerConfig()
+        // A fresh config (first connect of the process, or host/port/key/cwd changed) needs a
+        // real `connect()` — the core's new/open intents reuse the LAST config only. connect()
+        // is the one blocking core intent (bounded ≤15s), so it runs on a worker thread.
+        if (lastConfig != cfg) {
+            lastConfig = cfg
+            pendingResumeAfterConnect = resume
+            Thread({
+                core.connect(cfg)
+                // connect() returned: either Ready arrived (fine) or the bounded wait timed
+                // out / the handshake failed (the core emits no error status for the
+                // never-connected case — surface it here so the UI doesn't hang on
+                // "Connecting…" forever; a LATE Ready still overrides via live).
+                main.post {
+                    if (!live && connecting) {
+                        connecting = false
+                        online.value = false
+                        status.value = "connection failed — check host, port and key"
+                    }
+                }
+            }, "grouse-core-connect").apply { isDaemon = true; start() }
+            return
         }
+        if (resume != null) {
+            // An explicit open supersedes any deferred first-connect resume.
+            pendingResumeAfterConnect = null
+            core.openSession(resume)
+        }
+        else core.newSession(pendingRecipeId.also { pendingRecipeId = null })
     }
 
-    private fun onEvent(ev: AcpEvent) {
-        when (ev) {
-            // Direct tool replies only occur on utility clients, which have their own handler.
-            is AcpEvent.DirectToolResult -> {}
-            is AcpEvent.Elicitation -> elicitations.add(ev)
-            is AcpEvent.Status -> {
-                status.value = ev.text
-                if (ev.text == "ready — pick a session") {
-                    // Roam connected with no session bound (first connect to a peer):
-                    // the host accepted this device, the drawer lists its sessions,
-                    // the user picks one — opening it resumes over the same link.
-                    live = true; connecting = false; online.value = true
-                }
-                if (ev.text == "disconnected") {
-                    if (turnInFlight) droppedMidTurn = true   // see turnResyncTick
-                    live = false; connecting = false; online.value = false
-                }
-            }
-            is AcpEvent.Error -> {
-                if (ev.background) {
-                    // A failed sidebar/config refresh is not the conversation's problem: no
-                    // transcript bubble, and ABOVE ALL no busy/turn-state reset — that reset
-                    // once cancelled a live turn because a schedules poll errored.
-                    // But the flags those calls set MUST clear, or the failure sticks: a dead
-                    // tools/list left `discovering` armed and the NEXT tools reply triggered a
-                    // spurious allowlist write; a dead extensions/list left the sheet spinning.
-                    if (ev.text.startsWith("_goose/unstable/tools/list")) discovering = null
-                    if (ev.text.startsWith("_goose/unstable/config/extensions/list")) extensionsBusy.value = false
-                    backgroundNotice.value = ev.text
-                    android.util.Log.w("Grouse", "background rpc error: ${ev.text}")
-                } else {
-                    messages.add(ChatMessage("error", ev.text)); streamingRole = null; busy.value = false; turnInFlight = false
-                    compacting.value = false   // safety net: a dropped/garbled status must never stick
-                }
-            }
-            is AcpEvent.ToolCall -> {
-                if (ev.appKey.isNotBlank()) {
-                    // Tool declared a server-hosted UI (autovisualiser et al). Add the bubble
-                    // immediately — with the template if cached, empty otherwise — and fetch
-                    // once per key no matter how many bubbles are waiting on it.
-                    t().add(ChatMessage("mcpapp", ev.title, detail = ev.appInput,
-                        toolCallId = ev.toolCallId, appKey = ev.appKey,
-                        appHtml = appHtmlCache[ev.appKey] ?: ""))
-                    if (!appHtmlCache.containsKey(ev.appKey) && appFetchInFlight.add(ev.appKey))
-                        client?.readAppResource(ev.appKey, ev.appUri, ev.appExt)
-                } else {
-                    t().add(ChatMessage("tool", ev.title, detail = ev.detail,
-                        toolCallId = ev.toolCallId, status = "in_progress"))
-                }
-                streamingRole = null
-            }
-            is AcpEvent.AppResource -> {
-                appFetchInFlight.remove(ev.key)
-                if (ev.html.isNotBlank()) {
-                    appHtmlCache[ev.key] = ev.html
-                    val tr = t()
-                    for (i in tr.indices)
-                        if (tr[i].role == "mcpapp" && tr[i].appKey == ev.key && tr[i].appHtml.isEmpty())
-                            tr[i] = tr[i].copy(appHtml = ev.html)
-                }
-            }
-            is AcpEvent.ToolCallUpdate -> {
-                if (ev.toolCallId.isNotBlank()) {
-                    val i = t().indexOfLast { it.role == "tool" && it.toolCallId == ev.toolCallId }
-                    if (i >= 0) t()[i] = t()[i].copy(
-                        status = ev.status.ifBlank { t()[i].status },
-                        // Live shell chunks APPEND (capped — a verbose build log must not grow
-                        // a transcript entry without bound); the final completion update still
-                        // replaces, so the finished chip shows the tool's real result.
-                        output = when {
-                            ev.live -> (t()[i].output + ev.output).takeLast(4000)
-                            ev.output.isNotBlank() -> ev.output
-                            else -> t()[i].output
-                        },
+    private fun currentServerConfig(): ServerConfig = ServerConfig(
+        host = store.host,
+        port = store.port.toUShortOrNull() ?: 3284u,
+        secretKey = store.secretKey,
+        // The app has always spoken wss to goosed (trust-all TLS); no TLS toggle exists.
+        useTls = true,
+        cwd = store.workingDir,
+        autoConnect = true,
+        clientId = "grouse",
+    )
+
+    // ---------------------------------------------------------------------------
+    // Unstable payload parsers (the core hands the raw JSON reply payloads)
+    // ---------------------------------------------------------------------------
+
+    private fun parseRecipes(json: String): List<RecipeInfo> {
+        val arr = try { Json.parseToJsonElement(json) as? JsonArray } catch (e: Exception) { null } ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val e = el as? JsonObject ?: return@mapNotNull null
+            val r = e["recipe"] as? JsonObject ?: return@mapNotNull null
+            val settings = r["settings"] as? JsonObject
+            RecipeInfo(
+                id = e["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                title = r["title"]?.jsonPrimitive?.contentOrNull ?: "(untitled)",
+                description = r["description"]?.jsonPrimitive?.contentOrNull ?: "",
+                // snake_case, like recipes/schedule's cron_schedule and unlike most of goose's
+                // ACP surface.
+                cron = e["schedule_cron"]?.jsonPrimitive?.contentOrNull,
+                // settings keys are snake_case here, like the recipe YAML they came from
+                provider = settings?.get("goose_provider")?.jsonPrimitive?.contentOrNull,
+                model = settings?.get("goose_model")?.jsonPrimitive?.contentOrNull,
+                prompt = r["prompt"]?.jsonPrimitive?.contentOrNull,
+                instructions = r["instructions"]?.jsonPrimitive?.contentOrNull,
+                parameters = (r["parameters"] as? JsonArray).orEmpty().mapNotNull { p ->
+                    val po = p as? JsonObject ?: return@mapNotNull null
+                    RecipeParam(
+                        key = po["key"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                        requirement = po["requirement"]?.jsonPrimitive?.contentOrNull ?: "required",
+                        description = po["description"]?.jsonPrimitive?.contentOrNull ?: "",
+                        default = po["default"]?.jsonPrimitive?.contentOrNull,
                     )
-                }
-            }
-            is AcpEvent.ActiveRun -> {
-                // Only trust run ids for the session on screen — a notification for another
-                // session must not arm steering against the wrong run.
-                if (ev.sessionId == currentSession.value) activeRunId = ev.runId
-            }
-            is AcpEvent.Probe -> {
-                probeToken++   // cancels the pending dead-socket timeout
-                // While a replay streams, the socket is demonstrably alive and the rebuild is
-                // already bringing the fresh content — acting on the verdict here would just
-                // open() and RESTART the replay (same bug the watchdog guard above fixes).
-                // Keep only the baseline refresh; the replay's Ready supersedes any verdict.
-                if (!replayActive.value) when {
-                    // The probe itself failed: session gone or socket dead — reconnect.
-                    ev.messageCount < 0 -> if (!turnInFlight) { reconnectToCurrent() }
-                    // Baseline exists and moved: another client changed the session; replay.
-                    syncStamp != null && syncStamp != (ev.updatedAt to ev.messageCount) ->
-                        if (!busy.value && !turnInFlight) reconnectToCurrent()
-                    // else: nothing changed — the 2-second alt-tab costs one info call.
-                }
-                syncStamp = ev.updatedAt to ev.messageCount
-            }
-            is AcpEvent.SessionExport -> exportData.value = ev.data
-            is AcpEvent.SessionInfoChanged -> {
-                // Live title/updatedAt sync (auto-naming after the first turn, renames from any
-                // client) — previously only visible after a full session re-list.
-                sessions.value = sessions.value.map {
-                    if (it.sessionId == ev.sessionId) it.copy(
-                        title = ev.title ?: it.title,
-                        updatedAt = ev.updatedAt ?: it.updatedAt,
-                    ) else it
-                }
-            }
-            is AcpEvent.ModeChanged -> {
-                config.value = config.value.map {
-                    if (it.id == "mode") it.copy(currentValue = ev.modeId) else it
-                }
-            }
-            is AcpEvent.Usage -> usage.value = ev
-            is AcpEvent.CompactionStatus -> {
-                // Substring match on goose's own status copy — see agents/agent.rs (aaif-goose/goose,
-                // commit 1e03bbb5): Notice "Exceeded auto-compact threshold... Performing
-                // auto-compaction...", Progress "goose is compacting the conversation...", Notice
-                // "Compaction complete". Both start and end lines are type Notice, so "notice vs
-                // progress" can't gate the indicator — the text itself is the only stable signal. If
-                // a future goose upgrade rewords these, this just stops firing (fails safe: no
-                // spinner, never a wrong one) — re-check against that file after a server bump.
-                val m = ev.message.lowercase()
-                if (m.contains("compact")) compacting.value = true
-                if (m.contains("complete") || m.contains("error")) compacting.value = false
-            }
-            is AcpEvent.Chart -> { t().add(ChatMessage("chart", ev.spec)); streamingRole = null }
-            is AcpEvent.TurnDone -> {
-                streamingRole = null; compacting.value = false
-                turnInFlight = false
-                activeRunId = null   // the run this id named is over; steering it would fail
-                syncStamp = null     // our own turn changed the server state; re-baseline on next probe
-                // We got the authoritative completion straight from our own socket -- stop waiting
-                // on the Stop-hook push for this turn so a later turn from another client in the
-                // same (possibly shared) session doesn't spuriously match the stale flag.
-                store.pendingPushSessionId = null
-                // Drain one queued prompt, if any: send it and STAY busy, so the UI never flickers
-                // idle between a queue and its turn.
-                val queued = dequeue()
-                busy.value = queued != null
-                if (!appForeground) notifier.postReply(lastAssistantText())
-                if (queued != null) {
-                    // Send the queued prompt now that the wire is free. Service stays up (we are
-                    // still busy), so backgrounding between the two turns is safe.
-                    turnInFlight = true
-                    lastSessionId?.let { store.pendingPushSessionId = it }
-                    client?.sendPrompt(queued.text, queued.images, expect = currentSession.value)
-                } else if (!store.persistentConnection) stopService()
-            }
-            is AcpEvent.ReplayStart -> {
-                // A session/load replay is about to stream: the server transcript is ground truth
-                // (it may hold turns Desktop or deliver.sh added while this app wasn't looking),
-                // so rebuild from scratch — into the side buffer; `messages` stays visible and
-                // untouched until Ready decides whether anything actually changed.
-                replayBuffer.clear()
-                replayProgress.value = 0
-                streamingRole = null
-                replayWiped = true
-                replayActive.value = true
-            }
-            is AcpEvent.AgentChunk -> {
-                // Replay boundary: a NEW messageId means a new source message — break the
-                // bubble instead of gluing (consecutive assistant messages, e.g. a briefing
-                // relay followed by an appended digest, used to merge into one). The same
-                // boundary counts a replayed message for the Loading progress.
-                if (ev.messageId != null && ev.messageId != streamMsgId) {
-                    streamingRole = null
-                    if (replayActive.value) replayProgress.value++
-                }
-                if (ev.messageId != null) streamMsgId = ev.messageId
-                appendStream("assistant", ev.text)
-            }
-            is AcpEvent.ThoughtChunk -> appendStream("thought", ev.text)
-            is AcpEvent.UserChunk -> {
-                t().add(ChatMessage("user", ev.text)); streamingRole = null
-                if (replayActive.value) replayProgress.value++   // one UserChunk per replayed user message
-            }
-            is AcpEvent.Config -> if (ev.options.isNotEmpty()) {
-                config.value = ev.options
-                // A federated session's options are the PEER's (session/load passes them
-                // through). Persisting them would overwrite the sticky local defaults with
-                // the peer's model/provider, and fetching "supported models" would ask
-                // the LOCAL provider registry about the peer's provider id. Display only.
-                if (roamPeer(currentSession.value) != null) return
-                // Persist the true current values so re-apply on reconnect can't drift
-                // (e.g. leave a model selected after switching provider).
-                ev.options.forEach { if (it.currentValue.isNotBlank()) store.saveOption(it.id, it.currentValue) }
-                // Models come from the SERVER, live, and are never persisted. The old design kept
-                // a per-provider set in SharedPreferences that only ever GREW: every slug goose
-                // ever reported stayed forever, so a model retired server-side (Qwen3_1.7B), an
-                // alias that was renamed (the whole 2026-07-25 rename), and slugs that leaked in
-                // from another provider during a switch (z-ai/glm-5.2, gpt-4o under openai) all
-                // accumulated with no way to clear them short of wiping app data. Two separate
-                // one-time migrations existed in SecureStore purely to repair that cache, and a
-                // shape heuristic here tried to stop it being poisoned in the first place.
-                //
-                // None of that is needed: fetch_supported_models is authoritative and cheap. Ask
-                // the server, show the answer, keep nothing.
-                val provider = ev.options.firstOrNull { it.id == "provider" }?.currentValue ?: ""
-                if (provider != liveModelsFetchedFor) {
-                    // Provider changed (or first Config): drop the previous provider's list
-                    // immediately so its slugs cannot be shown under the new one, even briefly.
-                    knownModels.value = emptySet()
-                    liveModelsFetchedFor = provider
-                    if (provider.isNotBlank()) client?.listSupportedModels(provider)
-                }
-            }
-            is AcpEvent.SupportedModels -> {
-                // Straight replace, in memory only. Ignore a reply for a provider we have since
-                // switched away from, so a slow response can't repopulate the wrong list.
-                val currentProvider = config.value.firstOrNull { it.id == "provider" }?.currentValue
-                if (ev.providerId == currentProvider) knownModels.value = ev.models.toSet()
-            }
-            is AcpEvent.Ready -> {
-                live = true; connecting = false; online.value = true
-                lastSessionId = ev.sessionId
-                // A roam peer's session id means nothing to the local WS host — keep the
-                // WS resume target and each peer's resume target separate.
-                if (currentRoamPeer != null) roamLastSession[currentRoamPeer!!] = ev.sessionId
-                else store.lastSessionId = ev.sessionId
-                // Ready itself carries no cwd -- record what this open resolved (see open()).
-                // Blank = the server was asked via session/info; the next session/list merge
-                // records the authoritative value instead.
-                if (pendingOpenCwd.isNotBlank())
-                    store.rememberSessionCwds(listOf(ev.sessionId to pendingOpenCwd))
-                // A chat started from inside a project gets filed the moment it has an id --
-                // session/new takes no projectId, so membership is a second call.
-                pendingProjectFiling?.let { pid ->
-                    pendingProjectFiling = null
-                    fileSession(ev.sessionId, pid)
-                }
-                pendingClearOnReady?.let { target ->
-                    pendingClearOnReady = null
-                    if (target == ev.sessionId) {
-                        messages.clear()          // the replay we just took is about to be void
-                        client?.sendPrompt("/clear")
-                    }
-                }
-                if (droppedMidTurn) {
-                    // The turn we lost is still finishing server-side; poll it back into view.
-                    droppedMidTurn = false
-                    resyncTicks = 3
-                    main.postDelayed(::turnResyncTick, 8_000)
-                }
-                currentSession.value = ev.sessionId
-                // Populate the in-chat "N tools" indicator and the per-extension tool lists.
-                // MCP-backed extensions come up asynchronously AFTER the session is ready: a
-                // tools/list fired here returns only the builtins (measured -- nextcloud, beeper,
-                // kagi and memory were all absent from a list taken immediately). Ask again shortly
-                // for the full picture rather than caching a half-built one.
-                // Since roam-5 the probes route to the owning peer for federated sessions
-                // too (tools/list and session/extensions/list are session-scoped), so they
-                // run unconditionally. Stale state from the previous session is cleared by
-                // the replies; the detached-row cache is per-session and cleared here.
-                detachedPeerExts.value = emptyList()
-                client?.listTools()
-                val genAtReady = clientGen
-                main.postDelayed({ if (genAtReady == clientGen) client?.listTools() }, 2500)
-                client?.listSessionExtensions()
-                // Finishing an assistant reset/create: only when THIS Ready is the reset's own
-                // fresh session (its connection generation matches resetGen). Name it so both
-                // the app (title match) and deliver.sh (name-grep) resolve it as the assistant
-                // thread. The old-thread archive rename that used to run here is gone -- reset
-                // clears in place now, so this path only ever fires when no thread existed.
-                if (resetGen == clientGen) {
-                    resetGen = -1
-                    client?.renameSession(ev.sessionId, ASSISTANT_TITLE)
-                    store.assistantSessionId = ev.sessionId
-                }
-                client?.listSessions()   // so the Assistant thread can be resolved by title
-                if (replayActive.value) {
-                    replayActive.value = false
-                    // Swap the rebuilt transcript in only when it differs from what's shown.
-                    // The common background-reconnect replay is byte-identical, and leaving
-                    // `messages` untouched preserves the reading position by construction.
-                    // Compare content fields, not ChatMessage itself: `id` is per-instance.
-                    val same = replayBuffer.size == messages.size && replayBuffer.indices.all { i ->
-                        val a = replayBuffer[i]; val b = messages[i]
-                        a.role == b.role && a.text == b.text && a.detail == b.detail &&
-                            a.status == b.status && a.output == b.output &&
-                            a.images.size == b.images.size
-                    }
-                    if (!same) {
-                        messages.clear(); messages.addAll(replayBuffer)
-                        replayDoneTick.value++   // ChatScreen: new content -> snap to bottom
-                    }
-                    replayBuffer.clear()
-                }
-                // Prompts still waiting in the queue aren't in the server history (they haven't
-                // been sent). Re-add their bubbles on top, in queue order, so the user's unsent
-                // messages don't vanish from the screen. After the swap: a queued bubble was in
-                // the shown list but never in the buffer, so `same` is false and the swap
-                // dropped it.
-                if (replayWiped) {
-                    replayWiped = false
-                    pendingSends.forEach { messages.add(ChatMessage("user", it.text, it.images)) }
-                }
-                // Send ONE queued prompt (bubbles were already added when queued); TurnDone drains
-                // the rest. This used to `while`-loop the whole deque, firing every queued prompt
-                // into the session at once -- which interleaves them in the transcript and
-                // misattributes each reply, the exact failure the queue exists to prevent. It also
-                // left turnInFlight false, so the next send() would fire a concurrent prompt too.
-                dequeue()?.let { p ->
-                    store.pendingPushSessionId = ev.sessionId
-                    turnInFlight = true
-                    busy.value = true
-                    client?.sendPrompt(p.text, p.images, expect = currentSession.value)
-                }
-            }
-            is AcpEvent.Projects -> projects.value = ev.list
-            is AcpEvent.Schedules -> schedules.value = ev.list
-            is AcpEvent.Recipes -> recipes.value = ev.list
-            is AcpEvent.Skills -> skills.value = ev.list
-            is AcpEvent.Sessions -> {
-                sessions.value = ev.list
-                store.rememberSessionCwds(ev.list.map { it.sessionId to it.cwd })
-                // The fork-repoint block that used to live here is GONE (2026-08-01). It watched
-                // for the cached assistant id turning up under a different title and hopped to
-                // whichever session still bore ASSISTANT_TITLE -- necessary only because the
-                // nightly rotation renamed the thread aside and minted a new one, so every client
-                // had to notice and follow. deliver.sh now COMPACTS in place: the id never
-                // changes, nothing is renamed, and there is nothing to repoint to. Keeping the
-                // logic would mean keeping a recovery path for a failure that can no longer
-                // happen, on a cache that is now stable by construction.
-                //
-                // Only seed the cache when empty. It used to be written on every session list,
-                // which let an OLD session sharing the title clobber the id of the thread this app
-                // had just created. Newest title match wins, in case stale duplicates linger.
-                if (store.assistantSessionId == null)
-                    sessions.value.filter { it.title == ASSISTANT_TITLE }
-                        .maxByOrNull { it.updatedAt }?.let { store.assistantSessionId = it.sessionId }
-                if (pendingOpenAssistant) {
-                    pendingOpenAssistant = false
-                    val id = assistantSessionId()
-                    // If no assistant thread exists (e.g. an interrupted reset, or a fresh box),
-                    // recreate one instead of silently no-oping so openAssistant() can never dead-end.
-                    if (id != null) openSession(id, knownKind = SessionKind.ASSISTANT) else beginAssistantThread()
-                }
-            }
-            is AcpEvent.ServerConfig -> {
-                when (ev.key) {
-                    "GOOSE_CONTEXT_LIMIT" -> serverContextLimit.value = ev.value
-                    "GOOSE_FAST_MODEL" -> serverFastModel.value = ev.value
-                }
-                serverConfig[ev.key] = ev.value   // generic mirror for settings UIs
-            }
-            is AcpEvent.Commands -> commands.value = ev.names
-            is AcpEvent.Extensions -> { extensions.value = ev.list; extensionsBusy.value = false }
-            is AcpEvent.SessionExtensions -> {
-                sessionExtensionNames.value = ev.names
-                sessionExtensionInfos.value = ev.infos
-                // A re-listed name is attached again; its detached-row copy is stale.
-                detachedPeerExts.value = detachedPeerExts.value.filterNot { it.name in ev.names.toSet() }
-            }
-            is AcpEvent.Tools -> {
-                val g = group(ev.names)
-                val target = discovering
-                if (target != null) {
-                    // Catalogue read: record the full set, then restore the session's real
-                    // setting by round-tripping the SAME ExtInfo the discovery ran with (a
-                    // peer DTO for federated sessions — never re-looked-up locally by name).
-                    toolCatalog.value = toolCatalog.value + (catKey(target) to g[target.name].orEmpty())
-                    discovering = null
-                    val allowed = (target.raw["available_tools"] as? JsonArray)
-                        ?.mapNotNull { it.jsonPrimitive.contentOrNull }?.toSet().orEmpty()
-                    setSessionTools(target, if (allowed.isEmpty()) g[target.name].orEmpty().toSet() else allowed)
-                } else sessionTools.value = g
-            }
-            is AcpEvent.MessageUsage -> {
-                lastMessageUsage.value = ev
-                // Stamp the reply this belongs to. Usage arrives at the end of a turn, so the
-                // most recent assistant message is the one it describes.
-                val idx = messages.indexOfLast { it.role == "assistant" }
-                if (idx >= 0) messages[idx] = messages[idx].copy(usage = ev)
-            }
-            is AcpEvent.Permission -> {
-                // Every conversation prompts, the Assistant thread included. It used to carry a
-                // client-side "assistant actions" policy that could auto-approve or blanket-deny
-                // on its behalf -- a second, invisible permission system layered on top of
-                // goose's own mode, which the thread's mode picker then appeared to control and
-                // did not. One mode, set in the chat like any other.
-                permissions.add(ev)
-                if (!appForeground) notifier.postApprovalNeeded(ev.title)
-            }
+                },
+                subRecipes = (r["sub_recipes"] as? JsonArray).orEmpty().mapNotNull {
+                    (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
+                },
+                extensions = (r["extensions"] as? JsonArray).orEmpty().mapNotNull {
+                    (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
+                },
+                filePath = e["file_path"]?.jsonPrimitive?.contentOrNull ?: "",
+                raw = r,
+            )
+        }.sortedBy { it.title.lowercase() }
+    }
+
+    private fun parseSchedules(json: String): List<ScheduleInfo> {
+        val arr = try { Json.parseToJsonElement(json) as? JsonArray } catch (e: Exception) { null } ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            ScheduleInfo(
+                id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                cron = o["cron"]?.jsonPrimitive?.contentOrNull ?: "",
+                source = o["source"]?.jsonPrimitive?.contentOrNull ?: "",
+                paused = o["paused"]?.jsonPrimitive?.booleanOrNull ?: false,
+                running = o["currentlyRunning"]?.jsonPrimitive?.booleanOrNull ?: false,
+                lastRun = o["lastRun"]?.jsonPrimitive?.contentOrNull,
+                currentSessionId = o["currentSessionId"]?.jsonPrimitive?.contentOrNull,
+            )
+        }.sortedBy { it.id.lowercase() }
+    }
+
+    private fun parseProjects(json: String): List<ProjectInfo> {
+        val arr = try { Json.parseToJsonElement(json) as? JsonArray } catch (e: Exception) { null } ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val path = o["path"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val name = o["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val slug = path.substringAfterLast('/').removeSuffix(".md")
+            val content = o["content"]?.jsonPrimitive?.contentOrNull ?: ""
+            ProjectInfo(
+                id = slug.ifEmpty { name },
+                name = name,
+                description = o["description"]?.jsonPrimitive?.contentOrNull ?: "",
+                path = path,
+                root = content.lineSequence()
+                    .firstOrNull { it.trim().startsWith("root:") }
+                    ?.substringAfter("root:")?.trim().orEmpty(),
+            )
+        }.sortedBy { it.name.lowercase() }
+    }
+
+    private fun parseSkills(json: String): List<SkillInfo> {
+        val arr = try { Json.parseToJsonElement(json) as? JsonArray } catch (e: Exception) { null } ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            SkillInfo(
+                name = o["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                description = o["description"]?.jsonPrimitive?.contentOrNull ?: "",
+                content = o["content"]?.jsonPrimitive?.contentOrNull ?: "",
+                path = o["path"]?.jsonPrimitive?.contentOrNull ?: "",
+                global = o["global"]?.jsonPrimitive?.booleanOrNull ?: false,
+                writable = o["writable"]?.jsonPrimitive?.booleanOrNull ?: false,
+            )
+        }.sortedBy { it.name.lowercase() }
+    }
+
+    private fun parseGlobalExtensions(json: String): List<ExtInfo> {
+        val arr = try { Json.parseToJsonElement(json) as? JsonArray } catch (e: Exception) { null } ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val ext = o["extension"] as? JsonObject ?: return@mapNotNull null
+            // type=mcp extensions (nextcloud, kagi, fastmail, Fetch -- anything backed by an
+            // actual MCP server) carry their name NESTED at extension.server.name, not the
+            // top-level extension.name that builtin/platform types use.
+            val name = ext["name"]?.jsonPrimitive?.contentOrNull
+                ?: (ext["server"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
+                ?: return@mapNotNull null
+            ExtInfo(
+                name = name,
+                enabled = o["enabled"]?.jsonPrimitive?.booleanOrNull ?: false,
+                type = ext["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                description = ext["description"]?.jsonPrimitive?.contentOrNull ?: "",
+                configKey = o["configKey"]?.jsonPrimitive?.contentOrNull ?: name,
+                bundled = ext["bundled"]?.jsonPrimitive?.booleanOrNull ?: false,
+                raw = ext,
+            )
         }
     }
 
-    /** Merge a streamed chunk into the last bubble of the same role, else start a new one. */
-    private fun appendStream(role: String, chunk: String) {
-        val list = t()
-        val last = list.lastOrNull()
-        if (streamingRole == role && last != null && last.role == role) {
-            list[list.lastIndex] = last.copy(text = last.text + chunk)
-        } else {
-            streamingRole = role
-            list.add(ChatMessage(role, chunk))
+    /** Session-scoped extensions: the array elements ARE the extension objects (goose's tagged
+     *  union carries `name` at the top level), unlike config/extensions/list's wrap. */
+    private fun parseSessionExtensions(json: String): List<ExtInfo> {
+        val arr = try { Json.parseToJsonElement(json) as? JsonArray } catch (e: Exception) { null } ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val ext = el as? JsonObject ?: return@mapNotNull null
+            val name = ext["name"]?.jsonPrimitive?.contentOrNull
+                ?: (ext["server"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
+                ?: return@mapNotNull null
+            ExtInfo(
+                name = name,
+                enabled = true,   // attached to the session by definition
+                type = ext["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                description = ext["description"]?.jsonPrimitive?.contentOrNull ?: "",
+                configKey = name,
+                bundled = ext["bundled"]?.jsonPrimitive?.booleanOrNull ?: false,
+                raw = ext,
+                fromPeer = roamPeer(currentSession.value) != null,
+            )
         }
     }
+
+    private fun parseToolNames(json: String): List<String> {
+        val arr = try { Json.parseToJsonElement(json) as? JsonArray } catch (e: Exception) { null } ?: return emptyList()
+        return arr.mapNotNull { (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull }
+    }
+
+    private fun parseModelNames(json: String): Set<String> {
+        val arr = try { Json.parseToJsonElement(json) as? JsonArray } catch (e: Exception) { null } ?: return emptySet()
+        return arr.mapNotNull { it.jsonPrimitive.contentOrNull }.toSet()
+    }
+
+    // ---------------------------------------------------------------------------
+    // Record translation (core -> app DTO)
+    // ---------------------------------------------------------------------------
+
+    private fun SessionSummary.toInfo(): SessionInfo = SessionInfo(
+        sessionId = id,
+        title = title,
+        updatedAt = updatedAt,
+        messageCount = messageCount.toInt(),
+        model = model,
+        snippet = lastMessageSnippet.orEmpty(),
+        hasRecipe = hasRecipe,
+        projectId = projectId,
+    )
+
+    private fun CoreConfigOption.toApp(): ConfigOption = ConfigOption(
+        id = id,
+        name = name,
+        currentValue = value,
+        choices = choices.map { Choice(it.value, it.name) },
+    )
+
+    private fun ProjectSummary.toInfo(): ProjectInfo = ProjectInfo(
+        id = path.substringAfterLast('/').removeSuffix(".md").ifEmpty { name },
+        name = name,
+        description = description.orEmpty(),
+        path = path,
+        root = "",
+    )
 
     companion object {
         /** Server-side name of the persistent assistant thread (see docker/llm/goose-recipes).
@@ -1703,8 +1886,8 @@ class ConnectionManager private constructor(context: Context) {
         fun sessionKind(s: SessionInfo): SessionKind =
             if (s.title == ASSISTANT_TITLE) SessionKind.ASSISTANT else SessionKind.CHAT
 
-        /** A session living on a roam peer arrives as `roam:<peer>:<remote id>` (the goose
-         *  fork's ACP federation). Local ids never carry the prefix, so it doubles as the
+        /** A session living on a roam peer arrives as `roam:<peer>:<remote id>` (the core's
+         *  peer namespace). Local ids never carry the prefix, so it doubles as the
          *  client-side "this session is remote" signal. Returns the peer nickname, or null
          *  for a local session. */
         fun roamPeer(sessionId: String?): String? =
@@ -1717,13 +1900,4 @@ class ConnectionManager private constructor(context: Context) {
                 instance ?: ConnectionManager(context.applicationContext).also { instance = it }
             }
     }
-}
-
-/** Keep the cold-start transcript cache bounded: delete the oldest files beyond `keep`.
- *  Best-effort (a failed delete is not data loss) and a no-op on a missing/unreadable dir.
- *  Top-level internal so the JVM unit tests can exercise it. */
-internal fun pruneTranscriptCache(dir: java.io.File, keep: Int = 20) {
-    val files = dir.listFiles() ?: return          // missing/unreadable dir: no-op
-    if (files.size <= keep) return
-    files.sortedBy { it.lastModified() }.dropLast(keep).forEach { runCatching { it.delete() } }
 }

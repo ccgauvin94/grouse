@@ -49,7 +49,7 @@ class SecureStore(context: Context) {
         if (cfg.getString("port", null) == "3285") cfg.edit().putString("port", "3284").apply()
         // The per-provider known_models cache is GONE (2026-07-25). Models are fetched live
         // from the server on every connect and held in memory only -- see
-        // ConnectionManager's AcpEvent.SupportedModels. Two one-time migrations used to live
+        // ConnectionManager's supportedModels handling. Two one-time migrations used to live
         // here (flat -> per-provider split, then a cross-provider sanitize); both existed
         // purely to repair a cache that should never have been persistent, so they went with
         // it. Drop the dead keys so an upgraded install doesn't carry them forever.

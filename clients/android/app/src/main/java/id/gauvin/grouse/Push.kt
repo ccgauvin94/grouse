@@ -114,7 +114,10 @@ object PushRegistry {
         io.execute {
             runCatching {
                 val body = endpoint.toRequestBody("text/plain".toMediaTypeOrNull())
-                Net.builder().build().newCall(Request.Builder().url(url).post(body).build())
+                // Plain OkHttpClient: the push registry is a normal HTTPS endpoint (the
+                // trust-all TLS builder that used to live in Net.kt existed only for goosed's
+                // self-signed cert, which the registry never is).
+                okhttp3.OkHttpClient().newCall(Request.Builder().url(url).post(body).build())
                     .execute().close()
             }
         }
