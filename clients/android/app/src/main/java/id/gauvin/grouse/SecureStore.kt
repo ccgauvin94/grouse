@@ -47,6 +47,11 @@ class SecureStore(context: Context) {
         // Move off the ACP-only server (:3285) to the full agent server (:3284) which also
         // serves ACP and exposes the extension API.
         if (cfg.getString("port", null) == "3285") cfg.edit().putString("port", "3284").apply()
+        // 3284 was the PLAIN-goose port; this client is TLS-only (wss), so nothing on 3284
+        // was ever reachable through it. A saved 3284 is the failed "no port" default from
+        // an earlier build — move it to the wss default (443), which is what the empty-port
+        // setup actually needs (goose.gauvin.id only forwards 443).
+        if (cfg.getString("port", null) == "3284") cfg.edit().putString("port", "443").apply()
         // The per-provider known_models cache is GONE (2026-07-25). Models are fetched live
         // from the server on every connect and held in memory only -- see
         // ConnectionManager's supportedModels handling. Two one-time migrations used to live
@@ -83,7 +88,10 @@ class SecureStore(context: Context) {
         set(v) = cfg.edit().putString("host", v).apply()
 
     var port: String
-        get() = cfg.getString("port", "3284") ?: "3284"
+        // The app is TLS-only; 443 is the wss default and the reachable port on a
+        // MagicDNS name. 3284 is the PLAIN goose port — TLS to it never succeeds,
+        // and defaulting to it broke "host + key, no port" setups.
+        get() = cfg.getString("port", "443") ?: "443"
         set(v) = cfg.edit().putString("port", v).apply()
 
     var dynamicColor: Boolean

@@ -1161,8 +1161,23 @@ class ConnectionManager private constructor(context: Context) {
             is ConnectionStatus.Error -> {
                 live = false; connecting = false; online.value = false
                 replayActive.value = false
-                status.value = st.message
+                status.value = friendlyConnectError(st.message)
             }
+        }
+    }
+
+    private fun friendlyConnectError(msg: String): String {
+        // The core's message is raw SDK text ("internal error at …: WebSocket connect
+        // failed: …"). A timeout to the wrong port is the #1 login failure, so when we
+        // know what we tried, say so — and what the empty-port default actually is.
+        if (!msg.contains("WebSocket connect failed")) return msg
+        val target = lastConfig?.let { "${it.host}:${it.port}" } ?: return msg
+        return when {
+            msg.contains("timed out") ->
+                "can't reach $target — timed out. Empty port = 443 (wss); goose.gauvin.id only listens on 443."
+            msg.contains("refused") ->
+                "can't reach $target — refused. Is the server running?"
+            else -> "can't reach $target — ${msg.substringAfterLast(": ")}"
         }
     }
 
@@ -1733,7 +1748,7 @@ class ConnectionManager private constructor(context: Context) {
                     if (!live && connecting) {
                         connecting = false
                         online.value = false
-                        status.value = "connection failed — check host, port and key"
+                        status.value = "can't reach ${cfg.host}:${cfg.port} — check host, port and key (empty port = 443)"
                     }
                 }
             }, "grouse-core-connect").apply { isDaemon = true; start() }
