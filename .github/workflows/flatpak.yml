@@ -8,23 +8,26 @@ on:
 jobs:
   flatpak:
     runs-on: ubuntu-latest
-    # The desktop client is not in the monorepo yet (clients/desktop is a
-    # placeholder); this job lights up when the manifest lands.
-    if: hashFiles('clients/desktop/id.gauvin.Grouse.json') != ''
     steps:
       - uses: actions/checkout@v4
 
+      # The desktop client is not in the monorepo yet (clients/desktop is a
+      # placeholder); these steps light up when the manifest lands.
+      # (hashFiles is only valid in step-level if, hence the per-step gate.)
       - name: Install flatpak and flatpak-builder
+        if: hashFiles('clients/desktop/id.gauvin.Grouse.json') != ''
         run: |
           sudo apt-get update
           sudo apt-get install -y flatpak flatpak-builder
 
       - name: Add Flathub and install the KDE runtime/SDK
+        if: hashFiles('clients/desktop/id.gauvin.Grouse.json') != ''
         run: |
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub org.kde.Platform//6.10 org.kde.Sdk//6.10
 
       - name: Build the Flatpak bundle
+        if: hashFiles('clients/desktop/id.gauvin.Grouse.json') != ''
         run: |
           flatpak-builder --user --install-deps-from=flathub --force-clean \
             build-dir clients/desktop/id.gauvin.Grouse.json
@@ -32,6 +35,7 @@ jobs:
             flatpak-repo grouse-desktop.flatpak id.gauvin.Grouse
 
       - uses: actions/upload-artifact@v4
+        if: hashFiles('clients/desktop/id.gauvin.Grouse.json') != ''
         with:
           name: grouse-desktop-flatpak
           path: grouse-desktop.flatpak
