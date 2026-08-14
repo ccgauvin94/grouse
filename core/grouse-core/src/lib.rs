@@ -81,6 +81,15 @@ pub struct SessionSummary {
     /// Server timestamp; the core compares it against its transcript cache.
     pub updated_at: String,
     pub last_message_snippet: Option<String>,
+    /// The session's project, from the reply's `_meta.projectId` (absent for
+    /// un-filed sessions and for roam peer sessions).
+    pub project_id: Option<String>,
+    /// From the reply's `_meta.messageCount`.
+    pub message_count: i64,
+    /// From the reply's `_meta.model`.
+    pub model: String,
+    /// From the reply's `_meta.hasRecipe`.
+    pub has_recipe: bool,
 }
 
 /// One accumulated transcript bubble (CONTRACT §3.3/§4.3).
@@ -126,6 +135,19 @@ pub enum ToolCallKind {
 pub struct ConfigOption {
     pub id: String,
     pub value: String,
+    /// Human-readable label (the SDK's SessionConfigOption.name).
+    pub name: String,
+    /// Selectable choices for dropdowns, from the reply's `choices` array
+    /// ({value, name}); empty when the server doesn't send them (the
+    /// config_option_update notification path has no choices in the schema).
+    pub choices: Vec<ConfigChoice>,
+}
+
+/// One selectable config choice ({value, name} from the raw reply).
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct ConfigChoice {
+    pub value: String,
+    pub name: String,
 }
 
 /// One permission option (CONTRACT §5 / inventory §3).

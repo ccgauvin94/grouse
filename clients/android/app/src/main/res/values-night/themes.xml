@@ -1,0 +1,6 @@
+<resources>
+    <!-- Dark window theme (system dark mode) — see values/themes.xml. -->
+    <style name="Theme.Grouse" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/window_bg</item>
+    </style>
+</resources>

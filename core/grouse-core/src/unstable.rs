@@ -1,4 +1,4 @@
-//! GrouseUnstable: the goose-fork `_goose/unstable/*` shim (CONTRACT §5), marked for
+//! GrouseUnstable: the goose-fork `_goose/unstable/...` shim (CONTRACT §5), marked for
 //! retirement as GDK absorbs each feature.
 //!
 //! Every method is `conn.rpc(method, params)` plus a reply handler, mirroring the desktop's
@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use crate::spine::{self, PendingRequest, RpcConn};
 use crate::GrouseUnstableListener;
 
-/// The unstable `_goose/unstable/*` shim (CONTRACT §5), retiring with `grouse-unstable`.
+/// The unstable `_goose/unstable/...` shim (CONTRACT §5), retiring with `grouse-unstable`.
 ///
 /// Constructed independently of [`crate::Core`]; the live connection is resolved per call
 /// through `spine::current_conn()`, so these intents no-op (or error) while disconnected —

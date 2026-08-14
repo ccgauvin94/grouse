@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Backup / device-transfer rules (API 31+). Exclude the Keystore-backed encrypted prefs from
+     both cloud backup and device transfer: the master key is device-bound, so a copied file
+     would be undecryptable on the target and would crash the app. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="goose_secure.xml" />
+        <!-- Transcript snapshots: private content, server holds the truth. -->
+        <exclude domain="file" path="transcripts" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="goose_secure.xml" />
+    </device-transfer>
+</data-extraction-rules>

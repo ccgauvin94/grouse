@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="new_chat"
+        android:enabled="true"
+        android:icon="@drawable/ic_launcher_monochrome"
+        android:shortcutShortLabel="@string/new_chat"
+        android:shortcutLongLabel="@string/new_chat_long">
+        <intent
+            android:action="id.gauvin.grouse.NEW_CHAT"
+            android:targetPackage="id.gauvin.grouse"
+            android:targetClass="id.gauvin.grouse.MainActivity" />
+    </shortcut>
+</shortcuts>

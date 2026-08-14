@@ -420,6 +420,10 @@ impl RoamPeer {
                 title: s.title.clone(),
                 updated_at: s.updated_at.clone(),
                 last_message_snippet: s.last_message_snippet.clone(),
+                project_id: None,
+                message_count: 0,
+                model: String::new(),
+                has_recipe: false,
             })
             .collect()
     }
@@ -1087,6 +1091,10 @@ fn to_summary(label: &str, info: &SessionInfo) -> SessionSummary {
         title: info.title.clone().unwrap_or_default(),
         updated_at: info.updated_at.clone().unwrap_or_default(),
         last_message_snippet: None,
+        project_id: None,
+        message_count: 0,
+        model: String::new(),
+        has_recipe: false,
     }
 }
 

@@ -282,7 +282,12 @@ fn spine_e2e_connect_prompt_stream() {
     assert_eq!(core.active_session_id().as_deref(), Some("sess-e2e"));
     assert_eq!(
         core.config(),
-        vec![ConfigOption { id: "provider".to_string(), value: "openai".to_string() }]
+        vec![ConfigOption {
+            id: "provider".to_string(),
+            value: "openai".to_string(),
+            name: "Provider".to_string(),
+            choices: vec![],
+        }]
     );
 
     // The wire shape: initialize carried the goose client caps + the secret

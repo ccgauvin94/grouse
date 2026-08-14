@@ -1,0 +1,12 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Single-color grouse silhouette for themed (monochrome) icons; system tints it. -->
+    <group android:translateY="2">
+        <path android:fillColor="#000000" android:pathData="M30,56 L10,42 L24,68 Z" />
+        <path android:fillColor="#000000" android:pathData="M24,63 a26,23 0 1,0 52,0 a26,23 0 1,0 -52,0 Z" />
+        <path android:fillColor="#000000" android:pathData="M55,53 L64,42 L79,53 L72,63 Z" />
+        <path android:fillColor="#000000" android:pathData="M60,45 a11,11 0 1,0 22,0 a11,11 0 1,0 -22,0 Z" />
+        <path android:fillColor="#000000" android:pathData="M80,43 l12,3 l-11,5 Z" />
+    </group>
+</vector>

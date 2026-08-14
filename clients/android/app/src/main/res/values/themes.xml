@@ -1,0 +1,9 @@
+<resources>
+    <!-- Compose drives the real theme; this window-level style only controls what shows
+         BEFORE Compose draws (cold-start frame, window background) and framework surfaces.
+         Light variant here; values-night/themes.xml supplies the dark one, so the window
+         chrome follows the system day/night preference like the Compose layer does. -->
+    <style name="Theme.Grouse" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window_bg</item>
+    </style>
+</resources>

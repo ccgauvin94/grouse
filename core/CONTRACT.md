@@ -100,9 +100,13 @@ pub trait CoreListener {
 - `status(): ConnectionStatus` — `Disconnected | Connecting | Ready | Syncing | Error(String)`
 - `ready(): bool`
 - `active_session_id(): Option<String>`
-- `sessions(): Vec<SessionSummary>`
+- `sessions(): Vec<SessionSummary>` — carries the full session metadata the
+  UIs render: id, title, updated_at, last_message_snippet, project_id,
+  message_count, model, has_recipe.
 - `transcript(): Vec<Message>` — the accumulated active-session transcript
-- `config(): Vec<ConfigOption>`
+- `config(): Vec<ConfigOption>` — carries id, value, name, and the choices
+  list for dropdowns (empty on the config_option_update path; the schema
+  has no choices there).
 
 ### 3.4 Stream event enum (what `on_stream` carries)
 

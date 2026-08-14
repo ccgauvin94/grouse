@@ -48,7 +48,7 @@ use tokio::sync::oneshot;
 use crate::transcript::TranscriptStore;
 use crate::transport::WsTransport;
 use crate::{
-    ConfigOption, ConnectionStatus, CoreListener, PermissionOption, PermissionOutcome,
+    ConfigChoice, ConfigOption, ConnectionStatus, CoreListener, PermissionOption, PermissionOutcome,
     PermissionRequest, ServerConfig, SessionSummary, ToolCallKind,
 };
 
@@ -191,7 +191,7 @@ impl Drop for NotificationListenerGuard {
 }
 
 /// Register a listener for notifications the spine does not itself dispatch
-/// (custom `_goose/*` methods). The spine calls `f(method, params)` for every
+/// (custom `_goose/...` methods). The spine calls `f(method, params)` for every
 /// untyped notification after its own `session/update` dispatch.
 pub fn register_notification_listener(
     f: Arc<dyn Fn(&str, Value) + Send + Sync + 'static>,
@@ -643,6 +643,10 @@ impl Conn {
                     .map(|option| ConfigOption {
                         id: option.id.to_string(),
                         value: config_option_value(option),
+                        name: option.name.clone(),
+                        // The typed schema has no choices list — the initial
+                        // config (session/new|load replies) carries them.
+                        choices: Vec::new(),
                     })
                     .collect::<Vec<_>>();
                 if let Some(hook) = self.inner.on_config.lock().clone() {
@@ -1053,6 +1057,23 @@ pub(crate) fn parse_sessions(result: &Value) -> (Vec<SessionSummary>, Vec<(Strin
                 .and_then(|m| m.get("lastMessageSnippet"))
                 .and_then(Value::as_str)
                 .map(|s| s.to_string());
+            let project_id = meta
+                .and_then(|m| m.get("projectId"))
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let message_count = meta
+                .and_then(|m| m.get("messageCount"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let model = meta
+                .and_then(|m| m.get("model"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let has_recipe = meta
+                .and_then(|m| m.get("hasRecipe"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let updated = obj
                 .get("updatedAt")
                 .and_then(Value::as_str)
@@ -1068,6 +1089,10 @@ pub(crate) fn parse_sessions(result: &Value) -> (Vec<SessionSummary>, Vec<(Strin
                 title: if title.is_empty() { session_id.to_string() } else { title },
                 updated_at: updated.clone(),
                 last_message_snippet: snippet,
+                project_id,
+                message_count,
+                model,
+                has_recipe,
             });
             if !cwd.is_empty() {
                 cwds.push((session_id.to_string(), cwd));
@@ -1098,7 +1123,24 @@ pub(crate) fn parse_config_options(result: &Value) -> Vec<ConfigOption> {
                         Some(Value::Number(n)) => n.to_string(),
                         _ => String::new(),
                     };
-                    Some(ConfigOption { id, value })
+                    let name = obj.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                    let choices = obj
+                        .get("choices")
+                        .and_then(Value::as_array)
+                        .map(|choices| {
+                            choices
+                                .iter()
+                                .filter_map(|c| {
+                                    let c = c.as_object()?;
+                                    Some(ConfigChoice {
+                                        value: c.get("value")?.as_str()?.to_string(),
+                                        name: c.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some(ConfigOption { id, value, name, choices })
                 })
                 .collect()
         })
