@@ -162,26 +162,25 @@ class ConnectionManager private constructor(context: Context) {
         recipes.value.firstOrNull { it.filePath.isNotEmpty() && it.filePath == job.source }
 
     fun refreshSchedules() {
-        unstable.schedulesList()
-        unstable.recipesList()
+        io { unstable.schedulesList(); unstable.recipesList() }
     }
 
     fun setSchedulePaused(id: String, paused: Boolean) {
-        if (paused) unstable.schedulesPause(id) else unstable.schedulesUnpause(id)
+        io { if (paused) unstable.schedulesPause(id) else unstable.schedulesUnpause(id) }
     }
 
-    fun runScheduleNow(id: String) { unstable.schedulesRunNow(id) }
+    fun runScheduleNow(id: String) { io { unstable.schedulesRunNow(id) } }
 
-    fun deleteSchedule(id: String) { unstable.schedulesDelete(id) }
+    fun deleteSchedule(id: String) { io { unstable.schedulesDelete(id) } }
 
-    fun setScheduleCron(id: String, cron: String) { unstable.schedulesUpdate(id, cron) }
+    fun setScheduleCron(id: String, cron: String) { io { unstable.schedulesUpdate(id, cron) } }
 
-    fun setRecipeCron(recipeId: String, cron: String?) { unstable.recipesSchedule(recipeId, cron) }
+    fun setRecipeCron(recipeId: String, cron: String?) { io { unstable.recipesSchedule(recipeId, cron) } }
 
-    fun deleteRecipe(recipeId: String) { unstable.recipesDelete(recipeId) }
+    fun deleteRecipe(recipeId: String) { io { unstable.recipesDelete(recipeId) } }
 
     /** Save an edited recipe. The caller hands back a full DTO derived from RecipeInfo.raw. */
-    fun saveRecipe(recipeId: String, dto: JsonObject) { unstable.recipesSave(recipeId, dto.toString()) }
+    fun saveRecipe(recipeId: String, dto: JsonObject) { io { unstable.recipesSave(recipeId, dto.toString()) } }
 
     /** Replace one top-level string field, dropping it when blank. */
     fun recipeWith(r: RecipeInfo, field: String, value: String): JsonObject =
@@ -204,13 +203,13 @@ class ConnectionManager private constructor(context: Context) {
      *  demand -- they change rarely and there is no notification when they do. */
     val skills = mutableStateOf<List<SkillInfo>>(emptyList())
 
-    fun refreshSkills() { unstable.sourcesList("skill") }
+    fun refreshSkills() { io { unstable.sourcesList("skill") } }
 
     fun saveSkill(s: SkillInfo, content: String) {
-        unstable.sourcesUpdate("skill", s.path, s.name, s.description, content)
+        io { unstable.sourcesUpdate("skill", s.path, s.name, s.description, content) }
     }
 
-    fun deleteSkill(path: String) { unstable.sourcesDelete("skill", path) }
+    fun deleteSkill(path: String) { io { unstable.sourcesDelete("skill", path) } }
 
     fun sessionsByProject(): List<Pair<String, List<SessionInfo>>> {
         val byName = projects.value.associate { it.id to it.name }
@@ -224,7 +223,7 @@ class ConnectionManager private constructor(context: Context) {
             }
     }
 
-    fun refreshProjects() { unstable.sourcesList("project") }
+    fun refreshProjects() { io { unstable.sourcesList("project") } }
 
     /** Start a chat already filed under [projectId].
      *
@@ -238,7 +237,7 @@ class ConnectionManager private constructor(context: Context) {
     /** Set while a new-chat-in-project is in flight; consumed when Ready delivers the id. */
     private var pendingProjectFiling: String? = null
     fun fileSession(sessionId: String, projectId: String?) {
-        unstable.sessionProject(sessionId, projectId)
+        io { unstable.sessionProject(sessionId, projectId) }
         sessions.value = sessions.value.map {
             if (it.sessionId == sessionId) it.copy(projectId = projectId) else it
         }
@@ -324,7 +323,7 @@ class ConnectionManager private constructor(context: Context) {
     fun loadExtensions() {
         if (!live) { extensions.value = emptyList(); extensionsBusy.value = false; return }
         extensionsBusy.value = true
-        unstable.listGlobalExtensions()
+        io { unstable.listGlobalExtensions() }
     }
 
     /** Group `ext__tool` names into ext -> [tool]. ONLY mcp-type extensions namespace their tools
@@ -346,7 +345,7 @@ class ConnectionManager private constructor(context: Context) {
         discovering = null
         val sid = core.activeSessionId() ?: return
         if (roamPeer(currentSession.value) != null) return
-        unstable.listTools(sid)
+        io { unstable.listTools(sid) }
     }
 
     /** Everything the in-chat tool sheet displays, refreshed together on open. */
@@ -355,7 +354,7 @@ class ConnectionManager private constructor(context: Context) {
     private fun sessionExtensionsList() {
         val sid = core.activeSessionId() ?: return
         if (roamPeer(currentSession.value) != null) return
-        unstable.sessionExtensionsList(sid)
+        io { unstable.sessionExtensionsList(sid) }
     }
 
     /** Discover an extension's FULL tool set. goose only reports ALLOWED tools, so the only way to
@@ -377,8 +376,10 @@ class ConnectionManager private constructor(context: Context) {
             put("available_tools", JsonArray(emptyList()))
         })
         discovering = ext
-        unstable.sessionExtensionsRemove(sid, ext.name)
-        unstable.sessionExtensionsAdd(sid, toExtensionDto(unfiltered).toString())
+        io {
+            unstable.sessionExtensionsRemove(sid, ext.name)
+            unstable.sessionExtensionsAdd(sid, toExtensionDto(unfiltered).toString())
+        }
         // the add re-lists tools + session extensions (core side) -- see onTools
     }
 
@@ -394,8 +395,10 @@ class ConnectionManager private constructor(context: Context) {
             put("available_tools", JsonArray(list.map { JsonPrimitive(it) }))
         })
         discovering = null
-        unstable.sessionExtensionsRemove(sid, ext.name)
-        unstable.sessionExtensionsAdd(sid, toExtensionDto(scoped).toString())
+        io {
+            unstable.sessionExtensionsRemove(sid, ext.name)
+            unstable.sessionExtensionsAdd(sid, toExtensionDto(scoped).toString())
+        }
     }
 
     /** Save `allowed` as the GLOBAL default for `ext` (config.yaml; applies to new chats). */
@@ -406,7 +409,7 @@ class ConnectionManager private constructor(context: Context) {
             put("available_tools", JsonArray(list.map { JsonPrimitive(it) }))
         })
         extensionsBusy.value = true
-        unstable.addExtension(toExtensionDto(updated).toString(), ext.enabled)
+        io { unstable.addExtension(toExtensionDto(updated).toString(), ext.enabled) }
     }
 
     /** Enable/disable an extension globally (affects new chats); the reply refreshes the list. */
@@ -414,7 +417,7 @@ class ConnectionManager private constructor(context: Context) {
         extensionsBusy.value = true
         // The core's set-enabled takes the extension NAME (its wire param is `name`, not the
         // config.yaml key the old client sent).
-        unstable.setExtensionEnabled(e.name, enabled)
+        io { unstable.setExtensionEnabled(e.name, enabled) }
     }
 
     /** Enable/disable one extension for just THIS session (session-scoped API — never touches
@@ -424,11 +427,11 @@ class ConnectionManager private constructor(context: Context) {
         if (wrongNode(e)) return
         val sid = core.activeSessionId() ?: return
         if (enabled) {
-            unstable.sessionExtensionsAdd(sid, toExtensionDto(e.raw).toString())
+            io { unstable.sessionExtensionsAdd(sid, toExtensionDto(e.raw).toString()) }
             sessionExtensionNames.value = sessionExtensionNames.value + e.name
             detachedPeerExts.value = detachedPeerExts.value.filterNot { it.name == e.name }
         } else {
-            unstable.sessionExtensionsRemove(sid, e.name)
+            io { unstable.sessionExtensionsRemove(sid, e.name) }
             sessionExtensionNames.value = sessionExtensionNames.value - e.name
             // Keep the peer DTO so the row survives to be re-enabled; the peer's global
             // catalog can't be listed, so a dropped row would be gone until reopen.
@@ -444,6 +447,16 @@ class ConnectionManager private constructor(context: Context) {
     fun setShowAllProviders(v: Boolean) { store.showAllProviders = v; showAllProviders.value = v }
 
     private val main = Handler(Looper.getMainLooper())
+    // The unstable shim's intents are SYNCHRONOUS RPCs (round-trip the server on the
+    // calling thread) — unlike the core's own async intents. Calling them on the main
+    // thread freezes the UI for the whole call (the drawer's refreshSidebar used to do
+    // exactly that: opening the menu hung until session/list + sources/list returned, so
+    // tapping Settings "did nothing"). Every blocking intent goes through this thread.
+    private val intents = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "grouse-intents").apply { isDaemon = true }
+    }
+    private fun io(block: () -> Unit) { intents.execute(block) }
+
     // MCP-App template cache: "$extension|$uri" -> HTML. Templates are static per server
     // version and shared across tools/messages/sessions, so one fetch serves everything —
     // including transcript replays, which re-emit every historical tool_call.
@@ -624,7 +637,7 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Refresh sessions AND the projects that label them. Kept as one call so the two can never
      *  drift -- a session list newer than the project list renders groups labelled by raw id. */
-    fun refreshSidebar() { core.listSessions(); unstable.sourcesList("project") }
+    fun refreshSidebar() { core.listSessions(); io { unstable.sourcesList("project") } }
 
     /** Archive a session: history stays on disk, it just leaves the list. The soft option --
      *  deleteSession is the permanent one. */
@@ -636,31 +649,33 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Serialize a session server-side; the reply lands in [exportData] and the UI opens the
      *  Android share sheet with it. */
-    fun exportSession(sessionId: String) { unstable.exportSession(sessionId) }
+    fun exportSession(sessionId: String) { io { unstable.exportSession(sessionId) } }
 
     /** Publish this device's UnifiedPush endpoint into the server's config (GROUSE_PUSH_ENDPOINT),
      *  so the server's senders always POST to the current token. Best-effort. */
     fun publishPushEndpoint(url: String) {
-        if (url.isNotBlank()) unstable.configUpsert("GROUSE_PUSH_ENDPOINT", url)
+        if (url.isNotBlank()) io { unstable.configUpsert("GROUSE_PUSH_ENDPOINT", url) }
     }
 
     /** Answer a pending elicitation form and drop it from the queue. */
     fun answerElicitation(e: AcpEvent.Elicitation, values: Map<String, JsonPrimitive>?, cancelled: Boolean = false) {
-        if (e.recipeParams) {
-            // Recipe-params answers ride the same UI but a different wire shape:
-            // {action:"submit"|"cancel", values:{key:string}} — values must be STRINGS
-            // (RecipeParamsResponse is HashMap<String,String> server-side).
-            if (cancelled || values == null) unstable.respondRecipeParams("cancel", "{}")
-            else unstable.respondRecipeParams(
-                "submit",
-                buildJsonObject { values.forEach { (k, v) -> put(k, v.content) } }.toString())
-        } else {
-            when {
-                cancelled -> unstable.respondElicitation("cancel", "")
-                values == null -> unstable.respondElicitation("decline", "")
-                else -> unstable.respondElicitation(
-                    "accept",
-                    buildJsonObject { values.forEach { (k, v) -> put(k, v) } }.toString())
+        io {
+            if (e.recipeParams) {
+                // Recipe-params answers ride the same UI but a different wire shape:
+                // {action:"submit"|"cancel", values:{key:string}} — values must be STRINGS
+                // (RecipeParamsResponse is HashMap<String,String> server-side).
+                if (cancelled || values == null) unstable.respondRecipeParams("cancel", "{}")
+                else unstable.respondRecipeParams(
+                    "submit",
+                    buildJsonObject { values.forEach { (k, v) -> put(k, v.content) } }.toString())
+            } else {
+                when {
+                    cancelled -> unstable.respondElicitation("cancel", "")
+                    values == null -> unstable.respondElicitation("decline", "")
+                    else -> unstable.respondElicitation(
+                        "accept",
+                        buildJsonObject { values.forEach { (k, v) -> put(k, v) } }.toString())
+                }
             }
         }
         elicitations.remove(e)
@@ -676,7 +691,7 @@ class ConnectionManager private constructor(context: Context) {
     /** Move a chat into a project (or back to /state): the sanctioned working_dir rewrite.
      *  Also the in-app repair for sessions stranded by a renamed project directory. */
     fun moveSession(sessionId: String, cwd: String) {
-        unstable.workingDirUpdate(sessionId, cwd)
+        io { unstable.workingDirUpdate(sessionId, cwd) }
         sessions.value = sessions.value.map {          // optimistic
             if (it.sessionId == sessionId) it.copy(cwd = cwd) else it
         }
@@ -772,7 +787,7 @@ class ConnectionManager private constructor(context: Context) {
         main.postDelayed(watchdog, timeoutMs)
         entry = PendingToolCall(::finish)
         toolCallQueue.addLast(entry)
-        unstable.toolsCall(sid, tool, args.toString())
+        io { unstable.toolsCall(sid, tool, args.toString()) }
     }
 
     private data class PendingToolCall(val onDone: (String?, String) -> Unit)
@@ -811,7 +826,7 @@ class ConnectionManager private constructor(context: Context) {
             else -> null
         }
         if (bad != null) { onResult(bad); return }
-        unstable.sourcesCreate("project", name, "", "")
+        io { unstable.sourcesCreate("project", name, "", "") }
         // The reply dispatch re-lists projects; report success now so the dialog can close.
         onResult(null)
     }
@@ -840,7 +855,7 @@ class ConnectionManager private constructor(context: Context) {
             ?: run { onResult("No such project."); return }
         val affected = sessions.value.filter { it.projectId == proj.id }
         affected.forEach { fileSession(it.sessionId, null) }
-        unstable.sourcesDelete("project", proj.path)
+        io { unstable.sourcesDelete("project", proj.path) }
         projects.value = projects.value.filterNot { it.id == proj.id }   // optimistic; reply re-lists
         onResult(
             if (affected.isEmpty()) "Project deleted."
@@ -930,22 +945,26 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     /** Read + write server-side goose config (the deliver.sh schedule keys live there). */
-    fun readServerConfig(vararg keys: String) { keys.forEach { unstable.configRead(it) } }
+    fun readServerConfig(vararg keys: String) { io { keys.forEach { unstable.configRead(it) } } }
     fun writeServerConfig(key: String, value: String) {
-        unstable.configUpsert(key, value)
+        io { unstable.configUpsert(key, value) }
         serverConfig[key] = value   // optimistic
     }
 
     /** Read the app-editable global goose settings so Settings can show current values. */
     fun loadServerConfig() {
-        unstable.configRead("GOOSE_CONTEXT_LIMIT")
-        unstable.configRead("GOOSE_FAST_MODEL")
+        io {
+            unstable.configRead("GOOSE_CONTEXT_LIMIT")
+            unstable.configRead("GOOSE_FAST_MODEL")
+        }
     }
 
     /** Upsert a global goose setting (takes effect for NEW sessions/tasks), then re-read to confirm. */
     fun setServerConfig(key: String, value: String) {
-        unstable.configUpsert(key, value)
-        unstable.configRead(key)
+        io {
+            unstable.configUpsert(key, value)
+            unstable.configRead(key)
+        }
     }
 
     fun setOption(configId: String, value: String) {
@@ -1022,7 +1041,7 @@ class ConnectionManager private constructor(context: Context) {
             val run = activeRunId
             if (run != null) {
                 turnInFlight = true
-                unstable.steer(text, run)
+                io { unstable.steer(text, run) }
             } else {
                 enqueue(PendingSend(text, images))
             }
@@ -1066,7 +1085,7 @@ class ConnectionManager private constructor(context: Context) {
             if (live) {
                 config.value.firstOrNull { it.id == "provider" }?.currentValue
                     ?.takeIf { it.isNotBlank() }
-                    ?.let { unstable.supportedModels(it) }
+                    ?.let { model -> io { unstable.supportedModels(model) } }
             }
             if (!store.persistentConnection && !busy.value) stopService()
         } else {
@@ -1190,9 +1209,9 @@ class ConnectionManager private constructor(context: Context) {
             // for the full picture rather than caching a half-built one. (Peer-owned sessions
             // are skipped: the unstable surface routes to the main connection only.)
             detachedPeerExts.value = emptyList()
-            unstable.listTools(sid)
-            main.postDelayed({ if (live && core.activeSessionId() == sid) unstable.listTools(sid) }, 2500)
-            unstable.sessionExtensionsList(sid)
+            io { unstable.listTools(sid) }
+            main.postDelayed({ if (live && core.activeSessionId() == sid) io { unstable.listTools(sid) } }, 2500)
+            io { unstable.sessionExtensionsList(sid) }
             core.listSessions()   // so the Assistant thread can be resolved by title
         }
         // A rebuild (replay or cache path) just finished: unpin the list and snap to bottom
@@ -1294,7 +1313,7 @@ class ConnectionManager private constructor(context: Context) {
                 if (kind.appKey.isNotEmpty() && !appHtmlCache.containsKey(kind.appKey) &&
                     appFetchInFlight.add(kind.appKey) && roamPeer(currentSession.value) == null
                 ) {
-                    core.activeSessionId()?.let { sid -> unstable.resourcesRead(sid, kind.uri, kind.extension) }
+                    core.activeSessionId()?.let { sid -> io { unstable.resourcesRead(sid, kind.uri, kind.extension) } }
                 }
             }
             else -> ChatMessage(
@@ -1401,7 +1420,7 @@ class ConnectionManager private constructor(context: Context) {
             // immediately so its slugs cannot be shown under the new one, even briefly.
             knownModels.value = emptySet()
             liveModelsFetchedFor = provider
-            if (provider.isNotBlank()) unstable.supportedModels(provider)
+            if (provider.isNotBlank()) io { unstable.supportedModels(provider) }
         }
     }
 
