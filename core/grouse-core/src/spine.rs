@@ -4,6 +4,7 @@
 //!
 //! Slices talk to the server ONLY through the pinned seams here:
 //!
+#![allow(clippy::type_complexity)] // deliberate: hook/listener closure types + side-table tuples
 //! * [`Conn::rpc`] — a synchronous request/reply (the SDK's `block_task`,
 //!   driven on the core runtime). The reply handlers live with the *caller*:
 //!   the SDK routes each response to its pending request, so `session/list`
@@ -797,7 +798,7 @@ impl Conn {
                 }
             }
             if !chunk.is_empty() {
-                self.inner.store.tool_update(&id, &status, &chunk, true);
+                self.inner.store.tool_update(&id, status, &chunk, true);
             }
             return;
         }
@@ -814,7 +815,7 @@ impl Conn {
         }
         self.inner
             .store
-            .tool_update(&id, &status, &outputs.join("\n"), false);
+            .tool_update(&id, status, &outputs.join("\n"), false);
     }
 
     fn dispatch_session_info_update(

@@ -8,6 +8,9 @@ on:
 jobs:
   flatpak:
     runs-on: ubuntu-latest
+    # The desktop client is not in the monorepo yet (clients/desktop is a
+    # placeholder); this job lights up when the manifest lands.
+    if: hashFiles('clients/desktop/id.gauvin.Grouse.json') != ''
     steps:
       - uses: actions/checkout@v4
 

@@ -1,0 +1,3 @@
+[workspace]
+members = ["grouse-core", "grouse-unstable"]
+resolver = "2"

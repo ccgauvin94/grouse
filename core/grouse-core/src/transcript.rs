@@ -1,5 +1,6 @@
 //! TranscriptStore: chunk accumulation → Message bubbles; emits `on_stream` +
 //! `on_transcript`. Pure internal state — NO network, NO uniffi exports.
+#![allow(clippy::type_complexity)] // test helper returns event-recorder tuples
 //!
 //! Ports the desktop's streaming logic (`manager.cpp` appendChunk /
 //! onToolCall / onToolCallUpdate):

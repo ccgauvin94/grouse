@@ -165,6 +165,7 @@ impl FakeServer {
     }
 }
 
+#[allow(clippy::result_large_err)] // tungstenite mandates the large ErrorResponse here
 async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream) {
     let secret = server.secret_header.clone();
     let ws = async_tungstenite::tokio::accept_hdr_async(

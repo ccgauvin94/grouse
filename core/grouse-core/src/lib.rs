@@ -760,7 +760,7 @@ impl Core {
             return;
         }
         let rt = crate::roam::runtime();
-        let _ = rt.block_on(async {
+        rt.block_on(async {
             let _ = tokio::time::timeout(std::time::Duration::from_secs(15), ready_rx).await;
         });
     }
