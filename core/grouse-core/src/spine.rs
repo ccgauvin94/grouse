@@ -47,6 +47,7 @@ use tokio::sync::oneshot;
 
 use crate::transcript::TranscriptStore;
 use crate::transport::WsTransport;
+use crate::roam::RoamPeer;
 use crate::{
     ConfigChoice, ConfigOption, ConnectionStatus, CoreListener, PermissionOption, PermissionOutcome,
     PermissionRequest, ServerConfig, SessionSummary, ToolCallKind,
@@ -83,6 +84,25 @@ pub fn current_conn() -> Option<Arc<dyn RpcConn>> {
 /// when a connection ends; the shim never touches this.
 pub(crate) fn set_current_conn(conn: Option<Arc<dyn RpcConn>>) {
     *CURRENT_CONN.lock() = conn.map(|conn| Arc::downgrade(&conn));
+}
+
+/// Maps a session id to the owning roam peer (`roam:<peer>:<id>` prefix), so
+/// the unstable shim can route session-bound RPCs to the peer's connection.
+/// Registered by the Core, which owns the peer list.
+static PEER_RESOLVER: Mutex<Option<Arc<dyn Fn(&str) -> Option<Arc<RoamPeer>> + Send + Sync>>> =
+    Mutex::new(None);
+
+pub(crate) fn register_peer_resolver(
+    f: Arc<dyn Fn(&str) -> Option<Arc<RoamPeer>> + Send + Sync>,
+) {
+    *PEER_RESOLVER.lock() = Some(f);
+}
+
+pub(crate) fn peer_for(session_id: &str) -> Option<Arc<RoamPeer>> {
+    PEER_RESOLVER
+        .lock()
+        .as_ref()
+        .and_then(|f| f(session_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +281,10 @@ struct ConnInner {
     on_status: Mutex<Option<Arc<dyn Fn(ConnectionStatus) + Send + Sync>>>,
     /// `session_info_update` hook (Core: sidebar state + resync debounce).
     on_touched: Mutex<Option<Arc<dyn Fn(String, String, String) + Send + Sync>>>,
+    /// Active-run hook: `(session_id, run_id)`; an empty run_id means the run ended.
+    on_active_run: Mutex<Option<Arc<dyn Fn(String, String) + Send + Sync>>>,
+    /// Slash-command availability hook (`available_commands_update` names).
+    on_commands: Mutex<Option<Arc<dyn Fn(Vec<String>) + Send + Sync>>>,
     /// `configOptions` hook (Core mirrors the config getter).
     on_config: Mutex<Option<Arc<dyn Fn(Vec<ConfigOption>) + Send + Sync>>>,
     /// Connection-ended hook (Core: reconnect decision).
@@ -306,6 +330,8 @@ impl Conn {
                 shutdown_rx: Mutex::new(Some(shutdown_rx)),
                 on_status: Mutex::new(None),
                 on_touched: Mutex::new(None),
+                on_active_run: Mutex::new(None),
+                on_commands: Mutex::new(None),
                 on_config: Mutex::new(None),
                 on_ended: Mutex::new(None),
                 permission: Mutex::new(HashMap::new()),
@@ -355,6 +381,14 @@ impl Conn {
 
     pub(crate) fn set_on_touched(&self, f: Arc<dyn Fn(String, String, String) + Send + Sync>) {
         *self.inner.on_touched.lock() = Some(f);
+    }
+
+    pub(crate) fn set_on_active_run(&self, f: Arc<dyn Fn(String, String) + Send + Sync>) {
+        *self.inner.on_active_run.lock() = Some(f);
+    }
+
+    pub(crate) fn set_on_commands(&self, f: Arc<dyn Fn(Vec<String>) + Send + Sync>) {
+        *self.inner.on_commands.lock() = Some(f);
     }
 
     pub(crate) fn set_on_config(&self, f: Arc<dyn Fn(Vec<ConfigOption>) + Send + Sync>) {
@@ -653,9 +687,21 @@ impl Conn {
                     hook(options);
                 }
             }
-            SessionUpdate::CurrentModeUpdate(_) | SessionUpdate::AvailableCommandsUpdate(_) => {
-                // No stable listener event carries these; the desktop patches
-                // them in place. Ignored here.
+            SessionUpdate::CurrentModeUpdate(_) => {
+                // No stable listener event carries this; the desktop patches
+                // it in place. Ignored here.
+            }
+            SessionUpdate::AvailableCommandsUpdate(commands) => {
+                // Slash-command autocomplete: surface the command names so a
+                // client can offer them without a server round-trip.
+                let names = commands
+                    .available_commands
+                    .iter()
+                    .map(|command| command.name.clone())
+                    .collect::<Vec<_>>();
+                if let Some(hook) = self.inner.on_commands.lock().clone() {
+                    hook(names);
+                }
             }
             SessionUpdate::Plan(_) => {}
             _ => {} // non_exhaustive
@@ -777,10 +823,18 @@ impl Conn {
         info: agent_client_protocol::schema::v1::SessionInfoUpdate,
     ) {
         // The active-run lifecycle rides _meta.goose.activeRunId; its presence
-        // is what makes session/steer possible.
+        // is what makes session/steer possible. Emit both transitions: the run
+        // starting (id present) and ending (absent in this update).
         if let Some(goose) = info.meta.as_ref().and_then(|meta| meta.get("goose")) {
             if let Some(run_id) = goose.get("activeRunId").and_then(Value::as_str) {
                 *self.inner.active_run_id.lock() = Some(run_id.to_string());
+                if let Some(hook) = self.inner.on_active_run.lock().clone() {
+                    hook(session_id.to_string(), run_id.to_string());
+                }
+            } else if self.inner.active_run_id.lock().take().is_some() {
+                if let Some(hook) = self.inner.on_active_run.lock().clone() {
+                    hook(session_id.to_string(), String::new());
+                }
             }
         }
         let title = match info.title {

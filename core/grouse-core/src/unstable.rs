@@ -86,7 +86,7 @@ impl GrouseUnstable {
 
     /// Export a session transcript; the payload arrives on `on_export`.
     pub fn export_session(&self, session_id: String) {
-        let Some(conn) = spine::current_conn() else { return };
+        let Some(conn) = self.route(&session_id) else { return };
         if let Some(result) =
             self.call(&*conn, "_goose/unstable/session/export", json!({"sessionId": session_id}))
         {
@@ -98,7 +98,7 @@ impl GrouseUnstable {
     /// Cheap metadata probe (`{session}` with `updatedAt` + `_meta.messageCount`), used by
     /// resync and resume-cwd resolution; surfaces as `on_session_probe`.
     pub fn session_info(&self, session_id: String) {
-        let Some(conn) = spine::current_conn() else { return };
+        let Some(conn) = self.route(&session_id) else { return };
         if let Some(result) =
             self.call(&*conn, "_goose/unstable/session/info", json!({"sessionId": session_id}))
         {
@@ -117,7 +117,7 @@ impl GrouseUnstable {
     /// Move a session between projects (`None` un-files — an explicit JSON null, never
     /// an omitted key); re-lists projects so the sidebar reflects the change.
     pub fn session_project(&self, session_id: String, project_id: Option<String>) {
-        let Some(conn) = spine::current_conn() else { return };
+        let Some(conn) = self.route(&session_id) else { return };
         self.call(
             &*conn,
             "_goose/unstable/session/project/update",
@@ -132,7 +132,7 @@ impl GrouseUnstable {
 
     /// List the session's active tools (`extension__tool` names); surfaces as `on_tools`.
     pub fn list_tools(&self, session_id: String) {
-        let Some(conn) = spine::current_conn() else { return };
+        let Some(conn) = self.route(&session_id) else { return };
         if let Some(result) =
             self.call(&*conn, "_goose/unstable/tools/list", json!({"sessionId": session_id}))
         {
@@ -143,7 +143,7 @@ impl GrouseUnstable {
 
     /// List the session's extensions; surfaces as `on_session_extensions`.
     pub fn session_extensions_list(&self, session_id: String) {
-        let Some(conn) = spine::current_conn() else { return };
+        let Some(conn) = self.route(&session_id) else { return };
         if let Some(result) = self.call(
             &*conn,
             "_goose/unstable/session/extensions/list",
@@ -158,7 +158,7 @@ impl GrouseUnstable {
     /// set is current, so refresh tools + session extensions from here (desktop behavior).
     pub fn session_extensions_add(&self, session_id: String, extension: String) {
         let Ok(extension) = serde_json::from_str::<Value>(&extension) else { return };
-        let Some(conn) = spine::current_conn() else { return };
+        let Some(conn) = self.route(&session_id) else { return };
         self.call(
             &*conn,
             "_goose/unstable/session/extensions/add",
@@ -170,7 +170,7 @@ impl GrouseUnstable {
 
     /// Remove an extension from THIS session. The paired add re-lists (desktop behavior).
     pub fn session_extensions_remove(&self, session_id: String, name: String) {
-        let Some(conn) = spine::current_conn() else { return };
+        let Some(conn) = self.route(&session_id) else { return };
         self.call(
             &*conn,
             "_goose/unstable/session/extensions/remove",
@@ -334,7 +334,7 @@ impl GrouseUnstable {
     /// `extension|uri` convention so the UI can match the bubble that asked for it.
     /// A failed fetch clears the in-flight marker with empty html (never an error bubble).
     pub fn resources_read(&self, session_id: String, uri: String, extension: String) {
-        let Some(conn) = spine::current_conn() else { return };
+        let Some(conn) = self.route(&session_id) else { return };
         let app_key = format!("{extension}|{uri}");
         match conn.rpc(
             "_goose/unstable/resources/read",
@@ -452,7 +452,7 @@ impl GrouseUnstable {
     /// Sanctioned working-directory rewrite for a session (Android-only wire method).
     /// Optimistic: nothing to reflect on the reply.
     pub fn working_dir_update(&self, session_id: String, dir: String) {
-        let Some(conn) = spine::current_conn() else { return };
+        let Some(conn) = self.route(&session_id) else { return };
         self.call(
             &*conn,
             "_goose/unstable/session/working-dir/update",
@@ -464,7 +464,7 @@ impl GrouseUnstable {
     /// blocks (or the error text) arrive on `on_tool_result`.
     pub fn tools_call(&self, session_id: String, name: String, args: String) {
         let Ok(args) = serde_json::from_str::<Value>(&args) else { return };
-        let Some(conn) = spine::current_conn() else { return };
+        let Some(conn) = self.route(&session_id) else { return };
         match conn.rpc(
             "_goose/unstable/tools/call",
             json!({"sessionId": session_id, "name": name, "arguments": args}),
@@ -592,6 +592,16 @@ impl GrouseUnstable {
                 None
             }
         }
+    }
+
+    /// Resolve the RPC target for a session-bound call: the owning roam peer
+    /// (`roam:<label>:` prefix — peer sessions answer their own tool and
+    /// extension queries) or the main connection.
+    fn route(&self, session_id: &str) -> Option<Arc<dyn RpcConn>> {
+        if let Some(peer) = spine::peer_for(session_id) {
+            return Some(peer);
+        }
+        spine::current_conn()
     }
 
     fn relist_projects(&self, conn: &dyn RpcConn) {

@@ -60,6 +60,9 @@ pub struct ServerConfig {
     pub auto_connect: bool,
     /// `_meta.client`, e.g. "grouse-desktop" | "grouse" | "grouse-cli".
     pub client_id: String,
+    /// Start the fresh session as a recipe session (`session/new` recipeId),
+    /// for recipe runs on a cold start (gap 4: no connect happened yet).
+    pub initial_recipe_id: Option<String>,
 }
 
 /// Connection lifecycle (CONTRACT §3.3).
@@ -226,6 +229,11 @@ pub trait CoreListener: Send + Sync {
     fn on_roam_peer_status(&self, label: String, status: String);
     /// A roam peer's `session/list` result, ids prefixed `roam:<peer>:<id>`.
     fn on_roam_sessions(&self, label: String, sessions: Vec<SessionSummary>);
+    /// The live turn's run id for a session, or empty when the run ended
+    /// (gap 1: makes session/steer reachable).
+    fn on_active_run(&self, session_id: String, run_id: String);
+    /// Slash commands the server can execute right now (gap 2: autocomplete).
+    fn on_commands(&self, commands: Vec<String>);
 }
 
 /// Unstable events (CONTRACT §5). Retiring with `grouse-unstable`.
@@ -340,7 +348,7 @@ impl Core {
         let store = Arc::new(TranscriptStore::new(Box::new(CoreListenerForwarder(
             listener.clone(),
         ))));
-        Arc::new(Self {
+        let core = Arc::new(Self {
             inner: Arc::new(CoreInner {
                 listener,
                 store,
@@ -351,7 +359,18 @@ impl Core {
                 peers: Mutex::new(Vec::new()),
                 active_peer_label: Arc::new(RwLock::new(None)),
             }),
-        })
+        });
+        // Peer routing for the unstable shim (CONTRACT §6): resolve the peer
+        // owning a `roam:<label>:<id>` session so session-bound RPCs reach it.
+        let weak = Arc::downgrade(&core);
+        crate::spine::register_peer_resolver(Arc::new(move |session_id: &str| {
+            let rest = session_id.strip_prefix("roam:")?;
+            let label = rest.split(':').next()?;
+            let core = weak.upgrade()?;
+            let peers = core.inner.peers.lock();
+            peers.iter().find(|peer| peer.label() == label).cloned()
+        }));
+        core
     }
 
     // -- intents (CONTRACT §3.1): fire-and-forget into the core's runtime. --
@@ -360,7 +379,13 @@ impl Core {
     /// (bounded) until the connection is ready or fails — the one blocking
     /// intent (INTERNAL.md threading model).
     pub fn connect(&self, config: ServerConfig) {
-        let (_, ready_rx) = self.connect_impl(config, ConnectSpec::New { recipe_id: None }, false);
+        let (_, ready_rx) = self.connect_impl(
+            config.clone(),
+            ConnectSpec::New {
+                recipe_id: config.initial_recipe_id.clone(),
+            },
+            false,
+        );
         self.wait_ready(ready_rx);
     }
 
@@ -702,6 +727,8 @@ impl Core {
         conn.set_suppress_replay(suppress_replay);
         conn.set_on_status(self.status_hook());
         conn.set_on_touched(self.touched_hook());
+        conn.set_on_active_run(self.active_run_hook());
+        conn.set_on_commands(self.commands_hook());
         conn.set_on_config(self.config_hook());
         conn.set_on_ended(self.ended_hook(gen));
         crate::spine::set_current_conn(Some(conn.clone()));
@@ -1019,6 +1046,14 @@ impl Core {
         self.inner.listener.on_config(options);
     }
 
+    fn on_active_run(&self, session_id: String, run_id: String) {
+        self.inner.listener.on_active_run(session_id, run_id);
+    }
+
+    fn on_commands(&self, commands: Vec<String>) {
+        self.inner.listener.on_commands(commands);
+    }
+
     fn mutate_session(&self, method: &str, params: Value) {
         let Some(conn) = self.inner.conn.lock().clone() else { return };
         let core = self.clone();
@@ -1208,6 +1243,16 @@ impl Core {
         Arc::new(move |options| core.on_config_reply(options))
     }
 
+    fn active_run_hook(&self) -> Arc<dyn Fn(String, String) + Send + Sync> {
+        let core = self.clone();
+        Arc::new(move |session_id, run_id| core.on_active_run(session_id, run_id))
+    }
+
+    fn commands_hook(&self) -> Arc<dyn Fn(Vec<String>) + Send + Sync> {
+        let core = self.clone();
+        Arc::new(move |commands| core.on_commands(commands))
+    }
+
     fn ended_hook(&self, gen: u64) -> Arc<dyn Fn(Result<(), String>) + Send + Sync> {
         let core = self.clone();
         Arc::new(move |result| core.on_connection_ended(gen, result))
@@ -1321,5 +1366,11 @@ impl CoreListener for CoreListenerForwarder {
     }
     fn on_roam_sessions(&self, label: String, sessions: Vec<SessionSummary>) {
         self.0.on_roam_sessions(label, sessions);
+    }
+    fn on_active_run(&self, session_id: String, run_id: String) {
+        self.0.on_active_run(session_id, run_id);
+    }
+    fn on_commands(&self, commands: Vec<String>) {
+        self.0.on_commands(commands);
     }
 }

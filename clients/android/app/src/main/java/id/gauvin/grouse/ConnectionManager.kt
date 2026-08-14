@@ -102,6 +102,12 @@ class ConnectionManager private constructor(context: Context) {
         override fun onRoamSessions(label: String, sessions: List<SessionSummary>) {
             main.post { onRoamSessions(label, sessions) }
         }
+        override fun onActiveRun(sessionId: String, runId: String) {
+            main.post { onCoreActiveRun(sessionId, runId) }
+        }
+        override fun onCommands(commands: List<String>) {
+            main.post { this@ConnectionManager.commands.value = commands }
+        }
     })
     private val unstable = GrouseUnstable(object : GrouseUnstableListener {
         override fun onExport(data: String) { main.post { exportData.value = data } }
@@ -1007,12 +1013,19 @@ class ConnectionManager private constructor(context: Context) {
             lastSessionId?.let { store.pendingPushSessionId = it }
             sendPromptBlocks(text, images, expect = currentSession.value)
         } else if (live) {
-            // A turn is already running. Queue rather than firing a second sendPrompt into the
-            // same session -- concurrent prompts interleave in the transcript and the second
-            // reply is attributed to the wrong question. Flushed on RunEnded.
-            // (Mid-turn STEERING is gone: the core does not surface the active run id, so the
-            // old session/steer injection is unreachable — queued sends wait for the turn end.)
-            enqueue(PendingSend(text, images))
+            // A turn is already running. Steer into it when the core surfaced
+            // the run id (the server validates expected_run_id, so a run that
+            // ended between typing and sending fails loudly instead of
+            // starting a stray turn); otherwise queue for RunEnded — a second
+            // sendPrompt would interleave in the transcript and the reply
+            // would be attributed to the wrong question.
+            val run = activeRunId
+            if (run != null) {
+                turnInFlight = true
+                unstable.steer(text, run)
+            } else {
+                enqueue(PendingSend(text, images))
+            }
         } else {
             // Not connected yet (initial connect / silent reconnect window): queue and let the
             // core's own reconnect deliver the flush. The resume's replay wipes the local
@@ -1447,6 +1460,17 @@ class ConnectionManager private constructor(context: Context) {
             this.sessions.value.filterNot { roamPeer(it.sessionId) == label } + infos
     }
 
+    /** The running turn's run id (steer key), or null when no turn is live. */
+    @Volatile private var activeRunId: String? = null
+
+    private fun onCoreActiveRun(sessionId: String, runId: String) {
+        // Steer only targets the session on screen; a peer's or background
+        // session's run is irrelevant here. Empty runId = the run ended.
+        if (sessionId == currentSession.value) {
+            activeRunId = runId.ifEmpty { null }
+        }
+    }
+
     // ---------------------------------------------------------------------------
     // Unstable event translation
     // ---------------------------------------------------------------------------
@@ -1654,13 +1678,19 @@ class ConnectionManager private constructor(context: Context) {
         liveModelsFetchedFor = null   // re-fetch supported models fresh on every new connection
         desiredApplied = false
         replayActive.value = false; replayProgress.value = 0; replayWiped = false
-        val cfg = currentServerConfig()
+        val base = currentServerConfig()
         // A fresh config (first connect of the process, or host/port/key/cwd changed) needs a
         // real `connect()` — the core's new/open intents reuse the LAST config only. connect()
         // is the one blocking core intent (bounded ≤15s), so it runs on a worker thread.
-        if (lastConfig != cfg) {
-            lastConfig = cfg
+        if (lastConfig != base) {
+            lastConfig = base
             pendingResumeAfterConnect = resume
+            // A recipe pending on a cold start rides the connect's session/new
+            // (gap 4: the core's connect() takes initial_recipe_id), so the
+            // transient session IS the recipe session — one session, no waste.
+            // Consumed here; the Ready handler's newSession branch then no-ops.
+            val cfg = base.copy(initialRecipeId = pendingRecipeId)
+            pendingRecipeId = null
             Thread({
                 core.connect(cfg)
                 // connect() returned: either Ready arrived (fine) or the bounded wait timed
@@ -1694,6 +1724,7 @@ class ConnectionManager private constructor(context: Context) {
         cwd = store.workingDir,
         autoConnect = true,
         clientId = "grouse",
+        initialRecipeId = null,
     )
 
     // ---------------------------------------------------------------------------

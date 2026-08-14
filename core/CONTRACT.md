@@ -51,6 +51,7 @@ pub struct ServerConfig {
     pub cwd: String,           // absolute, must exist in the goose container
     pub auto_connect: bool,
     pub client_id: String,     // _meta.client, e.g. "grouse-desktop" | "grouse" | "grouse-cli"
+    pub initial_recipe_id: Option<String>, // session/new recipeId for the fresh session
 }
 ```
 
@@ -92,6 +93,12 @@ pub trait CoreListener {
     fn on_permission_request(&self, request: PermissionRequest);
     fn on_session_touched(&self, session_id: String, title: String, updated_at: String);
     fn on_projects(&self, projects: Vec<ProjectSummary>);
+    // The live turn's run id for a session (session_info_update
+    // _meta.goose.activeRunId); empty run_id = the run ended. The steer key:
+    // a UI holds it to inject mid-turn input via GrouseUnstable::steer.
+    fn on_active_run(&self, session_id: String, run_id: String);
+    // Slash commands the server can execute right now (available_commands_update).
+    fn on_commands(&self, commands: Vec<String>);
 }
 ```
 
@@ -184,6 +191,10 @@ opened. Surfaced as:
 - events: `on_roam_peer_status(label, status)`, `on_roam_sessions(label, Vec<SessionSummary>)`
 - the peer's session id namespace uses the `roam:<peer>:<id>` prefix for
   sidebar grouping, exactly as today.
+- session-bound unstable RPCs (tools list/call, session extensions, project,
+  working-dir, resources, export) ROUTE to the owning peer's connection when
+  the session id carries the `roam:` prefix — the peer answers its own
+  sessions' tool/extension queries (the in-chat N-tools indicator works there).
 
 The roam transport stays the shared `grouse-roam-core` library (iroh), now a
 dependency of `grouse-core`'s transport layer.

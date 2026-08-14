@@ -680,6 +680,12 @@ internal interface UniffiCallbackInterfaceCoreListenerMethod8 : com.sun.jna.Call
 internal interface UniffiCallbackInterfaceCoreListenerMethod9 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`label`: RustBuffer.ByValue,`sessions`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfaceCoreListenerMethod10 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`runId`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceCoreListenerMethod11 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`commands`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`data`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
@@ -734,7 +740,7 @@ internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod16 : com.s
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod17 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`method`: RustBuffer.ByValue,`message`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "onStatus", "onSessions", "onTranscript", "onStream", "onConfig", "onPermissionRequest", "onSessionTouched", "onProjects", "onRoamPeerStatus", "onRoamSessions")
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onStatus", "onSessions", "onTranscript", "onStream", "onConfig", "onPermissionRequest", "onSessionTouched", "onProjects", "onRoamPeerStatus", "onRoamSessions", "onActiveRun", "onCommands")
 internal open class UniffiVTableCallbackInterfaceCoreListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
     @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
@@ -748,6 +754,8 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
     @JvmField internal var `onProjects`: UniffiCallbackInterfaceCoreListenerMethod7? = null,
     @JvmField internal var `onRoamPeerStatus`: UniffiCallbackInterfaceCoreListenerMethod8? = null,
     @JvmField internal var `onRoamSessions`: UniffiCallbackInterfaceCoreListenerMethod9? = null,
+    @JvmField internal var `onActiveRun`: UniffiCallbackInterfaceCoreListenerMethod10? = null,
+    @JvmField internal var `onCommands`: UniffiCallbackInterfaceCoreListenerMethod11? = null,
 ) : Structure() {
     class UniffiByValue(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -762,7 +770,9 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
         `onProjects`: UniffiCallbackInterfaceCoreListenerMethod7? = null,
         `onRoamPeerStatus`: UniffiCallbackInterfaceCoreListenerMethod8? = null,
         `onRoamSessions`: UniffiCallbackInterfaceCoreListenerMethod9? = null,
-    ): UniffiVTableCallbackInterfaceCoreListener(`uniffiFree`,`uniffiClone`,`onStatus`,`onSessions`,`onTranscript`,`onStream`,`onConfig`,`onPermissionRequest`,`onSessionTouched`,`onProjects`,`onRoamPeerStatus`,`onRoamSessions`,), Structure.ByValue
+        `onActiveRun`: UniffiCallbackInterfaceCoreListenerMethod10? = null,
+        `onCommands`: UniffiCallbackInterfaceCoreListenerMethod11? = null,
+    ): UniffiVTableCallbackInterfaceCoreListener(`uniffiFree`,`uniffiClone`,`onStatus`,`onSessions`,`onTranscript`,`onStream`,`onConfig`,`onPermissionRequest`,`onSessionTouched`,`onProjects`,`onRoamPeerStatus`,`onRoamSessions`,`onActiveRun`,`onCommands`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceCoreListener) {
         `uniffiFree` = other.`uniffiFree`
@@ -777,6 +787,8 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
         `onProjects` = other.`onProjects`
         `onRoamPeerStatus` = other.`onRoamPeerStatus`
         `onRoamSessions` = other.`onRoamSessions`
+        `onActiveRun` = other.`onActiveRun`
+        `onCommands` = other.`onCommands`
     }
 
 }
@@ -1006,6 +1018,10 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_grouse_core_checksum_method_corelistener_on_roam_peer_status(
     ): Int
     external fun uniffi_grouse_core_checksum_method_corelistener_on_roam_sessions(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_corelistener_on_active_run(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_corelistener_on_commands(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export(
     ): Int
@@ -1507,6 +1523,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_corelistener_on_roam_sessions() != 29410) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_active_run() != 30734) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_commands() != 24609) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export() != 3482) {
@@ -4076,6 +4098,12 @@ data class ServerConfig (
      * `_meta.client`, e.g. "grouse-desktop" | "grouse" | "grouse-cli".
      */
     var `clientId`: kotlin.String
+    , 
+    /**
+     * Start the fresh session as a recipe session (`session/new` recipeId),
+     * for recipe runs on a cold start (gap 4: no connect happened yet).
+     */
+    var `initialRecipeId`: kotlin.String?
     
 ){
     
@@ -4099,6 +4127,7 @@ public object FfiConverterTypeServerConfig: FfiConverterRustBuffer<ServerConfig>
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -4109,7 +4138,8 @@ public object FfiConverterTypeServerConfig: FfiConverterRustBuffer<ServerConfig>
             FfiConverterBoolean.allocationSize(value.`useTls`) +
             FfiConverterString.allocationSize(value.`cwd`) +
             FfiConverterBoolean.allocationSize(value.`autoConnect`) +
-            FfiConverterString.allocationSize(value.`clientId`)
+            FfiConverterString.allocationSize(value.`clientId`) +
+            FfiConverterOptionalString.allocationSize(value.`initialRecipeId`)
     )
 
     override fun write(value: ServerConfig, buf: ByteBuffer) {
@@ -4120,6 +4150,7 @@ public object FfiConverterTypeServerConfig: FfiConverterRustBuffer<ServerConfig>
             FfiConverterString.write(value.`cwd`, buf)
             FfiConverterBoolean.write(value.`autoConnect`, buf)
             FfiConverterString.write(value.`clientId`, buf)
+            FfiConverterOptionalString.write(value.`initialRecipeId`, buf)
     }
 }
 
@@ -5033,6 +5064,17 @@ public interface CoreListener {
      */
     fun `onRoamSessions`(`label`: kotlin.String, `sessions`: List<SessionSummary>)
     
+    /**
+     * The live turn's run id for a session, or empty when the run ended
+     * (gap 1: makes session/steer reachable).
+     */
+    fun `onActiveRun`(`sessionId`: kotlin.String, `runId`: kotlin.String)
+    
+    /**
+     * Slash commands the server can execute right now (gap 2: autocomplete).
+     */
+    fun `onCommands`(`commands`: List<kotlin.String>)
+    
     companion object
 }
 
@@ -5164,6 +5206,31 @@ internal object uniffiCallbackInterfaceCoreListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
+    internal object `onActiveRun`: UniffiCallbackInterfaceCoreListenerMethod10 {
+        override fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`runId`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onActiveRun`(
+                    FfiConverterString.lift(`sessionId`),
+                    FfiConverterString.lift(`runId`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+    internal object `onCommands`: UniffiCallbackInterfaceCoreListenerMethod11 {
+        override fun callback(`uniffiHandle`: Long,`commands`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onCommands`(
+                    FfiConverterSequenceString.lift(`commands`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
 
     internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
@@ -5190,6 +5257,8 @@ internal object uniffiCallbackInterfaceCoreListener {
         `onProjects`,
         `onRoamPeerStatus`,
         `onRoamSessions`,
+        `onActiveRun`,
+        `onCommands`,
     )
 
     // Registers the foreign callback with the Rust side.
@@ -5596,6 +5665,34 @@ public object FfiConverterOptionalTypeSendExpect: FfiConverterRustBuffer<SendExp
         } else {
             buf.put(1)
             FfiConverterTypeSendExpect.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
+    override fun read(buf: ByteBuffer): List<kotlin.String> {
+        val len = buf.getInt()
+        return List<kotlin.String>(len) {
+            FfiConverterString.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.String>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterString.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.String>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterString.write(it, buf)
         }
     }
 }

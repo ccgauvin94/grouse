@@ -38,6 +38,8 @@ enum Ev {
     Projects(Vec<ProjectSummary>),
     RoamPeerStatus(String, String),
     RoamSessions(String, Vec<SessionSummary>),
+    ActiveRun(String, String),
+    Commands(Vec<String>),
 }
 
 struct RecordingListener {
@@ -81,6 +83,12 @@ impl CoreListener for RecordingListener {
     fn on_roam_sessions(&self, label: String, sessions: Vec<SessionSummary>) {
         let _ = self.tx.send(Ev::RoamSessions(label, sessions));
     }
+    fn on_commands(&self, commands: Vec<String>) {
+        let _ = self.tx.send(Ev::Commands(commands));
+    }
+    fn on_active_run(&self, session_id: String, run_id: String) {
+        let _ = self.tx.send(Ev::ActiveRun(session_id, run_id));
+    }
 }
 
 /// Wait for an event matching `pred`, skipping unrelated traffic.
@@ -113,6 +121,9 @@ struct FakeServer {
     frames: Arc<Mutex<Vec<Value>>>,
     /// The `X-Secret-Key` upgrade header, if the handshake carried one.
     secret_header: Arc<Mutex<Option<String>>>,
+    /// When set, the fake pushes `session_info_update` (with an activeRunId)
+    /// + `available_commands_update` notifications right after session/new.
+    notify: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FakeServer {
@@ -122,6 +133,7 @@ impl FakeServer {
         let server = Arc::new(Self {
             frames: Arc::new(Mutex::new(Vec::new())),
             secret_header: Arc::new(Mutex::new(None)),
+            notify: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -190,12 +202,48 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
 
         let result = match method.as_str() {
             "initialize" => json!({ "protocolVersion": 1 }),
-            "session/new" => json!({
-                "sessionId": "sess-e2e",
-                "configOptions": [
-                    { "id": "provider", "name": "Provider", "currentValue": "openai" }
-                ]
-            }),
+            "session/new" => {
+                if server.notify.load(std::sync::atomic::Ordering::SeqCst) {
+                    // session/new params carry no sessionId; the fake's reply
+                    // is fixed to sess-e2e, so the notifications use that.
+                    let session = "sess-e2e";
+                    let run = json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session,
+                            "update": {
+                                "sessionUpdate": "session_info_update",
+                                "title": "E2E Chat",
+                                "updated_at": "2026-08-12T00:00:00.000Z",
+                                "_meta": { "goose": { "activeRunId": "run-abc" } }
+                            }
+                        }
+                    });
+                    let _ = tx.send(WsMessage::Text(run.to_string().into())).await;
+                    let commands = json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session,
+                            "update": {
+                                "sessionUpdate": "available_commands_update",
+                                "availableCommands": [
+                                    { "name": "/compact", "description": "compact" },
+                                    { "name": "/undo", "description": "undo" }
+                                ]
+                            }
+                        }
+                    });
+                    let _ = tx.send(WsMessage::Text(commands.to_string().into())).await;
+                }
+                json!({
+                    "sessionId": "sess-e2e",
+                    "configOptions": [
+                        { "id": "provider", "name": "Provider", "currentValue": "openai" }
+                    ]
+                })
+            }
             "session/list" => json!({
                 "sessions": [{
                     "sessionId": "sess-e2e",
@@ -247,6 +295,56 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
 }
 
 // ---------------------------------------------------------------------------
+// Gap fixes: active-run + commands events, recipe on a cold-start connect
+// ---------------------------------------------------------------------------
+
+#[test]
+fn spine_e2e_active_run_commands_and_recipe_connect() {
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    server.notify.store(true, std::sync::atomic::Ordering::SeqCst);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(Box::new(RecordingListener::new(ev_tx)));
+
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: Some("r-42".to_string()),
+    });
+
+    // The recipe rode the session/new call (cold-start recipe run, gap 4).
+    let new_frames = server.frames_for("session/new");
+    assert_eq!(new_frames.len(), 1, "exactly one session/new");
+    assert_eq!(
+        new_frames[0].pointer("/params/_meta/recipeId").and_then(Value::as_str),
+        Some("r-42"),
+        "recipeId must ride _meta on session/new"
+    );
+
+    // The run-id event (gap 1) and the commands event (gap 2) arrived.
+    match wait_for(&ev_rx, |ev| matches!(ev, Ev::ActiveRun(..)), "active run") {
+        Ev::ActiveRun(sid, run_id) => {
+            assert_eq!(sid, "sess-e2e");
+            assert_eq!(run_id, "run-abc");
+        }
+        _ => unreachable!(),
+    }
+    match wait_for(&ev_rx, |ev| matches!(ev, Ev::Commands(..)), "commands") {
+        Ev::Commands(names) => assert_eq!(names, vec!["/compact", "/undo"]),
+        _ => unreachable!(),
+    }
+
+    core.disconnect();
+}
+
+// ---------------------------------------------------------------------------
 // End-to-end: connect -> ready -> send_prompt -> streamed chunk on the listener
 // ---------------------------------------------------------------------------
 
@@ -268,6 +366,7 @@ fn spine_e2e_connect_prompt_stream() {
         cwd: "/tmp".to_string(),
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
     });
 
     // Ready + the bound session + config.

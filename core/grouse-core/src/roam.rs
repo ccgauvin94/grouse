@@ -54,6 +54,7 @@ use serde_json::{Map, Value};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc as tokio_mpsc;
 
+use crate::spine::RpcConn;
 use crate::{
     ConnectionStatus, CoreListener, Message, PermissionOutcome, SessionSummary, StreamEvent,
     ToolCallKind, TranscriptEvent,
@@ -944,6 +945,20 @@ impl RoamPeer {
     }
 }
 
+/// The unstable shim routes session-bound RPCs through this when the session
+/// belongs to a peer (`roam:<label>:` prefix) — the peer's connection answers
+/// tool/extension/config calls for its own sessions.
+impl RpcConn for RoamPeer {
+    fn rpc(&self, method: &str, params: Value) -> Result<Value, AcpError> {
+        RoamPeer::rpc(self, method, params)
+    }
+
+    fn active_session_id(&self) -> Option<String> {
+        let raw = self.inner.lock().open_session_id.clone()?;
+        Some(format!("roam:{}:{}", self.label, raw))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SessionNotification translation helpers (the "same dispatch the spine uses")
 // ---------------------------------------------------------------------------
@@ -1277,6 +1292,10 @@ mod tests {
                 .lock()
                 .push(format!("peer_sessions {label} {}", sessions.len()));
         }
+
+        fn on_active_run(&self, _session_id: String, _run_id: String) {}
+
+        fn on_commands(&self, _commands: Vec<String>) {}
     }
 
     fn test_listener() -> Arc<RecordingListener> {
