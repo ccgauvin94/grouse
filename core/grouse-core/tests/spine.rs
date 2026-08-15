@@ -148,8 +148,13 @@ impl FakeServer {
                     .expect("bind fake server");
                 let port = listener.local_addr().expect("fake server addr").port();
                 let _ = port_tx.send(port);
-                let (stream, _peer) = listener.accept().await.expect("fake server accept");
-                serve_connection(for_thread, stream).await;
+                // Accept repeatedly: open_session / reconnect each bring a new
+                // WebSocket; each is served on its own task.
+                loop {
+                    let (stream, _peer) = listener.accept().await.expect("fake server accept");
+                    let server = for_thread.clone();
+                    tokio::spawn(async move { serve_connection(server, stream).await });
+                }
             });
         });
         server
@@ -254,6 +259,53 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
                     "_meta": { "messageCount": 1, "lastMessageSnippet": "hi from the list" }
                 }]
             }),
+            "session/load" => {
+                let session = params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                for (tag, text, message_id) in [
+                    ("agent_message_chunk", "replayed line one", "r-1"),
+                    ("agent_message_chunk", " and two", "r-1"),
+                ] {
+                    let frame = json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session,
+                            "update": {
+                                "sessionUpdate": tag,
+                                "content": { "type": "text", "text": text },
+                                "messageId": message_id
+                            }
+                        }
+                    });
+                    let _ = tx.send(WsMessage::Text(frame.to_string().into())).await;
+                }
+                // The replay's own session_info_update carries the CURRENT
+                // updatedAt — what the fresh cache must be stamped with.
+                let info = json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": session,
+                        "update": {
+                            "sessionUpdate": "session_info_update",
+                            "title": "Replayed",
+                            // camelCase: the schema's rename_all makes this updatedAt.
+                            "updatedAt": "2026-08-12T12:00:00.000Z"
+                        }
+                    }
+                });
+                let _ = tx.send(WsMessage::Text(info.to_string().into())).await;
+                json!({
+                    "sessionId": session,
+                    "configOptions": [
+                        { "id": "provider", "name": "Provider", "currentValue": "openai" }
+                    ]
+                })
+            }
             "session/prompt" => {
                 // Stream the turn BEFORE the reply: user echo + two chunks of
                 // one agent message (same messageId -> one bubble), then end.
@@ -293,6 +345,59 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
         let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
         let _ = tx.send(WsMessage::Text(reply.to_string().into())).await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cache: a resume replay must persist the fresh transcript + updatedAt so the
+// next open renders from cache instead of re-streaming the same delta
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resume_replay_persists_the_fresh_cache() {
+    let data_dir =
+        std::env::temp_dir().join(format!("grouse-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    std::env::set_var("XDG_DATA_HOME", &data_dir);
+    // Seed a STALE cache: old content, old updatedAt.
+    let cache = grouse_core::cache::CacheStore::new(data_dir.join("grouse"));
+    let stale = vec![grouse_core::Message {
+        id: "m-old".into(),
+        role: "user".into(),
+        content: "stale cached line".into(),
+    }];
+    assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z"));
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let _server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(Box::new(RecordingListener::new(ev_tx)));
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
+
+    // Stale cache for sess-r (no session/list yet -> unknown updatedAt ->
+    // replay). The replay must end with the cache rewritten.
+    core.open_session("sess-r".to_string());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "resume ready");
+
+    let (messages, updated_at) =
+        cache.load_transcript("sess-r").expect("cache written after the replay");
+    assert_eq!(updated_at, "2026-08-12T12:00:00.000Z", "cache stamped with the replayed updatedAt");
+    let text: String = messages.iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("");
+    assert!(text.contains("replayed line one and two"), "cache holds the replayed content: {text}");
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 // ---------------------------------------------------------------------------

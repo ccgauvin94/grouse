@@ -780,6 +780,16 @@ impl Core {
             state.reconnect_gen += 1;
         }
         drop(state);
+        if matches!(status, ConnectionStatus::Ready) {
+            // A session/load replay just finished — fresh-cache opens, resume
+            // after reconnect, and in-place resync all land here with the full
+            // replayed transcript in the store. Persist it so the NEXT open
+            // renders from cache (freshness matches) instead of replaying the
+            // same delta again. on_prompt_done alone only covered the
+            // prompt-turn case, which is why reopening a replayed session
+            // re-streamed it every time.
+            self.save_cache();
+        }
         self.inner.listener.on_status(status);
     }
 
