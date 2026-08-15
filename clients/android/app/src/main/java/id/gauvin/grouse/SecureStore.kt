@@ -141,6 +141,12 @@ class SecureStore(context: Context) {
         get() = cfg.getString("last_session", null)
         set(v) = cfg.edit().putString("last_session", v).apply()
 
+    /** Last `_goose/unstable/sources/list` projects reply (raw JSON), so the drawer
+     *  renders project names before the first live fetch on cold start. */
+    var projectsCache: String
+        get() = cfg.getString("projects_cache", "") ?: ""
+        set(v) = cfg.edit().putString("projects_cache", v).apply()
+
     /** Last known cwd PER session id, merged from every session/list and every open. The resume
      *  path MUST hand session/load the session's REAL cwd — a wrong value silently REWRITES the
      *  session's working_dir server-side. The old global last_session_cwd fallback ("wrong here

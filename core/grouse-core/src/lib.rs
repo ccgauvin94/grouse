@@ -360,6 +360,26 @@ impl Core {
                 active_peer_label: Arc::new(RwLock::new(None)),
             }),
         });
+        // Seed the session directory from cache: the drawer renders the
+        // names immediately (before the first session/list round trip), the
+        // updatedAt table makes a cold-start resume's freshness check match
+        // the transcript cache stamp, and the cwds resolve without a probe.
+        if let Some((sessions, cwds)) = core.inner.cache.load_directory() {
+            {
+                let mut state = core.inner.state.lock();
+                for (sid, cwd) in &cwds {
+                    state.session_cwds.insert(sid.clone(), cwd.clone());
+                }
+                for s in &sessions {
+                    if !s.updated_at.is_empty() {
+                        state
+                            .session_updated_at
+                            .insert(s.id.clone(), s.updated_at.clone());
+                    }
+                }
+            }
+            core.inner.listener.on_sessions(sessions);
+        }
         // Peer routing for the unstable shim (CONTRACT §6): resolve the peer
         // owning a `roam:<label>:<id>` session so session-bound RPCs reach it.
         let weak = Arc::downgrade(&core);
@@ -1093,13 +1113,18 @@ impl Core {
         {
             let mut state = self.inner.state.lock();
             state.sessions = sessions.clone();
-            for (sid, cwd) in cwds {
+            for (sid, cwd) in cwds.clone() {
                 state.session_cwds.insert(sid, cwd);
             }
             for (sid, updated_at) in updated {
                 state.session_updated_at.insert(sid, updated_at);
             }
         }
+        // The drawer's names + cwds persist so a cold start renders them
+        // before the first session/list round trip.
+        let cwds_map: std::collections::BTreeMap<String, String> =
+            cwds.iter().cloned().collect();
+        self.inner.cache.save_directory(&sessions, &cwds_map);
         self.inner.listener.on_sessions(sessions);
     }
 

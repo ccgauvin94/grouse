@@ -22,6 +22,10 @@ use grouse_core::{
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
+/// Both cache e2e tests set the process-global XDG_DATA_HOME; they must not
+/// run concurrently or each reads the other's cache dir.
+static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 // ---------------------------------------------------------------------------
 // Recording listener
 // ---------------------------------------------------------------------------
@@ -360,6 +364,7 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
 
 #[test]
 fn resume_replay_persists_the_fresh_cache() {
+    let _cache_guard = CACHE_TEST_LOCK.lock();
     let data_dir =
         std::env::temp_dir().join(format!("grouse-cache-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&data_dir);
@@ -416,6 +421,46 @@ fn resume_replay_persists_the_fresh_cache() {
     let text: String = messages.iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("");
     assert!(text.contains("replayed line one and two"), "cache holds the replayed content: {text}");
 
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+// ---------------------------------------------------------------------------
+// Directory cache: a cold start emits the cached session names immediately
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cold_start_emits_cached_directory() {
+    let _cache_guard = CACHE_TEST_LOCK.lock();
+    let data_dir = std::env::temp_dir().join(format!("grouse-dir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    std::env::set_var("XDG_DATA_HOME", &data_dir);
+    let cache = grouse_core::cache::CacheStore::new(data_dir.join("grouse"));
+    let sessions = vec![grouse_core::SessionSummary {
+        id: "sess-c".into(),
+        title: "Cached Chat".into(),
+        updated_at: "2026-08-12T10:00:00Z".into(),
+        last_message_snippet: None,
+        project_id: None,
+        message_count: 3,
+        model: String::new(),
+        has_recipe: false,
+    }];
+    let mut cwds = std::collections::BTreeMap::new();
+    cwds.insert("sess-c".into(), "/tmp".into());
+    assert!(cache.save_directory(&sessions, &cwds));
+
+    // A brand-new Core (no connect yet) must emit the cached names right away.
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(Box::new(RecordingListener::new(ev_tx)));
+    match wait_for(&ev_rx, |ev| matches!(ev, Ev::Sessions(_)), "cached sessions") {
+        Ev::Sessions(s) => {
+            assert_eq!(s.len(), 1);
+            assert_eq!(s[0].id, "sess-c");
+            assert_eq!(s[0].title, "Cached Chat");
+        }
+        _ => unreachable!(),
+    }
     core.disconnect();
     let _ = std::fs::remove_dir_all(&data_dir);
 }

@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::Message;
+use crate::{Message, SessionSummary};
 
 /// The tool catalog cache, mirroring the desktop's tool-cache JSON.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -117,6 +117,75 @@ impl CacheStore {
         Some((messages, updated_at))
     }
 
+    /// Persist the session directory (the drawer's names + the per-session
+    /// cwd side-table) so the UI can render it before the first session/list
+    /// round trip. Returns whether the file was written.
+    pub fn save_directory(
+        &self,
+        sessions: &[SessionSummary],
+        cwds: &BTreeMap<String, String>,
+    ) -> bool {
+        if sessions.is_empty() {
+            return true;
+        }
+        let arr = sessions
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id,
+                    "title": s.title,
+                    "updatedAt": s.updated_at,
+                    "projectId": s.project_id,
+                    "messageCount": s.message_count,
+                    "model": s.model,
+                    "hasRecipe": s.has_recipe,
+                    "lastMessageSnippet": s.last_message_snippet,
+                    "cwd": cwds.get(&s.id),
+                })
+            })
+            .collect::<Vec<_>>();
+        write_json(&self.directory_path(), &serde_json::json!({ "sessions": arr }))
+    }
+
+    /// Load the cached session directory (names + cwds). `None` when missing
+    /// or corrupt.
+    pub fn load_directory(&self) -> Option<(Vec<SessionSummary>, BTreeMap<String, String>)> {
+        let bytes = fs::read(self.directory_path()).ok()?;
+        let root: Value = serde_json::from_slice(&bytes).ok()?;
+        let arr = root.get("sessions")?.as_array()?;
+        if arr.is_empty() {
+            return None;
+        }
+        let mut cwds = BTreeMap::new();
+        let sessions = arr
+            .iter()
+            .filter_map(|el| {
+                let id = el.get("id")?.as_str()?.to_string();
+                if let Some(cwd) = el.get("cwd").and_then(Value::as_str) {
+                    cwds.insert(id.clone(), cwd.to_string());
+                }
+                Some(SessionSummary {
+                    id,
+                    title: el.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
+                    updated_at: el.get("updatedAt").and_then(Value::as_str).unwrap_or("").to_string(),
+                    last_message_snippet: el.get("lastMessageSnippet").and_then(Value::as_str).map(|s| s.to_string()),
+                    project_id: el.get("projectId").and_then(Value::as_str).map(|s| s.to_string()),
+                    message_count: el.get("messageCount").and_then(Value::as_i64).unwrap_or(0),
+                    model: el.get("model").and_then(Value::as_str).unwrap_or("").to_string(),
+                    has_recipe: el.get("hasRecipe").and_then(Value::as_bool).unwrap_or(false),
+                })
+            })
+            .collect::<Vec<_>>();
+        if sessions.is_empty() {
+            return None;
+        }
+        Some((sessions, cwds))
+    }
+
+    fn directory_path(&self) -> PathBuf {
+        self.cache_dir.join("directory.json")
+    }
+
     /// Persist the tool catalog for a session. Returns whether the file was
     /// written.
     pub fn save_tools(&self, session_id: &str, tools: &ToolCache) -> bool {
@@ -202,6 +271,7 @@ fn message_from_json(el: &Value) -> Message {
 
 #[cfg(test)]
 mod tests {
+    use crate::SessionSummary;
     use std::collections::BTreeMap;
     use std::fs;
 
@@ -331,6 +401,38 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn directory_round_trip() {
+        let dir = temp_cache_dir("directory");
+        let store = CacheStore::new(dir.clone());
+        let sessions = vec![SessionSummary {
+            id: "sess/1".into(),
+            title: "Chat one".into(),
+            updated_at: "2026-08-12T10:00:00Z".into(),
+            last_message_snippet: Some("hi".into()),
+            project_id: Some("proj-a".into()),
+            message_count: 42,
+            model: "gpt-4o".into(),
+            has_recipe: true,
+        }];
+        let mut cwds = BTreeMap::new();
+        cwds.insert("sess/1".into(), "/tmp".into());
+        assert!(store.save_directory(&sessions, &cwds));
+        let (loaded, cwds2) = store.load_directory().expect("directory must load back");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "sess/1");
+        assert_eq!(loaded[0].title, "Chat one");
+        assert_eq!(loaded[0].project_id.as_deref(), Some("proj-a"));
+        assert_eq!(loaded[0].message_count, 42);
+        assert_eq!(cwds2.get("sess/1").map(String::as_str), Some("/tmp"));
+        // Empty saves no-op (existing file untouched); a store with no
+        // prior file loads None.
+        assert!(store.save_directory(&[], &BTreeMap::new()));
+        let empty_store = CacheStore::new(dir.join("other"));
+        assert!(empty_store.load_directory().is_none());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

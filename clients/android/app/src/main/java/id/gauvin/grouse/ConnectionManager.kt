@@ -147,7 +147,9 @@ class ConnectionManager private constructor(context: Context) {
     /** Goose projects, refreshed alongside the session list. A project is a named source with an
      *  id, not a directory -- so filing a chat no longer decides where its tools run, and the
      *  same project is one entry from every client instead of one per cwd spelling. */
-    val projects = mutableStateOf<List<ProjectInfo>>(emptyList())
+    // Seeded from the persisted sources/list so the drawer shows projects
+    // immediately on cold start; the live fetch replaces it when it lands.
+    val projects = mutableStateOf<List<ProjectInfo>>(parseProjects(store.projectsCache))
 
     /** The server's cron table, and the recipe library the jobs run from. Both are server state
      *  with no local mirror -- every mutation re-lists rather than patching, because paused and
@@ -1543,6 +1545,7 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     private fun onUnstableProjects(json: String) {
+        store.projectsCache = json
         projects.value = parseProjects(json)
     }
 
