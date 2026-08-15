@@ -70,7 +70,7 @@ fn main() {
     let key = std::env::var("KEY").unwrap_or_else(|_| "dummy-key".into());
     println!("connecting to wss://{host}:{port}/acp (key {} chars)", key.len());
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let core = Core::new(Box::new(L(seen.clone())));
+    let core = Core::new(Box::new(L(seen.clone())), String::new());
     core.connect(ServerConfig {
         host,
         port,

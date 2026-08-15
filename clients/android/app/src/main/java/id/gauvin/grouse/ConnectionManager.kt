@@ -108,7 +108,7 @@ class ConnectionManager private constructor(context: Context) {
         override fun onCommands(commands: List<String>) {
             main.post { this@ConnectionManager.commands.value = commands }
         }
-    })
+    }, appContext.filesDir.absolutePath)
     private val unstable = GrouseUnstable(object : GrouseUnstableListener {
         override fun onExport(data: String) { main.post { exportData.value = data } }
         override fun onRecipeParams(parameters: String) { main.post { onRecipeParams(parameters) } }

@@ -1085,7 +1085,7 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_grouse_core_fn_free_core(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_grouse_core_fn_constructor_core_new(`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_grouse_core_fn_constructor_core_new(`listener`: Long,`cacheDir`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_grouse_core_fn_method_core_active_session_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1496,7 +1496,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_grouse_core_checksum_method_grouseunstable_working_dir_update() != 28181) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_constructor_core_new() != 63036) {
+    if (lib.uniffi_grouse_core_checksum_constructor_core_new() != 23476) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_constructor_grouseunstable_new() != 25278) {
@@ -2211,17 +2211,20 @@ open class Core: Disposable, AutoCloseable, CoreInterface
         this.cleanable = null
     }
     /**
-     * Construct the core. The UI's `CacheDir` (CONTRACT §7.4) is not part of
-     * the skeleton constructor, so the core uses a default data dir; the
-     * cache is created lazily on first write.
+     * Construct the core. The UI supplies its `CacheDir` (CONTRACT §7.4):
+     * every transcript/directory/tools cache file and the roam identity live
+     * under it. An empty string falls back to the platform data dir — on
+     * Android that resolves relative to the read-only process CWD, so the
+     * UI must pass a real absolute dir (context.filesDir).
      */
-    constructor(`listener`: CoreListener) :
+    constructor(`listener`: CoreListener, `cacheDir`: kotlin.String) :
         this(UniffiWithHandle, 
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_grouse_core_fn_constructor_core_new(
     
         
-        FfiConverterTypeCoreListener.lower(`listener`),_status)
+        FfiConverterTypeCoreListener.lower(`listener`),
+        FfiConverterString.lower(`cacheDir`),_status)
 }
     )
 

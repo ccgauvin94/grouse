@@ -337,22 +337,29 @@ pub struct Core {
 
 #[uniffi::export]
 impl Core {
-    /// Construct the core. The UI's `CacheDir` (CONTRACT §7.4) is not part of
-    /// the skeleton constructor, so the core uses a default data dir; the
-    /// cache is created lazily on first write.
+    /// Construct the core. The UI supplies its `CacheDir` (CONTRACT §7.4):
+    /// every transcript/directory/tools cache file and the roam identity live
+    /// under it. An empty string falls back to the platform data dir — on
+    /// Android that resolves relative to the read-only process CWD, so the
+    /// UI must pass a real absolute dir (context.filesDir).
     #[uniffi::constructor]
-    pub fn new(listener: Box<dyn CoreListener>) -> Arc<Self> {
+    pub fn new(listener: Box<dyn CoreListener>, cache_dir: String) -> Arc<Self> {
         let listener: Arc<dyn CoreListener> = Arc::from(listener);
         // The store shares one listener with the rest of the core; a tiny
         // forwarder adapts the Box the store's seam asks for.
         let store = Arc::new(TranscriptStore::new(Box::new(CoreListenerForwarder(
             listener.clone(),
         ))));
+        let cache_dir = if cache_dir.is_empty() {
+            default_cache_dir()
+        } else {
+            PathBuf::from(cache_dir)
+        };
         let core = Arc::new(Self {
             inner: Arc::new(CoreInner {
                 listener,
                 store,
-                cache: CacheStore::new(default_cache_dir()),
+                cache: CacheStore::new(cache_dir),
                 state: Mutex::new(CoreState::default()),
                 conn: Mutex::new(None),
                 conn_task: Mutex::new(None),
@@ -1351,7 +1358,6 @@ impl Core {
     }
 
     // -- roam helpers ---------------------------------------------------------
-
     fn active_peer(&self) -> Option<Arc<RoamPeer>> {
         let peers = self.inner.peers.lock();
         let active = self.inner.active_peer_label.read().clone();
@@ -1361,8 +1367,7 @@ impl Core {
     /// The device's roam identity (grouse-roam-core), generated + persisted
     /// under the cache dir on first use (desktop m_store roam_identity).
     fn roam_identity(&self) -> String {
-        let dir = default_cache_dir();
-        let path = dir.join("roam_identity");
+        let path = self.inner.cache.dir().join("roam_identity");
         if let Ok(existing) = std::fs::read_to_string(&path) {
             let existing = existing.trim();
             if !existing.is_empty() {
@@ -1370,7 +1375,7 @@ impl Core {
             }
         }
         let secret = grouse_roam_core::identity_generate();
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::create_dir_all(self.inner.cache.dir());
         let _ = std::fs::write(&path, &secret);
         secret
     }

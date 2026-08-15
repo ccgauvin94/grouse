@@ -57,6 +57,11 @@ impl CacheStore {
         Self { cache_dir }
     }
 
+    /// The cache root the core was constructed with (roam identity etc.).
+    pub fn dir(&self) -> &Path {
+        &self.cache_dir
+    }
+
     /// `<dir>/<session>.json`, `/` escaped to `_` (desktop `cacheFilePath`).
     fn transcript_path(&self, session_id: &str) -> PathBuf {
         self.cache_dir.join(format!("{}.json", escape(session_id)))

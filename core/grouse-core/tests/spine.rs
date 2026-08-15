@@ -383,7 +383,7 @@ fn resume_replay_persists_the_fresh_cache() {
     let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
 
     let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)));
+    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
     core.connect(grouse_core::ServerConfig {
         host: "127.0.0.1".to_string(),
         port,
@@ -452,7 +452,7 @@ fn cold_start_emits_cached_directory() {
 
     // A brand-new Core (no connect yet) must emit the cached names right away.
     let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)));
+    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
     match wait_for(&ev_rx, |ev| matches!(ev, Ev::Sessions(_)), "cached sessions") {
         Ev::Sessions(s) => {
             assert_eq!(s.len(), 1);
@@ -463,6 +463,44 @@ fn cold_start_emits_cached_directory() {
     }
     core.disconnect();
     let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// The Android regression: the UI supplies a real cache dir at construction
+/// (context.filesDir). The env-based default resolves nowhere writable there,
+/// so a core built without the dir silently cached nothing — the drawer was
+/// empty on every cold start.
+#[test]
+fn cold_start_emits_cached_directory_from_supplied_dir() {
+    let dir = std::env::temp_dir().join(format!("grouse-supplied-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cache = grouse_core::cache::CacheStore::new(dir.clone());
+    let sessions = vec![grouse_core::SessionSummary {
+        id: "sess-d".into(),
+        title: "Supplied Chat".into(),
+        updated_at: "2026-08-13T11:00:00Z".into(),
+        last_message_snippet: None,
+        project_id: None,
+        message_count: 2,
+        model: String::new(),
+        has_recipe: false,
+    }];
+    assert!(cache.save_directory(&sessions, &std::collections::BTreeMap::new()));
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        dir.to_string_lossy().into_owned(),
+    );
+    match wait_for(&ev_rx, |ev| matches!(ev, Ev::Sessions(_)), "cached sessions") {
+        Ev::Sessions(s) => {
+            assert_eq!(s.len(), 1);
+            assert_eq!(s[0].id, "sess-d");
+            assert_eq!(s[0].title, "Supplied Chat");
+        }
+        _ => unreachable!(),
+    }
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -477,7 +515,7 @@ fn spine_e2e_active_run_commands_and_recipe_connect() {
     let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
 
     let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)));
+    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
 
     core.connect(grouse_core::ServerConfig {
         host: "127.0.0.1".to_string(),
@@ -526,7 +564,7 @@ fn spine_e2e_connect_prompt_stream() {
     let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
 
     let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)));
+    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
 
     // connect() blocks (bounded) until the handshake completes.
     core.connect(grouse_core::ServerConfig {
