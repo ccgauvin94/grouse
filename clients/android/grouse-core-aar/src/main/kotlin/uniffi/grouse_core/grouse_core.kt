@@ -901,6 +901,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_list_sessions(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_load_cached_transcript(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_new_session(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_open_session(
@@ -1100,6 +1102,8 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_method_core_disconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_list_sessions(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_core_load_cached_transcript(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_new_session(`ptr`: Long,`recipeId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1346,6 +1350,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_list_sessions() != 33034) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_core_load_cached_transcript() != 50836) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_new_session() != 54951) {
@@ -2092,6 +2099,15 @@ public interface CoreInterface {
     fun `listSessions`()
     
     /**
+     * Render the cached transcript for a session WITHOUT connecting (cold
+     * start: the UI shows the conversation instantly while the connection
+     * establishes, instead of "Connecting…" over an empty transcript). Emits
+     * the same `Clear` the open path would; the later open is a no-op when
+     * the cache is fresh.
+     */
+    fun `loadCachedTranscript`(`sessionId`: kotlin.String)
+    
+    /**
      * `session/new` with `_meta.client` + cwd; replaces the current wire.
      */
     fun `newSession`(`recipeId`: kotlin.String?)
@@ -2406,6 +2422,26 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     UniffiLib.uniffi_grouse_core_fn_method_core_list_sessions(
         it,
         _status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Render the cached transcript for a session WITHOUT connecting (cold
+     * start: the UI shows the conversation instantly while the connection
+     * establishes, instead of "Connecting…" over an empty transcript). Emits
+     * the same `Clear` the open path would; the later open is a no-op when
+     * the cache is fresh.
+     */override fun `loadCachedTranscript`(`sessionId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_load_cached_transcript(
+        it,
+        
+        FfiConverterString.lower(`sessionId`),_status)
 }
     }
     

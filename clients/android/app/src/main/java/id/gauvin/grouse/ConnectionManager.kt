@@ -1732,6 +1732,15 @@ class ConnectionManager private constructor(context: Context) {
         if (lastConfig != base) {
             lastConfig = base
             pendingResumeAfterConnect = resume
+            // Render the cached transcript NOW (before the connection
+            // establishes) so a reopened convo shows instantly instead of
+            // "Connecting…" over an empty chat, and warm the session list so
+            // the resume's freshness check (at Ready) can match the cache
+            // stamp when nothing changed — no replay on cold start.
+            if (resume != null) {
+                core.loadCachedTranscript(resume)
+                core.listSessions()
+            }
             // A recipe pending on a cold start rides the connect's session/new
             // (gap 4: the core's connect() takes initial_recipe_id), so the
             // transient session IS the recipe session — one session, no waste.

@@ -340,6 +340,12 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
                 }
                 json!({ "stopReason": "end_turn" })
             }
+            "_goose/unstable/session/info" => json!({
+                "session": {
+                    "updatedAt": "2026-08-12T13:00:00.000Z",
+                    "_meta": { "messageCount": 3 }
+                }
+            }),
             _ => json!({}),
         };
         let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
@@ -390,9 +396,23 @@ fn resume_replay_persists_the_fresh_cache() {
     core.open_session("sess-r".to_string());
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "resume ready");
 
-    let (messages, updated_at) =
-        cache.load_transcript("sess-r").expect("cache written after the replay");
-    assert_eq!(updated_at, "2026-08-12T12:00:00.000Z", "cache stamped with the replayed updatedAt");
+    // The probe (13:00) lands asynchronously after Ready; poll for it. It
+    // wins over the replay's own session_info_update (12:00): the stamp is
+    // deterministic and matches the session/list entry byte-for-byte, so the
+    // next open is fresh across restarts.
+    let (messages, updated_at) = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut last: Option<(Vec<grouse_core::Message>, String)> = None;
+        while Instant::now() < deadline {
+            if let Some(v) = cache.load_transcript("sess-r") {
+                last = Some(v.clone());
+                if v.1 == "2026-08-12T13:00:00.000Z" { break; }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        last.expect("cache written after the replay")
+    };
+    assert_eq!(updated_at, "2026-08-12T13:00:00.000Z", "cache stamped from the session/info probe");
     let text: String = messages.iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("");
     assert!(text.contains("replayed line one and two"), "cache holds the replayed content: {text}");
 

@@ -458,6 +458,18 @@ impl Core {
         );
     }
 
+    /// Render the cached transcript for a session WITHOUT connecting (cold
+    /// start: the UI shows the conversation instantly while the connection
+    /// establishes, instead of "Connecting…" over an empty transcript). Emits
+    /// the same `Clear` the open path would; the later open is a no-op when
+    /// the cache is fresh.
+    pub fn load_cached_transcript(&self, session_id: String) {
+        if let Some((messages, _)) = self.inner.cache.load_transcript(&session_id) {
+            self.inner.store.replace(messages);
+        }
+    }
+
+
     /// Refresh `session/list` (reply → `on_sessions`).
     pub fn list_sessions(&self) {
         let Some(conn) = self.inner.conn.lock().clone() else { return };
@@ -789,8 +801,48 @@ impl Core {
             // prompt-turn case, which is why reopening a replayed session
             // re-streamed it every time.
             self.save_cache();
+            // The replay itself sends NO session_info_update (the real server
+            // doesn't), so the stamp above can race the session/list reply and
+            // land empty — which made every later open look stale. Re-stamp
+            // from a session/info probe: deterministic, and its updatedAt is
+            // byte-identical to the session/list entry, so the freshness check
+            // survives process restarts (list on the next cold start == this
+            // stamp when nothing changed).
+            self.probe_stamp_and_save();
         }
         self.inner.listener.on_status(status);
+    }
+
+    /// `session/info` probe for the active session → re-stamp the cache's
+    /// updatedAt and persist (see [`Self::on_conn_status`]).
+    fn probe_stamp_and_save(&self) {
+        let Some(session_id) = self.active_session_id() else { return };
+        let Some(conn) = self.inner.conn.lock().clone() else { return };
+        let core = self.clone();
+        crate::roam::runtime().spawn(async move {
+            let probed = conn
+                .rpc_async(
+                    "_goose/unstable/session/info",
+                    json!({ "sessionId": session_id }),
+                )
+                .await
+                .ok()
+                .and_then(|reply| {
+                    reply
+                        .get("session")
+                        .and_then(|session| session.get("updatedAt"))
+                        .and_then(Value::as_str)
+                        .map(|s| s.to_string())
+                });
+            if let Some(updated_at) = probed {
+                core.inner
+                    .state
+                    .lock()
+                    .session_updated_at
+                    .insert(session_id.clone(), updated_at);
+            }
+            core.save_cache();
+        });
     }
 
     /// A connection ended. Explicit disconnect → nothing more (status already
