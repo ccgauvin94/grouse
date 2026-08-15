@@ -35,6 +35,9 @@ use tokio_rustls::TlsConnector;
 /// `Client::builder().connect_with(transport, …)`.
 pub struct WsTransport {
     endpoint: String,
+    host: String,
+    port: u16,
+    use_tls: bool,
     secret_key: String,
 }
 
@@ -44,6 +47,9 @@ impl WsTransport {
         let scheme = if use_tls { "wss" } else { "ws" };
         Self {
             endpoint: format!("{scheme}://{host}:{port}/acp"),
+            host: host.to_string(),
+            port,
+            use_tls,
             secret_key: secret_key.to_string(),
         }
     }
@@ -53,10 +59,20 @@ impl WsTransport {
     /// it no longer fills them in), plus the `X-Secret-Key` header.
     fn handshake_request(&self) -> Result<Request<()>, AcpError> {
         let key = async_tungstenite::tungstenite::handshake::client::generate_key();
+        // Host must be authority-only, and the port is OMITTED when it is the
+        // scheme default (RFC 7230 §5.4). Two real failures came from getting
+        // this wrong against the public endpoint: a trailing path made Caddy
+        // reply 400 to the upgrade, and an explicit `:443` made its site
+        // matcher reply 403 — while `Host: host` (what OkHttp sends) gets 101.
+        let authority = if (self.use_tls && self.port == 443) || (!self.use_tls && self.port == 80) {
+            self.host.clone()
+        } else {
+            format!("{}:{}", self.host, self.port)
+        };
         Request::builder()
             .method("GET")
             .uri(self.endpoint.as_str())
-            .header("Host", self.endpoint.trim_start_matches("ws://").trim_start_matches("wss://"))
+            .header("Host", authority)
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
             .header("Sec-WebSocket-Version", "13")
@@ -255,4 +271,28 @@ fn trust_all_connector() -> TlsConnector {
         .with_custom_certificate_verifier(Arc::new(NoVerify))
         .with_no_client_auth();
     TlsConnector::from(Arc::new(config))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_header_is_authority_only() {
+        // Regression: the Host header used to carry the path (`host:443/acp`),
+        // which Caddy rejects with 400 Bad Request on the upgrade.
+        let t = WsTransport::new("goose.gauvin.id", 443, "k", true);
+        let req = t.handshake_request().unwrap();
+        // Default wss port: the Host MUST omit it (Caddy's site matcher 403s
+        // an explicit :443 on the upgrade; OkHttp omits it and gets 101).
+        assert_eq!(req.headers().get("Host").unwrap(), "goose.gauvin.id");
+
+        let t = WsTransport::new("192.168.1.5", 3284, "k", false);
+        let req = t.handshake_request().unwrap();
+        assert_eq!(req.headers().get("Host").unwrap(), "192.168.1.5:3284");
+
+        let t = WsTransport::new("example.com", 80, "k", false);
+        let req = t.handshake_request().unwrap();
+        assert_eq!(req.headers().get("Host").unwrap(), "example.com");
+    }
 }
