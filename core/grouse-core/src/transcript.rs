@@ -511,6 +511,7 @@ mod tests {
         fn on_projects(&self, _projects: Vec<ProjectSummary>) {}
         fn on_roam_peer_status(&self, _label: String, _status: String) {}
         fn on_roam_sessions(&self, _label: String, _sessions: Vec<SessionSummary>) {}
+        fn on_peer_new_session(&self, _label: String, _session_id: String) {}
         fn on_active_run(&self, _session_id: String, _run_id: String) {}
         fn on_commands(&self, _commands: Vec<String>) {}
     }

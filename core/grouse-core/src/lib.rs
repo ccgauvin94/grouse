@@ -229,6 +229,9 @@ pub trait CoreListener: Send + Sync {
     fn on_roam_peer_status(&self, label: String, status: String);
     /// A roam peer's `session/list` result, ids prefixed `roam:<peer>:<id>`.
     fn on_roam_sessions(&self, label: String, sessions: Vec<SessionSummary>);
+    /// A fresh session created on a roam peer (`session/new` reply), raw id
+    /// (NOT prefixed — the UI prefixes it for routing).
+    fn on_peer_new_session(&self, label: String, session_id: String);
     /// The live turn's run id for a session, or empty when the run ended
     /// (gap 1: makes session/steer reachable).
     fn on_active_run(&self, session_id: String, run_id: String);
@@ -677,6 +680,30 @@ impl Core {
             .map(|config| config.cwd.clone())
             .unwrap_or_default();
         peer.open_session(session_id, cwd);
+    }
+
+    /// Create a fresh session on a roam peer; the peer becomes the chat owner
+    /// until a Main session is opened. Uses the only known-good cwd, exactly
+    /// like `roam_open_session` (the remote goose has no default working dir).
+    pub fn roam_new_session(&self, label: String) {
+        let peer = self
+            .inner
+            .peers
+            .lock()
+            .iter()
+            .find(|peer| peer.label() == label)
+            .cloned();
+        let Some(peer) = peer else { return };
+        *self.inner.active_peer_label.write() = Some(label);
+        let cwd = self
+            .inner
+            .state
+            .lock()
+            .last_config
+            .as_ref()
+            .map(|config| config.cwd.clone())
+            .unwrap_or_default();
+        peer.new_session(cwd);
     }
 
     /// Answer a permission request (CONTRACT §5); routes to the active peer
@@ -1480,6 +1507,9 @@ impl CoreListener for CoreListenerForwarder {
     }
     fn on_roam_sessions(&self, label: String, sessions: Vec<SessionSummary>) {
         self.0.on_roam_sessions(label, sessions);
+    }
+    fn on_peer_new_session(&self, label: String, session_id: String) {
+        self.0.on_peer_new_session(label, session_id);
     }
     fn on_active_run(&self, session_id: String, run_id: String) {
         self.0.on_active_run(session_id, run_id);

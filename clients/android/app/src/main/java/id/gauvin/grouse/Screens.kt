@@ -3391,6 +3391,14 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
                             contentDescription = if (open) "collapse" else "expand",
                             tint = MaterialTheme.colorScheme.outline)
                     }
+                    // New chat ON this peer (session/new on its connection).
+                    if (ready) {
+                        IconButton(onClick = { cm.newRoamSession(peer.name) }) {
+                            Icon(Icons.Filled.Add,
+                                contentDescription = "new chat on ${peer.name}",
+                                tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
                 }
             }
             if (open && sessions.isNotEmpty()) {
@@ -3526,6 +3534,8 @@ fun RoamAddConnectionScreen(cm: ConnectionManager, nav: NavController) {
                         }
                         if (ready) {
                             TextButton(onClick = { cm.disconnectRoam(peer.name) }) { Text("Disconnect") }
+                            // New chat ON the peer: session/new on its connection.
+                            TextButton(onClick = { cm.newRoamSession(peer.name) }) { Text("New chat") }
                         } else {
                             Button(onClick = { cm.connectRoam(peer.name) }) { Text("Connect") }
                         }

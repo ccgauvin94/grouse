@@ -113,6 +113,9 @@ class ConnectionManager private constructor(context: Context) {
         override fun onRoamSessions(label: String, sessions: List<SessionSummary>) {
             main.post { this@ConnectionManager.onRoamSessions(label, sessions) }
         }
+        override fun onPeerNewSession(label: String, sessionId: String) {
+            main.post { this@ConnectionManager.onPeerNewSession(label, sessionId) }
+        }
         override fun onActiveRun(sessionId: String, runId: String) {
             main.post { onCoreActiveRun(sessionId, runId) }
         }
@@ -610,6 +613,13 @@ class ConnectionManager private constructor(context: Context) {
             messages.clear(); currentSession.value = null
         }
         roamStatus[peer] = "disconnected"
+    }
+
+    /** Start a fresh chat on a roam peer: session/new on the peer's connection
+     *  (the core resolves the cwd and reports ready once created). The new
+     *  session arrives via on_peer_new_session, which opens the chat. */
+    fun newRoamSession(name: String) {
+        core.roamNewSession(name)
     }
 
     /** Make the core's roam dial present THE identity the host accepted.
@@ -1578,6 +1588,12 @@ class ConnectionManager private constructor(context: Context) {
         val infos = sessions.map { it.toInfo() }
         this.sessions.value =
             this.sessions.value.filterNot { roamPeer(it.sessionId) == label } + infos
+    }
+
+    /** A fresh chat was created on the peer (session/new reply). Open it,
+     *  like tapping it in the drawer: the core has already routed to it. */
+    private fun onPeerNewSession(label: String, sessionId: String) {
+        openSession("roam:$label:$sessionId")
     }
 
     /** The running turn's run id (steer key), or null when no turn is live. */

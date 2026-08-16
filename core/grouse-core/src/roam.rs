@@ -249,6 +249,7 @@ impl ConnectTo<Client> for RoamTransport {
 #[derive(Debug)]
 enum PeerCommand {
     OpenSession { session_id: String, cwd: String },
+    NewSession { cwd: String },
     Close,
 }
 
@@ -472,6 +473,17 @@ impl RoamPeer {
         });
     }
 
+    /// Create a fresh session on this peer. The peer's goose has no default
+    /// cwd, so one is required (like `session/new` on the main connection);
+    /// the caller resolves it the same way `open_session` does. Fire-and-forget
+    /// into the peer's command loop, like the desktop's `openRoamSession`.
+    pub fn new_session(&self, cwd: String) {
+        if !matches!(self.status(), ConnectionStatus::Ready) {
+            return; // browse peers only open sessions once connected
+        }
+        let _ = self.cmd_tx.send(PeerCommand::NewSession { cwd });
+    }
+
     /// Disconnect the peer: FIN + cancel the stream (unblocks the reader),
     /// shut down the command loop, and report the terminal status.
     pub fn close(&self) {
@@ -670,23 +682,8 @@ impl RoamPeer {
                             self.emit_config(&reply);
                         }
                         Err(error) => {
-                            let mut params = json!({ "cwd": cwd });
-                            params["_meta"] = Value::Object(new_session_meta());
-                            let fallback = cx
-                                .send_request(UntypedMessage::new("session/new", params)?)
-                                .block_task()
-                                .await;
-                            match fallback {
-                                Ok(reply) => {
-                                    let sid = reply
-                                        .get("sessionId")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_string();
-                                    self.open(sid);
-                                    self.emit_status("ready");
-                                    self.emit_config(&reply);
-                                }
+                            match self.create_session(&cx, &cwd).await {
+                                Ok(()) => {}
                                 Err(_) => {
                                     self.fail(format!("roam session/load: {error}"));
                                 }
@@ -694,8 +691,60 @@ impl RoamPeer {
                         }
                     }
                 }
+                PeerCommand::NewSession { cwd } => {
+                    match self.create_session(&cx, &cwd).await {
+                        Ok(()) => {}
+                        Err(error) => {
+                            self.fail(format!("roam session/new: {error}"));
+                        }
+                    }
+                }
                 PeerCommand::Close => break,
             }
+        }
+        Ok(())
+    }
+
+    /// `session/new` on this peer: untyped so the reply `Value` surfaces the
+    /// peer's own {provider, model, effort} config and the fresh session id
+    /// (the app's model picker for this peer comes from `emit_config`). Opens
+    /// the created session and reports ready.
+    async fn create_session(
+        &self,
+        cx: &agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
+        cwd: &str,
+    ) -> Result<(), AcpError> {
+        // The remote goose's session/new deserializer REQUIRES mcpServers
+        // (a missing field is a hard protocol error, not a default) — the
+        // main connection sends it and so must this peer.
+        let mut params = json!({ "cwd": cwd, "mcpServers": [] });
+        params["_meta"] = Value::Object(new_session_meta());
+        let reply = cx
+            .send_request(UntypedMessage::new("session/new", params)?)
+            .block_task()
+            .await
+            .map_err(|error| AcpError::internal_error().data(format!("roam session/new: {error}")))?;
+        let sid = reply
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        self.open(sid.clone());
+        self.emit_status("ready");
+        self.emit_config(&reply);
+        // The app opens the fresh chat on receipt of this id (prefixed by the
+        // UI for routing); then the re-list below keeps the drawer in sync.
+        self.listener.on_peer_new_session(self.label.clone(), sid);
+        // The created session must enter the peer's list or the app's drawer
+        // never learns it exists (and cannot route a chat to it). Re-list.
+        let relist = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            cx.send_request(ListSessionsRequest::new().meta(session_list_meta()))
+                .block_task(),
+        )
+        .await;
+        if let Ok(Ok(list)) = relist {
+            self.apply_sessions(&list);
         }
         Ok(())
     }
@@ -1401,6 +1450,11 @@ mod tests {
                 .lock()
                 .push(format!("peer_sessions {label} {}", sessions.len()));
         }
+        fn on_peer_new_session(&self, label: String, session_id: String) {
+            self.events
+                .lock()
+                .push(format!("peer_new_session {label} {session_id}"));
+        }
 
         fn on_active_run(&self, _session_id: String, _run_id: String) {}
 
@@ -1537,6 +1591,26 @@ mod tests {
         assert!(matches!(peer.status(), ConnectionStatus::Connecting));
         peer.open_session("s1".to_string(), "/home/user".to_string());
         assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn new_session_queues_create_with_cwd() {
+        let listener = test_listener();
+        let (peer, mut cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
+        peer.new_session("/home/user".to_string());
+        match cmd_rx.try_recv() {
+            Ok(PeerCommand::NewSession { cwd }) => assert_eq!(cwd, "/home/user"),
+            other => panic!("expected NewSession command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_session_ignored_before_ready() {
+        let listener = test_listener();
+        let (peer, _) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        peer.new_session("/home/user".to_string());
+        // No Ready, no command queued (peer still Connecting).
     }
 
     #[test]

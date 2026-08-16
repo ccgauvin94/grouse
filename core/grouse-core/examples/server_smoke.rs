@@ -36,6 +36,7 @@ impl CoreListener for L {
     fn on_projects(&self, _p: Vec<grouse_core::ProjectSummary>) {}
     fn on_roam_peer_status(&self, _a: String, _b: String) {}
     fn on_roam_sessions(&self, _a: String, _b: Vec<grouse_core::SessionSummary>) {}
+    fn on_peer_new_session(&self, _a: String, _b: String) {}
     fn on_active_run(&self, _a: String, _b: String) {}
     fn on_commands(&self, _c: Vec<String>) {}
 }

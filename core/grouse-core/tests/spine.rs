@@ -42,6 +42,7 @@ enum Ev {
     Projects(Vec<ProjectSummary>),
     RoamPeerStatus(String, String),
     RoamSessions(String, Vec<SessionSummary>),
+    PeerNewSession(String, String),
     ActiveRun(String, String),
     Commands(Vec<String>),
 }
@@ -86,6 +87,9 @@ impl CoreListener for RecordingListener {
     }
     fn on_roam_sessions(&self, label: String, sessions: Vec<SessionSummary>) {
         let _ = self.tx.send(Ev::RoamSessions(label, sessions));
+    }
+    fn on_peer_new_session(&self, label: String, session_id: String) {
+        let _ = self.tx.send(Ev::PeerNewSession(label, session_id));
     }
     fn on_commands(&self, commands: Vec<String>) {
         let _ = self.tx.send(Ev::Commands(commands));
