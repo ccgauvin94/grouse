@@ -362,9 +362,32 @@ impl TranscriptStore {
     /// clear + rebuild, emitting exactly one `on_transcript` Clear. The
     /// rebuild is faithful — projecting the rebuilt bubbles reproduces the
     /// input — and the stream state resets so the next chunk starts fresh.
+    ///
+    /// No-op when the snapshot already matches the current bubbles: a cold
+    /// start paints the cached transcript via `load_cached_transcript`, then
+    /// `open_session`'s fresh path replaces the same content again — the
+    /// second rebuild emptied the list and re-painted all rows (flicker +
+    /// recomposition storm). The Clear is skipped, so the reading position
+    /// and the list stay untouched.
     pub fn replace(&self, messages: Vec<Message>) {
         {
             let mut st = self.state.lock();
+            let same = {
+                let cur = st.bubbles.iter().map(Bubble::project);
+                let mut n = 0;
+                let mut matches = true;
+                for (a, b) in cur.zip(messages.iter()) {
+                    if a != *b {
+                        matches = false;
+                        break;
+                    }
+                    n += 1;
+                }
+                matches && n == messages.len()
+            };
+            if same {
+                return;
+            }
             st.bubbles.clear();
             st.stream_idx = None;
             st.stream_role.clear();
@@ -795,5 +818,31 @@ mod tests {
         let t = store.transcript();
         assert_eq!(t.len(), 5);
         assert_eq!(t[4].content, "new");
+    }
+
+    #[test]
+    fn replace_with_identical_content_is_a_noop() {
+        let (l, t_evts, _s) = listener();
+        let store = TranscriptStore::new(l);
+        let snapshot = vec![
+            Message { id: "m1".into(), role: "user".into(), content: "hi".into() },
+            Message { id: "m2".into(), role: "agent".into(), content: "hello".into() },
+        ];
+        store.replace(snapshot.clone());
+        assert_eq!(&*t_evts.lock(), &["clear"]);
+
+        // A cold start paints the cache twice (load_cached_transcript, then
+        // open_session's fresh path): the second replace of the SAME content
+        // must not emit another Clear — that emptied the list and re-painted
+        // every row (flicker + recomposition storm).
+        store.replace(snapshot.clone());
+        assert_eq!(&*t_evts.lock(), &["clear"], "identical replace must be a no-op");
+
+        // A genuinely different snapshot still rebuilds.
+        store.replace(vec![
+            Message { id: "m1".into(), role: "user".into(), content: "hi".into() },
+            Message { id: "m2".into(), role: "agent".into(), content: "changed".into() },
+        ]);
+        assert_eq!(&*t_evts.lock(), &["clear", "clear"]);
     }
 }

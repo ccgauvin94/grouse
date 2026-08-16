@@ -37,7 +37,7 @@ use parking_lot::Mutex;
 use agent_client_protocol::schema::v1::{
     ClientCapabilities, ElicitationCapabilities, ElicitationFormCapabilities,
     FileSystemCapabilities, Implementation, InitializeRequest, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, NewSessionRequest, PermissionOptionId,
+    ListSessionsResponse, PermissionOptionId,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionInfo, SessionNotification, SessionUpdate,
 };
@@ -50,7 +50,7 @@ use futures::future::{select, BoxFuture};
 use futures::stream::StreamExt;
 use futures::pin_mut;
 use grouse_roam_core::RoamStream;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -328,6 +328,7 @@ impl RoamPeer {
         let task = peer.clone();
         runtime().spawn(async move {
             // 1. Dial (blocking, seconds) off the runtime.
+            task.emit_status("connecting: dialing");
             let dialed = tokio::task::spawn_blocking({
                 let secret = secret.clone();
                 let card = card.clone();
@@ -503,13 +504,40 @@ impl RoamPeer {
             .conn
             .clone()
             .ok_or_else(|| AcpError::internal_error().data("roam peer not connected"))?;
-        let msg = UntypedMessage::new(method, params)?;
+        let msg = UntypedMessage::new(method, self.wire_params(params))?;
         let (tx, rx) = std_mpsc::channel();
         runtime().spawn(async move {
             let _ = tx.send(conn.send_request(msg).block_task().await);
         });
         rx.recv()
             .map_err(|_| AcpError::internal_error().data("roam rpc task failed"))?
+    }
+
+    /// Preprocess outbound `sessionId` params at the peer wire boundary.
+    ///
+    /// The app and the spine always address this peer's sessions by their
+    /// prefixed id (`roam:<label>:<raw>`, see `open_session`). The remote
+    /// goose knows only the raw id — `open_session` strips the prefix for the
+    /// same reason — so every request/notification that carries a
+    /// `sessionId` must be stripped to the raw id before it leaves this peer's
+    /// connection, or the remote cannot resolve the session. This is the
+    /// single rewrite point for `rpc` and `notify`; a `sessionId` that does
+    /// not carry *this* peer's exact prefix passes through untouched (a raw id
+    /// is already correct, and another peer's prefix can't reach this
+    /// connection because `route()` resolves by label).
+    fn wire_params(&self, params: Value) -> Value {
+        let Value::Object(mut object) = params else {
+            return params;
+        };
+        let stripped = match object.get("sessionId") {
+            Some(Value::String(id)) => self.strip_prefix(id),
+            _ => return Value::Object(object),
+        };
+        if stripped == object["sessionId"].as_str().unwrap_or_default() {
+            return Value::Object(object);
+        }
+        object.insert("sessionId".into(), Value::String(stripped));
+        Value::Object(object)
     }
 
     /// Send a raw JSON-RPC notification over this peer's connection (e.g.
@@ -523,7 +551,7 @@ impl RoamPeer {
             .conn
             .clone()
             .ok_or_else(|| AcpError::internal_error().data("roam peer not connected"))?;
-        let msg = UntypedMessage::new(method, params)?;
+        let msg = UntypedMessage::new(method, self.wire_params(params))?;
         conn.send_notification(msg)
     }
 
@@ -565,17 +593,54 @@ impl RoamPeer {
     ) -> Result<(), AcpError> {
         self.inner.lock().conn = Some(cx.clone());
 
-        let _init = cx
-            .send_request(initialize_request())
-            .block_task()
-            .await
-            .map_err(|error| AcpError::internal_error().data(format!("roam initialize: {error}")))?;
+        // Phase-tagged + bounded handshake: a stall in any phase must surface
+        // as a per-phase status the UI can show, not a silent forever-hang.
+        // The host logs "connected" once its accept-ack is SENT — the phone
+        // can still be waiting here in `initialize`/`session/list` after that.
+        const PHASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-        let list: ListSessionsResponse = cx
-            .send_request(ListSessionsRequest::new().meta(session_list_meta()))
-            .block_task()
-            .await
-            .map_err(|error| AcpError::internal_error().data(format!("roam session/list: {error}")))?;
+        self.emit_status("connecting: handshake");
+        let init = tokio::time::timeout(
+            PHASE_TIMEOUT,
+            cx.send_request(initialize_request()).block_task(),
+        )
+        .await;
+        let _init = match init {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(error)) => {
+                self.fail(format!("roam initialize: {error}"));
+                return Err(AcpError::internal_error()
+                    .data(format!("roam initialize: {error}")));
+            }
+            Err(_) => {
+                self.fail("handshake timed out waiting for initialize reply".into());
+                return Err(AcpError::internal_error().data(
+                    "handshake timed out waiting for initialize reply",
+                ));
+            }
+        };
+
+        self.emit_status("connecting: listing sessions");
+        let list = tokio::time::timeout(
+            PHASE_TIMEOUT,
+            cx.send_request(ListSessionsRequest::new().meta(session_list_meta()))
+                .block_task(),
+        )
+        .await;
+        let list: ListSessionsResponse = match list {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(error)) => {
+                self.fail(format!("roam session/list: {error}"));
+                return Err(AcpError::internal_error()
+                    .data(format!("roam session/list: {error}")));
+            }
+            Err(_) => {
+                self.fail("handshake timed out waiting for session/list reply".into());
+                return Err(AcpError::internal_error().data(
+                    "handshake timed out waiting for session/list reply",
+                ));
+            }
+        };
         self.apply_sessions(&list);
 
         while let Some(cmd) = cmd_rx.recv().await {
@@ -585,25 +650,42 @@ impl RoamPeer {
                     // A stale/archived session can't be resumed — fall back to
                     // a fresh session rather than leaving the chat wedged on
                     // the failed load (desktop `response()` behavior).
-                    match cx
-                        .send_request(LoadSessionRequest::new(raw.clone(), cwd.clone()))
+                    //
+                    // Untyped sends: the raw reply `Value` is needed both to
+                    // surface the peer's own {provider, model, effort} config
+                    // (the app's model picker for this peer comes from here,
+                    // not from the main connection) and to derive the new
+                    // session id on the fallback path.
+                    let load = cx
+                        .send_request(UntypedMessage::new(
+                            "session/load",
+                            json!({ "sessionId": raw, "cwd": cwd }),
+                        )?)
                         .block_task()
-                        .await
-                    {
-                        Ok(_) => {
+                        .await;
+                    match load {
+                        Ok(reply) => {
                             self.open(raw);
                             self.emit_status("ready");
+                            self.emit_config(&reply);
                         }
                         Err(error) => {
+                            let mut params = json!({ "cwd": cwd });
+                            params["_meta"] = Value::Object(new_session_meta());
                             let fallback = cx
-                                .send_request(NewSessionRequest::new(cwd).meta(new_session_meta()))
+                                .send_request(UntypedMessage::new("session/new", params)?)
                                 .block_task()
                                 .await;
                             match fallback {
-                                Ok(resp) => {
-                                    let sid = resp.session_id.to_string();
+                                Ok(reply) => {
+                                    let sid = reply
+                                        .get("sessionId")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string();
                                     self.open(sid);
                                     self.emit_status("ready");
+                                    self.emit_config(&reply);
                                 }
                                 Err(_) => {
                                     self.fail(format!("roam session/load: {error}"));
@@ -616,6 +698,16 @@ impl RoamPeer {
             }
         }
         Ok(())
+    }
+
+    /// Surface the session config from a `session/load`|`session/new` reply as
+    /// a `CoreListener::on_config` event. The remote goose populates the
+    /// `model` option's `options` list with its featured models, so this is
+    /// where a peer's model picker gets its choices. A reply without
+    /// `configOptions` yields an empty vec — the app tolerates that.
+    fn emit_config(&self, reply: &Value) {
+        let options = crate::spine::parse_config_options(reply);
+        self.listener.on_config(options);
     }
 
     /// `session/list` arrived: store it, flip to Ready, emit. Browse mode — no
@@ -789,7 +881,27 @@ impl RoamPeer {
                         .on_session_touched(session_id, title, updated_at);
                 }
             }
-            _ => {} // config/mode/plan updates are not peer-scoped chat events
+            SessionUpdate::ConfigOptionUpdate(config) if active => {
+                // Peer-scoped config change (e.g. the user picked a different
+                // model on this peer): forward it to the listener so the app
+                // shows the peer's current provider/model/effort. Mirrors the
+                // spine's translation; gated on `active` like the neighboring
+                // chat-scoped arms.
+                let options = config
+                    .config_options
+                    .iter()
+                    .map(|option| crate::ConfigOption {
+                        id: option.id.to_string(),
+                        value: crate::spine::config_option_value(option),
+                        name: option.name.clone(),
+                        // The typed schema has no choices list — the initial
+                        // config (session/load|new reply) carries them.
+                        choices: Vec::new(),
+                    })
+                    .collect::<Vec<_>>();
+                self.listener.on_config(options);
+            }
+            _ => {} // other updates are not peer-scoped chat events
         }
     }
 
@@ -977,9 +1089,6 @@ fn chunk_text(block: &agent_client_protocol::schema::v1::ContentBlock) -> Option
 fn block_type_name(block: &agent_client_protocol::schema::v1::ContentBlock) -> &'static str {
     use agent_client_protocol::schema::v1::ContentBlock;
     match block {
-        ContentBlock::Text(_) => "text",
-        ContentBlock::Image(_) => "image",
-        ContentBlock::Audio(_) => "audio",
         ContentBlock::ResourceLink(_) => "resource_link",
         ContentBlock::Resource(_) => "resource",
         _ => "unknown",
@@ -1184,7 +1293,7 @@ pub fn active_peer<'a>(
 mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        ContentBlock, ContentChunk, TextContent, ToolCall, ToolCallId,
+        ConfigOptionUpdate, ContentBlock, ContentChunk, TextContent, ToolCall, ToolCallId,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1442,6 +1551,60 @@ mod tests {
     }
 
     #[test]
+    fn wire_params_strips_own_roam_prefix_from_session_id() {
+        let listener = test_listener();
+        let (peer, _cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        // The app/spine address this peer's sessions by the prefixed id; the
+        // wire must receive the raw id or the remote cannot resolve it.
+        let rewritten = peer.wire_params(json!({
+            "sessionId": "roam:laptop:s1",
+            "foo": "bar",
+        }));
+        assert_eq!(rewritten["sessionId"], json!("s1"));
+        // Unrelated params pass through untouched.
+        assert_eq!(rewritten["foo"], json!("bar"));
+    }
+
+    #[test]
+    fn wire_params_leaves_foreign_or_raw_ids_alone() {
+        let listener = test_listener();
+        let (peer, _cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        // A raw id (already correct) and another peer's prefix (cannot reach
+        // this connection) are not rewritten.
+        assert_eq!(peer.wire_params(json!({"sessionId": "s1"}))["sessionId"], json!("s1"));
+        assert_eq!(
+            peer.wire_params(json!({"sessionId": "roam:other:s2"}))["sessionId"],
+            json!("roam:other:s2")
+        );
+        // A params object without sessionId is returned as-is (same value).
+        let params = json!({"cwd": "/home/user"});
+        assert_eq!(peer.wire_params(params.clone()), params);
+    }
+
+    #[test]
+    fn open_session_emits_config_from_load_reply() {
+        // The peer's load reply carries `configOptions` (provider/model/effort
+        // with the featured model choices); it must reach the listener as
+        // on_config — that is the model picker's only source for a peer.
+        let reply = json!({
+            "sessionId": "s1",
+            "configOptions": [{
+                "id": "model",
+                "name": "Model",
+                "currentValue": "deepseek",
+                "options": [ { "value": "deepseek", "name": "DeepSeek" } ]
+            }]
+        });
+        let options = crate::spine::parse_config_options(&reply);
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].id, "model");
+        assert_eq!(options[0].value, "deepseek");
+        assert_eq!(options[0].choices.len(), 1);
+        assert_eq!(options[0].choices[0].value, "deepseek");
+        assert_eq!(options[0].choices[0].name, "DeepSeek");
+    }
+
+    #[test]
     fn dispatch_gates_chat_events_on_active() {
         let listener = test_listener();
         let active = Arc::new(AtomicBool::new(false));
@@ -1495,6 +1658,32 @@ mod tests {
             ),
         ));
         assert_eq!(peer.transcript().len(), 2);
+    }
+
+    #[test]
+    fn dispatch_config_option_update_forwards_when_active() {
+        let listener = test_listener();
+        let active = Arc::new(AtomicBool::new(false));
+        let (peer, _cmd_rx) = offline_peer("laptop", listener.clone(), gate(active.clone()));
+
+        let notif = SessionNotification::new(
+            "s1",
+            SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(vec![
+                agent_client_protocol::schema::v1::SessionConfigOption::select(
+                    "model", "Model", "deepseek",
+                    Vec::<agent_client_protocol::schema::v1::SessionConfigSelectOption>::new(),
+                ),
+            ])),
+        );
+        // Inactive: config change is not forwarded (chat-scoped gate).
+        peer.dispatch(notif.clone());
+        assert!(!listener.events.lock().iter().any(|e| e.starts_with("config ")));
+
+        // Active: forwarded to on_config.
+        active.store(true, Ordering::SeqCst);
+        peer.dispatch(notif);
+        let events = listener.events.lock();
+        assert!(events.iter().any(|e| e == "config 1"));
     }
 
     #[test]

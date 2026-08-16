@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
 package id.gauvin.grouse
 
 import android.Manifest
@@ -11,14 +13,15 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.core.content.IntentCompat
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Public
 import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.HorizontalDivider
@@ -27,9 +30,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
@@ -198,64 +204,90 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                 // so it must reflect renames/archives/new sessions from any client.
                 LaunchedEffect(drawerState.isOpen) { if (drawerState.isOpen) cm.refreshSidebar() }
                 Column(Modifier.fillMaxHeight().padding(vertical = 12.dp)) {
-                    if (cm.assistantEnabled.value) {
+                    // Main | Roam — the chats world vs. peer management. Roam replaces the old
+                    // standalone RoamScreen route entirely.
+                    var drawerTab by rememberSaveable { mutableStateOf("main") }
+                    TabRow(selectedTabIndex = if (drawerTab == "roam") 1 else 0,
+                        modifier = Modifier.padding(horizontal = 12.dp)) {
+                        Tab(selected = drawerTab == "main",
+                            onClick = { drawerTab = "main" },
+                            text = { Text("Main") })
+                        Tab(selected = drawerTab == "roam",
+                            onClick = { drawerTab = "roam" },
+                            text = { Text("Roam") })
+                    }
+                    if (drawerTab == "main") {
+                        if (cm.assistantEnabled.value) {
+                            NavigationDrawerItem(
+                                label = { Text("Assistant") },
+                                icon = { Icon(Icons.Filled.Psychology, contentDescription = null) },
+                                selected = route == "chat" && cm.onAssistant,
+                                onClick = {
+                                    closeDrawer(); cm.openAssistant()
+                                    nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = false } }
+                                },
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                            )
+                            HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                        }
+                        // The whole chats world lives in the menu: projects (collapsible) then free
+                        // chats. Tap opens; long-press renames/archives. Scrolls independently so
+                        // Settings stays pinned at the bottom.
+                        Box(Modifier.weight(1f)) {
+                            DrawerChats(cm, onOpen = {
+                                closeDrawer()
+                                nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
+                            }, onOpenProject = { p ->
+                                closeDrawer()
+                                nav.navigate("project/" + Uri.encode(p)) { launchSingleTop = true }
+                            })
+                        }
+                        HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                        // What the agent can be given, and when it runs: skills are the notes it
+                        // pulls in on demand, recipes are the jobs, the scheduler is their cron.
+                        // All three are server state that was previously only reachable by editing
+                        // files on the box.
                         NavigationDrawerItem(
-                            label = { Text("Assistant") },
-                            icon = { Icon(Icons.Filled.Psychology, contentDescription = null) },
-                            selected = route == "chat" && cm.onAssistant,
-                            onClick = {
-                                closeDrawer(); cm.openAssistant()
-                                nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = false } }
-                            },
+                            label = { Text("Skills") },
+                            icon = { Icon(Icons.Filled.School, contentDescription = null) },
+                            selected = route == "skills",
+                            onClick = { closeDrawer(); nav.navigate("skills") { launchSingleTop = true } },
                             modifier = Modifier.padding(horizontal = 12.dp),
                         )
-                        HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                        NavigationDrawerItem(
+                            label = { Text("Recipes") },
+                            icon = { Icon(Icons.Filled.MenuBook, contentDescription = null) },
+                            selected = route == "recipes",
+                            onClick = { closeDrawer(); nav.navigate("recipes") { launchSingleTop = true } },
+                            modifier = Modifier.padding(horizontal = 12.dp),
+                        )
+                        NavigationDrawerItem(
+                            label = { Text("Settings") },
+                            icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
+                            selected = route == "settings",
+                            onClick = { closeDrawer(); nav.navigate("settings") { launchSingleTop = true } },
+                            modifier = Modifier.padding(horizontal = 12.dp),
+                        )
+                    } else {
+                        Column(Modifier.fillMaxWidth()) {
+                            Box(Modifier.weight(1f).fillMaxWidth()) {
+                                RoamBrowse(cm, nav, onOpen = {
+                                    closeDrawer()
+                                    nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
+                                })
+                            }
+                            HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                            // Add/management is a full-screen page (own route) — it carries the
+                            // camera QR scanner, which must not sit under the drawer scrim.
+                            NavigationDrawerItem(
+                                label = { Text("New connection") },
+                                icon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                                selected = route == "roam_add",
+                                onClick = { closeDrawer(); nav.navigate("roam_add") { launchSingleTop = true } },
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                            )
+                        }
                     }
-                    // The whole chats world lives in the menu: projects (collapsible) then free
-                    // chats. Tap opens; long-press renames/archives. Scrolls independently so
-                    // Settings stays pinned at the bottom.
-                    Box(Modifier.weight(1f)) {
-                        DrawerChats(cm, onOpen = {
-                            closeDrawer()
-                            nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
-                        }, onOpenProject = { p ->
-                            closeDrawer()
-                            nav.navigate("project/" + Uri.encode(p)) { launchSingleTop = true }
-                        })
-                    }
-                    HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
-                    // What the agent can be given, and when it runs: skills are the notes it
-                    // pulls in on demand, recipes are the jobs, the scheduler is their cron.
-                    // All three are server state that was previously only reachable by editing
-                    // files on the box.
-                    NavigationDrawerItem(
-                        label = { Text("Skills") },
-                        icon = { Icon(Icons.Filled.School, contentDescription = null) },
-                        selected = route == "skills",
-                        onClick = { closeDrawer(); nav.navigate("skills") { launchSingleTop = true } },
-                        modifier = Modifier.padding(horizontal = 12.dp),
-                    )
-                    NavigationDrawerItem(
-                        label = { Text("Recipes") },
-                        icon = { Icon(Icons.Filled.MenuBook, contentDescription = null) },
-                        selected = route == "recipes",
-                        onClick = { closeDrawer(); nav.navigate("recipes") { launchSingleTop = true } },
-                        modifier = Modifier.padding(horizontal = 12.dp),
-                    )
-                    NavigationDrawerItem(
-                        label = { Text("Roam") },
-                        icon = { Icon(Icons.Filled.Public, contentDescription = null) },
-                        selected = route == "roam",
-                        onClick = { closeDrawer(); nav.navigate("roam") { launchSingleTop = true } },
-                        modifier = Modifier.padding(horizontal = 12.dp),
-                    )
-                    NavigationDrawerItem(
-                        label = { Text("Settings") },
-                        icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
-                        selected = route == "settings",
-                        onClick = { closeDrawer(); nav.navigate("settings") { launchSingleTop = true } },
-                        modifier = Modifier.padding(horizontal = 12.dp),
-                    )
                 }
             }
         },
@@ -271,10 +303,11 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                 ProjectScreen(cm, nav, pname)
             }
             composable("settings") { SettingsScreen(cm, nav, onOpenDrawer = ::openDrawer) }
-            composable("roam") { RoamScreen(cm, nav) }
+            composable("roam_add") { RoamAddConnectionScreen(cm, nav) }
             composable("qrscan") {
                 QrScanScreen(
                     onResult = { card ->
+                        // The scanner's previous entry is the standalone add page.
                         nav.previousBackStackEntry?.savedStateHandle?.set("qr_card", card)
                         nav.popBackStack()
                     },

@@ -29,6 +29,14 @@ data class ConfigOption(
 /** An image to attach to a prompt (base64 payload + mime). */
 data class ImageBlock(val mimeType: String, val dataB64: String)
 
+/** A non-image file attached to a prompt (uri + mime + one of text/blob). */
+data class FileBlock(
+    val name: String,
+    val mimeType: String,
+    val text: String? = null,
+    val blobB64: String? = null,
+)
+
 /** One choice in a tool-approval request (allow_once / allow_always / reject_*). */
 data class PermOption(val optionId: String, val label: String, val kind: String)
 
@@ -193,6 +201,7 @@ data class ChatMessage(
     val role: String,
     val text: String,
     val images: List<ImageBlock> = emptyList(),
+    val files: List<FileBlock> = emptyList(),
     // Extra detail for a "tool" message: the tool's rawInput (command/args) — Desktop shows this,
     // Grouse was discarding it and only keeping the title. Unused by other roles.
     val detail: String = "",

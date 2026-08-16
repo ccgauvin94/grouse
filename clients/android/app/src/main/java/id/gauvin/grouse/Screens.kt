@@ -1,6 +1,7 @@
 package id.gauvin.grouse
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -38,10 +39,13 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Psychology
@@ -183,9 +187,7 @@ fun ConnectScreen(cm: ConnectionManager, onConnected: () -> Unit) {
 @Composable
 fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     val ctx = LocalContext.current
-    var showConfig by remember { mutableStateOf(false) }
     var showSchedule by remember { mutableStateOf(false) }
-    var showTools by remember { mutableStateOf(false) }
     // Assistant health from last-briefing recency (briefings run hourly 7 AM–10 PM). Green = fresh,
     // yellow = late, red = stale/never. Overnight the gap grows to ~9h and that's still healthy.
     val lastBriefing = cm.store.lastBriefingAt
@@ -207,6 +209,46 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? -> uri?.let { readImage(ctx, it)?.let(attachments::add) } }
+
+    // Camera capture (returns a JPEG bitmap; the "camera square" in the + sheet).
+    // TakePicturePreview launches the system camera app, which demands the CAMERA
+    // permission be granted to US first — launching revoked crashes with
+    // SecurityException ("Permission Denial … with revoked permission").
+    var cameraPending by remember { mutableStateOf(false) }
+    val cameraLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicturePreview()
+    ) { bmp: Bitmap? -> bmp?.let { attachments.add(bitmapToImage(it)) }; cameraPending = false }
+    val cameraPerm = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) cameraLauncher.launch(null) else cameraPending = false
+    }
+    fun launchCamera() {
+        cameraPending = true
+        if (androidx.core.content.ContextCompat.checkSelfPermission(
+                ctx, android.Manifest.permission.CAMERA) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            cameraLauncher.launch(null)
+        } else {
+            cameraPerm.launch(android.Manifest.permission.CAMERA)
+        }
+    }
+
+    // Generic file attach (the "Files square"): text files become text blocks, the rest blobs.
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        uri ?: return@rememberLauncherForActivityResult
+        val name = runCatching {
+            ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                val i = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (i >= 0) c.getString(i) else null
+            }
+        }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/') ?: "file"
+        readFile(ctx, uri, name)?.let(cm.draftFiles::add)
+    }
+    var showComposer by remember { mutableStateOf(false) }
+    var showModelSheet by remember { mutableStateOf(false) }
 
     // Content shared into Goose from another app — append (don't clobber an in-progress draft).
     LaunchedEffect(cm.pendingShareText.value) {
@@ -230,11 +272,11 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     }
 
     fun reallySend() {
-        cm.send(input.trim(), attachments.toList())
-        input = ""; attachments.clear()
+        cm.send(input.trim(), attachments.toList(), cm.draftFiles.toList())
+        input = ""; attachments.clear(); cm.draftFiles.clear()
     }
     fun doSend() {
-        if (input.isBlank() && attachments.isEmpty()) return
+        if (input.isBlank() && attachments.isEmpty() && cm.draftFiles.isEmpty()) return
         // Sending images to a non-vision model (esp. LocalAI without mmproj) hangs the session.
         // The heuristic is a name-substring guess and gets it wrong (it missed Qwen3.6-35B-A3B,
         // which reads images fine); the user's own past answer for this exact model overrides it.
@@ -255,16 +297,9 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     // as history replays in.
     LaunchedEffect(cm.currentSession.value) { listState.scrollToItem(0) }
     // A replay swapped in a genuinely different transcript: go to the bottom. Identical
-    // rebuilds never touch `messages`, so the reading position survives untouched and this
+    // Rebuilds never touch `messages`, so the reading position survives untouched and this
     // never fires for them.
     LaunchedEffect(cm.replayDoneTick.value) { listState.scrollToItem(0) }
-    // Reconnect (resuming the session) when we return to the foreground.
-    val owner = LocalLifecycleOwner.current
-    DisposableEffect(owner) {
-        val obs = LifecycleEventObserver { _, e -> if (e == Lifecycle.Event.ON_RESUME) cm.ensureConnected() }
-        owner.lifecycle.addObserver(obs)
-        onDispose { owner.lifecycle.removeObserver(obs) }
-    }
 
     cm.elicitations.firstOrNull()?.let { e ->
         ElicitationSheet(e,
@@ -299,9 +334,25 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
         PermissionSheet(req, onChoose = { cm.answerPermission(req, it) })
     }
 
-    if (showTools) {
-        LaunchedEffect(Unit) { if (cm.extensions.value.isEmpty()) cm.loadExtensions() }
-        ToolManagementSheet(cm, onDismiss = { showTools = false })
+    if (showComposer) {
+        ComposerSheet(cm,
+            onCamera = { launchCamera() },
+            onPhotos = { picker.launch(PickVisualMediaRequest(
+                ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+            onFiles = { filePicker.launch(arrayOf("*/*")) },
+            onDismiss = { showComposer = false },
+        )
+    }
+
+    if (showModelSheet) {
+        ModelSheet(
+            cm.config.value,
+            cm.configuredProviders,
+            if (ConnectionManager.roamPeer(cm.currentSession.value) != null) emptySet()
+            else cm.knownModels.value,
+            cm::setOption,
+            onDismiss = { showModelSheet = false },
+        )
     }
 
     if (showVisionWarn) AlertDialog(
@@ -429,20 +480,9 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                     }
                 }
                 val roamPeer = ConnectionManager.roamPeer(cm.currentSession.value)
-                // Live tool count for THIS session — tap to see/toggle which are actually on.
-                // Shown for federated sessions too since roam-5: the probes and the
-                // session-scoped toggles all route to the owning peer.
-                AssistChip(
-                    onClick = { showTools = true },
-                    label = { Text("${cm.sessionExtensionNames.value.size}") },
-                    leadingIcon = { Icon(Icons.Filled.Build, contentDescription = "tools",
-                        modifier = Modifier.size(16.dp)) },
-                    modifier = Modifier.padding(end = 4.dp),
-                )
-                // Since roam-4 the server routes set_config_option to the owning peer, and
-                // the options shown came from the peer via session/load — so the config
-                // panel is live for federated sessions too. The chip stays as the "this
-                // chat is remote" marker next to it.
+                // Tools and model/mode now live in the + sheet and model pill — nothing
+                // in the top bar for them. The roam chip stays as the "this chat is
+                // remote" marker.
                 if (roamPeer != null) AssistChip(
                     onClick = {},
                     label = { Text(roamPeer) },
@@ -450,9 +490,6 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         modifier = Modifier.size(16.dp)) },
                     modifier = Modifier.padding(end = 4.dp),
                 )
-                IconButton(onClick = { showConfig = !showConfig }) {
-                    Icon(Icons.Filled.Tune, contentDescription = "model")
-                }
             }
         )
     }) { pad ->
@@ -460,15 +497,6 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
             if (cm.onAssistant && !hintDismissed) AssistantHint {
                 hintDismissed = true; cm.store.assistantHintSeen = true
             }
-            // Model/mode picker opens from the Tune button in the top bar (no always-on bar).
-            // On a federated session the options came from the PEER, but knownModels is the
-            // LOCAL provider's live list — merging them offered models the peer doesn't have.
-            // The peer's own choices (plus "Custom model…") are the honest set.
-            if (showConfig) ConfigPanel(cm.config.value, cm.showAllProviders.value,
-                cm.configuredProviders,
-                if (ConnectionManager.roamPeer(cm.currentSession.value) != null) emptySet()
-                else cm.knownModels.value,
-                cm::setOption, cm::compact, cm.compacting.value)
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 if (cm.messages.isEmpty() && !cm.busy.value) {
                     Column(
@@ -539,10 +567,20 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                 }
             }
 
-            if (attachments.isNotEmpty()) Row(Modifier.padding(vertical = 4.dp)) {
+            if (attachments.isNotEmpty() || cm.draftFiles.isNotEmpty()) Row(Modifier.padding(vertical = 4.dp)) {
                 attachments.forEachIndexed { i, _ ->
                     AssistChip(onClick = { attachments.removeAt(i) },
                         label = { Text("image ${i + 1}") },
+                        trailingIcon = { Icon(Icons.Filled.Close, contentDescription = "remove",
+                            modifier = Modifier.size(16.dp)) },
+                        modifier = Modifier.padding(end = 6.dp))
+                }
+                cm.draftFiles.forEachIndexed { i, f ->
+                    AssistChip(onClick = { cm.draftFiles.removeAt(i) },
+                        label = { Text(f.name, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis) },
+                        leadingIcon = { Icon(Icons.Filled.InsertDriveFile, contentDescription = null,
+                            modifier = Modifier.size(16.dp)) },
                         trailingIcon = { Icon(Icons.Filled.Close, contentDescription = "remove",
                             modifier = Modifier.size(16.dp)) },
                         modifier = Modifier.padding(end = 6.dp))
@@ -594,66 +632,32 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         )
                     }
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        // MODE pill, left -- the same slot Claude uses for its mode selector, and
-                        // the same meaning: how much the agent will do without asking. The model
-                        // lives in Settings; what you want at a glance while typing is whether
-                        // this turn is going to stop for approval.
-                        //
-                        val modeOpt = cm.config.value.firstOrNull { it.id == "mode" }
-                        val modeLabel = prettyMode(modeOpt?.currentValue)
-                        var modeMenu by remember { mutableStateOf(false) }
-                        Box {
-                            Surface(
-                                shape = RoundedCornerShape(20.dp),
-                                color = MaterialTheme.colorScheme.surface,
-                                modifier = Modifier.clickable(enabled = modeOpt != null) {
-                                    modeMenu = true
-                                },
-                            ) {
-                                Row(
-                                    Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Icon(Icons.Filled.Bolt, contentDescription = null,
-                                        modifier = Modifier.size(16.dp),
-                                        tint = MaterialTheme.colorScheme.onSurface)
-                                    Spacer(Modifier.width(6.dp))
-                                    Text(modeLabel, style = MaterialTheme.typography.labelLarge,
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.widthIn(max = 130.dp))
-                                }
-                            }
-                            DropdownMenu(expanded = modeMenu, onDismissRequest = { modeMenu = false }) {
-                                modeOpt?.choices?.forEach { c ->
-                                    DropdownMenuItem(
-                                        text = {
-                                            Column {
-                                                Text(prettyMode(c.value))
-                                                Text(modeBlurb(c.value),
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                            }
-                                        },
-                                        onClick = {
-                                            modeMenu = false
-                                            cm.setOption("mode", c.value)
-                                        },
-                                    )
-                                }
-                            }
-                        }
-                        Spacer(Modifier.weight(1f))
-                        IconButton(
-                            onClick = {
-                                picker.launch(PickVisualMediaRequest(
-                                    ActivityResultContracts.PickVisualMedia.ImageOnly))
-                            },
-                            modifier = Modifier.size(40.dp),
+                        // "+" pill, left -- Claude-style composer: attach (camera/photos/files),
+                        // the tool-approval mode, and the tools-for-this-chat list all live in
+                        // the bottom sheet it opens. The MODEL pill stays beside it (the model
+                        // you're about to prompt with, worth seeing at a glance while typing).
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            modifier = Modifier.clickable { showComposer = true },
                         ) {
-                            Icon(Icons.Filled.AttachFile, contentDescription = "attach image",
-                                modifier = Modifier.size(21.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Row(
+                                Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(Icons.Filled.Add, contentDescription = "attach, mode, tools",
+                                    modifier = Modifier.size(18.dp),
+                                    tint = MaterialTheme.colorScheme.onSurface)
+                            }
                         }
+                        Spacer(Modifier.width(6.dp))
+                        // MODEL pill, right beside "+": the model you're about to prompt with,
+                        // switchable without opening the Tune panel. Opens the full-width
+                        // source/model/effort sheet.
+                        val modelOpt = cm.config.value.firstOrNull { it.id == "model" }
+                        ModelPill(modelOpt, cm.knownModels.value, cm::setOption,
+                            onOpenSheet = { showModelSheet = true })
+                        Spacer(Modifier.weight(1f))
                         // One circle, two states: stop while a turn runs, send when there is
                         // text. Sending mid-turn queues, so the arrow is never wrong -- it just
                         // may not go out immediately.
@@ -807,71 +811,130 @@ fun ElicitationSheet(
     }
 }
 
-/** What tools are actually active in THIS session, with a switch per extension to change it on the
- *  fly (session-scoped — never touches config.yaml or any other open session). Distinct from
- *  Settings' Extensions screen (that one's the GLOBAL default for new chats) and the Session
- *  extension profiles (a saved preset applied at open time) — this is "right now, this chat". */
+/** The tools-for-this-chat list body, shared by the composer "+" sheet. */
+@Composable
+private fun ToolManagementBody(cm: ConnectionManager, title: String = "Tools for this chat") {
+    Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp).verticalScroll(rememberScrollState())) {
+        Text(title, style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(4.dp))
+        Text("Session only — not global. Other chats and your defaults are untouched.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+        Spacer(Modifier.height(12.dp))
+        // A federated session's rows come from the PEER's own session extension list
+        // (plus any detached this session, so they can be re-enabled). The peer's global
+        // catalog isn't queryable — config/extensions/list has no session id to route on —
+        // so extensions not attached to the remote session simply don't appear.
+        val remotePeer = ConnectionManager.roamPeer(cm.currentSession.value)
+        val rows = if (remotePeer != null)
+            (cm.sessionExtensionInfos.value + cm.detachedPeerExts.value).sortedBy { it.name }
+        else cm.extensions.value
+        if (remotePeer != null) {
+            Text("This chat lives on $remotePeer — changes apply there, and only " +
+                "extensions already in the chat are listed.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline)
+            Spacer(Modifier.height(12.dp))
+        }
+        if (rows.isEmpty()) {
+            Text("loading…", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline)
+        }
+        val active = cm.sessionExtensionNames.value.toSet()
+        rows.forEach { e ->
+            val isOn = e.name in active
+            Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text(e.name, style = MaterialTheme.typography.bodyLarge)
+                    if (e.description.isNotBlank())
+                        Text(e.description, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline, maxLines = 2)
+                }
+                // Every switch is live, bundled or not. This used to be
+                // `enabled = !(e.bundled && isOn)`, meant to stop a core extension being stripped
+                // -- but 8 of the 12 enabled extensions are bundled, so most of the sheet was
+                // permanently greyed and read as broken. goose itself imposes no such rule:
+                // session/extensions/remove drops a bundled extension for this session happily,
+                // and the next new chat starts from config.yaml again, so the blast radius is one
+                // conversation.
+                Switch(
+                    checked = isOn,
+                    onCheckedChange = { on -> cm.toggleSessionExtension(e, on) },
+                )
+            }
+            if (isOn) ToolList(cm, e, cm.sessionTools.value[e.name].orEmpty().toSet()) {
+                cm.setSessionTools(e, it)          // this chat only
+            }
+            HorizontalDivider()
+        }
+    }
+}
+
+/** The "+" composer sheet (Claude-style): attach squares on top, then the tool-approval
+ *  mode, then the tools-for-this-chat list. Replaces the old mode pill + attach button. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ToolManagementSheet(cm: ConnectionManager, onDismiss: () -> Unit) {
-    // Re-list the session's tools and extensions every time the sheet opens. Ready's two polls
-    // (0s/2.5s) can both miss a slow-attaching MCP extension, after which nothing else refreshed —
-    // the sheet then showed the previous session's state until a manual toggle forced a round trip.
-    LaunchedEffect(Unit) { cm.refreshSessionSheet() }
+private fun ComposerSheet(
+    cm: ConnectionManager,
+    onCamera: () -> Unit,
+    onPhotos: () -> Unit,
+    onFiles: () -> Unit,
+    onDismiss: () -> Unit,
+) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp).verticalScroll(rememberScrollState())) {
-            Text("Tools for this chat", style = MaterialTheme.typography.titleLarge)
-            Spacer(Modifier.height(4.dp))
-            Text("Session-only — doesn't change your global defaults or other chats. Reflects this " +
-                "chat's own tool set from when it was opened, which can lag behind a global change " +
-                "made since — flip it here if it's stale.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
-            Spacer(Modifier.height(12.dp))
-            // A federated session's rows come from the PEER's own session extension list
-            // (plus any detached this session, so they can be re-enabled). The peer's global
-            // catalog isn't queryable — config/extensions/list has no session id to route on —
-            // so extensions not attached to the remote session simply don't appear.
-            val remotePeer = ConnectionManager.roamPeer(cm.currentSession.value)
-            val rows = if (remotePeer != null)
-                (cm.sessionExtensionInfos.value + cm.detachedPeerExts.value).sortedBy { it.name }
-            else cm.extensions.value
-            if (remotePeer != null) {
-                Text("This chat lives on $remotePeer — changes apply there, and only " +
-                    "extensions already in the chat are listed.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline)
-                Spacer(Modifier.height(12.dp))
-            }
-            if (rows.isEmpty()) {
-                Text("loading…", style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline)
-            }
-            val active = cm.sessionExtensionNames.value.toSet()
-            rows.forEach { e ->
-                val isOn = e.name in active
-                Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                        Text(e.name, style = MaterialTheme.typography.bodyLarge)
-                        if (e.description.isNotBlank())
-                            Text(e.description, style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.outline, maxLines = 2)
+        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
+            // Attach squares, Claude-style: three equal tiles across the top.
+            Row(Modifier.fillMaxWidth()) {
+                listOf(
+                    Triple("Camera", Icons.Filled.PhotoCamera, onCamera),
+                    Triple("Photos", Icons.Filled.Image, onPhotos),
+                    Triple("Files", Icons.Filled.InsertDriveFile, onFiles),
+                ).forEach { (label, icon, action) ->
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.weight(1f).padding(end = 8.dp).clickable { action() },
+                    ) {
+                        Column(
+                            Modifier.fillMaxWidth().padding(vertical = 14.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Icon(icon, contentDescription = label, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.height(6.dp))
+                            Text(label, style = MaterialTheme.typography.labelMedium)
+                        }
                     }
-                    // Every switch is live, bundled or not. This used to be
-                    // `enabled = !(e.bundled && isOn)`, meant to stop a core extension being stripped
-                    // -- but 8 of the 12 enabled extensions are bundled, so most of the sheet was
-                    // permanently greyed and read as broken. goose itself imposes no such rule:
-                    // session/extensions/remove drops a bundled extension for this session happily,
-                    // and the next new chat starts from config.yaml again, so the blast radius is one
-                    // conversation.
-                    Switch(
-                        checked = isOn,
-                        onCheckedChange = { on -> cm.toggleSessionExtension(e, on) },
-                    )
                 }
-                if (isOn) ToolList(cm, e, cm.sessionTools.value[e.name].orEmpty().toSet()) {
-                    cm.setSessionTools(e, it)          // this chat only
+            }
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(12.dp))
+
+            // Tool-approval mode: how much the agent may do without asking, this chat.
+            // Compact dropdown, not a stack of blocks — the sheet is about attach +
+            // tools; the mode is one knob.
+            val modeOpt = cm.config.value.firstOrNull { it.id == "mode" }
+            ModeDropdown(modeOpt, cm::setOption)
+            Spacer(Modifier.height(8.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(8.dp))
+
+            // Tools for this chat (session-scoped toggles + per-extension tool lists).
+            LaunchedEffect(Unit) {
+                if (cm.extensions.value.isEmpty()) cm.loadExtensions()
+                cm.refreshSessionSheet()
+            }
+            ToolManagementBody(cm, title = "Tools")
+            Spacer(Modifier.height(4.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(8.dp))
+            // Compact conversation — was in the Tune panel; the + sheet is its home now.
+            OutlinedButton(onClick = { cm.compact() }, enabled = !cm.compacting.value,
+                modifier = Modifier.fillMaxWidth()) {
+                if (cm.compacting.value) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
                 }
-                HorizontalDivider()
+                Text(if (cm.compacting.value) "Compacting…" else "Compact conversation")
             }
         }
     }
@@ -936,33 +999,24 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     // other session (the 2026-08-01 migration filed it under "inbox"), so it needs excluding
     // explicitly or it renders twice -- once pinned, once as an ordinary chat.
     val all = cm.sessions.value.filter { ConnectionManager.sessionKind(it) != SessionKind.ASSISTANT }
-    // Remote sessions split out BEFORE project grouping, and not only for the section
-    // below: a federated SessionInfo carries the REMOTE server's project_id, which matches
-    // no local project — grouped naively it lands in neither a project nor the null bucket
-    // and silently vanishes from the drawer.
-    val (remoteChats, localChats) = all.partition { ConnectionManager.roamPeer(it.sessionId) != null }
-    val remoteByPeer = remoteChats.groupBy { ConnectionManager.roamPeer(it.sessionId)!! }
+    // All sessions here are LOCAL — remote (roam peer) sessions moved to the Roam tab's
+    // per-peer groups (RoamTabBody). Grouped naively a federated SessionInfo carries the
+    // REMOTE server's project_id, so it must never mix into the local project/free split.
+    val localChats = all
     val byProjectId = localChats.groupBy { it.projectId }
     val freeChats = byProjectId[null].orEmpty()
     val projects = cm.projects.value
 
     @Composable
-    fun sessionRow(s: SessionInfo, indent: Boolean, markRemote: Boolean = true) {
+    fun sessionRow(s: SessionInfo, indent: Boolean) {
         Row(Modifier.fillMaxWidth()
             .combinedClickable(onClick = { cm.openSession(s.sessionId); onOpen() },
                 onLongClick = { actionsFor = s })
             .padding(start = if (indent) 34.dp else 10.dp, end = 8.dp)
             .padding(vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            // markRemote=false under a peer group header, where a per-row globe is noise.
-            val peer = ConnectionManager.roamPeer(s.sessionId).takeIf { markRemote }
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (peer != null) {
-                        Icon(Icons.Filled.Public, contentDescription = "remote — on $peer",
-                            modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.outline)
-                        Spacer(Modifier.width(5.dp))
-                    }
                     Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.bodyLarge,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -1040,49 +1094,8 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
                 modifier = Modifier.padding(start = 10.dp, top = 16.dp, bottom = 2.dp))
         }
         item { addRow("New chat", indent = false) { cm.newSession(); onOpen() } }
+        // Remote (roam peer) sessions no longer render here — the Roam tab owns them.
         items(freeChats, key = { "s:" + it.sessionId }) { s -> sessionRow(s, indent = false) }
-        // Federated sessions get their own section, one collapsible group per roam peer —
-        // out of the daily local flow but one tap away. Groups only render for peers that
-        // are online with sessions; an offline peer contributes nothing (server behavior),
-        // so its group disappears rather than showing empty.
-        if (remoteByPeer.isNotEmpty()) {
-            item {
-                Text("REMOTE", style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(start = 10.dp, top = 16.dp, bottom = 2.dp))
-            }
-            remoteByPeer.toSortedMap().forEach { (peerName, chats) ->
-                val peerKey = "peer:$peerName"
-                val open = peerKey in expanded
-                item(key = peerKey) {
-                    Row(Modifier.fillMaxWidth().padding(start = 10.dp)
-                        .clickable { expanded = if (open) expanded - peerKey else expanded + peerKey },
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Row(Modifier.weight(1f).padding(vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Public, contentDescription = null,
-                                modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
-                            Spacer(Modifier.width(10.dp))
-                            Text(peerName, style = MaterialTheme.typography.bodyLarge,
-                                modifier = Modifier.weight(1f),
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("${chats.size}", style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.outline)
-                        }
-                        IconButton(onClick = {
-                            expanded = if (open) expanded - peerKey else expanded + peerKey
-                        }) {
-                            Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                                contentDescription = if (open) "collapse" else "expand",
-                                tint = MaterialTheme.colorScheme.outline)
-                        }
-                    }
-                }
-                if (open) items(chats, key = { "s:" + it.sessionId }) { s ->
-                    sessionRow(s, indent = true, markRemote = false)
-                }
-            }
-        }
     }
 }
 
@@ -1788,38 +1801,80 @@ fun ExtensionsScreen(cm: ConnectionManager, nav: NavController) {
 
 // ---- Model pickers ----------------------------------------------------------
 
+/** Full-width model picker sheet: source (provider), model (per source), and
+ *  thinking effort when the current model exposes it (goose 1.46 sends
+ *  `thinking_effort` only for models that support extended thinking). Opens
+ *  from the model pill; the Tune-panel dropdowns share the same widgets. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ModelBar(options: List<ConfigOption>, usage: AcpEvent.Usage?, expanded: Boolean, onToggle: () -> Unit) {
-    fun cur(id: String) = options.firstOrNull { it.id == id }?.let { o ->
-        if (o.currentValue == "current") "Provider default"
-        else o.choices.firstOrNull { it.value == o.currentValue }?.label ?: o.currentValue
+private fun ModelSheet(
+    options: List<ConfigOption>,
+    configured: Set<String>,
+    knownModels: Set<String>,
+    onPick: (String, String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
+            Text("Model", style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(12.dp))
+            if (options.isEmpty()) {
+                Text("loading model options…", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline)
+            } else {
+                val byId = options.associateBy { it.id }
+                // Source first — the model list is provider-scoped.
+                byId["provider"]?.let { opt ->
+                    ConfigDropdown(
+                        if (configured.isEmpty()) opt
+                        else opt.copy(choices = opt.choices.filter {
+                            it.value in configured || it.value == opt.currentValue
+                        }),
+                        onPick,
+                    )
+                }
+                // Models for the CURRENT source.
+                byId["model"]?.let { ModelDropdown(it, knownModels, onPick) }
+                // Effort, only when the server offers it (model-dependent).
+                byId["thinking_effort"]?.let { ConfigDropdown(it, onPick) }
+            }
+        }
     }
-    val summary = when {
-        options.isEmpty() -> "loading model…"
-        else -> listOfNotNull(cur("model"), cur("mode")).joinToString(" · ").ifBlank { "model settings" }
+}
+
+/** Compact model pill for the input row — the same slot/shape as the MODE pill
+ *  beside it. Lists goose's featured models for the current provider plus the
+ *  live-known set (same entries as the Tune panel's ModelDropdown), and a
+ *  "Custom model…" escape hatch for ids the catalog doesn't feature. */
+@Composable
+private fun ModelPill(
+    opt: ConfigOption?,
+    knownModels: Set<String>,
+    onPick: (String, String) -> Unit,
+    onOpenSheet: () -> Unit,
+) {
+    fun labelFor(v: String) = if (v == "current") "Provider default"
+        else opt?.choices?.firstOrNull { it.value == v }?.label ?: v
+    val currentLabel = when {
+        opt == null || opt.currentValue.isBlank() -> "Provider default"
+        else -> labelFor(opt.currentValue)
     }
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = MaterialTheme.shapes.small,
-        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.clickable(enabled = opt != null) { onOpenSheet() },
     ) {
         Row(
-            Modifier.fillMaxWidth().clickable { onToggle() }.padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+            Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Filled.Tune, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text(summary, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f),
-                maxLines = 1)
-            if (usage != null && usage.size > 0) {
-                Spacer(Modifier.width(6.dp))
-                Text("${fmtTokens(usage.used)}/${fmtTokens(usage.size)}",
-                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
-            }
+            Icon(Icons.Filled.Psychology, contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurface)
             Spacer(Modifier.width(6.dp))
-            Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null,
-                modifier = Modifier.rotate(if (expanded) 180f else 0f),
-                tint = MaterialTheme.colorScheme.outline)
+            Text(currentLabel, style = MaterialTheme.typography.labelLarge,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 130.dp))
         }
     }
 }
@@ -1846,7 +1901,6 @@ private fun relativeTime(iso: String): String = runCatching {
     }
 }.getOrElse { iso.take(16).replace('T', ' ') }
 
-
 /** One-time hint on the assistant thread explaining what this privileged conversation is. */
 @Composable
 private fun AssistantHint(onDismiss: () -> Unit) {
@@ -1861,47 +1915,6 @@ private fun AssistantHint(onDismiss: () -> Unit) {
             }
             IconButton(onClick = onDismiss) { Icon(Icons.Filled.Close, contentDescription = "dismiss") }
         }
-    }
-}
-
-@Composable
-fun ConfigPanel(
-    options: List<ConfigOption>,
-    showAllProviders: Boolean,
-    configured: Set<String>,
-    knownModels: Set<String>,
-    onPick: (String, String) -> Unit,
-    onCompact: () -> Unit,
-    compacting: Boolean = false,
-) {
-    if (options.isEmpty()) {
-        Text("loading model options…", style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(vertical = 8.dp))
-        return
-    }
-    val byId = options.associateBy { it.id }
-    Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-        for (id in CONFIG_IDS) byId[id]?.let { opt ->
-            when (id) {
-                // Dropdown of goose's featured models + ones seen before for the current provider.
-                "model" -> ModelDropdown(opt, knownModels, onPick)
-                // Hide unconfigured providers unless the user opted into the full catalog.
-                "provider" -> ConfigDropdown(
-                    if (showAllProviders) opt
-                    else opt.copy(choices = opt.choices.filter { it.value in configured || it.value == opt.currentValue }),
-                    onPick)
-                else -> ConfigDropdown(opt, onPick)
-            }
-        }
-        OutlinedButton(onClick = onCompact, enabled = !compacting,
-            modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
-            if (compacting) {
-                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                Spacer(Modifier.width(8.dp))
-            }
-            Text(if (compacting) "Compacting…" else "Compact conversation")
-        }
-        HorizontalDivider(Modifier.padding(top = 8.dp))
     }
 }
 
@@ -2005,6 +2018,43 @@ fun ConfigDropdown(opt: ConfigOption, onPick: (String, String) -> Unit) {
             opt.choices.forEach { c ->
                 DropdownMenuItem(text = { Text(c.label) },
                     onClick = { expanded = false; onPick(opt.id, c.value) })
+            }
+        }
+    }
+}
+
+/** Tool-approval mode as a compact dropdown (the + sheet's knob): shows the current
+ *  mode, menu lists all modes with their one-line explanations. Same options as the
+ *  old stacked blocks — just not a full-width column each. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ModeDropdown(opt: ConfigOption?, onPick: (String, String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val current = opt?.currentValue.orEmpty()
+    ExposedDropdownMenuBox(
+        expanded = expanded, onExpandedChange = { expanded = it },
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+    ) {
+        OutlinedTextField(
+            value = prettyMode(current),
+            onValueChange = {}, readOnly = true, singleLine = true,
+            label = { Text("Tool mode") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+            modifier = Modifier.menuAnchor().fillMaxWidth()
+        )
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            opt?.choices?.forEach { c ->
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(prettyMode(c.value))
+                            Text(modeBlurb(c.value),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    },
+                    onClick = { expanded = false; onPick("mode", c.value) },
+                )
             }
         }
     }
@@ -3269,17 +3319,117 @@ fun SkillScreen(cm: ConnectionManager, nav: NavController, name: String) {
 // filed by goose's own project id and run wherever the configured working directory points.
 
 
-/** Direct iroh pairing (roam branch): this device's identity + saved hosts. A
- *  host is a `goose serve --roam` (or `roam share`) peer; once connected, its
- *  sessions appear in the drawer like any other — the peer IS a first-class
- *  goose, no `roam:` ids, no hub. */
+/** Browse view (DEFAULT): saved endpoints as collapsible groups like projects, each
+ *  listing its sessions. Live status shown inline; only ready peers carry sessions. */
 @Composable
+fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
+    var expanded by rememberSaveable { mutableStateOf(listOf<String>()) }
+    // Populate the peer list from the persisted store (cards survive restart).
+    LaunchedEffect(Unit) { cm.loadRoamPeers() }
+    val peers = cm.roamPeers
+    val status = cm.roamStatus
+    // Remote session groups listed per peer; only peers currently CONNECTED (ready) are listed.
+    val sessionsByLocalPeer = cm.sessions.value
+        .filter { it.sessionId.startsWith("roam:") }
+        .mapNotNull { s ->
+            val p = ConnectionManager.roamPeer(s.sessionId) ?: return@mapNotNull null
+            if (status[p]?.contentEquals("ready") != true) null else p to s
+        }
+        .groupBy({ it.first }, { it.second })
+
+    LazyColumn(Modifier.fillMaxWidth().padding(horizontal = 14.dp)) {
+        item {
+            Text("ENDPOINTS", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 2.dp))
+        }
+        if (peers.isEmpty()) {
+            item {
+                Text("No endpoints yet — use “New connection” to pair with a " +
+                    "`goose serve --roam` host.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp))
+            }
+        }
+        peers.forEach { peer ->
+            val peerKey = "peer:${peer.name}"
+            val open = peerKey in expanded
+            val st = status[peer.name]
+            val ready = st == "ready"
+            val sessions = sessionsByLocalPeer[peer.name].orEmpty()
+            item(key = peerKey) {
+                Row(Modifier.fillMaxWidth().padding(start = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.weight(1f)
+                        .clickable { expanded = if (open) expanded - peerKey else expanded + peerKey }
+                        .padding(vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Public, contentDescription = null,
+                            modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(10.dp))
+                        Text(peer.name, style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(if (ready) "ready" else (st ?: "offline"),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = when {
+                                ready -> Color(0xFF2E7D32)
+                                st == "connecting" -> Color(0xFFFFA000)
+                                st?.startsWith("error") == true -> MaterialTheme.colorScheme.error
+                                else -> MaterialTheme.colorScheme.outline
+                            })
+                        Spacer(Modifier.width(6.dp))
+                        if (sessions.isNotEmpty()) Text("${sessions.size}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline)
+                    }
+                    IconButton(onClick = {
+                        expanded = if (open) expanded - peerKey else expanded + peerKey
+                    }) {
+                        Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                            contentDescription = if (open) "collapse" else "expand",
+                            tint = MaterialTheme.colorScheme.outline)
+                    }
+                }
+            }
+            if (open && sessions.isNotEmpty()) {
+                item(key = peerKey + ":sessions") {
+                    sessions.sortedBy { it.updatedAt }.forEach { s ->
+                        Row(Modifier.fillMaxWidth()
+                            .clickable { cm.openSession(s.sessionId); onOpen() }
+                            .padding(start = 34.dp, end = 8.dp).padding(vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(s.title.ifBlank { "Untitled chat" },
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (s.snippet.isNotBlank())
+                                    Text(s.snippet, style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.outline,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Add/management page (standalone route): this device's identity (incl. a host-scannable
+ *  QR), add-host form, and per-host connect/disconnect. Opened from the drawer's
+ *  "New connection" item. Full-screen on purpose — the camera card scanner must not sit
+ *  under the drawer scrim. */
 @OptIn(ExperimentalMaterial3Api::class)
-fun RoamScreen(cm: ConnectionManager, nav: NavController) {
+@Composable
+fun RoamAddConnectionScreen(cm: ConnectionManager, nav: NavController) {
     var name by remember { mutableStateOf("") }
     var card by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(Unit) { cm.loadRoamPeers() }
+    val peers = cm.roamPeers
+    val status = cm.roamStatus
+
     // A scanned card arrives back via the qrscan route's savedStateHandle.
     LaunchedEffect(nav.currentBackStackEntry) {
         nav.currentBackStackEntry?.savedStateHandle
@@ -3290,9 +3440,10 @@ fun RoamScreen(cm: ConnectionManager, nav: NavController) {
                 }
             }
     }
+
     Scaffold(topBar = {
         TopAppBar(
-            title = { Text("Roam") },
+            title = { Text("New connection") },
             navigationIcon = {
                 IconButton(onClick = { nav.popBackStack() }) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
@@ -3304,10 +3455,30 @@ fun RoamScreen(cm: ConnectionManager, nav: NavController) {
             .verticalScroll(rememberScrollState())) {
             SettingsSection("This device") {
                 SettingCaption("The host you pair with sees this key. Paste the host's card " +
-                    "below, then accept this device on the host (`goose roam peers accept`).")
+                    "below, or show this QR / copy this card to a host to pair — then accept " +
+                    "this device on the host (`goose roam peers accept`). Either direction works.")
+                DeviceQr(cm, modifier = Modifier.size(200.dp).align(Alignment.CenterHorizontally)
+                    .padding(vertical = 4.dp))
                 SelectionContainer {
                     Text(cm.roamPublicKey, style = MaterialTheme.typography.bodySmall,
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()) {
+                    // The shareable card — paste this into `goose roam peers` / a pairing tool.
+                    Text(cm.deviceCard, style = MaterialTheme.typography.bodySmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f))
+                    val clip = LocalClipboardManager.current
+                    val ctx = LocalContext.current
+                    IconButton(onClick = {
+                        clip.setText(AnnotatedString(cm.deviceCard))
+                        Toast.makeText(ctx, "Card copied", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Icon(Icons.Filled.ContentCopy, contentDescription = "Copy device card")
+                    }
                 }
             }
             SettingsSection("Add a host") {
@@ -3332,20 +3503,29 @@ fun RoamScreen(cm: ConnectionManager, nav: NavController) {
                 }
             }
             SettingsSection("Hosts") {
-                if (cm.roamPeers.isEmpty())
+                if (peers.isEmpty())
                     SettingCaption("No hosts yet — paste a connection card from a " +
                         "`goose serve --roam` or `roam share` host.")
-                cm.roamPeers.forEach { peer ->
-                    val connected = cm.currentRoamPeer == peer.name
+                peers.forEach { peer ->
+                    val st = status[peer.name]
+                    val ready = st == "ready"
+                    val statusColor = when {
+                        ready -> Color(0xFF2E7D32)
+                        st == "connecting" -> Color(0xFFFFA000)
+                        st?.startsWith("error") == true -> MaterialTheme.colorScheme.error
+                        else -> MaterialTheme.colorScheme.outline
+                    }
                     Row(verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                         Column(Modifier.weight(1f)) {
                             Text(peer.name, style = MaterialTheme.typography.bodyLarge)
                             Text(peer.fingerprint, style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.outline)
+                            Text(if (st.isNullOrBlank()) "disconnected" else st,
+                                style = MaterialTheme.typography.labelSmall, color = statusColor)
                         }
-                        if (connected) {
-                            TextButton(onClick = { cm.disconnectRoam() }) { Text("Disconnect") }
+                        if (ready) {
+                            TextButton(onClick = { cm.disconnectRoam(peer.name) }) { Text("Disconnect") }
                         } else {
                             Button(onClick = { cm.connectRoam(peer.name) }) { Text("Connect") }
                         }
@@ -3354,16 +3534,8 @@ fun RoamScreen(cm: ConnectionManager, nav: NavController) {
                         }
                     }
                 }
-                cm.currentRoamPeer?.let { peer ->
-                    SettingCaption("Connected to $peer — open the menu to pick one of its " +
-                        "sessions; remote chats work like local ones.")
-                }
-                if (cm.status.value.isNotBlank()) {
-                    Text(cm.status.value, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline,
-                        modifier = Modifier.padding(top = 6.dp))
-                }
             }
+            Spacer(Modifier.height(16.dp))
         }
     }
 }
@@ -3400,6 +3572,38 @@ fun QrScanScreen(onResult: (String) -> Unit, onCancel: () -> Unit) {
         } else {
             CameraQrPreview(onCard = onResult, modifier = Modifier.padding(pad).fillMaxSize())
         }
+    }
+}
+
+/** Renders a QR of this device's roam identity so a HOST can scan the phone to pair
+ *  (the reverse of "Scan QR", which decodes a host's card). Encodes the same public key
+ *  the host would see in `peers list` and would `roam peers accept`. */
+@Composable
+fun DeviceQr(cm: ConnectionManager, modifier: Modifier = Modifier) {
+    val key = remember(cm.roamPublicKey) { cm.roamPublicKey }
+    val qr = remember(key) {
+        runCatching {
+            val matrix = com.google.zxing.qrcode.QRCodeWriter().encode(
+                key, com.google.zxing.BarcodeFormat.QR_CODE, 256, 256)
+            val px = IntArray(matrix.width * matrix.height)
+            for (y in 0 until matrix.height) {
+                for (x in 0 until matrix.width) {
+                    px[y * matrix.width + x] = if (matrix[x, y])
+                        android.graphics.Color.BLACK else android.graphics.Color.WHITE
+                }
+            }
+            android.graphics.Bitmap.createBitmap(matrix.width, matrix.height,
+                android.graphics.Bitmap.Config.ARGB_8888).apply {
+                setPixels(px, 0, matrix.width, 0, 0, matrix.width, matrix.height)
+            }.asImageBitmap()
+        }.getOrNull()
+    }
+    if (qr != null) {
+        Image(bitmap = qr, contentDescription = "This device's roam pairing QR",
+            modifier = modifier)
+    } else {
+        Text("Couldn't render pairing QR.", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error)
     }
 }
 

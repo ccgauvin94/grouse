@@ -96,7 +96,7 @@ pub struct SessionSummary {
 }
 
 /// One accumulated transcript bubble (CONTRACT §3.3/§4.3).
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
 pub struct Message {
     /// Bubble key (`message_id`); empty for live bubbles without an id.
     pub id: String,
@@ -447,6 +447,26 @@ impl Core {
             self.connect_impl(config, ConnectSpec::New { recipe_id }, false);
     }
 
+    /// Whether the cached transcript for a session is up to date with the
+    /// session's last-known `updatedAt` (from the directory cache seed, a live
+    /// session/list, or a session_info_update). A mismatch means the session
+    /// changed remotely and a replay is owed; equality means the cache is
+    /// fresh and any load can suppress its replay.
+    fn transcript_is_fresh(&self, session_id: &str, cached_at: &str) -> bool {
+        if cached_at.is_empty() {
+            return false;
+        }
+        let updated = self
+            .inner
+            .state
+            .lock()
+            .session_updated_at
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default();
+        !updated.is_empty() && updated == cached_at
+    }
+
     /// `session/load` with the session's real cwd (resolved: cache → probe →
     /// session/list, never guessed); a fresh cached transcript renders
     /// instantly, otherwise the load replays it.
@@ -456,15 +476,7 @@ impl Core {
         let cwd = self.resolve_cwd(&session_id);
         let (suppress, cached) = match self.inner.cache.load_transcript(&session_id) {
             Some((messages, cached_at)) => {
-                let updated = self
-                    .inner
-                    .state
-                    .lock()
-                    .session_updated_at
-                    .get(&session_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let fresh = !updated.is_empty() && updated == cached_at;
+                let fresh = self.transcript_is_fresh(&session_id, &cached_at);
                 (fresh, Some(messages))
             }
             None => (false, None),
@@ -935,10 +947,20 @@ impl Core {
         drop(state);
         let Some(config) = config else { return };
         let cwd = self.resolve_cwd(&resume);
+        // The freshness gate open_session applies: a session whose cached
+        // transcript is up to date must not replay just because the socket
+        // dropped (screen-off / background reconnects re-streamed the whole
+        // convo every time). The store kept the live transcript across the
+        // drop, so a fresh suppress keeps the UI exactly as it was; a stale
+        // one replays (the id-gated chunks dedupe against the store).
+        let suppress = match self.inner.cache.load_transcript(&resume) {
+            Some((_, cached_at)) => self.transcript_is_fresh(&resume, &cached_at),
+            None => false,
+        };
         let (_, _rx) = self.connect_impl(
             config,
             ConnectSpec::Resume { session_id: resume, cwd },
-            false,
+            suppress,
         );
     }
 

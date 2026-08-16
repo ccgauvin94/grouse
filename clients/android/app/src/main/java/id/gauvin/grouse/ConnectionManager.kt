@@ -69,7 +69,7 @@ class ConnectionManager private constructor(context: Context) {
     private var serviceRunning = false
     // Sends that must wait for (re)connect — a queue, not one slot, so a second reply while
     // still connecting can't clobber the first. The user bubble is added when queued (in send()).
-    private data class PendingSend(val text: String, val images: List<ImageBlock>)
+    private data class PendingSend(val text: String, val images: List<ImageBlock>, val files: List<FileBlock> = emptyList())
     private val pendingSends = ArrayDeque<PendingSend>()
 
     /** How many prompts are waiting behind the running turn. Drives the "N queued" chip -- without
@@ -84,7 +84,12 @@ class ConnectionManager private constructor(context: Context) {
     // queued, so it cannot answer "is the wire busy" -- this can.
     private var turnInFlight = false
 
+
     // --- grouse-core (the wire is the core's; these are the only handles we hold) ----------
+    // The core's OWN constructor fires callbacks synchronously (the cache-directory seed
+    // emits onSessions before the first connect), so `main` MUST be initialized before
+    // `core` — declared here, not with the other handlers below.
+    private val main = Handler(Looper.getMainLooper())
     // The core owns the socket, reconnect/backoff, the transcript, and the caches. `unstable`
     // is the _goose/unstable/* shim (recipes, schedules, skills, extensions, tools, config).
     private val core = Core(object : CoreListener {
@@ -98,9 +103,15 @@ class ConnectionManager private constructor(context: Context) {
             main.post { onCoreSessionTouched(sessionId, title, updatedAt) }
         }
         override fun onProjects(projects: List<ProjectSummary>) { main.post { onCoreProjects(projects) } }
-        override fun onRoamPeerStatus(label: String, status: String) { main.post { onRoamPeerStatus(label, status) } }
+        override fun onRoamPeerStatus(label: String, status: String) {
+            // `this@ConnectionManager.` is load-bearing: unqualified, the name resolves to
+            // THIS override (same signature) and the posted runnable re-enters it — one
+            // real core event then self-replicates on the main looper at ~700k/s (the
+            // "storm": 744k re-deliveries of a single status, main thread pegged, UI dead).
+            main.post { this@ConnectionManager.onRoamPeerStatus(label, status) }
+        }
         override fun onRoamSessions(label: String, sessions: List<SessionSummary>) {
-            main.post { onRoamSessions(label, sessions) }
+            main.post { this@ConnectionManager.onRoamSessions(label, sessions) }
         }
         override fun onActiveRun(sessionId: String, runId: String) {
             main.post { onCoreActiveRun(sessionId, runId) }
@@ -111,30 +122,32 @@ class ConnectionManager private constructor(context: Context) {
     }, appContext.filesDir.absolutePath)
     private val unstable = GrouseUnstable(object : GrouseUnstableListener {
         override fun onExport(data: String) { main.post { exportData.value = data } }
-        override fun onRecipeParams(parameters: String) { main.post { onRecipeParams(parameters) } }
-        override fun onElicitation(schema: String) { main.post { onElicitation(schema) } }
-        override fun onCompactionStatus(message: String) { main.post { onCompactionStatus(message) } }
+        override fun onRecipeParams(parameters: String) { main.post { this@ConnectionManager.onRecipeParams(parameters) } }
+        override fun onElicitation(schema: String) { main.post { this@ConnectionManager.onElicitation(schema) } }
+        override fun onCompactionStatus(message: String) { main.post { this@ConnectionManager.onCompactionStatus(message) } }
         override fun onMessageUsage(outputTokens: ULong, elapsedMs: ULong, timeToFirstTokenMs: ULong, cost: Double) {
-            main.post { onMessageUsage(outputTokens, elapsedMs, timeToFirstTokenMs, cost) }
+            main.post { this@ConnectionManager.onMessageUsage(outputTokens, elapsedMs, timeToFirstTokenMs, cost) }
         }
-        override fun onAppResource(key: String, html: String) { main.post { onAppResource(key, html) } }
-        override fun onRecipes(recipes: String) { main.post { onRecipes(recipes) } }
-        override fun onSchedules(schedules: String) { main.post { onSchedules(schedules) } }
+        override fun onAppResource(key: String, html: String) { main.post { this@ConnectionManager.onAppResource(key, html) } }
+        override fun onRecipes(recipes: String) { main.post { this@ConnectionManager.onRecipes(recipes) } }
+        override fun onSchedules(schedules: String) { main.post { this@ConnectionManager.onSchedules(schedules) } }
         override fun onProjects(projects: String) { main.post { onUnstableProjects(projects) } }
-        override fun onSkills(skills: String) { main.post { onSkills(skills) } }
-        override fun onTools(sessionId: String, tools: String) { main.post { onTools(sessionId, tools) } }
-        override fun onExtensions(extensions: String) { main.post { onExtensions(extensions) } }
-        override fun onSessionExtensions(sessionId: String, extensions: String) {
-            main.post { onSessionExtensions(sessionId, extensions) }
+        override fun onSkills(skills: String) { main.post { this@ConnectionManager.onSkills(skills) } }
+        override fun onTools(sessionId: String, tools: String) {
+            main.post { this@ConnectionManager.onTools(sessionId, tools) }
         }
-        override fun onConfigValue(key: String, value: String) { main.post { onConfigValue(key, value) } }
+        override fun onExtensions(extensions: String) { main.post { this@ConnectionManager.onExtensions(extensions) } }
+        override fun onSessionExtensions(sessionId: String, extensions: String) {
+            main.post { this@ConnectionManager.onSessionExtensions(sessionId, extensions) }
+        }
+        override fun onConfigValue(key: String, value: String) { main.post { this@ConnectionManager.onConfigValue(key, value) } }
         override fun onSupportedModels(provider: String, models: String) {
-            main.post { onSupportedModels(provider, models) }
+            main.post { this@ConnectionManager.onSupportedModels(provider, models) }
         }
         override fun onSessionProbe(sessionId: String, updatedAt: String, messageCount: Long) {
             // The core owns resync now (probe → in-place replay); the app never probes.
         }
-        override fun onToolResult(text: String, isError: Boolean) { main.post { onToolResult(text, isError) } }
+        override fun onToolResult(text: String, isError: Boolean) { main.post { this@ConnectionManager.onToolResult(text, isError) } }
         override fun onError(method: String, message: String) { main.post { onUnstableError(method, message) } }
     })
 
@@ -272,6 +285,7 @@ class ConnectionManager private constructor(context: Context) {
     // Draft attachments live here (process-scoped) so a rotation/recreation doesn't drop picked
     // images -- and base64 payloads stay out of the saved-state Bundle (TransactionTooLarge).
     val draftAttachments = mutableStateListOf<ImageBlock>()
+    val draftFiles = mutableStateListOf<FileBlock>()
     val dynamicColor = mutableStateOf(store.dynamicColor)
     val showAllProviders = mutableStateOf(store.showAllProviders)
     // Live model list for the CURRENT provider, from the server, in memory only -- never
@@ -341,12 +355,12 @@ class ConnectionManager private constructor(context: Context) {
      *  namespace their tools, and only namespaced tools can be mapped back to an owner. */
     fun toolsAttributable(e: ExtInfo): Boolean = e.type == "mcp"
 
-    /** Ask the server for this session's active tools; lands as onTools. The unstable surface
-     *  routes to the MAIN connection only, so peer-owned sessions are skipped (see the roam note). */
+    /** Ask the server for this session's active tools; lands as onTools. Session-bound
+     *  unstable calls route to the owning peer (the core resolves `roam:<label>:` ids per connection),
+     *  so this serves both main- and peer-owned sessions. */
     fun refreshTools() {
         discovering = null
         val sid = core.activeSessionId() ?: return
-        if (roamPeer(currentSession.value) != null) return
         io { unstable.listTools(sid) }
     }
 
@@ -355,7 +369,6 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun sessionExtensionsList() {
         val sid = core.activeSessionId() ?: return
-        if (roamPeer(currentSession.value) != null) return
         io { unstable.sessionExtensionsList(sid) }
     }
 
@@ -373,7 +386,6 @@ class ConnectionManager private constructor(context: Context) {
         if (toolCatalog.value.containsKey(catKey(ext))) { refreshTools(); return }
         if (wrongNode(ext)) { refreshTools(); return }
         val sid = core.activeSessionId() ?: return
-        if (roamPeer(currentSession.value) != null) { refreshTools(); return }
         val unfiltered = JsonObject(ext.raw.toMutableMap().apply {
             put("available_tools", JsonArray(emptyList()))
         })
@@ -448,7 +460,6 @@ class ConnectionManager private constructor(context: Context) {
     fun setDynamicColor(v: Boolean) { store.dynamicColor = v; dynamicColor.value = v }
     fun setShowAllProviders(v: Boolean) { store.showAllProviders = v; showAllProviders.value = v }
 
-    private val main = Handler(Looper.getMainLooper())
     // The unstable shim's intents are SYNCHRONOUS RPCs (round-trip the server on the
     // calling thread) — unlike the core's own async intents. Calling them on the main
     // thread freezes the UI for the whole call (the drawer's refreshSidebar used to do
@@ -505,6 +516,33 @@ class ConnectionManager private constructor(context: Context) {
     data class RoamPeer(val name: String, val card: String, val fingerprint: String)
 
     val roamPeers = mutableStateListOf<RoamPeer>()
+    /** Live connection status per peer label: "connecting" | "ready" | "disconnected" | "error: …".
+     *  The core keeps ALL dialed peers connected simultaneously, so each is tracked here. */
+    val roamStatus = mutableStateMapOf<String, String>()
+    /** The core's iroh dial + ACP handshake have their own timeouts now, but keep a belt-and-
+     *  suspenders watchdog so a peer stuck in ANY connecting phase flips to an explicit error
+     *  instead of hanging forever. Cancelled on any terminal event. The per-phase status the
+     *  core emits ("connecting: dialing/handshake/listing sessions") stays visible until the
+     *  flip, so the user can see exactly where it stalled. */
+    private val roamDialTimeoutMs = 25_000L
+    private val roamWatchdogs = HashMap<String, Runnable>()
+    private fun cancelRoamWatchdog(name: String) {
+        roamWatchdogs.remove(name)?.let { main.removeCallbacks(it) }
+    }
+    private fun armRoamWatchdog(name: String) {
+        cancelRoamWatchdog(name)
+        val r = Runnable {
+            // Flipped to a hard error only if the peer is STILL in a connecting phase.
+            if (roamStatus[name]?.startsWith("connecting") == true) {
+                roamStatus[name] = "error: no reply from host — check the host accepted this device and its relay is reachable"
+                if (currentRoamPeer == name) {
+                    status.value = "roam: $name — no reply from host — check acceptance and relay reachability"
+                }
+            }
+        }
+        roamWatchdogs[name] = r
+        main.postDelayed(r, roamDialTimeoutMs)
+    }
     /** Name of the peer that owns the current chat, or null (main connection). */
     @Volatile var currentRoamPeer: String? = null
         private set
@@ -527,6 +565,20 @@ class ConnectionManager private constructor(context: Context) {
     val roamPublicKey: String
         get() = runCatching { identityPublicKey(roamIdentity()) }.getOrDefault("")
 
+    /** This device's shareable connection card (`goose+roam://` + base64url JSON), built from
+     *  this device's identity so a HOST can reach it. The same payload the QR encodes: version 1,
+     *  endpoint = this public key, no relay URLs (LAN-direct; the card decoder accepts empty relays).
+     *  A host that receives this card can `roam peers accept` this device and dial it back. */
+    val deviceCard: String
+        get() {
+            val key = roamPublicKey
+            if (key.isBlank()) return ""
+            val json = "{\"version\":1,\"endpoint_id\":\"$key\",\"relay_urls\":[]}"
+            val b64 = android.util.Base64.encodeToString(json.toByteArray(Charsets.UTF_8),
+                android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING)
+            return "goose+roam://$b64"
+        }
+
     /** Add a peer from its card; returns null on success, else the error text. */
     fun addRoamPeer(name: String, card: String): String? {
         val fp = try { cardFingerprint(card) } catch (t: Throwable) { return t.message ?: "invalid card" }
@@ -538,17 +590,46 @@ class ConnectionManager private constructor(context: Context) {
     fun removeRoamPeer(name: String) {
         store.roamPeers = store.roamPeers - name
         roamPeers.removeAll { it.name == name }
-        if (currentRoamPeer == name) disconnectRoam()
+        roamStatus.remove(name)
+        cancelRoamWatchdog(name)
+        // Always close the core-side peer, not only when it owns the chat: an error/watched
+        // peer that no longer matches currentRoamPeer would otherwise keep dialing forever.
+        disconnectRoam(name)
     }
 
-    fun disconnectRoam() {
-        val peer = currentRoamPeer ?: return
-        currentRoamPeer = null
+    /** Disconnect the named peer. Simultaneous-connection aware: the chat is cleared ONLY if the
+     *  named peer is the one owning the current session — disconnecting a non-owning peer must not
+     *  tear down a chat live on another endpoint. */
+    fun disconnectRoam(name: String) {
+        val peer = name
+        cancelRoamWatchdog(peer)
+        if (currentRoamPeer == peer) currentRoamPeer = null
         core.roamDisconnect(peer)
         sessions.value = sessions.value.filterNot { roamPeer(it.sessionId) == peer }
         if (roamPeer(currentSession.value) == peer) {
             messages.clear(); currentSession.value = null
         }
+        roamStatus[peer] = "disconnected"
+    }
+
+    /** Make the core's roam dial present THE identity the host accepted.
+     *
+     *  The core keeps its own `roam_identity` file ({cacheDir}/roam_identity) and generates a
+     *  NEW secret there on first use if absent — a different key from the one this app shows on
+     *  the pairing screen (roamPublicKey / the QR / deviceCard, all derived from SecureStore).
+     *  A host that accepted the app's key then receives a dial under an UNACCEPTED key and the
+     *  handshake hangs at "connecting" with no error. Seeding that file with the app's own
+     *  secret (when they differ, and only when the app has one) makes the dial identity equal
+     *  the accepted one. cacheDir here is appContext.filesDir — passed into Core at construction,
+     *  which is exactly where CacheStore.dir() resolves, so this path is guaranteed aligned. */
+    private fun seedRoamIdentity() {
+        val secret = roamIdentity()
+        if (secret.isBlank()) return
+        val target = java.io.File(appContext.filesDir, "roam_identity")
+        runCatching {
+            if (target.readText().trim() != secret) target.writeText(secret)
+        }.onFailure { /* best-effort: a dial under the core's own generated key still works if the */
+            /* user accepts THAT key instead; the mismatch is only the root cause we prevent here. */ }
     }
 
     /** Dial a peer and bind the chat to it. `resume` is the peer-side session to open (last
@@ -560,8 +641,13 @@ class ConnectionManager private constructor(context: Context) {
     fun connectRoam(name: String, resume: String? = null, createSession: Boolean = false) {
         val peer = roamPeers.firstOrNull { it.name == name } ?: return
         currentRoamPeer = name
-        // The core generates + persists the device identity itself; browse-mode dial.
+        roamStatus[name] = "connecting"
+        armRoamWatchdog(name)
+        // The core generates + persists the device identity itself; browse-mode dial. Seed it
+        // with OUR accepted secret first (see seedRoamIdentity) so the dial key matches.
+        seedRoamIdentity()
         core.roamConnect(peer.card, name)
+
         if (resume != null) {
             messages.clear(); currentSession.value = resume
             core.roamOpenSession(name, resume)
@@ -572,18 +658,14 @@ class ConnectionManager private constructor(context: Context) {
         }
     }
 
-    /** Reconnect whatever is current: the roam peer (resuming the open session) or the WS host.
-     *  Every reconnect call site routes through here so roam mode can't accidentally dial the WS
-     *  path with a peer session id. */
-    private fun reconnectToCurrent() {
-        val peer = currentRoamPeer
-        if (peer != null) connectRoam(peer, resume = lastSessionId)
-        else open(resume = lastSessionId ?: store.lastSessionId)
-    }
+    // No automatic reconnection: an unexpected drop stays dropped until the user acts.
+    // The core reconnects the MAIN connection on its own (backoff, resume) — an app-side
+    // nudge here was the wedged loop that re-dialed the roam peer forever (peers must be
+    // explicitly connected by the user; they never auto-reconnect).
 
     // connectHome() re-enters composition every time the lock screen (or any recreation) swaps
     // AppRoot back in; only the FIRST call per process should land on the Assistant. Later calls
-    // resume whatever session was open instead.
+    // just re-open the app on whatever was already connected — no reconnect is attempted.
     private var homeOpened = false
 
     /** Fresh start: land directly on the privileged Assistant thread (its home). Uses the cached
@@ -591,10 +673,10 @@ class ConnectionManager private constructor(context: Context) {
      *  list arrives. After the first call this only re-establishes the connection. */
     fun connectHome() {
         if (!store.hasKey()) return
-        if (homeOpened) { ensureConnected(); return }
+        if (homeOpened) return
         homeOpened = true
         // Master switch off: connect to the last regular session instead of the Assistant.
-        if (!store.assistantEnabled) { ensureConnected(); return }
+        if (!store.assistantEnabled) return
         val a = store.assistantSessionId
         if (a != null) openSession(a, knownKind = SessionKind.ASSISTANT)
         else { pendingOpenAssistant = true; open(resume = null) }
@@ -625,16 +707,6 @@ class ConnectionManager private constructor(context: Context) {
             if (tail.isNotEmpty() && tail.all { it.isDigit() }) { p = tail; h = h.substring(0, colon) }
         }
         return h to p
-    }
-
-    /** Reconnect silently after Android drops the socket in the background. The core reconnects
-     *  on its own (backoff, resume) — this only nudges the give-up case or the first connect. */
-    fun ensureConnected() {
-        if (!store.hasKey() || live || connecting) return
-        val sid = lastSessionId ?: store.lastSessionId
-        if (sid != null && lastConfig != null) core.openSession(sid)
-        else if (sid != null) open(resume = sid)
-        else open(resume = null)
     }
 
     /** Refresh sessions AND the projects that label them. Kept as one call so the two can never
@@ -974,15 +1046,15 @@ class ConnectionManager private constructor(context: Context) {
         core.setConfigOption(configId, value)
     }
 
-    fun send(text: String, images: List<ImageBlock> = emptyList()) {
+    fun send(text: String, images: List<ImageBlock> = emptyList(), files: List<FileBlock> = emptyList()) {
         // Keep the images ON the message so the bubble renders the actual thumbnail(s), not a
         // "[📎 N]" placeholder. (Live-session only — a session reloaded from the server replays
         // text; images aren't reconstructed from the replayed content blocks.)
-        messages.add(ChatMessage("user", text, images)); busy.value = true
+        messages.add(ChatMessage("user", text, images, files)); busy.value = true
         lastMessageUsage.value = null   // stale stats from the previous turn shouldn't linger
         startService()   // keep the socket alive if the user backgrounds mid-turn
-        if (images.isNotEmpty() && store.describeImages) { describeThenSend(text, images); return }
-        dispatch(text, images)
+        if (images.isNotEmpty() && store.describeImages) { describeThenSend(text, images, files); return }
+        dispatch(text, images, files)
     }
 
     /** Turn the attached images into text, then send a text-only prompt.
@@ -1000,7 +1072,7 @@ class ConnectionManager private constructor(context: Context) {
      *  On failure the send still happens, with the failure written into the prompt: a silent
      *  fallback to sending the raw image would put us back where we started, and dropping the
      *  message would lose what the user typed. */
-    private fun describeThenSend(text: String, images: List<ImageBlock>) {
+    private fun describeThenSend(text: String, images: List<ImageBlock>, files: List<FileBlock> = emptyList()) {
         status.value = if (images.size == 1) "reading the image…" else "reading ${images.size} images…"
         val parts = arrayOfNulls<String>(images.size)
         var remaining = images.size
@@ -1018,13 +1090,13 @@ class ConnectionManager private constructor(context: Context) {
                             "${parts[n].orEmpty().trim()}]"
                     }
                     status.value = ""
-                    dispatch(if (text.isBlank()) described else "$text\n\n$described", emptyList())
+                    dispatch(if (text.isBlank()) described else "$text\n\n$described", emptyList(), files)
                 }
             }
         }
     }
 
-    private fun dispatch(text: String, images: List<ImageBlock>) {
+    private fun dispatch(text: String, images: List<ImageBlock>, files: List<FileBlock> = emptyList()) {
         // `ready` gate: between reconnect and replay-complete the socket is live but has no
         // bound session — a send in that window used to ERROR ("not ready — no session")
         // instead of queueing, which was the visible "app must reconnect" failure. Queue;
@@ -1032,7 +1104,7 @@ class ConnectionManager private constructor(context: Context) {
         if (live && core.ready() && !turnInFlight) {
             turnInFlight = true
             lastSessionId?.let { store.pendingPushSessionId = it }
-            sendPromptBlocks(text, images, expect = currentSession.value)
+            sendPromptBlocks(text, images, files, expect = currentSession.value)
         } else if (live) {
             // A turn is already running. Steer into it when the core surfaced
             // the run id (the server validates expected_run_id, so a run that
@@ -1045,21 +1117,20 @@ class ConnectionManager private constructor(context: Context) {
                 turnInFlight = true
                 io { unstable.steer(text, run) }
             } else {
-                enqueue(PendingSend(text, images))
+                enqueue(PendingSend(text, images, files))
             }
         } else {
             // Not connected yet (initial connect / silent reconnect window): queue and let the
             // core's own reconnect deliver the flush. The resume's replay wipes the local
             // transcript (including this just-added bubble); Ready re-adds the queued bubbles on
             // top of the rebuilt history.
-            enqueue(PendingSend(text, images))
-            if (!connecting) reconnectToCurrent()
+            enqueue(PendingSend(text, images, files))
         }
     }
 
     /** Build a Prompt and hand it to the core. The core rejects a send whose `expect` session
      *  mismatches its bound session — silently, so the mismatch is surfaced here instead. */
-    private fun sendPromptBlocks(text: String, images: List<ImageBlock>, expect: String?) {
+    private fun sendPromptBlocks(text: String, images: List<ImageBlock>, files: List<FileBlock> = emptyList(), expect: String?) {
         val bound = core.activeSessionId()
         if (expect != null && expect != bound) {
             messages.add(ChatMessage("error",
@@ -1070,6 +1141,7 @@ class ConnectionManager private constructor(context: Context) {
         val blocks = mutableListOf<PromptBlock>()
         if (text.isNotBlank()) blocks.add(PromptBlock.Text(text))
         images.forEach { img -> blocks.add(PromptBlock.Image(img.mimeType, img.dataB64)) }
+        files.forEach { f -> blocks.add(PromptBlock.Resource(f.name, f.mimeType, f.text, f.blobB64)) }
         if (blocks.isEmpty()) { busy.value = false; turnInFlight = false; return }
         core.sendPrompt(Prompt(blocks), expect?.let { SendExpect(it) })
     }
@@ -1229,6 +1301,10 @@ class ConnectionManager private constructor(context: Context) {
             io { unstable.listTools(sid) }
             main.postDelayed({ if (live && core.activeSessionId() == sid) io { unstable.listTools(sid) } }, 2500)
             io { unstable.sessionExtensionsList(sid) }
+            // The global extension catalog (Tools sheet / + sheet rows). Without this the
+            // catalog only loaded when a sheet happened to open after Ready — a sheet opened
+            // during a reconnect window bailed on `!live` and stayed "loading" forever.
+            io { unstable.listGlobalExtensions() }
             core.listSessions()   // so the Assistant thread can be resolved by title
         }
         // A rebuild (replay or cache path) just finished: unpin the list and snap to bottom
@@ -1242,7 +1318,7 @@ class ConnectionManager private constructor(context: Context) {
         // messages don't vanish from the screen (the rebuild wiped them).
         if (replayWiped) {
             replayWiped = false
-            pendingSends.forEach { messages.add(ChatMessage("user", it.text, it.images)) }
+            pendingSends.forEach { messages.add(ChatMessage("user", it.text, it.images, it.files)) }
         }
         // Send ONE queued prompt (bubbles were already added when queued); RunEnded drains
         // the rest. Firing the whole deque at once would interleave the prompts in the
@@ -1466,6 +1542,9 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     private fun onRoamPeerStatus(label: String, st: String) {
+        roamStatus[label] = st
+        // A terminal event means the dial/pair settled; the timeout watchdog (if armed) is moot.
+        if (st == "ready" || st == "disconnected" || st.startsWith("error")) cancelRoamWatchdog(label)
         when {
             st == "ready" -> {
                 // Peer connected; its sessions arrive via on_roam_sessions.
@@ -1483,6 +1562,11 @@ class ConnectionManager private constructor(context: Context) {
             st.startsWith("error") -> {
                 if (currentRoamPeer == label) currentRoamPeer = null
                 status.value = "roam: $label — ${st.removePrefix("error:")}"
+            }
+            // In-flight phases (connecting: dialing/handshake/listing sessions): show which
+            // step the dial is on, so a stall is visible instead of a static "connecting…".
+            st.startsWith("connecting") -> {
+                if (currentRoamPeer == label) status.value = "roam: $label — ${st.removePrefix("connecting: ")}"
             }
             else -> {}
         }

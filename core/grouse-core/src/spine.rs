@@ -1179,8 +1179,12 @@ pub(crate) fn parse_config_options(result: &Value) -> Vec<ConfigOption> {
                         _ => String::new(),
                     };
                     let name = obj.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                    // goose sends the selectable values under `options`
+                    // (SessionConfigSelect.options); the desktop parses the
+                    // same key. `choices` is never sent — reading it made every
+                    // dropdown empty (mode pill did nothing).
                     let choices = obj
-                        .get("choices")
+                        .get("options")
                         .and_then(Value::as_array)
                         .map(|choices| {
                             choices
@@ -1203,7 +1207,7 @@ pub(crate) fn parse_config_options(result: &Value) -> Vec<ConfigOption> {
 }
 
 /// The typed `SessionConfigOption`'s current value, flattened to a string.
-fn config_option_value(option: &agent_client_protocol::schema::v1::SessionConfigOption) -> String {
+pub(crate) fn config_option_value(option: &agent_client_protocol::schema::v1::SessionConfigOption) -> String {
     match &option.kind {
         SessionConfigKind::Select(select) => select.current_value.to_string(),
         SessionConfigKind::Boolean(boolean) => boolean.current_value.to_string(),
