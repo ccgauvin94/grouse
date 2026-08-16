@@ -1342,7 +1342,13 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     private fun onCoreSessions(list: List<SessionSummary>) {
-        sessions.value = list.map { it.toInfo() }
+        // The main connection's list REPLACES the drawer — but roam peer
+        // sessions live here too (`roam:<label>:<id>`), so keep them across
+        // main list refreshes; the roam merge is additive and must not be
+        // clobbered every time the main list arrives.
+        val main = list.map { it.toInfo() }
+        val roam = this.sessions.value.filter { it.sessionId.startsWith("roam:") }
+        sessions.value = main + roam
         // Only seed the cache when empty. It used to be written on every session list,
         // which let an OLD session sharing the title clobber the id of the thread this app
         // had just created. Newest title match wins, in case stale duplicates linger.

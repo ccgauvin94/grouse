@@ -668,10 +668,12 @@ impl RoamPeer {
                     // (the app's model picker for this peer comes from here,
                     // not from the main connection) and to derive the new
                     // session id on the fallback path.
+                    // mcpServers is REQUIRED by the remote deserializer (same
+                    // strictness as session/new — missing field = hard error).
                     let load = cx
                         .send_request(UntypedMessage::new(
                             "session/load",
-                            json!({ "sessionId": raw, "cwd": cwd }),
+                            json!({ "sessionId": raw, "cwd": cwd, "mcpServers": [] }),
                         )?)
                         .block_task()
                         .await;
@@ -682,7 +684,12 @@ impl RoamPeer {
                             self.emit_config(&reply);
                         }
                         Err(error) => {
-                            match self.create_session(&cx, &cwd).await {
+                            // Fallback: the tapped session is stale/archived —
+                            // a fresh session is better than a wedged chat.
+                            // NO on_peer_new_session here: that event opens the
+                            // app's UI, and the user asked for THIS session
+                            // (the fallback silently serves a proxy).
+                            match self.create_session(&cx, &cwd, false).await {
                                 Ok(()) => {}
                                 Err(_) => {
                                     self.fail(format!("roam session/load: {error}"));
@@ -692,7 +699,7 @@ impl RoamPeer {
                     }
                 }
                 PeerCommand::NewSession { cwd } => {
-                    match self.create_session(&cx, &cwd).await {
+                    match self.create_session(&cx, &cwd, true).await {
                         Ok(()) => {}
                         Err(error) => {
                             self.fail(format!("roam session/new: {error}"));
@@ -713,6 +720,7 @@ impl RoamPeer {
         &self,
         cx: &agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
         cwd: &str,
+        notify_new: bool,
     ) -> Result<(), AcpError> {
         // The remote goose's session/new deserializer REQUIRES mcpServers
         // (a missing field is a hard protocol error, not a default) — the
@@ -732,9 +740,12 @@ impl RoamPeer {
         self.open(sid.clone());
         self.emit_status("ready");
         self.emit_config(&reply);
-        // The app opens the fresh chat on receipt of this id (prefixed by the
-        // UI for routing); then the re-list below keeps the drawer in sync.
-        self.listener.on_peer_new_session(self.label.clone(), sid);
+        // The app opens a freshly created chat on this id — but ONLY when the
+        // user initiated the create. The load-fallback create must not yank
+        // the UI to a proxy session the user didn't ask for.
+        if notify_new {
+            self.listener.on_peer_new_session(self.label.clone(), sid);
+        }
         // The created session must enter the peer's list or the app's drawer
         // never learns it exists (and cannot route a chat to it). Re-list.
         let relist = tokio::time::timeout(
