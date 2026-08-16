@@ -3393,7 +3393,13 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
                     }
                     // New chat ON this peer (session/new on its connection).
                     if (ready) {
-                        IconButton(onClick = { cm.newRoamSession(peer.name) }) {
+                        IconButton(onClick = {
+                            cm.newRoamSession(peer.name)
+                            // Leave the browse slide: the chat opens on the
+                            // peer's on_peer_new_session, and this state change
+                            // (currentSession.next) drives the ChatScreen.
+                            onOpen()
+                        }) {
                             Icon(Icons.Filled.Add,
                                 contentDescription = "new chat on ${peer.name}",
                                 tint = MaterialTheme.colorScheme.primary)
@@ -3535,7 +3541,15 @@ fun RoamAddConnectionScreen(cm: ConnectionManager, nav: NavController) {
                         if (ready) {
                             TextButton(onClick = { cm.disconnectRoam(peer.name) }) { Text("Disconnect") }
                             // New chat ON the peer: session/new on its connection.
-                            TextButton(onClick = { cm.newRoamSession(peer.name) }) { Text("New chat") }
+                            TextButton(onClick = {
+                                cm.newRoamSession(peer.name)
+                                // Jump to the chat surface: the session opens on
+                                // the peer's on_peer_new_session once created.
+                                nav.navigate("chat") {
+                                    launchSingleTop = true
+                                    popUpTo("chat") { inclusive = true }
+                                }
+                            }) { Text("New chat") }
                         } else {
                             Button(onClick = { cm.connectRoam(peer.name) }) { Text("Connect") }
                         }
