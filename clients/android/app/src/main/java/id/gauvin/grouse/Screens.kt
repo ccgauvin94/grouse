@@ -922,6 +922,13 @@ private fun ComposerSheet(
             LaunchedEffect(Unit) {
                 if (cm.extensions.value.isEmpty()) cm.loadExtensions()
                 cm.refreshSessionSheet()
+                // A peer session's explicit calls race its session/load replay —
+                // one fetch can return empty (the SDK's routing settles after
+                // the reply). Re-ask shortly; a second empty is presumed real.
+                if (cm.roamStatus.values.any { it == "ready" }) {
+                    kotlinx.coroutines.delay(1500)
+                    cm.refreshSessionSheet()
+                }
             }
             ToolManagementBody(cm, title = "Tools")
             Spacer(Modifier.height(4.dp))
