@@ -276,6 +276,9 @@ struct PeerInner {
     sessions: Vec<SessionSummary>,
     /// The raw (unprefixed) id of the session opened on this peer, if any.
     open_session_id: Option<String>,
+    /// The live turn's run id (`_meta.goose.activeRunId`); None when no turn
+    /// is running. Mirrors the spine's active_run_id.
+    active_run: Option<String>,
     /// The SDK connection handle, set once `initialize` succeeds.
     conn: Option<agent_client_protocol::ConnectionTo<Agent>>,
     /// Peer-owned transcript of the open session (never cached).
@@ -296,6 +299,7 @@ impl PeerInner {
             status: ConnectionStatus::Connecting,
             sessions: Vec::new(),
             open_session_id: None,
+            active_run: None,
             conn: None,
             transcript: Vec::new(),
             pending_permission: None,
@@ -521,8 +525,29 @@ impl RoamPeer {
         runtime().spawn(async move {
             let _ = tx.send(conn.send_request(msg).block_task().await);
         });
-        rx.recv()
-            .map_err(|_| AcpError::internal_error().data("roam rpc task failed"))?
+        let result = rx
+            .recv()
+            .map_err(|_| AcpError::internal_error().data("roam rpc task failed"))??;
+        // The turn's completion rides the session/prompt REPLACE (the reply's
+        // stopReason) — the main connection surfaces it via store.run_ended;
+        // the peer has no store, so emit RunEnded straight to the listener so
+        // the app clears its in-flight/turnInFlight state and drains the queue.
+        if method == "session/prompt" {
+            let stop = result
+                .get("stopReason")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if (self.is_active)() {
+                self.emit_stream(StreamEvent::RunEnded {
+                    stop_reason: stop,
+                });
+            }
+            // The peer's turn bookkeeping mirrors the spine: a live run id is
+            // now over, whether or not the server sent an activeRunId update.
+            self.inner.lock().active_run = None;
+        }
+        Ok(result)
     }
 
     /// Preprocess outbound `sessionId` params at the peer wire boundary.
@@ -930,6 +955,32 @@ impl RoamPeer {
                 }
             }
             SessionUpdate::SessionInfoUpdate(info) => {
+                // The active-run lifecycle rides _meta.goose.activeRunId (same
+                // translation as the spine's dispatch_session_info_update):
+                // a present id starts a turn, an absent one ends it. The
+                // prefixed session id is emitted so the app's
+                // onCoreActiveRun matches currentSession and clears the
+                // prompting state.
+                if active {
+                    if let Some(goose) = info.meta.as_ref().and_then(|meta| meta.get("goose")) {
+                        let run = goose.get("activeRunId").and_then(Value::as_str);
+                        let started = run.map(|r| r.to_string());
+                        let ended = started.is_none()
+                            && self.inner.lock().active_run.take().is_some();
+                        if let Some(run_id) = started {
+                            self.inner.lock().active_run = Some(run_id.clone());
+                            self.listener.on_active_run(
+                                format!("roam:{}:{session_id}", self.label),
+                                run_id,
+                            );
+                        } else if ended {
+                            self.listener.on_active_run(
+                                format!("roam:{}:{session_id}", self.label),
+                                String::new(),
+                            );
+                        }
+                    }
+                }
                 let title = info.title.value().map(|t| t.to_string()).unwrap_or_default();
                 let updated_at = info
                     .updated_at
