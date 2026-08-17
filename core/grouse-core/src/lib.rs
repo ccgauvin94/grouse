@@ -331,7 +331,7 @@ struct CoreInner {
     store: Arc<TranscriptStore>,
     /// Dumb per-session transcript I/O under a default data dir (CONTRACT §7.4;
     /// the skeleton's constructor carries no CacheDir, so the core defaults it).
-    cache: CacheStore,
+    cache: Arc<CacheStore>,
     state: Mutex<CoreState>,
     /// The live main connection + its task (recreated per connect).
     conn: Mutex<Option<Arc<crate::spine::Conn>>>,
@@ -372,7 +372,7 @@ impl Core {
             inner: Arc::new(CoreInner {
                 listener,
                 store,
-                cache: CacheStore::new(cache_dir),
+                cache: Arc::new(CacheStore::new(cache_dir)),
                 state: Mutex::new(CoreState::default()),
                 conn: Mutex::new(None),
                 conn_task: Mutex::new(None),
@@ -644,7 +644,14 @@ impl Core {
         let is_active: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
             *active.read() == Some(gate_label.clone())
         });
-        let peer = RoamPeer::connect(secret, card, label, self.inner.listener.clone(), is_active);
+        let peer = RoamPeer::connect(
+            secret,
+            card,
+            label,
+            self.inner.listener.clone(),
+            is_active,
+            self.inner.cache.clone(),
+        );
         peers.push(peer);
     }
 

@@ -61,6 +61,7 @@ use crate::{
     ConnectionStatus, CoreListener, Message, PermissionOutcome, SessionSummary, StreamEvent,
     ToolCallKind, TranscriptEvent,
 };
+use crate::cache::CacheStore;
 
 // ---------------------------------------------------------------------------
 // Core runtime (shared with the spine)
@@ -269,6 +270,11 @@ pub struct RoamPeer {
     /// Gate supplied by the spine: true while this peer owns the active
     /// session. Chat-scoped events forward only under this gate.
     is_active: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// Shared transcript cache. Peer transcripts are cached under their
+    /// prefixed id (`roam:<label>:<raw>`) — collision-free across machines —
+    /// so opening a seen chat paints instantly instead of re-replaying the
+    /// whole history over the wire.
+    cache: Arc<CacheStore>,
 }
 
 struct PeerInner {
@@ -342,6 +348,7 @@ impl RoamPeer {
         label: String,
         listener: Arc<dyn CoreListener>,
         is_active: Arc<dyn Fn() -> bool + Send + Sync>,
+        cache: Arc<CacheStore>,
     ) -> Arc<Self> {
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel();
         let peer = Arc::new(Self {
@@ -350,6 +357,7 @@ impl RoamPeer {
             cmd_tx,
             listener,
             is_active,
+            cache,
         });
         let task = peer.clone();
         runtime().spawn(async move {
@@ -857,6 +865,19 @@ impl RoamPeer {
             .collect();
         {
             let mut inner = self.inner.lock();
+            // Seed each listed session's staging from the transcript cache:
+            // a seen chat then paints instantly on open (its chunks were
+            // staged here), no waiting on the wire replay.
+            for s in &list.sessions {
+                let raw = s.session_id.to_string();
+                if inner.staging.contains_key(&raw) {
+                    continue;
+                }
+                let key = self.cache_key(&raw);
+                if let Some((messages, _)) = self.cache.load_transcript(&key) {
+                    inner.staging.insert(raw, StagedSession { messages, has_new: false });
+                }
+            }
             inner.sessions = sessions;
             inner.session_cwds = cwds;
             inner.status = ConnectionStatus::Ready;
@@ -868,19 +889,46 @@ impl RoamPeer {
     /// A session/load succeeded: the peer now owns an open session and its
     /// transcript starts fresh (the server replays history as chunks).
     fn open(&self, raw_session_id: String) {
-        let mut inner = self.inner.lock();
-        // Promote backgrounded content if any: the staged chunks ARE the
-        // session's transcript since the last visit (chunks only accumulate
-        // here while the session is closed), so show them instantly — the
-        // session/load replay that follows merges/dedupes against them.
-        if let Some(staged) = inner.staging.remove(&raw_session_id) {
-            inner.transcript = staged.messages;
-        } else {
-            inner.transcript.clear();
+        {
+            let mut inner = self.inner.lock();
+            // Persist the PREVIOUS open session's transcript before switching:
+            // the next time it's opened, the cache paints it instantly.
+            if let Some(prev) = inner.open_session_id.take() {
+                let key = self.cache_key(&prev);
+                let t = inner.transcript.clone();
+                let updated = inner
+                    .sessions
+                    .iter()
+                    .find(|s| s.id.ends_with(&format!(":{prev}")))
+                    .map(|s| s.updated_at.clone())
+                    .unwrap_or_default();
+                drop(inner);
+                self.cache.save_transcript(&key, &t, &updated);
+                inner = self.inner.lock();
+            }
+            // Promote backgrounded content if any: the staged chunks ARE the
+            // session's transcript since the last visit (chunks only accumulate
+            // here while the session is closed), so show them instantly — the
+            // session/load replay that follows merges/dedupes against them.
+            if let Some(staged) = inner.staging.remove(&raw_session_id) {
+                inner.transcript = staged.messages;
+            } else {
+                inner.transcript.clear();
+            }
+            inner.open_session_id = Some(raw_session_id);
+            // Promotion (or simply visiting) clears the green dot: has_new is
+            // gone with the staging entry, and sessions() re-reads it live.
         }
-        inner.open_session_id = Some(raw_session_id);
-        // Promotion (or simply visiting) clears the green dot: has_new is
-        // gone with the staging entry, and sessions() re-reads it live.
+        // Instant paint: emit the cached/staged snapshot NOW so the UI shows
+        // the chat before the wire replay lands; the live chunks merge into
+        // it (accumulate dedupes by message id). Non-empty = not loading.
+        let snapshot = self.transcript();
+        if !snapshot.is_empty() {
+            self.listener.on_transcript(TranscriptEvent::Clear);
+            for m in snapshot {
+                self.emit(TranscriptEvent::Append { message: m });
+            }
+        }
     }
 
     /// The connection task ended. `Ok` = clean (close command). `Err` = the
@@ -918,6 +966,13 @@ impl RoamPeer {
         id.strip_prefix(&format!("roam:{}:", self.label))
             .unwrap_or(id)
             .to_string()
+    }
+
+    /// Cache key for a peer session: the prefixed id. Collision-free across
+    /// machines (the main cache keys on bare sessionId, which two machines
+    /// could share) — peer transcripts live under `roam:<label>:<raw>`.
+    fn cache_key(&self, raw: &str) -> String {
+        format!("roam:{}:{raw}", self.label)
     }
 
     // -- SessionNotification dispatch -----------------------------------------
@@ -1705,6 +1760,9 @@ mod tests {
             cmd_tx,
             listener,
             is_active,
+            cache: Arc::new(CacheStore::new(
+                std::env::temp_dir().join(format!("grouse-roam-test-{label}")),
+            )),
         });
         (peer, cmd_rx)
     }
@@ -1830,6 +1888,53 @@ mod tests {
             }
             other => panic!("expected OpenSession command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn apply_sessions_seeds_staging_from_cache() {
+        use crate::Message;
+        let listener = test_listener();
+        let (peer, _) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        // Persist a transcript for s1 under the prefixed cache key, then list:
+        // apply_sessions must seed it into staging so open() paints instantly.
+        let m = Message {
+            id: "msg1".to_string(),
+            role: "agent".to_string(),
+            content: "hello".to_string(),
+            output: String::new(),
+        };
+        assert!(peer.cache.save_transcript("roam:laptop:s1", &[m], "2026-01-01T00:00:00Z"));
+        peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
+        let n = peer
+            .inner
+            .lock()
+            .staging
+            .get("s1")
+            .map(|st| st.messages.len())
+            .unwrap_or(0);
+        assert_eq!(n, 1, "s1 should be staged from the cache");
+    }
+
+    #[test]
+    fn open_emits_cached_snapshot_instantly() {
+        use crate::Message;
+        let listener = test_listener();
+        let (peer, _) = offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
+        let m = Message {
+            id: "msg1".to_string(),
+            role: "agent".to_string(),
+            content: "hello".to_string(),
+            output: String::new(),
+        };
+        assert!(peer.cache.save_transcript("roam:laptop:s1", &[m], "2026-01-01T00:00:00Z"));
+        peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
+        peer.open("s1".to_string());
+        let events = listener.events.lock();
+        // The cached snapshot replays immediately: a Clear then one Append.
+        let has_clear = events.iter().any(|e| e.as_str() == "transcript Clear");
+        let append_count = events.iter().filter(|e| e.as_str() == "transcript Append").count();
+        assert!(has_clear, "expected a Clear painting the cached snapshot");
+        assert_eq!(append_count, 1, "expected the cached message appended");
     }
 
     #[test]
