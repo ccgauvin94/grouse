@@ -488,6 +488,7 @@ fn cold_start_emits_cached_directory_from_supplied_dir() {
         message_count: 2,
         model: String::new(),
         has_recipe: false,
+        has_new: false,
     }];
     assert!(cache.save_directory(&sessions, &std::collections::BTreeMap::new()));
 
