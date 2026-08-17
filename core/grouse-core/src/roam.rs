@@ -484,6 +484,7 @@ impl RoamPeer {
                 id: m.id.clone(),
                 role: m.role.clone(),
                 content: m.content.clone(),
+                output: m.output.clone(),
             })
             .collect()
     }
@@ -1100,6 +1101,7 @@ impl RoamPeer {
                         id: msg.id.clone(),
                         role: msg.role.clone(),
                         content: msg.content.clone(),
+                        output: String::new(),
                     },
                 })
             } else {
@@ -1110,11 +1112,13 @@ impl RoamPeer {
                 id: message_id.to_string(),
                 role: role.to_string(),
                 content: text.to_string(),
+                output: String::new(),
             };
             target.push(Message {
                 id: msg.id.clone(),
                 role: msg.role.clone(),
                 content: msg.content.clone(),
+                output: String::new(),
             });
             Some(TranscriptEvent::Append { message: msg })
         };
@@ -1154,19 +1158,20 @@ impl RoamPeer {
             st.has_new = true;
             &mut st.messages
         };
+        // Serve-shape: content is the TITLE ONLY; the result rides Message.output
+        // so the UI chip never renders the tool output in its header.
         let (message, is_new) = if let Some(msg) = target
             .iter_mut()
             .find(|m| m.role == "tool" && m.id == tool_call_id)
         {
-            msg.content = match output {
-                Some(out) => format!("{title}\n{out}"),
-                None => title.to_string(),
-            };
+            msg.content = title.to_string();
+            msg.output = output.unwrap_or("").to_string();
             (
                 Message {
                     id: msg.id.clone(),
                     role: msg.role.clone(),
                     content: msg.content.clone(),
+                    output: msg.output.clone(),
                 },
                 false,
             )
@@ -1174,15 +1179,14 @@ impl RoamPeer {
             let msg = Message {
                 id: tool_call_id.to_string(),
                 role: "tool".to_string(),
-                content: match output {
-                    Some(out) => format!("{title}\n{out}"),
-                    None => title.to_string(),
-                },
+                content: title.to_string(),
+                output: output.unwrap_or("").to_string(),
             };
             target.push(Message {
                 id: msg.id.clone(),
                 role: msg.role.clone(),
                 content: msg.content.clone(),
+                output: msg.output.clone(),
             });
             (msg, true)
         };
@@ -1212,18 +1216,25 @@ impl RoamPeer {
             st.has_new = true;
             &mut st.messages
         };
+        // Appends go to Message.output (title stays in content). Dedupe: a
+        // replay re-delivering already-staged output must not double it.
         let result = if let Some(msg) = target
             .iter_mut()
             .find(|m| m.role == "tool" && m.id == tool_call_id)
         {
-            msg.content.push_str(output);
-            Some(TranscriptEvent::Update {
-                message: Message {
-                    id: msg.id.clone(),
-                    role: msg.role.clone(),
-                    content: msg.content.clone(),
-                },
-            })
+            if !msg.output.contains(output) {
+                msg.output.push_str(output);
+                Some(TranscriptEvent::Update {
+                    message: Message {
+                        id: msg.id.clone(),
+                        role: msg.role.clone(),
+                        content: msg.content.clone(),
+                        output: msg.output.clone(),
+                    },
+                })
+            } else {
+                None
+            }
         } else {
             None
         };

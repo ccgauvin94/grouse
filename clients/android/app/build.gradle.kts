@@ -16,7 +16,7 @@ android {
         // The only native code is the arm64-v8a roam transport (grouse-roam-core
         // .so + its transitive natives); building the other ABIs just carries
         // dead weight in the single sideloaded APK.
-        ndk { abiFilters += listOf("arm64-v8a") }
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         // MUST be bumped on every sideloaded build. It sat at 1 through many rebuilds, and a
         // same-versionCode install is a reinstall Android may silently skip or refuse -- the
         // installer reports success while the old APK stays in place, so fixes appear not to

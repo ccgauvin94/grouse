@@ -806,6 +806,8 @@ class ConnectionManager private constructor(context: Context) {
         pendingOpenAssistant = false
         pendingAssistantRename = false
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
+        // Clearing the dot: opening the session consumes its staged content.
+        sessions.value = sessions.value.map { if (it.sessionId == sessionId) it.copy(hasNew = false) else it }
         // Roam: the session lives on the peer -- the core routes the chat to it.
         val peer = roamPeer(sessionId)
         if (peer != null) {
@@ -1414,7 +1416,6 @@ class ConnectionManager private constructor(context: Context) {
         if (m.id.isNotEmpty()) coreKeyToAppId[m.id] = appId
         if (replayActive.value) replayProgress.value++
     }
-
     private fun buildToolBubble(m: Message, stash: ToolCallStash?, appId: Long): ChatMessage {
         val kind = stash?.kind
         return when (kind) {
@@ -1437,6 +1438,10 @@ class ConnectionManager private constructor(context: Context) {
                 "tool", m.content,
                 detail = stash?.detail.orEmpty(),
                 toolCallId = m.id,
+                // The core delivers tool output separately (Message.output) now,
+                // matching serve's shape — a roam tool result lands in the chip's
+                // output, never glued into the header text.
+                output = m.output,
                 // Live calls stream with a lifecycle; a snapshot/rebuild (no stash) is
                 // finished history and renders as a plain wrench.
                 status = if (stash != null) "in_progress" else "",
@@ -1456,7 +1461,10 @@ class ConnectionManager private constructor(context: Context) {
         val cur = messages[idx]
         messages[idx] = cur.copy(
             role = if (m.role == "agent") "assistant" else m.role,
-            text = m.content,
+            text = if (m.role == "tool" && m.output.isNotEmpty()) cur.text else m.content,
+            // Roam tool output arrives via the core's on_transcript update now
+            // (serve streams it separately); land it in the chip's output field.
+            output = if (m.role == "tool" && m.output.isNotEmpty()) m.output else cur.output,
         )
     }
 
@@ -1550,11 +1558,13 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun onCoreSessionTouched(sessionId: String, title: String, updatedAt: String) {
         // Live title/updatedAt sync (auto-naming after the first turn, renames from any
-        // client) — previously only visible after a full session re-list.
+        // client) — previously only visible after a full session re-list. A roam staging
+        // touch (empty title, just a timestamp) is the green-dot signal: paint hasNew.
         sessions.value = sessions.value.map {
             if (it.sessionId == sessionId) it.copy(
                 title = if (title.isNotBlank()) title else it.title,
                 updatedAt = if (updatedAt.isNotBlank()) updatedAt else it.updatedAt,
+                hasNew = it.hasNew || title.isBlank(),
             ) else it
         }
     }
@@ -2064,6 +2074,7 @@ class ConnectionManager private constructor(context: Context) {
         snippet = lastMessageSnippet.orEmpty(),
         hasRecipe = hasRecipe,
         projectId = projectId,
+        hasNew = hasNew,
     )
 
     private fun CoreConfigOption.toApp(): ConfigOption = ConfigOption(

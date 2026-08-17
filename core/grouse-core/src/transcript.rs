@@ -74,11 +74,13 @@ impl Bubble {
                 id: id.clone(),
                 role: role.clone(),
                 content: text.clone(),
+                output: String::new(),
             },
             Bubble::Tool(r) => Message {
                 id: r.tool_call_id.clone(),
                 role: "tool".to_string(),
                 content: r.title.clone(),
+                output: String::new(),
             },
             Bubble::ToolGroup(calls) => {
                 let first = &calls[0];
@@ -86,12 +88,14 @@ impl Bubble {
                     id: first.tool_call_id.clone(),
                     role: "tool".to_string(),
                     content: first.title.clone(),
+                    output: String::new(),
                 }
             }
             Bubble::Chart(r) | Bubble::McpApp(r) => Message {
                 id: r.tool_call_id.clone(),
                 role: "tool".to_string(),
                 content: r.title.clone(),
+                output: String::new(),
             },
         }
     }
@@ -795,10 +799,10 @@ mod tests {
         store.append_chunk("user", "old", Some("m1"), false);
 
         store.replace(vec![
-            Message { id: "m1".into(), role: "user".into(), content: "hi".into() },
-            Message { id: "m2".into(), role: "agent".into(), content: "hello".into() },
-            Message { id: "t1".into(), role: "tool".into(), content: "Bash".into() },
-            Message { id: String::new(), role: "thought".into(), content: "hmm".into() },
+            Message { id: "m1".into(), role: "user".into(), content: "hi".into() , output: String::new() },
+            Message { id: "m2".into(), role: "agent".into(), content: "hello".into() , output: String::new() },
+            Message { id: "t1".into(), role: "tool".into(), content: "Bash".into() , output: String::new() },
+            Message { id: String::new(), role: "thought".into(), content: "hmm".into() , output: String::new() },
         ]);
 
         // The rebuild is faithful: the projection reproduces the input.
@@ -826,8 +830,8 @@ mod tests {
         let (l, t_evts, _s) = listener();
         let store = TranscriptStore::new(l);
         let snapshot = vec![
-            Message { id: "m1".into(), role: "user".into(), content: "hi".into() },
-            Message { id: "m2".into(), role: "agent".into(), content: "hello".into() },
+            Message { id: "m1".into(), role: "user".into(), content: "hi".into() , output: String::new() },
+            Message { id: "m2".into(), role: "agent".into(), content: "hello".into() , output: String::new() },
         ];
         store.replace(snapshot.clone());
         assert_eq!(&*t_evts.lock(), &["clear"]);
@@ -841,8 +845,8 @@ mod tests {
 
         // A genuinely different snapshot still rebuilds.
         store.replace(vec![
-            Message { id: "m1".into(), role: "user".into(), content: "hi".into() },
-            Message { id: "m2".into(), role: "agent".into(), content: "changed".into() },
+            Message { id: "m1".into(), role: "user".into(), content: "hi".into() , output: String::new() },
+            Message { id: "m2".into(), role: "agent".into(), content: "changed".into() , output: String::new() },
         ]);
         assert_eq!(&*t_evts.lock(), &["clear", "clear"]);
     }

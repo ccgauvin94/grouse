@@ -105,7 +105,14 @@ pub struct Message {
     pub id: String,
     /// `user` | `agent` | `thought` | `tool` | `error`.
     pub role: String,
+    /// Bubble text. For `tool` this is the TITLE ONLY (serve shape); the
+    /// tool's output lives in [`Message::output`], delivered separately so a
+    /// chip never renders the result in its header.
     pub content: String,
+    /// Tool-role only: the tool's output/result text (live chunks appended,
+    /// completion replaces). Empty for other roles and for serve's transcript
+    /// projection (serve streams output separately, §4).
+    pub output: String,
 }
 
 /// Transcript mutation carried by `CoreListener::on_transcript` (CONTRACT §3.2).

@@ -55,6 +55,9 @@ data class SessionInfo(
     val hasRecipe: Boolean = false,
     /** The project this session is filed under, or null for unfiled. */
     val projectId: String? = null,
+    /** True while the session has backgrounded (staged) content the UI has not
+     *  shown yet — the green-dot indicator. */
+    val hasNew: Boolean = false,
 )
 
 /** A goose project: a named source with a slug, NOT a directory. */

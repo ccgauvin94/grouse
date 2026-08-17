@@ -263,9 +263,10 @@ fn message_from_json(el: &Value) -> Message {
                 id: cid.to_string(),
                 role: "tool".to_string(),
                 content: title.to_string(),
+                output: String::new(),
             };
         }
-        return Message { id: String::new(), role: "tool".to_string(), content: String::new() };
+        return Message { id: String::new(), role: "tool".to_string(), content: String::new(), output: String::new() };
     }
 
     let content = if (role == "tool" || role == "chart" || role == "mcpapp") && text.is_empty() {
@@ -274,7 +275,7 @@ fn message_from_json(el: &Value) -> Message {
         text
     };
     let id = if id.is_empty() && !tool_call_id.is_empty() { tool_call_id } else { id };
-    Message { id, role, content }
+    Message { id, role, content, output: String::new() }
 }
 
 #[cfg(test)]
@@ -307,10 +308,10 @@ mod tests {
         let dir = temp_cache_dir("roundtrip");
         let store = CacheStore::new(dir.clone());
         let messages = vec![
-            Message { id: "m1".into(), role: "user".into(), content: "hi".into() },
-            Message { id: "m2".into(), role: "agent".into(), content: "hello there".into() },
-            Message { id: "t1".into(), role: "tool".into(), content: "Bash".into() },
-            Message { id: String::new(), role: "thought".into(), content: "hmm".into() },
+            Message { id: "m1".into(), role: "user".into(), content: "hi".into() , output: String::new(), },
+            Message { id: "m2".into(), role: "agent".into(), content: "hello there".into() , output: String::new(), },
+            Message { id: "t1".into(), role: "tool".into(), content: "Bash".into() , output: String::new(), },
+            Message { id: String::new(), role: "thought".into(), content: "hmm".into() , output: String::new(), },
         ];
 
         assert!(store.save_transcript("sess/1", &messages, "2026-08-12T10:00:00Z"));
@@ -334,7 +335,7 @@ mod tests {
         let dir = temp_cache_dir("fresh");
         let store = CacheStore::new(dir.clone());
         let messages =
-            vec![Message { id: "m1".into(), role: "user".into(), content: "hi".into() }];
+            vec![Message { id: "m1".into(), role: "user".into(), content: "hi".into() , output: String::new(), }];
 
         store.save_transcript("s1", &messages, "2026-08-12T09:00:00Z");
         let (_, updated_at) = store.load_transcript("s1").unwrap();

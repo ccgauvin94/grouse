@@ -3930,7 +3930,19 @@ data class Message (
      */
     var `role`: kotlin.String
     , 
+    /**
+     * Bubble text. For `tool` this is the TITLE ONLY (serve shape); the
+     * tool's output lives in [`Message::output`], delivered separately so a
+     * chip never renders the result in its header.
+     */
     var `content`: kotlin.String
+    , 
+    /**
+     * Tool-role only: the tool's output/result text (live chunks appended,
+     * completion replaces). Empty for other roles and for serve's transcript
+     * projection (serve streams output separately, §4).
+     */
+    var `output`: kotlin.String
     
 ){
     
@@ -3950,19 +3962,22 @@ public object FfiConverterTypeMessage: FfiConverterRustBuffer<Message> {
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
         )
     }
 
     override fun allocationSize(value: Message) = (
             FfiConverterString.allocationSize(value.`id`) +
             FfiConverterString.allocationSize(value.`role`) +
-            FfiConverterString.allocationSize(value.`content`)
+            FfiConverterString.allocationSize(value.`content`) +
+            FfiConverterString.allocationSize(value.`output`)
     )
 
     override fun write(value: Message, buf: ByteBuffer) {
             FfiConverterString.write(value.`id`, buf)
             FfiConverterString.write(value.`role`, buf)
             FfiConverterString.write(value.`content`, buf)
+            FfiConverterString.write(value.`output`, buf)
     }
 }
 
@@ -4311,6 +4326,12 @@ data class SessionSummary (
      * From the reply's `_meta.hasRecipe`.
      */
     var `hasRecipe`: kotlin.Boolean
+    , 
+    /**
+     * True while the session has backgrounded (staged) content the UI has
+     * not shown yet — the green-dot indicator (roam staging, serve parity).
+     */
+    var `hasNew`: kotlin.Boolean
     
 ){
     
@@ -4335,6 +4356,7 @@ public object FfiConverterTypeSessionSummary: FfiConverterRustBuffer<SessionSumm
             FfiConverterLong.read(buf),
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -4346,7 +4368,8 @@ public object FfiConverterTypeSessionSummary: FfiConverterRustBuffer<SessionSumm
             FfiConverterOptionalString.allocationSize(value.`projectId`) +
             FfiConverterLong.allocationSize(value.`messageCount`) +
             FfiConverterString.allocationSize(value.`model`) +
-            FfiConverterBoolean.allocationSize(value.`hasRecipe`)
+            FfiConverterBoolean.allocationSize(value.`hasRecipe`) +
+            FfiConverterBoolean.allocationSize(value.`hasNew`)
     )
 
     override fun write(value: SessionSummary, buf: ByteBuffer) {
@@ -4358,6 +4381,7 @@ public object FfiConverterTypeSessionSummary: FfiConverterRustBuffer<SessionSumm
             FfiConverterLong.write(value.`messageCount`, buf)
             FfiConverterString.write(value.`model`, buf)
             FfiConverterBoolean.write(value.`hasRecipe`, buf)
+            FfiConverterBoolean.write(value.`hasNew`, buf)
     }
 }
 

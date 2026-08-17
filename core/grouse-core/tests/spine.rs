@@ -379,6 +379,7 @@ fn resume_replay_persists_the_fresh_cache() {
         id: "m-old".into(),
         role: "user".into(),
         content: "stale cached line".into(),
+        output: String::new(),
     }];
     assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z"));
 

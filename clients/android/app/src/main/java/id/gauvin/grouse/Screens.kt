@@ -9,6 +9,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.BasicTextField
@@ -31,6 +32,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -1183,6 +1185,12 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
                     .filter { it.isNotBlank() }.joinToString("  ·  "),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline, maxLines = 1)
+            }
+            // Green dot: backgrounded content arrived for a chat that's not on
+            // screen (serve parity with the roam staging indicator).
+            if (s.hasNew) {
+                Spacer(Modifier.width(10.dp))
+                Box(Modifier.size(10.dp).background(Color(0xFF2E7D32), CircleShape))
             }
         }
     }
@@ -3584,6 +3592,12 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
                                     Text(s.snippet, style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.outline,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            // Green dot: backgrounded content arrived for a
+                            // chat that's not on screen (roam staging).
+                            if (s.hasNew) {
+                                Spacer(Modifier.width(10.dp))
+                                Box(Modifier.size(10.dp).background(Color(0xFF2E7D32), CircleShape))
                             }
                         }
                     }
