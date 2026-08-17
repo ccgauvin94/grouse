@@ -9,6 +9,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.filled.ArrowUpward
@@ -16,6 +17,10 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -130,6 +135,102 @@ private val CONFIG_IDS = listOf("provider", "model", "mode", "thinking_effort")
 private fun mainThread(block: () -> Unit) =
     android.os.Handler(android.os.Looper.getMainLooper()).post(block)
 
+// ---- Landing (home on open) -------------------------------------------------
+
+/** Home page shown on a fresh app open: connection status, and one-tap entry to
+ *  the Assistant, a brand-new chat, and the most recent sessions. Drawn here so a
+ *  cold start surfaces choices instead of dropping straight into the last chat. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun LandingScreen(
+    cm: ConnectionManager,
+    onOpenDrawer: () -> Unit,
+    onNewChat: () -> Unit,
+    onOpenAssistant: () -> Unit,
+    onOpenSession: (String) -> Unit,
+) {
+    val recent = cm.sessions.value
+        .filter { !it.sessionId.startsWith("roam:") }
+        .sortedByDescending { it.updatedAt }
+        .take(5)
+
+    Scaffold(topBar = {
+        TopAppBar(
+            title = {
+                Column {
+                    Text("Grouse", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        when {
+                            cm.online.value -> "Connected"
+                            cm.status.value.contains("connect", true) -> cm.status.value
+                            else -> cm.status.value.ifBlank { "not connected" }
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline)
+                }
+            },
+            navigationIcon = {
+                IconButton(onClick = onOpenDrawer) {
+                    Icon(Icons.Filled.Menu, contentDescription = "menu")
+                }
+            },
+        )
+    }) { pad ->
+        LazyColumn(Modifier.padding(pad).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            item {
+                Text("What would you like to do?", style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(top = 8.dp))
+            }
+            item {
+                Button(onClick = onNewChat, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                    Icon(Icons.Filled.Add, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("New chat")
+                }
+            }
+            if (cm.assistantEnabled.value) {
+                item {
+                    OutlinedButton(onClick = onOpenAssistant, modifier = Modifier.fillMaxWidth().height(48.dp)) {
+                        Icon(Icons.Filled.Psychology, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Assistant")
+                    }
+                }
+            }
+            if (recent.isNotEmpty()) {
+                item {
+                    Text("Recent", style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 10.dp))
+                }
+                items(recent, key = { it.sessionId }) { s ->
+                    Surface(
+                        onClick = { onOpenSession(s.sessionId) },
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                            Text(s.title.ifBlank { "Untitled chat" },
+                                style = MaterialTheme.typography.bodyLarge, maxLines = 1,
+                                overflow = TextOverflow.Ellipsis)
+                            Text(relativeTime(s.updatedAt),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline)
+                        }
+                    }
+                }
+            } else {
+                item {
+                    Text("No chats yet — start a new one above.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline)
+                }
+            }
+        }
+    }
+}
+
 // ---- Connect (onboarding) ---------------------------------------------------
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -183,12 +284,42 @@ fun ConnectScreen(cm: ConnectionManager, onConnected: () -> Unit) {
 
 // ---- Chat -------------------------------------------------------------------
 
+/** A donut that shows how full the context window is, colored by % used —
+ *  green until ~60%, amber through ~90%, red beyond (matches the compacting
+ *  coverage of the usage line). `pct` is 0..100. */
+@Composable
+fun ContextRing(pct: Int, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
+    val fraction = (pct / 100f).coerceIn(0f, 1f)
+    val track = MaterialTheme.colorScheme.outlineVariant
+    val color = when {
+        pct >= 90 -> MaterialTheme.colorScheme.error
+        pct >= 60 -> Color(0xFFF5A623)   // amber — nearing compaction
+        else -> Color(0xFF2E7D32)        // green — comfortable
+    }
+    val base = Modifier
+    val m = if (onClick != null) base.clickable(onClick = onClick) else base
+    Canvas(m.then(modifier)) {
+        val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+        // Full ring = track; the filled arc from 12 o'clock = usage.
+        drawArc(color = track, startAngle = -90f, sweepAngle = 360f,
+            useCenter = false, style = stroke,
+            topLeft = Offset.Zero,
+            size = Size(size.width, size.height))
+        if (fraction > 0f) {
+            drawArc(color = color, startAngle = -90f, sweepAngle = 360f * fraction,
+                useCenter = false, style = stroke,
+                topLeft = Offset.Zero,
+                size = Size(size.width, size.height))
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     val ctx = LocalContext.current
     var showSchedule by remember { mutableStateOf(false) }
-    // Assistant health from last-briefing recency (briefings run hourly 7 AM–10 PM). Green = fresh,
+    var showContextDetail by remember { mutableStateOf(false) }    // Assistant health from last-briefing recency (briefings run hourly 7 AM–10 PM). Green = fresh,
     // yellow = late, red = stale/never. Overnight the gap grows to ~9h and that's still healthy.
     val lastBriefing = cm.store.lastBriefingAt
     val briefingAgo = if (lastBriefing > 0)
@@ -434,6 +565,17 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                        // Context window fullness, as a colored donut next to the
+                        // chat name. Shown once the first turn reports usage.
+                        val u = cm.usage.value
+                        if (u != null && u.size > 0 && !cm.compacting.value) {
+                            Spacer(Modifier.width(10.dp))
+                            ContextRing(
+                                pct = (u.used * 100 / u.size).coerceIn(0, 100),
+                                modifier = Modifier.size(14.dp),
+                                onClick = { showContextDetail = !showContextDetail }
+                            )
+                        }
                     }
                     // Compacting (manual /compact or a server-triggered auto-compact) takes priority
                     // over the usage line — it's transient and explains why the numbers are about to
@@ -447,9 +589,10 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             Text("Compacting…", style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.outline)
                         }
-                    } else if (usage != null && usage.size > 0) {
+                    } else if (showContextDetail && usage != null && usage.size > 0) {
                         // Context window used/size, so you can see how full the conversation is
-                        // (goose compacts around the limit). Appears once the first turn reports usage.
+                        // (goose compacts around the limit). Hidden by default; tapping the
+                        // donut next to the chat name reveals it.
                         val pct = (usage.used * 100 / usage.size).coerceIn(0, 100)
                         Text("${fmtTokens(usage.used)} / ${fmtTokens(usage.size)} · ${pct}%",
                             style = MaterialTheme.typography.labelSmall,
@@ -979,6 +1122,9 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     var showNewProject by remember { mutableStateOf(false) }
     var actionsFor by remember { mutableStateOf<SessionInfo?>(null) }
     var expanded by rememberSaveable { mutableStateOf(listOf<String>()) }
+    // Entire PROJECTS section collapsed/expanded (master toggle), independent of
+    // per-project `expanded`.
+    var projectsCollapsed by rememberSaveable { mutableStateOf(false) }
 
     actionsFor?.let { s -> SessionActionsDialog(cm, s) { actionsFor = null } }
     if (showNewProject) NewProjectDialog(
@@ -1057,44 +1203,53 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
 
     LazyColumn(Modifier.fillMaxWidth().padding(horizontal = 14.dp)) {
         item {
-            Text("PROJECTS", style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 2.dp))
+            Row(Modifier.fillMaxWidth().clickable { projectsCollapsed = !projectsCollapsed }
+                .padding(start = 10.dp, top = 10.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("PROJECTS", style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.weight(1f))
+                Icon(if (projectsCollapsed) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                    contentDescription = if (projectsCollapsed) "expand projects" else "collapse projects",
+                    modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.outline)
+            }
         }
-        projects.forEach { proj ->
-            val p = proj.name
-            val inProject = byProjectId[proj.id].orEmpty()
-            val open = proj.id in expanded
-            item(key = "project:" + proj.id) {
-                // Name -> the project page; the chevron alone toggles the inline dropdown.
-                Row(Modifier.fillMaxWidth().padding(start = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Row(Modifier.weight(1f).clickable { onOpenProject(p) }.padding(vertical = 9.dp),
+        if (!projectsCollapsed) {
+            projects.forEach { proj ->
+                val p = proj.name
+                val inProject = byProjectId[proj.id].orEmpty()
+                val open = proj.id in expanded
+                item(key = "project:" + proj.id) {
+                    // Name -> the project page; the chevron alone toggles the inline dropdown.
+                    Row(Modifier.fillMaxWidth().padding(start = 10.dp),
                         verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.Folder, contentDescription = null,
-                            modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.width(10.dp))
-                        Text(p, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f),
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (inProject.isNotEmpty()) Text("${inProject.size}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.outline)
-                    }
-                    IconButton(onClick = { expanded = if (open) expanded - proj.id else expanded + proj.id }) {
-                        Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                            contentDescription = if (open) "collapse" else "expand",
-                            tint = MaterialTheme.colorScheme.outline)
+                        Row(Modifier.weight(1f).clickable { onOpenProject(p) }.padding(vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.Folder, contentDescription = null,
+                                modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(10.dp))
+                            Text(p, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f),
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (inProject.isNotEmpty()) Text("${inProject.size}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline)
+                        }
+                        IconButton(onClick = { expanded = if (open) expanded - proj.id else expanded + proj.id }) {
+                            Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                                contentDescription = if (open) "collapse" else "expand",
+                                tint = MaterialTheme.colorScheme.outline)
+                        }
                     }
                 }
-            }
-            if (open) {
-                item(key = "project:" + proj.id + ":new") {
-                    addRow("New chat", indent = true) { cm.newChatInProject(proj.id); onOpen() }
+                if (open) {
+                    item(key = "project:" + proj.id + ":new") {
+                        addRow("New chat", indent = true) { cm.newChatInProject(proj.id); onOpen() }
+                    }
+                    items(inProject, key = { "s:" + it.sessionId }) { s -> sessionRow(s, indent = true) }
                 }
-                items(inProject, key = { "s:" + it.sessionId }) { s -> sessionRow(s, indent = true) }
             }
+            item { addRow("New project", indent = false) { showNewProject = true } }
         }
-        item { addRow("New project", indent = false) { showNewProject = true } }
         item {
             Text("CHATS", style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.primary,

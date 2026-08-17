@@ -10,8 +10,10 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.compose.ui.graphics.Color
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.core.content.IntentCompat
@@ -25,6 +27,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
@@ -39,6 +42,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
@@ -144,8 +149,7 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
 }
 
 @Composable
-private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked: Boolean) {
-    // Ask for notification permission so backgrounded turns can alert (API 33+). Gated on
+private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked: Boolean) {    // Ask for notification permission so backgrounded turns can alert (API 33+). Gated on
     // unlocked so the dialog doesn't compete with the biometric prompt at cold start.
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         val notifPerm = rememberLauncherForActivityResult(
@@ -246,28 +250,18 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                         // What the agent can be given, and when it runs: skills are the notes it
                         // pulls in on demand, recipes are the jobs, the scheduler is their cron.
                         // All three are server state that was previously only reachable by editing
-                        // files on the box.
-                        NavigationDrawerItem(
-                            label = { Text("Skills") },
-                            icon = { Icon(Icons.Filled.School, contentDescription = null) },
-                            selected = route == "skills",
-                            onClick = { closeDrawer(); nav.navigate("skills") { launchSingleTop = true } },
-                            modifier = Modifier.padding(horizontal = 12.dp),
-                        )
-                        NavigationDrawerItem(
-                            label = { Text("Recipes") },
-                            icon = { Icon(Icons.Filled.MenuBook, contentDescription = null) },
-                            selected = route == "recipes",
-                            onClick = { closeDrawer(); nav.navigate("recipes") { launchSingleTop = true } },
-                            modifier = Modifier.padding(horizontal = 12.dp),
-                        )
-                        NavigationDrawerItem(
-                            label = { Text("Settings") },
-                            icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
-                            selected = route == "settings",
-                            onClick = { closeDrawer(); nav.navigate("settings") { launchSingleTop = true } },
-                            modifier = Modifier.padding(horizontal = 12.dp),
-                        )
+                        // files on the box. Compact rows so the chats list keeps the space.
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                            CompactNavItem("Skills", Icons.Filled.School, route == "skills") {
+                                closeDrawer(); nav.navigate("skills") { launchSingleTop = true }
+                            }
+                            CompactNavItem("Recipes", Icons.Filled.MenuBook, route == "recipes") {
+                                closeDrawer(); nav.navigate("recipes") { launchSingleTop = true }
+                            }
+                            CompactNavItem("Settings", Icons.Filled.Settings, route == "settings") {
+                                closeDrawer(); nav.navigate("settings") { launchSingleTop = true }
+                            }
+                        }
                     } else {
                         Column(Modifier.fillMaxWidth()) {
                             Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -292,9 +286,10 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
             }
         },
     ) {
-        NavHost(nav, startDestination = if (cm.configured) "chat" else "connect") {
-            composable("connect") {
-                ConnectScreen(cm) { nav.navigate("chat") { popUpTo("connect") { inclusive = true } } }
+        Box(Modifier.fillMaxSize()) {
+            NavHost(nav, startDestination = if (cm.configured) "landing" else "connect") {
+                composable("connect") {
+                    ConnectScreen(cm) { nav.navigate("chat") { popUpTo("connect") { inclusive = true } } }
             }
             composable("chat") { ChatScreen(cm, onOpenDrawer = ::openDrawer) }
             composable("assistant_settings") { AssistantSettingsScreen(cm, nav) }
@@ -331,6 +326,25 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                     nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
                 })
             }
+            composable("landing") { LandingScreen(cm, onOpenDrawer = ::openDrawer, onNewChat = {
+                cm.newSession()
+                nav.navigate("chat") { launchSingleTop = true; popUpTo("landing") { inclusive = true } }
+            }, onOpenAssistant = {
+                cm.openAssistant()
+                nav.navigate("chat") { launchSingleTop = true; popUpTo("landing") { inclusive = true } }
+            }, onOpenSession = { sid ->
+                cm.openSession(sid)
+                nav.navigate("chat") { launchSingleTop = true; popUpTo("landing") { inclusive = true } }
+            }) }
+        }
+        // System-wide activity: a turn in flight (or a replay/connect) squeezes a
+        // thin bar under the status bar so any screen telegraphs that work is
+        // happening, not just the chat header.
+        if (cm.busy.value) {
+            LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth().height(2.dp).align(Alignment.TopCenter),
+            )
+        }
         }
     }
 }
@@ -363,5 +377,34 @@ fun LockScreen(error: String?, onUnlock: () -> Unit) {
             Spacer(Modifier.height(14.dp))
             Button(onClick = onUnlock) { Text("Unlock") }
         }
+    }
+}
+
+/** Compact bottom-nav row for the drawer (Skills/Recipes/Settings) — smaller than
+ *  a full NavigationDrawerItem so more drawer height goes to the chats list. */
+@Composable
+private fun CompactNavItem(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(8.dp)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(shape)
+            .background(
+                if (selected) MaterialTheme.colorScheme.secondaryContainer
+                else Color.Transparent
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+    ) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.width(4.dp))
+        Text(label, style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

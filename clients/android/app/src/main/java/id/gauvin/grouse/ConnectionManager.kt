@@ -555,6 +555,14 @@ class ConnectionManager private constructor(context: Context) {
         store.roamPeers.forEach { (n, c) ->
             roamPeers.add(RoamPeer(n, c, runCatching { cardFingerprint(c) }.getOrDefault("")))
         }
+        // Auto-connect saved peers so chats are pre-warmed and ready to switch
+        // into — a manual Connect each launch is redundant. Runs once per call
+        // (RoamBrowse calls loadRoamPeers once on first composition).
+        roamPeers.forEach { peer ->
+            if (roamStatus[peer.name] != "ready" && roamStatus[peer.name] != "connecting") {
+                connectRoam(peer.name)
+            }
+        }
     }
 
     /** The device's iroh secret key, created once and held in SecureStore.
