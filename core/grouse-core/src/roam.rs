@@ -278,6 +278,11 @@ struct PeerInner {
     sessions: Vec<SessionSummary>,
     /// The raw (unprefixed) id of the session opened on this peer, if any.
     open_session_id: Option<String>,
+    /// Each listed session's working directory, keyed by RAW session id
+    /// (populated from `session/list`; `session/load` must use the session's
+    /// own cwd — the main connection's `last_config` cwd is empty on a
+    /// roam-only client and `session/load` hard-fails on a blank cwd).
+    session_cwds: HashMap<String, String>,
     /// The live turn's run id (`_meta.goose.activeRunId`); None when no turn
     /// is running. Mirrors the spine's active_run_id.
     active_run: Option<String>,
@@ -313,6 +318,7 @@ impl PeerInner {
             status: ConnectionStatus::Connecting,
             sessions: Vec::new(),
             open_session_id: None,
+            session_cwds: HashMap::new(),
             active_run: None,
             conn: None,
             transcript: Vec::new(),
@@ -498,8 +504,18 @@ impl RoamPeer {
         if !matches!(self.status(), ConnectionStatus::Ready) {
             return; // browse peers only open sessions once connected
         }
-        // The UI holds the prefixed id (`roam:<label>:<id>`); the wire wants raw.
+        // The raw id is derived by stripping the prefix when the caller passed
+        // a prefixed id.
         let raw = self.strip_prefix(&session_id);
+        // session/load hard-fails on a blank cwd. The passed cwd can be empty
+        // on a roam-only client (no main connection to seed last_config), so
+        // fall back to the session's own cwd from session/list — the remote
+        // goose rewrote it there, so it's the guaranteed-valid one.
+        let cwd = if cwd.is_empty() {
+            self.inner.lock().session_cwds.get(&raw).cloned().unwrap_or_default()
+        } else {
+            cwd
+        };
         let _ = self.cmd_tx.send(PeerCommand::OpenSession {
             session_id: raw,
             cwd,
@@ -827,18 +843,22 @@ impl RoamPeer {
     /// `session/list` arrived: store it, flip to Ready, emit. Browse mode — no
     /// session is auto-opened here (open only via `open_session`).
     fn apply_sessions(&self, list: &ListSessionsResponse) {
+        let mut cwds = HashMap::new();
         let sessions: Vec<SessionSummary> = list
             .sessions
             .iter()
             .map(|s| {
+                let id = s.session_id.to_string();
+                cwds.insert(id.clone(), s.cwd.to_string_lossy().to_string());
                 let mut summary = to_summary(&self.label, s);
-                summary.has_new = self.staging_has_new(&s.session_id.to_string());
+                summary.has_new = self.staging_has_new(&id);
                 summary
             })
             .collect();
         {
             let mut inner = self.inner.lock();
             inner.sessions = sessions;
+            inner.session_cwds = cwds;
             inner.status = ConnectionStatus::Ready;
         }
         self.emit_sessions(self.sessions());
@@ -1792,6 +1812,24 @@ mod tests {
         assert!(matches!(peer.status(), ConnectionStatus::Connecting));
         peer.open_session("s1".to_string(), "/home/user".to_string());
         assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn open_session_falls_back_to_session_cwd_when_blank() {
+        let listener = test_listener();
+        let (peer, mut cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
+
+        // A blank cwd (roam-only client, no main last_config) must resolve to
+        // the session's own cwd from session/list, not fail the load.
+        peer.open_session("s1".to_string(), String::new());
+        match cmd_rx.try_recv() {
+            Ok(PeerCommand::OpenSession { session_id, cwd }) => {
+                assert_eq!(session_id, "s1");
+                assert!(!cwd.is_empty());
+            }
+            other => panic!("expected OpenSession command, got {other:?}"),
+        }
     }
 
     #[test]
