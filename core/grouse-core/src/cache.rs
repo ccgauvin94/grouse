@@ -178,6 +178,9 @@ impl CacheStore {
                     message_count: el.get("messageCount").and_then(Value::as_i64).unwrap_or(0),
                     model: el.get("model").and_then(Value::as_str).unwrap_or("").to_string(),
                     has_recipe: el.get("hasRecipe").and_then(Value::as_bool).unwrap_or(false),
+                    // The cache is a replay of the last list; a cached summary is
+                    // never "new" — has_new is live-only, derived from staging.
+                    has_new: false,
                 })
             })
             .collect::<Vec<_>>();
@@ -421,6 +424,7 @@ mod tests {
             message_count: 42,
             model: "gpt-4o".into(),
             has_recipe: true,
+            has_new: false,
         }];
         let mut cwds = BTreeMap::new();
         cwds.insert("sess/1".into(), "/tmp".into());

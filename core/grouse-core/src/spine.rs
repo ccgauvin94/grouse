@@ -533,6 +533,11 @@ impl Conn {
         match spec {
             Some(ConnectSpec::Resume { session_id, cwd }) => {
                 self.inner.replaying.store(true, Ordering::SeqCst);
+                // Set the open-session id BEFORE the load request: the server
+                // may stream replay chunks ahead of the reply (the spine's own
+                // gateway test does), and the session-membership gate must not
+                // drop them. start_new_session overwrites this if load fails.
+                *self.inner.session_id.lock() = Some(session_id.clone());
                 let params = json!({
                     "sessionId": session_id,
                     "cwd": cwd,
@@ -613,6 +618,25 @@ impl Conn {
 
     fn dispatch_session_notification(&self, notif: SessionNotification) {
         let session_id = notif.session_id.to_string();
+        // Session-membership gate (serve parity with the roam peers): a CHAT
+        // event for a session other than the one currently open belongs to a
+        // backgrounded turn — never render it in the wrong chat (serve re-loads
+        // on every open, so the reply is recovered by the next replay). Applied
+        // only to bubble-producing events: session-level config/run updates
+        // (SessionInfoUpdate etc.) are not chat content and may arrive before
+        // the open/load reply has set session_id (e.g. session/new broadcasts).
+        let chat_event = matches!(
+            &notif.update,
+            SessionUpdate::UserMessageChunk(_)
+                | SessionUpdate::AgentMessageChunk(_)
+                | SessionUpdate::AgentThoughtChunk(_)
+                | SessionUpdate::ToolCall(_)
+                | SessionUpdate::ToolCallUpdate(_)
+                | SessionUpdate::UsageUpdate(_)
+        );
+        if chat_event && self.inner.session_id.lock().as_deref() != Some(session_id.as_str()) {
+            return;
+        }
         match notif.update {
             SessionUpdate::UserMessageChunk(chunk) => {
                 if !self.inner.suppress_replay.load(Ordering::SeqCst) {
@@ -1148,6 +1172,7 @@ pub(crate) fn parse_sessions(result: &Value) -> (Vec<SessionSummary>, Vec<(Strin
                 message_count,
                 model,
                 has_recipe,
+                has_new: false,
             });
             if !cwd.is_empty() {
                 cwds.push((session_id.to_string(), cwd));

@@ -30,6 +30,7 @@
 //! cached: the cache is keyed by session id, which could collide across
 //! machines, so the desktop replays peer sessions every time.
 
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, mpsc as std_mpsc};
 
 use parking_lot::Mutex;
@@ -51,6 +52,7 @@ use futures::stream::StreamExt;
 use futures::pin_mut;
 use grouse_roam_core::RoamStream;
 use serde_json::{Map, Value, json};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -291,6 +293,18 @@ struct PeerInner {
     /// Set by [`RoamPeer::close`] so a teardown that races the dial or a
     /// transport error is not reported as a failure.
     closing: bool,
+    /// Backgrounded content for sessions that are NOT currently open, keyed by
+    /// raw session id (dispatch routes by `notif.session_id`). Chunks keep
+    /// accumulating here while the user sits in another chat; opening the
+    /// session promotes them (no flash) and clears its green dot.
+    staging: HashMap<String, StagedSession>,
+}
+
+/// One backgrounded session's staged transcript + dot state.
+#[derive(Default)]
+struct StagedSession {
+    messages: Vec<Message>,
+    has_new: bool,
 }
 
 impl PeerInner {
@@ -305,6 +319,7 @@ impl PeerInner {
             pending_permission: None,
             stream: None,
             closing: false,
+            staging: HashMap::new(),
         }
     }
 }
@@ -417,9 +432,11 @@ impl RoamPeer {
 
     /// The last `session/list` result, ids prefixed `roam:<label>:<id>`.
     pub fn sessions(&self) -> Vec<SessionSummary> {
-        // Rebuild from fields: the uniffi records are not Clone (yet).
-        self.inner
-            .lock()
+        // Rebuild from fields: the uniffi records are not Clone (yet). Read
+        // has_new from the staging map under the SAME lock — staging_has_new
+        // locks again and parking_lot is not re-entrant (deadlock).
+        let inner = self.inner.lock();
+        inner
             .sessions
             .iter()
             .map(|s| SessionSummary {
@@ -431,8 +448,19 @@ impl RoamPeer {
                 message_count: 0,
                 model: String::new(),
                 has_recipe: false,
+                has_new: inner.staging.get(&s.id).map(|st| st.has_new).unwrap_or(false),
             })
             .collect()
+    }
+
+    /// True while the given raw session id has backgrounded content staged.
+    fn staging_has_new(&self, raw_id: &str) -> bool {
+        self.inner
+            .lock()
+            .staging
+            .get(raw_id)
+            .map(|s| s.has_new)
+            .unwrap_or(false)
     }
 
     /// The open session's id (`roam:<label>:<raw>`), if one is open.
@@ -798,8 +826,15 @@ impl RoamPeer {
     /// `session/list` arrived: store it, flip to Ready, emit. Browse mode — no
     /// session is auto-opened here (open only via `open_session`).
     fn apply_sessions(&self, list: &ListSessionsResponse) {
-        let sessions: Vec<SessionSummary> =
-            list.sessions.iter().map(|s| to_summary(&self.label, s)).collect();
+        let sessions: Vec<SessionSummary> = list
+            .sessions
+            .iter()
+            .map(|s| {
+                let mut summary = to_summary(&self.label, s);
+                summary.has_new = self.staging_has_new(&s.session_id.to_string());
+                summary
+            })
+            .collect();
         {
             let mut inner = self.inner.lock();
             inner.sessions = sessions;
@@ -812,11 +847,19 @@ impl RoamPeer {
     /// A session/load succeeded: the peer now owns an open session and its
     /// transcript starts fresh (the server replays history as chunks).
     fn open(&self, raw_session_id: String) {
-        {
-            let mut inner = self.inner.lock();
-            inner.open_session_id = Some(raw_session_id);
+        let mut inner = self.inner.lock();
+        // Promote backgrounded content if any: the staged chunks ARE the
+        // session's transcript since the last visit (chunks only accumulate
+        // here while the session is closed), so show them instantly — the
+        // session/load replay that follows merges/dedupes against them.
+        if let Some(staged) = inner.staging.remove(&raw_session_id) {
+            inner.transcript = staged.messages;
+        } else {
             inner.transcript.clear();
         }
+        inner.open_session_id = Some(raw_session_id);
+        // Promotion (or simply visiting) clears the green dot: has_new is
+        // gone with the staging entry, and sessions() re-reads it live.
     }
 
     /// The connection task ended. `Ok` = clean (close command). `Err` = the
@@ -866,12 +909,21 @@ impl RoamPeer {
     fn dispatch(&self, notif: SessionNotification) {
         let active = (self.is_active)();
         let session_id = notif.session_id.to_string();
+        // Session-membership gate: this notification's chunks belong to the
+        // OPEN session (live view) or to a backgrounded one (staging + dot).
+        // Nothing from another session ever renders in the visible chat.
+        let mine = self
+            .inner
+            .lock()
+            .open_session_id
+            .as_deref()
+            == Some(session_id.as_str());
         match notif.update {
             SessionUpdate::UserMessageChunk(chunk) => {
                 if let Some(text) = chunk_text(&chunk.content) {
                     let message_id = chunk.message_id.map(|m| m.to_string()).unwrap_or_default();
-                    let event = self.accumulate("user", &text, &message_id);
-                    if active {
+                    let event = self.accumulate(&session_id, "user", &text, &message_id);
+                    if active && mine {
                         if let Some(event) = event {
                             self.emit(event);
                         }
@@ -882,8 +934,8 @@ impl RoamPeer {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if let Some(text) = chunk_text(&chunk.content) {
                     let message_id = chunk.message_id.map(|m| m.to_string()).unwrap_or_default();
-                    let event = self.accumulate("agent", &text, &message_id);
-                    if active {
+                    let event = self.accumulate(&session_id, "agent", &text, &message_id);
+                    if active && mine {
                         if let Some(event) = event {
                             self.emit(event);
                         }
@@ -894,8 +946,8 @@ impl RoamPeer {
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 if let Some(text) = chunk_text(&chunk.content) {
                     let message_id = chunk.message_id.map(|m| m.to_string()).unwrap_or_default();
-                    let event = self.accumulate("thought", &text, &message_id);
-                    if active {
+                    let event = self.accumulate(&session_id, "thought", &text, &message_id);
+                    if active && mine {
                         if let Some(event) = event {
                             self.emit(event);
                         }
@@ -906,8 +958,8 @@ impl RoamPeer {
             SessionUpdate::ToolCall(tool) => {
                 let tool_call_id = tool.tool_call_id.to_string();
                 let (kind, detail) = tool_kind(&tool);
-                let event = self.accumulate_tool(&tool_call_id, &tool.title, None);
-                if active {
+                let event = self.accumulate_tool(&session_id, &tool_call_id, &tool.title, None);
+                if active && mine {
                     if let Some(event) = event {
                         self.emit(event);
                     }
@@ -923,11 +975,11 @@ impl RoamPeer {
                 let id = update.tool_call_id.to_string();
                 let (status, output, live) = tool_update(&update);
                 let event = if live {
-                    self.accumulate_tool_append(&id, &output)
+                    self.accumulate_tool_append(&session_id, &id, &output)
                 } else {
-                    self.accumulate_tool(&id, &status, Some(&output))
+                    self.accumulate_tool(&session_id, &id, &status, Some(&output))
                 };
-                if active {
+                if active && mine {
                     if let Some(event) = event {
                         self.emit(event);
                     }
@@ -945,7 +997,7 @@ impl RoamPeer {
                     .as_ref()
                     .map(|c| (c.amount, c.currency.clone()))
                     .unwrap_or((0.0, String::new()));
-                if active {
+                if active && mine {
                     self.emit_stream(StreamEvent::Usage {
                         used: usage.used as i64,
                         size: usage.size as i64,
@@ -1017,48 +1069,92 @@ impl RoamPeer {
     }
 
     /// Append a text chunk to the bubble for `(role, message_id)`; a new
-    /// message_id starts a new bubble (CONTRACT §4 accumulation rule). Returns
-    /// the transcript mutation for the caller to emit under the active gate.
-    fn accumulate(&self, role: &str, text: &str, message_id: &str) -> Option<TranscriptEvent> {
+    /// message_id starts a new bubble (CONTRACT §4 accumulation rule). Chunks
+    /// for a session that is NOT currently open accumulate into its staging
+    /// buffer instead (green dot) and never touch the visible transcript.
+    /// Returns the transcript mutation for the caller to emit under the
+    /// active gate (`emit_if_mine` handles the session-membership check too,
+    /// so a staged event is never emitted to the live view).
+    fn accumulate(&self, session_id: &str, role: &str, text: &str, message_id: &str) -> Option<TranscriptEvent> {
         let mut inner = self.inner.lock();
-        if let Some(msg) = inner
-            .transcript
+        let mine = inner.open_session_id.as_deref() == Some(session_id);
+        let mut staged_new = false;
+        let target: &mut Vec<Message> = if mine {
+            &mut inner.transcript
+        } else {
+            let st = inner.staging.entry(session_id.to_string()).or_default();
+            staged_new = !st.has_new;
+            st.has_new = true;
+            &mut st.messages
+        };
+        let event = if let Some(msg) = target
             .iter_mut()
             .find(|m| m.role == role && m.id == message_id)
         {
-            msg.content.push_str(text);
-            Some(TranscriptEvent::Update {
-                message: Message {
-                    id: msg.id.clone(),
-                    role: msg.role.clone(),
-                    content: msg.content.clone(),
-                },
-            })
+            // Replay dedupe: a staged message being re-sent by session/load
+            // is identical — appending it again would double the text.
+            if !msg.content.contains(text) {
+                msg.content.push_str(text);
+                Some(TranscriptEvent::Update {
+                    message: Message {
+                        id: msg.id.clone(),
+                        role: msg.role.clone(),
+                        content: msg.content.clone(),
+                    },
+                })
+            } else {
+                None
+            }
         } else {
             let msg = Message {
                 id: message_id.to_string(),
                 role: role.to_string(),
                 content: text.to_string(),
             };
-            inner.transcript.push(Message {
+            target.push(Message {
                 id: msg.id.clone(),
                 role: msg.role.clone(),
                 content: msg.content.clone(),
             });
             Some(TranscriptEvent::Append { message: msg })
+        };
+        drop(inner);
+        if !mine && staged_new {
+            // First backgrounded content for this session: tell the UI once
+            // (prefixed id, so it can paint the row). It re-reads sessions()
+            // for the dot state; no per-chunk traffic.
+            self.listener.on_session_touched(
+                format!("roam:{}:{}", self.label, session_id),
+                String::new(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis().to_string())
+                    .unwrap_or_default(),
+            );
         }
+        event
     }
 
     /// Create (or replace) the bubble for a tool call id.
     fn accumulate_tool(
         &self,
+        session_id: &str,
         tool_call_id: &str,
         title: &str,
         output: Option<&str>,
     ) -> Option<TranscriptEvent> {
         let mut inner = self.inner.lock();
-        let (message, is_new) = if let Some(msg) = inner
-            .transcript
+        let mine = inner.open_session_id.as_deref() == Some(session_id);
+        let mut staged_new = false;
+        let target: &mut Vec<Message> = if mine {
+            &mut inner.transcript
+        } else {
+            let st = inner.staging.entry(session_id.to_string()).or_default();
+            staged_new = !st.has_new;
+            st.has_new = true;
+            &mut st.messages
+        };
+        let (message, is_new) = if let Some(msg) = target
             .iter_mut()
             .find(|m| m.role == "tool" && m.id == tool_call_id)
         {
@@ -1083,13 +1179,17 @@ impl RoamPeer {
                     None => title.to_string(),
                 },
             };
-            inner.transcript.push(Message {
+            target.push(Message {
                 id: msg.id.clone(),
                 role: msg.role.clone(),
                 content: msg.content.clone(),
             });
             (msg, true)
         };
+        drop(inner);
+        if !mine && staged_new {
+            let _ = self.staged_touch(session_id);
+        }
         Some(if is_new {
             TranscriptEvent::Append { message }
         } else {
@@ -1100,10 +1200,19 @@ impl RoamPeer {
     /// Live shell output appends to the tool bubble instead of replacing it
     /// (CONTRACT §4: "live shell output appends, the completion update
     /// replaces").
-    fn accumulate_tool_append(&self, tool_call_id: &str, output: &str) -> Option<TranscriptEvent> {
+    fn accumulate_tool_append(&self, session_id: &str, tool_call_id: &str, output: &str) -> Option<TranscriptEvent> {
         let mut inner = self.inner.lock();
-        if let Some(msg) = inner
-            .transcript
+        let mine = inner.open_session_id.as_deref() == Some(session_id);
+        let mut staged_new = false;
+        let target: &mut Vec<Message> = if mine {
+            &mut inner.transcript
+        } else {
+            let st = inner.staging.entry(session_id.to_string()).or_default();
+            staged_new = !st.has_new;
+            st.has_new = true;
+            &mut st.messages
+        };
+        let result = if let Some(msg) = target
             .iter_mut()
             .find(|m| m.role == "tool" && m.id == tool_call_id)
         {
@@ -1117,7 +1226,25 @@ impl RoamPeer {
             })
         } else {
             None
+        };
+        drop(inner);
+        if !mine && staged_new {
+            let _ = self.staged_touch(session_id);
         }
+        result
+    }
+
+    /// Fire the UI notification for a session's FIRST backgrounded content
+    /// (prefixed id, so the client can paint the dot on the peer row).
+    fn staged_touch(&self, session_id: &str) {
+        self.listener.on_session_touched(
+            format!("roam:{}:{}", self.label, session_id),
+            String::new(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis().to_string())
+                .unwrap_or_default(),
+        );
     }
 
     /// A `session/request_permission` arrived: stash the responder and prompt
@@ -1330,6 +1457,7 @@ fn to_summary(label: &str, info: &SessionInfo) -> SessionSummary {
         message_count: 0,
         model: String::new(),
         has_recipe: false,
+        has_new: false,
     }
 }
 
@@ -1745,6 +1873,7 @@ mod tests {
         let listener = test_listener();
         let active = Arc::new(AtomicBool::new(false));
         let (peer, _cmd_rx) = offline_peer("laptop", listener.clone(), gate(active.clone()));
+        peer.open("s1".to_string());  // live-transcript path: session must be OPEN
 
         let notif = SessionNotification::new(
             "s1",
@@ -1776,6 +1905,7 @@ mod tests {
     fn dispatch_appends_to_existing_bubble() {
         let listener = test_listener();
         let (peer, _cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(false))));
+        peer.open("s1".to_string());  // live-transcript path
         for text in ["a", "b", "c"] {
             peer.dispatch(SessionNotification::new(
                 "s1",
@@ -1826,6 +1956,7 @@ mod tests {
     fn dispatch_tool_call_kinds() {
         let listener = test_listener();
         let (peer, _cmd_rx) = offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
+        peer.open("s1".to_string());  // live-transcript path
 
         let mut meta = Map::new();
         let mut goose = Map::new();

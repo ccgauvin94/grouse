@@ -449,6 +449,7 @@ fn cold_start_emits_cached_directory() {
         message_count: 3,
         model: String::new(),
         has_recipe: false,
+        has_new: false,
     }];
     let mut cwds = std::collections::BTreeMap::new();
     cwds.insert("sess-c".into(), "/tmp".into());

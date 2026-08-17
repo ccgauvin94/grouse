@@ -93,6 +93,9 @@ pub struct SessionSummary {
     pub model: String,
     /// From the reply's `_meta.hasRecipe`.
     pub has_recipe: bool,
+    /// True while the session has backgrounded (staged) content the UI has
+    /// not shown yet — the green-dot indicator (roam staging, serve parity).
+    pub has_new: bool,
 }
 
 /// One accumulated transcript bubble (CONTRACT §3.3/§4.3).
