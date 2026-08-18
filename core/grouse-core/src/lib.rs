@@ -554,6 +554,22 @@ impl Core {
     }
 
 
+    /// Persist every open transcript NOW: the main session's and each roam
+    /// peer's.
+    ///
+    /// The UI calls this when the app leaves the foreground. Nothing else
+    /// guarantees a write before the process dies — the main session saves on
+    /// ready and at the end of a turn, and a peer saves when its session is
+    /// closed or switched away from, so a chat that was simply left open when
+    /// Android reclaimed the process was never written.
+    pub fn flush_caches(&self) {
+        self.save_cache();
+        let peers = self.inner.peers.lock().clone();
+        for peer in peers {
+            peer.save_open_transcript();
+        }
+    }
+
     /// Refresh `session/list` (reply → `on_sessions`).
     pub fn list_sessions(&self) {
         let Some(conn) = self.inner.conn.lock().clone() else { return };

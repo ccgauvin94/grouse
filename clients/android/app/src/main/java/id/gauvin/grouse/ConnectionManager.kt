@@ -1183,6 +1183,12 @@ class ConnectionManager private constructor(context: Context) {
             }
             if (!store.persistentConnection && !busy.value) stopService()
         } else {
+            // Leaving the foreground is the last reliable moment before Android
+            // may reclaim the process. The core saves the main session on ready
+            // and at the end of a turn, and a peer saves when its session closes
+            // or switches — a chat simply left open was never written at all,
+            // which is why roam transcripts looked uncached after a restart.
+            io { core.flushCaches() }
             if (store.persistentConnection) startService()
         }
     }

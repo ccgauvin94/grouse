@@ -1222,13 +1222,6 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 //
 
 
-/**
- * A blocking handle over an authenticated roam stream.
- *
- * One reader task per stream pulls bytes off the iroh duplex into a channel;
- * `read()` blocks on that channel, `write()` blocks on the write half. EOF is
- * an empty Vec. FIN via `shutdown()` drops the write half (FIN to the peer).
- */
 public interface RoamStreamInterface {
     
     /**
@@ -1256,13 +1249,6 @@ public interface RoamStreamInterface {
     companion object
 }
 
-/**
- * A blocking handle over an authenticated roam stream.
- *
- * One reader task per stream pulls bytes off the iroh duplex into a channel;
- * `read()` blocks on that channel, `write()` blocks on the write half. EOF is
- * an empty Vec. FIN via `shutdown()` drops the write half (FIN to the peer).
- */
 open class RoamStream: Disposable, AutoCloseable, RoamStreamInterface
 {
 

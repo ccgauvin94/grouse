@@ -544,6 +544,9 @@ impl RoamPeer {
     /// Disconnect the peer: FIN + cancel the stream (unblocks the reader),
     /// shut down the command loop, and report the terminal status.
     pub fn close(&self) {
+        // Before tearing anything down: an explicit disconnect is an exit from
+        // the open session just as much as a switch is.
+        self.save_open_transcript();
         {
             let mut inner = self.inner.lock();
             if inner.closing {
@@ -558,6 +561,29 @@ impl RoamPeer {
             stream.cancel();
         }
         self.emit_status("disconnected");
+    }
+
+    /// Persist the currently open session's transcript.
+    ///
+    /// Called on every exit from a session, not just a switch to another one.
+    /// It used to run ONLY when `open` replaced a previous session, so a peer
+    /// chat opened and then left by killing the app was never written at all —
+    /// the cache only survived if you happened to open a second session on the
+    /// same peer in the same run, which is why peer transcripts looked like they
+    /// were not cached across restarts.
+    pub fn save_open_transcript(&self) {
+        let inner = self.inner.lock();
+        let Some(open) = inner.open_session_id.clone() else { return };
+        let key = self.cache_key(&open);
+        let transcript = inner.transcript.clone();
+        let updated = inner
+            .sessions
+            .iter()
+            .find(|s| s.id.ends_with(&format!(":{open}")))
+            .map(|s| s.updated_at.clone())
+            .unwrap_or_default();
+        drop(inner);
+        self.cache.save_transcript(&key, &transcript, &updated);
     }
 
     /// Send a raw JSON-RPC request over this peer's connection — the
@@ -889,23 +915,12 @@ impl RoamPeer {
     /// A session/load succeeded: the peer now owns an open session and its
     /// transcript starts fresh (the server replays history as chunks).
     fn open(&self, raw_session_id: String) {
+        // Persist the PREVIOUS open session's transcript before switching: the
+        // next time it's opened, the cache paints it instantly.
+        self.save_open_transcript();
         {
             let mut inner = self.inner.lock();
-            // Persist the PREVIOUS open session's transcript before switching:
-            // the next time it's opened, the cache paints it instantly.
-            if let Some(prev) = inner.open_session_id.take() {
-                let key = self.cache_key(&prev);
-                let t = inner.transcript.clone();
-                let updated = inner
-                    .sessions
-                    .iter()
-                    .find(|s| s.id.ends_with(&format!(":{prev}")))
-                    .map(|s| s.updated_at.clone())
-                    .unwrap_or_default();
-                drop(inner);
-                self.cache.save_transcript(&key, &t, &updated);
-                inner = self.inner.lock();
-            }
+            inner.open_session_id.take();
             // Promote backgrounded content if any: the staged chunks ARE the
             // session's transcript since the last visit (chunks only accumulate
             // here while the session is closed), so show them instantly — the
@@ -935,6 +950,9 @@ impl RoamPeer {
     /// transport dropped — only report it as a failure if the peer wasn't
     /// closed deliberately.
     fn connection_ended(&self, result: Result<(), AcpError>) {
+        // A dropped link loses the session as surely as closing it does; if
+        // close() already ran this is a cheap no-op rewrite of the same rows.
+        self.save_open_transcript();
         let mut inner = self.inner.lock();
         inner.conn = None;
         if inner.closing {

@@ -723,13 +723,14 @@ fn spine_e2e_connect_prompt_stream() {
 
 #[test]
 fn stale_cache_is_painted_then_replaced_not_appended() {
-    let _cache_guard = CACHE_TEST_LOCK.lock();
+    // Own cache dir, passed to Core explicitly: XDG_DATA_HOME is process-global
+    // and the spine_e2e_* tests build a Core with an empty cache dir, so they
+    // resolve whatever it points at when THEY construct — steering it here made
+    // their sess-e2e writes land in this test's directory.
     let data_dir =
         std::env::temp_dir().join(format!("grouse-paint-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&data_dir);
-    std::env::set_var("XDG_DATA_HOME", &data_dir);
-
-    let cache = grouse_core::cache::CacheStore::new(data_dir.join("grouse"));
+    let cache = grouse_core::cache::CacheStore::new(data_dir.clone());
     let stale = vec![grouse_core::Message {
         id: "m-old".into(),
         role: "agent".into(),
@@ -744,7 +745,10 @@ fn stale_cache_is_painted_then_replaced_not_appended() {
     let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
 
     let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        data_dir.to_string_lossy().to_string(),
+    );
     core.connect(grouse_core::ServerConfig {
         host: "127.0.0.1".to_string(),
         port,
@@ -795,13 +799,11 @@ fn stale_cache_is_painted_then_replaced_not_appended() {
 
 #[test]
 fn cold_start_paint_is_not_filed_under_the_transient_session() {
-    let _cache_guard = CACHE_TEST_LOCK.lock();
-    let data_dir =
+    // Own cache dir, passed to Core explicitly — see the note in
+    // stale_cache_is_painted_then_replaced_not_appended.
+    let cache_dir =
         std::env::temp_dir().join(format!("grouse-owner-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
-    std::env::set_var("XDG_DATA_HOME", &data_dir);
-    let cache_dir = data_dir.join("grouse");
-
+    let _ = std::fs::remove_dir_all(&cache_dir);
     let cache = grouse_core::cache::CacheStore::new(cache_dir.clone());
     let seeded = vec![grouse_core::Message {
         id: "m-1".into(),
@@ -816,7 +818,10 @@ fn cold_start_paint_is_not_filed_under_the_transient_session() {
     let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
 
     let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        cache_dir.to_string_lossy().to_string(),
+    );
 
     // The cold-start sequence the UI runs: paint the last chat, THEN connect.
     // connect() creates a throwaway session before the real resume.
@@ -861,5 +866,5 @@ fn cold_start_paint_is_not_filed_under_the_transient_session() {
     assert!(painted.contains("OWNED-BY-SESS-R"), "paint must stay on screen: {painted}");
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&cache_dir);
 }

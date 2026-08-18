@@ -905,6 +905,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_disconnect(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_flush_caches(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_list_sessions(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_load_cached_transcript(
@@ -1112,6 +1114,8 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_method_core_delete_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_disconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_core_flush_caches(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_list_sessions(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1363,6 +1367,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_disconnect() != 29396) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_core_flush_caches() != 885) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_list_sessions() != 33034) {
@@ -2119,6 +2126,18 @@ public interface CoreInterface {
     fun `disconnect`()
     
     /**
+     * Persist every open transcript NOW: the main session's and each roam
+     * peer's.
+     *
+     * The UI calls this when the app leaves the foreground. Nothing else
+     * guarantees a write before the process dies — the main session saves on
+     * ready and at the end of a turn, and a peer saves when its session is
+     * closed or switched away from, so a chat that was simply left open when
+     * Android reclaimed the process was never written.
+     */
+    fun `flushCaches`()
+    
+    /**
      * Refresh `session/list` (reply → `on_sessions`).
      */
     fun `listSessions`()
@@ -2449,6 +2468,28 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_grouse_core_fn_method_core_disconnect(
+        it,
+        _status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Persist every open transcript NOW: the main session's and each roam
+     * peer's.
+     *
+     * The UI calls this when the app leaves the foreground. Nothing else
+     * guarantees a write before the process dies — the main session saves on
+     * ready and at the end of a turn, and a peer saves when its session is
+     * closed or switched away from, so a chat that was simply left open when
+     * Android reclaimed the process was never written.
+     */override fun `flushCaches`()
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_flush_caches(
         it,
         _status)
 }
