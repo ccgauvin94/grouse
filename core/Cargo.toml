@@ -1,3 +1,16 @@
 [workspace]
-members = ["grouse-core", "grouse-unstable"]
+members = ["grouse-core", "grouse-roam-core", "grouse-unstable"]
 resolver = "2"
+
+# Both cdylibs (grouse-core + grouse-roam-core) ship in the same APK, where the
+# native libs dominate the download. A workspace has exactly ONE release
+# profile, so the size profile grouse-roam-core carried as a standalone crate is
+# hoisted here and now applies to every member. The core is network-latency-
+# bound, not CPU-bound, so opt-level "z" costs nothing measurable.
+[profile.release]
+opt-level = "z"
+codegen-units = 1
+strip = true
+lto = true
+# uniffi's catch_unwind must be able to turn a panic into a foreign exception.
+panic = "unwind"

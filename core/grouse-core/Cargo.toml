@@ -16,8 +16,9 @@ agent-client-protocol = { version = "2.0.0", features = ["unstable_elicitation"]
 async-tungstenite = { version = "0.34", default-features = false, features = ["tokio-rustls-webpki-roots"] }
 futures = "0.3"
 # The shared iroh roam transport (CONTRACT §2/§6) — the RUST crate, not the C
-# ABI. Pinned to the checked-out revision of the public grouse-roam-core repo.
-grouse-roam-core = { git = "https://github.com/ccgauvin94/grouse-roam-core.git", rev = "69530b376387212c29e710e70c79bc71d731ac33" }
+# ABI. A workspace member: the transport is part of this repo, not an external
+# pin (it was a SHA-pinned git dep on a commit that lived on no branch).
+grouse-roam-core = { path = "../grouse-roam-core" }
 parking_lot = "0.12"
 # `ring` (and NOT aws-lc-rs) so rustls has exactly one crypto provider and
 # `ClientConfig::builder()` can install it automatically.

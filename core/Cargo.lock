@@ -1431,8 +1431,8 @@ dependencies = [
 [[package]]
 name = "grouse-roam-core"
 version = "0.1.3"
-source = "git+https://github.com/ccgauvin94/grouse-roam-core.git?rev=69530b376387212c29e710e70c79bc71d731ac33#69530b376387212c29e710e70c79bc71d731ac33"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
  "futures",
  "goose-roaming",

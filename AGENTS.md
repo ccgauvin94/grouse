@@ -16,7 +16,8 @@ and does not reimplement client logic.
 A UI is native per platform. There is no cross-platform UI framework, no shared
 web view, and no embedded browser shell.
 
-`core/` splits into two crates along the stable/unstable line:
+`core/` holds three crates — two split along the stable/unstable line, plus the
+roam transport:
 
 - **`grouse-core`** — the stable ACP surface on the official
   `agent-client-protocol` SDK: the initialize handshake, session lifecycle,
@@ -24,15 +25,19 @@ web view, and no embedded browser shell.
   tags. It owns the WebSocket transport, including a custom `ConnectTo` that
   sends the `X-Secret-Key` header and applies a trust-all TLS configuration (the
   server's self-signed cert).
+- **`grouse-roam-core`** — the roam transport: iroh peer dialing, the device
+  identity, connection cards, and the authenticated byte duplex ACP is framed
+  over. It exposes its own uniffi Kotlin bindings and a C ABI (`src/capi.rs`),
+  so a UI can pair and dial without going through `grouse-core`.
 - **`grouse-unstable`** — the goose-fork compatibility shim: every
   `_goose/unstable/*` method, plus the SDK's `unstable_elicitation` feature and
   the goose-custom `status_message`/`message_usage` notifications. Marked for
   retirement as the GDK absorbs each feature upstream.
 
-Together the two crates own the ACP session state machine and everything that
-must be byte-identical across platforms. The UIs own: rendering, input, platform
-lifecycle, and platform services (notifications, tiles, biometrics, tray
-integration).
+Together these crates own the ACP session state machine, the roam transport, and
+everything else that must be byte-identical across platforms. The UIs own:
+rendering, input, platform lifecycle, and platform services (notifications,
+tiles, biometrics, tray integration).
 
 ## The uniffi contract is the API boundary
 
@@ -43,7 +48,8 @@ the core.
 - **Android (Kotlin/Compose)** consumes the uniffi-generated Kotlin bindings.
 - **macOS (SwiftUI)** will consume the uniffi-generated Swift bindings.
 - **Linux desktop (Qt6/KF6 Kirigami)** consumes a hand-written C ABI on the core
-  (`extern "C"`), mirroring the `src/capi.rs` pattern proven in `grouse-roam-core`;
+  (`extern "C"`), mirroring the `src/capi.rs` pattern proven in
+  `core/grouse-roam-core`;
   Qt dlopens/links that ABI.
 - **CLI (Rust TUI)** consumes the crates directly as Rust libraries — no FFI.
 
@@ -98,8 +104,8 @@ bite; keep them in mind when extending the core.
   JSON-RPC, newline-framed (ACP's ByteStreams framing, identical to goose on
   stdio), over an iroh connection between two peers instead of a WebSocket to a
   host. Roam peers are parallel connections, not replacements for the main
-  connection. The transport is a separate native library (see
-  `grouse-roam-core`) exposing both uniffi Kotlin and a C ABI.
+  connection. The transport is `core/grouse-roam-core` — a workspace member, not
+  an external dependency — exposing both uniffi Kotlin and a C ABI.
 - **camelCase vs snake_case**: `recipes/*` and `schedules/*` params are
   snake_case (`cron_schedule`, `file_path`); nearly everything else is camelCase.
   A misspelled param is silently dropped, not rejected.
