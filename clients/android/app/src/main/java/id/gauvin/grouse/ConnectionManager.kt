@@ -1878,7 +1878,11 @@ class ConnectionManager private constructor(context: Context) {
         live = false; connecting = true; online.value = false
         liveModelsFetchedFor = null   // re-fetch supported models fresh on every new connection
         desiredApplied = false
-        replayActive.value = false; replayProgress.value = 0; replayWiped = false
+        // Resuming means content is on its way — show "Loading…" from the tap,
+        // not from whenever the core's first event happens to land. onCoreTranscript
+        // turns it straight back off if a cached snapshot paints (content on screen
+        // needs no spinner); a new chat is empty by definition and never loads.
+        replayActive.value = resume != null; replayProgress.value = 0; replayWiped = false
         val base = currentServerConfig()
         // A fresh config (first connect of the process, or host/port/key/cwd changed) needs a
         // real `connect()` — the core's new/open intents reuse the LAST config only. connect()

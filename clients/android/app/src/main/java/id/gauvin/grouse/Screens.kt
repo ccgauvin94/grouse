@@ -674,7 +674,26 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                 hintDismissed = true; cm.store.assistantHintSeen = true
             }
             Box(Modifier.weight(1f).fillMaxWidth()) {
-                if (cm.messages.isEmpty() && !cm.busy.value) {
+                if (cm.messages.isEmpty() && !cm.busy.value && cm.replayActive.value) {
+                    // Opening an existing chat with nothing painted yet: the wire
+                    // is fetching it. The landing copy below would read as "this
+                    // chat is empty", which is the opposite of what is happening.
+                    Column(
+                        Modifier.fillMaxSize().padding(32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
+                        Spacer(Modifier.height(14.dp))
+                        Text("Loading conversation…", style = MaterialTheme.typography.titleMedium)
+                        if (cm.replayProgress.value > 0) {
+                            Spacer(Modifier.height(4.dp))
+                            Text("${cm.replayProgress.value} messages",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline)
+                        }
+                    }
+                } else if (cm.messages.isEmpty() && !cm.busy.value) {
                     Column(
                         Modifier.fillMaxSize().padding(32.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
