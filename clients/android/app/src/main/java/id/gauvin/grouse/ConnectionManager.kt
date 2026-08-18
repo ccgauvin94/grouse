@@ -650,30 +650,23 @@ class ConnectionManager private constructor(context: Context) {
             /* user accepts THAT key instead; the mismatch is only the root cause we prevent here. */ }
     }
 
-    /** Dial a peer and bind the chat to it. `resume` is the peer-side session to open (last
-     *  session on that peer, or the one the user just picked); null on first connect leaves the
-     *  app sessionless until the user picks -- session/new would litter the host's session list.
-     *  `createSession` (a new chat ON the peer) has no core intent -- the peer registry only
-     *  opens EXISTING peer sessions (CONTRACT §6) -- so it degrades to browse: the peer's
-     *  sessions are listed and the user picks one. */
-    fun connectRoam(name: String, resume: String? = null, createSession: Boolean = false) {
+    /** Dial a peer in browse mode. Its sessions arrive via on_roam_sessions and the user
+     *  picks one; openSession is what binds the chat to a peer, never this.
+     *
+     *  This used to bind the chat too -- set currentRoamPeer, clear `messages` and null
+     *  currentSession. Auto-connect calls it once PER SAVED PEER, so with two endpoints the
+     *  open chat was wiped twice and currentRoamPeer was left pointing at whichever peer
+     *  sorted last even though no peer owned the chat. A non-null currentRoamPeer then gates
+     *  out the MAIN connection's entire ready path (onCoreReady), so the main session never
+     *  got repointed, tools never listed, sessions never re-listed. Dialing is not owning. */
+    fun connectRoam(name: String) {
         val peer = roamPeers.firstOrNull { it.name == name } ?: return
-        currentRoamPeer = name
         roamStatus[name] = "connecting"
         armRoamWatchdog(name)
         // The core generates + persists the device identity itself; browse-mode dial. Seed it
         // with OUR accepted secret first (see seedRoamIdentity) so the dial key matches.
         seedRoamIdentity()
         core.roamConnect(peer.card, name)
-
-        if (resume != null) {
-            messages.clear(); currentSession.value = resume
-            core.roamOpenSession(name, resume)
-        } else {
-            messages.clear(); currentSession.value = null
-            status.value = "connecting to ${peer.name}…"
-            // its sessions arrive via on_roam_sessions
-        }
     }
 
     // No automatic reconnection: an unexpected drop stays dropped until the user acts.
