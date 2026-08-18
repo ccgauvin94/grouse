@@ -3131,7 +3131,14 @@ private fun ModelRow(
     incompatible: String? = null,
     showModel: Boolean = true,
 ) {
-    val on = enabled && incompatible == null
+    // `enabled` is derived from the server value being set, so switching ON could never
+    // stick: onEnabled(true) has nothing to write (the model is still blank), the derived
+    // value stayed false, and the row snapped shut — the fields you needed in order to set
+    // a model were exactly what the switch was supposed to reveal. Fast and Vision could
+    // therefore be turned off and never back on. Local state opens the row; the server is
+    // written when a model is actually saved.
+    var enabledLocal by remember(enabled) { mutableStateOf(enabled) }
+    val on = enabledLocal && incompatible == null
     SettingsSection(title) {
         if (onEnabled != null) {
             Row(Modifier.fillMaxWidth().padding(vertical = 6.dp),
@@ -3140,7 +3147,7 @@ private fun ModelRow(
                     color = if (incompatible != null) MaterialTheme.colorScheme.outline
                             else MaterialTheme.colorScheme.onSurface)
                 Switch(checked = on, enabled = incompatible == null,
-                    onCheckedChange = { onEnabled(it) })
+                    onCheckedChange = { enabledLocal = it; onEnabled(it) })
             }
         }
         incompatible?.let { SettingCaption(it) }
