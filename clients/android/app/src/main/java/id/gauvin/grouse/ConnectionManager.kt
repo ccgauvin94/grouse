@@ -1087,6 +1087,10 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Upsert a global goose setting (takes effect for NEW sessions/tasks), then re-read to confirm. */
     fun setServerConfig(key: String, value: String) {
+        // Optimistic: reflect the selection immediately so the picker shows it chosen even
+        // before the async read confirms (mirrors writeServerConfig). The read below updates
+        // it to the server's canonical value when it differs.
+        serverConfig[key] = value
         io {
             unstable.configUpsert(key, value)
             unstable.configRead(key)
@@ -1766,7 +1770,10 @@ class ConnectionManager private constructor(context: Context) {
             "GOOSE_CONTEXT_LIMIT" -> serverContextLimit.value = value
             "GOOSE_FAST_MODEL" -> serverFastModel.value = value
         }
-        serverConfig[key] = value   // generic mirror for settings UIs
+        // Don't let an empty/absent server read clobber an optimistic value the user just
+        // picked — goose's read for a key it doesn't recognize returns "". Without this,
+        // a just-selected provider would flash back to a blank row on the confirming read.
+        if (value.isNotBlank() || serverConfig[key].isNullOrBlank()) serverConfig[key] = value
     }
 
     private fun onSupportedModels(provider: String, modelsJson: String) {
