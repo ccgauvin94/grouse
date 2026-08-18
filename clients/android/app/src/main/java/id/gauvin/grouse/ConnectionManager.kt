@@ -811,7 +811,6 @@ class ConnectionManager private constructor(context: Context) {
             // peer's snapshot, so a short quiet window is the good signal.
             replayActive.value = true
             replayProgress.value = 0
-            armRoamReplaySettle()
             core.roamOpenSession(peer, sessionId)
             return
         }
@@ -1401,20 +1400,6 @@ class ConnectionManager private constructor(context: Context) {
             is TranscriptEvent.Append -> appendFromMessage(event.message)
             is TranscriptEvent.Update -> updateFromMessage(event.message)
         }
-        // A roam replay streams chunks briefly; keep the loading indicator up
-        // until the burst settles (re-arm per chunk, clear after quiet).
-        if (currentRoamPeer != null && replayActive.value) armRoamReplaySettle()
-    }
-
-    /** Quiet-window loading clear for roam replays: after ~900ms with no new
-     *  chunks, the peeked transcript is done painting — drop the "Loading…" */
-    private fun armRoamReplaySettle() {
-        roamReplaySettleTask?.let { main.removeCallbacks(it) }
-        val task = Runnable {
-            if (currentRoamPeer != null) replayActive.value = false
-        }
-        roamReplaySettleTask = task
-        main.postDelayed(task, 900)
     }
 
     /** Core message id ("" for live bubbles, tool_call_id for tool rows) -> app bubble id. */
@@ -1601,7 +1586,15 @@ class ConnectionManager private constructor(context: Context) {
         if (st == "ready" || st == "disconnected" || st.startsWith("error")) cancelRoamWatchdog(label)
         when {
             st == "ready" -> {
-                // Peer connected; its sessions arrive via on_roam_sessions.
+                // Peer connected, or a session/load on it finished. Either way the
+                // peer's transcript is settled: replay chunks arrive BEFORE the load
+                // reply, so they are staged and open() paints them in one go. This is
+                // the peer's equivalent of onCoreReady clearing the main connection's
+                // indicator — it replaced a 900ms "no chunks lately" guess.
+                if (currentRoamPeer == label && replayActive.value) {
+                    replayActive.value = false
+                    replayDoneTick.value++      // ChatScreen: snap to bottom, as main does
+                }
             }
             st == "disconnected" -> {
                 if (currentRoamPeer == label) {
@@ -1646,9 +1639,6 @@ class ConnectionManager private constructor(context: Context) {
 
     /** The running turn's run id (steer key), or null when no turn is live. */
     @Volatile private var activeRunId: String? = null
-
-    /** Pending quiet-window clear for the roam replay "Loading…" indicator. */
-    private var roamReplaySettleTask: Runnable? = null
 
     private fun onCoreActiveRun(sessionId: String, runId: String) {
         // Steer only targets the session on screen; a peer's or background
