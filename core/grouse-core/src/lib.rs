@@ -425,6 +425,7 @@ impl Core {
                 recipe_id: config.initial_recipe_id.clone(),
             },
             false,
+            false,
         );
         self.wait_ready(ready_rx);
     }
@@ -457,7 +458,7 @@ impl Core {
         let config = self.inner.state.lock().last_config.clone();
         let Some(config) = config else { return };
         let (_, _rx) =
-            self.connect_impl(config, ConnectSpec::New { recipe_id }, false);
+            self.connect_impl(config, ConnectSpec::New { recipe_id }, false, false);
     }
 
     /// Whether the cached transcript for a session is up to date with the
@@ -494,19 +495,28 @@ impl Core {
             }
             None => (false, None),
         };
-        if suppress {
-            if let Some(messages) = cached {
+        // ALWAYS paint the cached transcript instantly — never clear it and wait
+        // on the wire. A fresh cache suppresses the replay outright; a stale one
+        // stays on screen only until the replay's first real row lands, which is
+        // what `painted` arms below (the replay APPENDS, so leaving the painted
+        // copy in place would duplicate the whole transcript).
+        let painted = match cached {
+            Some(messages) => {
                 self.inner.store.replace(messages);
+                !suppress
             }
-        } else {
-            self.inner.store.clear();
-        }
+            None => {
+                self.inner.store.clear();
+                false
+            }
+        };
         let config = self.inner.state.lock().last_config.clone();
         let Some(config) = config else { return };
         let (_, _rx) = self.connect_impl(
             config,
             ConnectSpec::Resume { session_id, cwd },
             suppress,
+            painted,
         );
     }
 
@@ -799,6 +809,7 @@ impl Core {
         config: ServerConfig,
         spec: ConnectSpec,
         suppress_replay: bool,
+        painted_cache: bool,
     ) -> (Arc<crate::spine::Conn>, oneshot::Receiver<Result<(), String>>) {
         let gen = {
             let mut state = self.inner.state.lock();
@@ -820,6 +831,9 @@ impl Core {
             spec,
         );
         conn.set_suppress_replay(suppress_replay);
+        // Both flags are armed BEFORE the task spawns: the handshake's first
+        // replayed row must never race the flag that tells it what to do.
+        conn.set_painted_cache(painted_cache);
         conn.set_on_status(self.status_hook());
         conn.set_on_touched(self.touched_hook());
         conn.set_on_active_run(self.active_run_hook());
@@ -1005,6 +1019,12 @@ impl Core {
             config,
             ConnectSpec::Resume { session_id: resume, cwd },
             suppress,
+            // Not a painted cache here but the same hazard: the store still
+            // holds the live transcript and a stale resume replays the whole
+            // history onto it. Chunks do NOT dedupe against the store —
+            // append_chunk only continues the currently-open bubble — so the
+            // replay has to drop what is there when its first row lands.
+            !suppress,
         );
     }
 

@@ -272,6 +272,10 @@ struct ConnInner {
     /// `session/load` replay (open + resync): thought chunks are dropped so a
     /// replayed reasoning trail does not double up (desktop `m_replaying`).
     replaying: AtomicBool,
+    /// A STALE cached transcript is painted on screen and this load's replay is
+    /// about to rebuild it. Dropped exactly once, when the first replayed row
+    /// actually arrives — see [`Conn::drop_painted_cache`].
+    painted_cache: AtomicBool,
     /// The handshake signals Core (bounded connect) through this channel.
     ready: Mutex<Option<oneshot::Sender<Result<(), String>>>>,
     /// Core triggers an explicit disconnect through this channel.
@@ -326,6 +330,7 @@ impl Conn {
                 active_run_id: Mutex::new(None),
                 suppress_replay: AtomicBool::new(false),
                 replaying: AtomicBool::new(false),
+                painted_cache: AtomicBool::new(false),
                 ready: Mutex::new(Some(ready_tx)),
                 shutdown_tx: Mutex::new(Some(shutdown_tx)),
                 shutdown_rx: Mutex::new(Some(shutdown_rx)),
@@ -374,6 +379,27 @@ impl Conn {
 
     pub(crate) fn set_replaying(&self, replaying: bool) {
         self.inner.replaying.store(replaying, Ordering::SeqCst);
+    }
+
+    /// Mark that a stale cached transcript has been painted for this load.
+    pub(crate) fn set_painted_cache(&self, painted: bool) {
+        self.inner.painted_cache.store(painted, Ordering::SeqCst);
+    }
+
+    /// Drop the painted cache, exactly once, the moment the replay produces a
+    /// real row.
+    ///
+    /// The replay APPENDS: `append_chunk` opens a new bubble rather than
+    /// matching an existing one by message id, so painting a stale cache and
+    /// then letting the replay run over it duplicates the whole transcript.
+    /// Clearing up front (what `resync_current_session` does, where the wire is
+    /// already live) would instead blank the chat for the length of a connect +
+    /// initialize + load. Clearing on first content keeps the cached rows on
+    /// screen right up to the instant real ones replace them.
+    fn drop_painted_cache(&self) {
+        if self.inner.painted_cache.swap(false, Ordering::SeqCst) {
+            self.inner.store.clear();
+        }
     }
 
     pub(crate) fn set_on_status(&self, f: Arc<dyn Fn(ConnectionStatus) + Send + Sync>) {
@@ -501,6 +527,10 @@ impl Conn {
     fn on_ready(&self) {
         self.inner.suppress_replay.store(false, Ordering::SeqCst);
         self.inner.replaying.store(false, Ordering::SeqCst);
+        // Still armed here => the replay produced nothing, so the server's copy
+        // of this session is empty and the painted rows are gone from it.
+        // Replay chunks precede the load reply, so nothing is racing this.
+        self.drop_painted_cache();
         self.set_status(ConnectionStatus::Ready);
         self.signal_ready(Ok(()));
     }
@@ -555,7 +585,10 @@ impl Conn {
                     Err(_) => {
                         // A stale/archived session cannot be resumed — fall
                         // back to a fresh session (desktop response()
-                        // session/load error branch) rather than wedging.
+                        // session/load error branch) rather than wedging. Any
+                        // painted rows belong to the session we just failed to
+                        // resume, so they must not linger in the new one.
+                        self.drop_painted_cache();
                         self.start_new_session(&cx, None).await?;
                     }
                 }
@@ -642,6 +675,7 @@ impl Conn {
                 if !self.inner.suppress_replay.load(Ordering::SeqCst) {
                     let text = chunk_text(&chunk);
                     if !text.is_empty() {
+                        self.drop_painted_cache();
                         let mid = chunk.message_id.map(|id| id.to_string());
                         self.inner
                             .store
@@ -653,6 +687,7 @@ impl Conn {
                 if !self.inner.suppress_replay.load(Ordering::SeqCst) {
                     let text = chunk_text(&chunk);
                     if !text.is_empty() {
+                        self.drop_painted_cache();
                         let mid = chunk.message_id.map(|id| id.to_string());
                         self.inner
                             .store
@@ -668,17 +703,20 @@ impl Conn {
                 {
                     let text = chunk_text(&chunk);
                     if !text.is_empty() {
+                        self.drop_painted_cache();
                         self.inner.store.append_chunk("thought", &text, None, true);
                     }
                 }
             }
             SessionUpdate::ToolCall(tc) => {
                 if !self.inner.suppress_replay.load(Ordering::SeqCst) {
+                    self.drop_painted_cache();
                     self.dispatch_tool_call(&tc);
                 }
             }
             SessionUpdate::ToolCallUpdate(tcu) => {
                 if !self.inner.suppress_replay.load(Ordering::SeqCst) {
+                    self.drop_painted_cache();
                     self.dispatch_tool_update(&tcu);
                 }
             }

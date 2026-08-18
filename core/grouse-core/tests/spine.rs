@@ -713,3 +713,77 @@ fn spine_e2e_connect_prompt_stream() {
     // No session/prompt ever went out after the first one.
     assert_eq!(server.frames_for("session/prompt").len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Stale cache: painted for the connect, then REPLACED by the replay — not
+// appended to. The replay's chunks open new bubbles (append_chunk only ever
+// continues the currently-open one; it never matches an existing bubble by
+// message id), so a painted cache left in place duplicates the transcript.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stale_cache_is_painted_then_replaced_not_appended() {
+    let _cache_guard = CACHE_TEST_LOCK.lock();
+    let data_dir =
+        std::env::temp_dir().join(format!("grouse-paint-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    std::env::set_var("XDG_DATA_HOME", &data_dir);
+
+    let cache = grouse_core::cache::CacheStore::new(data_dir.join("grouse"));
+    let stale = vec![grouse_core::Message {
+        id: "m-old".into(),
+        role: "agent".into(),
+        content: "STALE-MARKER".into(),
+        output: String::new(),
+    }];
+    // An updatedAt the server will not agree with => stale => the load replays.
+    assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z"));
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let _server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
+
+    core.open_session("sess-r".to_string());
+    // The paint is synchronous inside open_session, so by the time the intent
+    // returns the stale rows are on screen — that is the point of painting.
+    let painted: String =
+        core.transcript().iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("");
+    assert!(painted.contains("STALE-MARKER"), "cache must paint instantly, got: {painted}");
+
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "resume ready");
+
+    let final_text: String =
+        core.transcript().iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("");
+    assert!(
+        final_text.contains("replayed line one and two"),
+        "the replay must land: {final_text}"
+    );
+    // The regression: the painted rows must be GONE, not sitting above the
+    // replayed copy of the same conversation.
+    assert!(
+        !final_text.contains("STALE-MARKER"),
+        "painted cache survived the replay (transcript duplicated): {final_text}"
+    );
+    assert_eq!(
+        final_text.matches("replayed line one").count(),
+        1,
+        "replayed content must appear exactly once: {final_text}"
+    );
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
