@@ -3572,11 +3572,18 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
                         Text(peer.name, style = MaterialTheme.typography.bodyLarge,
                             modifier = Modifier.weight(1f),
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(if (ready) "ready" else (st ?: "offline"),
+                        // widthIn caps the status STRUCTURALLY, not just by trusting
+                        // roamStatusShort to stay terse: this Text is unweighted, so
+                        // without a bound it is measured against the full row width and
+                        // the name's weight(1f) collapses to nothing (a raw transport
+                        // error used to erase the endpoint name entirely).
+                        Text(ConnectionManager.roamStatusShort(st),
                             style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 132.dp),
                             color = when {
                                 ready -> Color(0xFF2E7D32)
-                                st == "connecting" -> Color(0xFFFFA000)
+                                st?.startsWith("connecting") == true -> Color(0xFFFFA000)
                                 st?.startsWith("error") == true -> MaterialTheme.colorScheme.error
                                 else -> MaterialTheme.colorScheme.outline
                             })
@@ -3606,6 +3613,13 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
                                 tint = MaterialTheme.colorScheme.primary)
                         }
                     }
+                }
+            }
+            ConnectionManager.roamStatusDetail(st)?.let { detail ->
+                item(key = "$peerKey:detail") {
+                    Text(detail, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(start = 40.dp, end = 10.dp, bottom = 8.dp))
                 }
             }
             if (open && sessions.isNotEmpty()) {
@@ -3732,7 +3746,7 @@ fun RoamAddConnectionScreen(cm: ConnectionManager, nav: NavController) {
                     val ready = st == "ready"
                     val statusColor = when {
                         ready -> Color(0xFF2E7D32)
-                        st == "connecting" -> Color(0xFFFFA000)
+                        st?.startsWith("connecting") == true -> Color(0xFFFFA000)
                         st?.startsWith("error") == true -> MaterialTheme.colorScheme.error
                         else -> MaterialTheme.colorScheme.outline
                     }
@@ -3742,8 +3756,13 @@ fun RoamAddConnectionScreen(cm: ConnectionManager, nav: NavController) {
                             Text(peer.name, style = MaterialTheme.typography.bodyLarge)
                             Text(peer.fingerprint, style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.outline)
-                            Text(if (st.isNullOrBlank()) "disconnected" else st,
+                            Text(ConnectionManager.roamStatusShort(st),
                                 style = MaterialTheme.typography.labelSmall, color = statusColor)
+                            // This column wraps, so the full explanation fits here too.
+                            ConnectionManager.roamStatusDetail(st)?.let { detail ->
+                                Text(detail, style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error)
+                            }
                         }
                         if (ready) {
                             TextButton(onClick = { cm.disconnectRoam(peer.name) }) { Text("Disconnect") }

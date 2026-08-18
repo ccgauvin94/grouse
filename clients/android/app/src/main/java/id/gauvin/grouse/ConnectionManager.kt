@@ -2139,6 +2139,60 @@ class ConnectionManager private constructor(context: Context) {
             sessionId?.takeIf { it.startsWith("roam:") }
                 ?.removePrefix("roam:")?.substringBefore(':')?.ifBlank { null }
 
+        /** Compact status for an endpoint row.
+         *
+         *  The drawer row is ONE line shared with the endpoint name, and the name is the
+         *  `weight(1f)` child: a Row measures unweighted children against the full width
+         *  first, so an unbounded status string starves the name to zero width and the row
+         *  renders with no name at all. A raw transport status ("error: roam connect:
+         *  connect: transport error: connect failed: timed out") did exactly that. Every
+         *  value returned here is short enough to sit beside a name; the full explanation
+         *  goes to [roamStatusDetail] on its own wrapped line. */
+        fun roamStatusShort(status: String?): String = shortLabel(status).let {
+            // Structural guarantee, not a promise: an unrecognised status falls through
+            // the `when` untouched, and the whole point of this function is that NOTHING
+            // long reaches the row.
+            if (it.length > ROAM_STATUS_MAX) it.take(ROAM_STATUS_MAX - 1) + "…" else it
+        }
+
+        /** Longest status text that fits beside an endpoint name on one line. */
+        const val ROAM_STATUS_MAX = 20
+
+        private fun shortLabel(status: String?): String = when {
+            status.isNullOrBlank() -> "offline"
+            status == "ready" -> "ready"
+            status == "disconnected" -> "disconnected"
+            // "connecting: dialing" -> "dialing"; the phase is the useful half.
+            status.startsWith("connecting") ->
+                status.removePrefix("connecting").removePrefix(":").trim()
+                    .ifBlank { "connecting" }
+            status.startsWith("error") -> when {
+                status.contains("timed out", true) || status.contains("no reply", true) -> "no reply"
+                status.contains("refused", true) -> "refused"
+                status.contains("invalid card", true) -> "bad card"
+                else -> "error"
+            }
+            else -> status
+        }
+
+        /** The human explanation for an endpoint in an error state, for the wrapped line
+         *  under its row. Null when there is nothing to explain (any non-error status).
+         *  The transport's own prose is the last resort, not the first. */
+        fun roamStatusDetail(status: String?): String? {
+            if (status == null || !status.startsWith("error")) return null
+            val raw = status.removePrefix("error:").trim()
+            return when {
+                raw.contains("timed out", true) || raw.contains("no reply", true) ->
+                    "No reply from the host. Check that it accepted this device and that " +
+                        "its relay is reachable."
+                raw.contains("refused", true) -> "The host refused the connection."
+                raw.contains("invalid card", true) ->
+                    "That connection card could not be decoded — re-copy it from the host."
+                raw.isBlank() -> "The connection failed."
+                else -> raw
+            }
+        }
+
         @Volatile private var instance: ConnectionManager? = null
         fun get(context: Context): ConnectionManager =
             instance ?: synchronized(this) {
