@@ -4,10 +4,10 @@
 _default:
     @just --list
 
-# Build the Rust core and the CLI.
+# Build the Rust core. (The CLI is not written yet — clients/cli is a README
+# placeholder, so building it here would just fail the recipe.)
 build:
     cargo build --manifest-path core/Cargo.toml
-    cargo build --manifest-path clients/cli/Cargo.toml
 
 # Run the core test suite.
 test:
