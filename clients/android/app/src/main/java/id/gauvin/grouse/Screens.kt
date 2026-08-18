@@ -3126,7 +3126,7 @@ private fun ModelRow(
     onProvider: (String) -> Unit,
     model: String,
     onModel: (String) -> Unit,
-    providers: List<String> = listOf("openai", "openrouter", "openrouter_custom"),
+    providers: List<String>,
     modelChoices: List<String> = emptyList(),
     incompatible: String? = null,
     showModel: Boolean = true,
@@ -3282,13 +3282,17 @@ fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
 @Composable
 fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
     val ctx = LocalContext.current
-    var showAll by remember { mutableStateOf(cm.showAllProviders.value) }
     // Every row below reads and writes goose's own config over ACP, except speech, which is
     // this device calling LocalAI directly (goose has no TTS, and its dictation transcribes for
     // goose's own UI rather than returning text to a client).
     LaunchedEffect(cm.online.value) {
-        if (cm.online.value) cm.readServerConfig(
-            "GOOSE_PROVIDER", "GOOSE_MODEL", "GOOSE_FAST_MODEL", "VISION_MODEL", "VISION_PROVIDER")
+        if (cm.online.value) {
+            cm.readServerConfig(
+                "GOOSE_PROVIDER", "GOOSE_MODEL", "GOOSE_FAST_MODEL", "VISION_MODEL", "VISION_PROVIDER")
+            // Refresh the inventory on entry: providers can be configured server-side while
+            // the app is running, and this screen is where that would be noticed.
+            cm.refreshProviders()
+        }
     }
     fun cfg(k: String) = cm.serverConfig[k].orEmpty()
     Scaffold(topBar = {
@@ -3314,6 +3318,7 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
                 onProvider = { cm.setServerConfig("GOOSE_PROVIDER", it) },
                 model = cfg("GOOSE_MODEL"),
                 onModel = { cm.setServerConfig("GOOSE_MODEL", it) },
+                providers = cm.providerChoices(cfg("GOOSE_PROVIDER")),
                 modelChoices = cm.knownModels.value.toList(),
             )
 
@@ -3329,6 +3334,7 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
                 onProvider = { cm.setServerConfig("GOOSE_PROVIDER", it) },
                 model = cfg("GOOSE_FAST_MODEL"),
                 onModel = { cm.setServerConfig("GOOSE_FAST_MODEL", it) },
+                providers = cm.providerChoices(cfg("GOOSE_PROVIDER")),
                 modelChoices = cm.knownModels.value.toList(),
             )
 
@@ -3345,10 +3351,24 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
                 onProvider = { cm.setServerConfig("VISION_PROVIDER", it) },
                 model = cfg("VISION_MODEL"),
                 onModel = { cm.setServerConfig("VISION_MODEL", it) },
+                providers = cm.providerChoices(cfg("VISION_PROVIDER")),
+                // The inventory carries each provider's own models, so vision no longer has
+                // to borrow the chat provider's list.
+                modelChoices = cm.modelsFor(cfg("VISION_PROVIDER")),
             )
 
             SettingsSection("Catalog") {
-                SettingsSwitchRow("Show all providers", showAll) { showAll = it; cm.setShowAllProviders(it) }
+                SettingsSwitchRow("Show all providers", cm.showAllProviders.value) {
+                    cm.setShowAllProviders(it)
+                }
+                // Without the inventory the pickers can only offer what is already selected.
+                // Say so, rather than letting an empty dropdown read as a broken screen.
+                if (cm.providers.value.isEmpty()) {
+                    SettingCaption(if (cm.online.value)
+                        "This server did not return a provider list, so the pickers only show " +
+                            "what is already set. Type a provider name to change it."
+                        else "Connect to load the provider list.")
+                }
                 SettingCaption("Off shows only providers set up on your goose. On lists goose's " +
                     "full catalog.")
             }

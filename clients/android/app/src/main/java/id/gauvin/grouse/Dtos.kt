@@ -260,3 +260,15 @@ sealed interface AcpEvent {
         val recipeParams: Boolean = false,
     ) : AcpEvent
 }
+
+/** One entry of goose's provider inventory (`_goose/unstable/providers/list`).
+ *
+ *  `configured` is the server's own judgement of whether it has enough config to USE the
+ *  provider, and `models` is that provider's inventory — both were previously guessed by
+ *  the app from hardcoded lists. */
+data class ProviderInfo(
+    val id: String,
+    val name: String,
+    val configured: Boolean,
+    val models: List<String>,
+)

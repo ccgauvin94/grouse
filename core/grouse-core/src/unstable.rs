@@ -326,6 +326,25 @@ impl GrouseUnstable {
         }
     }
 
+    /// The server's provider inventory; surfaces as `on_providers(json)`.
+    ///
+    /// This is the authority on which providers exist, which are usable, and what
+    /// models each one has — `configured` and per-provider `models` come straight
+    /// from goose. The app previously carried its own provider list and its own
+    /// idea of which were set up; both are the server's to know, and both drifted.
+    /// An empty `providerIds` asks for everything.
+    pub fn providers_list(&self) {
+        let Some(conn) = spine::current_conn() else { return };
+        if let Some(result) = self.call(
+            &*conn,
+            "_goose/unstable/providers/list",
+            json!({ "providerIds": [] }),
+        ) {
+            let entries = result.get("entries").cloned().unwrap_or(Value::Null);
+            self.listener.on_providers(entries.to_string());
+        }
+    }
+
     // -----------------------------------------------------------------------
     // MCP-App resources
     // -----------------------------------------------------------------------
@@ -754,6 +773,7 @@ mod tests {
         SessionExtensions(String, String),
         ConfigValue(String, String),
         SupportedModels(String, String),
+        Providers(String),
         SessionProbe(String, String, i64),
         ToolResult(String, bool),
         Error(String, String),
@@ -821,6 +841,9 @@ mod tests {
             self.events
                 .lock()
                 .push(Ev::SupportedModels(provider, models));
+        }
+        fn on_providers(&self, providers: String) {
+            self.events.lock().push(Ev::Providers(providers));
         }
         fn on_session_probe(&self, session_id: String, updated_at: String, message_count: i64) {
             self.events

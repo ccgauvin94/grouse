@@ -147,6 +147,9 @@ class ConnectionManager private constructor(context: Context) {
         override fun onSupportedModels(provider: String, models: String) {
             main.post { this@ConnectionManager.onSupportedModels(provider, models) }
         }
+        override fun onProviders(providers: String) {
+            main.post { this@ConnectionManager.onProviders(providers) }
+        }
         override fun onSessionProbe(sessionId: String, updatedAt: String, messageCount: Long) {
             // The core owns resync now (probe → in-place replay); the app never probes.
         }
@@ -456,9 +459,39 @@ class ConnectionManager private constructor(context: Context) {
         }
     }
 
-    // Providers actually set up on this goose (config.yaml `providers:` with configured:true).
-    // Unconfigured catalog entries are hidden unless showAllProviders is on.
-    val configuredProviders = setOf("openai", "openrouter")
+    /** goose's own provider inventory (`_goose/unstable/providers/list`): which providers
+     *  exist, which are usable, and the models each one has. The server is the authority on
+     *  all three — the app used to carry a hardcoded catalog AND a hardcoded set of
+     *  "configured" providers, and both drifted from whatever the goose actually had. */
+    val providers = mutableStateOf<List<ProviderInfo>>(emptyList())
+
+    /** The provider list a picker should show: everything the server knows when the user
+     *  asked for the full catalog, otherwise only what it reports as configured. The current
+     *  selection is always included, so an off-catalog value stays visible in its own picker
+     *  instead of silently vanishing. */
+    fun providerChoices(current: String): List<String> =
+        providerChoices(providers.value, showAllProviders.value, current)
+
+    /** Models the server reports for a given provider — the right list for a row whose
+     *  provider is not the chat provider (Vision, typically). Empty when unknown, which
+     *  leaves the field as free text rather than offering another provider's models. */
+    fun modelsFor(provider: String): List<String> =
+        providers.value.firstOrNull { it.id == provider }?.models.orEmpty()
+
+    /** Provider ids the server reports as usable, derived from the inventory rather than
+     *  assumed. Reads [providers], so a Composable using it recomposes when it lands. */
+    val configuredProviders: Set<String>
+        get() = providers.value.filter { it.configured }.map { it.id }.toSet()
+
+    /** Re-ask the server for its provider inventory. */
+    fun refreshProviders() { io { unstable.providersList() } }
+
+    private fun onProviders(json: String) {
+        val parsed = parseProviders(json)
+        // An empty/failed parse must not wipe a good list: an older server that does not
+        // implement providers/list answers with an error, not an empty inventory.
+        if (parsed.isNotEmpty()) providers.value = parsed
+    }
 
     fun setDynamicColor(v: Boolean) { store.dynamicColor = v; dynamicColor.value = v }
     fun setShowAllProviders(v: Boolean) { store.showAllProviders = v; showAllProviders.value = v }
@@ -1330,6 +1363,8 @@ class ConnectionManager private constructor(context: Context) {
             // catalog only loaded when a sheet happened to open after Ready — a sheet opened
             // during a reconnect window bailed on `!live` and stayed "loading" forever.
             io { unstable.listGlobalExtensions() }
+            // The provider inventory: catalog + which are configured + their models.
+            io { unstable.providersList() }
             core.listSessions()   // so the Assistant thread can be resolved by title
         }
         // A rebuild (replay or cache path) just finished: unpin the list and snap to bottom
@@ -2183,6 +2218,44 @@ class ConnectionManager private constructor(context: Context) {
                     "That connection card could not be decoded — re-copy it from the host."
                 raw.isBlank() -> "The connection failed."
                 else -> raw
+            }
+        }
+
+        /** Pure half of [ConnectionManager.providerChoices], so the filtering is testable
+         *  without a Context. */
+        fun providerChoices(
+            inventory: List<ProviderInfo>,
+            showAll: Boolean,
+            current: String,
+        ): List<String> {
+            val base = inventory.filter { showAll || it.configured }.map { it.id }
+            return if (current.isNotBlank() && current !in base) base + current else base
+        }
+
+        /** Parse `_goose/unstable/providers/list` entries. Unknown fields are ignored and a
+         *  malformed payload yields an empty list rather than throwing into the UI. */
+        fun parseProviders(json: String): List<ProviderInfo> {
+            val arr = try {
+                Json.parseToJsonElement(json) as? JsonArray
+            } catch (e: Exception) { null } ?: return emptyList()
+            return arr.mapNotNull { el ->
+                val o = el as? JsonObject ?: return@mapNotNull null
+                val id = o["providerId"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                ProviderInfo(
+                    id = id,
+                    name = o["providerName"]?.jsonPrimitive?.contentOrNull ?: id,
+                    configured = o["configured"]?.jsonPrimitive?.booleanOrNull ?: false,
+                    models = (o["models"] as? JsonArray).orEmpty().mapNotNull { m ->
+                        // `id` is the identifier that goes in GOOSE_MODEL; `name` is a
+                        // DISPLAY string ("Claude Sonnet 5 (Global)" for the id
+                        // "global.anthropic.claude-sonnet-5"). Writing the name into config
+                        // would set a model the server cannot resolve.
+                        val o2 = m as? JsonObject
+                        o2?.get("id")?.jsonPrimitive?.contentOrNull
+                            ?: o2?.get("name")?.jsonPrimitive?.contentOrNull
+                            ?: (m as? JsonPrimitive)?.contentOrNull
+                    },
+                )
             }
         }
 

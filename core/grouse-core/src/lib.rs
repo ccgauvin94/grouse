@@ -276,6 +276,10 @@ pub trait GrouseUnstableListener: Send + Sync {
     fn on_session_extensions(&self, session_id: String, extensions: String);
     fn on_config_value(&self, key: String, value: String);
     fn on_supported_models(&self, provider: String, models: String);
+    /// The server's provider inventory (`_goose/unstable/providers/list`): the
+    /// catalog, which entries are configured, and each one's models. Raw JSON
+    /// array of ProviderInventoryEntryDto.
+    fn on_providers(&self, providers: String);
     fn on_session_probe(&self, session_id: String, updated_at: String, message_count: i64);
     fn on_tool_result(&self, text: String, is_error: bool);
     fn on_error(&self, method: String, message: String);
