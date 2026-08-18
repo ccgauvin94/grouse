@@ -1,0 +1,83 @@
+import QtQuick
+import QtTest
+import "@CHART_UI_URL@"
+
+// ChartBubble: the chart-spec parsing and axis math are plain functions on the
+// component, so the logic is testable without rendering pixels.
+
+TestCase {
+    id: tc
+    name: "ChartBubble"
+    width: 400
+    height: 300
+
+    Component {
+        id: chartComp
+        ChartBubble { }
+    }
+
+    function makeChart(spec, title) {
+        const c = chartComp.createObject(tc)
+        if (spec !== undefined) c.chartSpec = spec
+        if (title !== undefined) c.title = title
+        return c
+    }
+
+    function test_parseSpec() {
+        const c = makeChart('')
+        compare(c.parseSpec(), null)                       // empty spec -> nothing
+
+        c.chartSpec = '{"type":"bar","data":{"labels":["a"],"datasets":[{"data":[1]}]}}'
+        const s = c.parseSpec()
+        verify(s !== null)
+        compare(s.type, 'bar')
+
+        c.chartSpec = 'not json'                           // malformed -> null
+        compare(c.parseSpec(), null)
+
+        c.chartSpec = '{"data":{}}'                        // missing type -> null
+        compare(c.parseSpec(), null)
+
+        c.chartSpec = '{"type":"line"}'                    // missing data -> null
+        compare(c.parseSpec(), null)
+        c.destroy()
+    }
+
+    function test_niceMax() {
+        const c = makeChart('')
+        compare(c.niceMax(0), 1)
+        compare(c.niceMax(7), 10)
+        compare(c.niceMax(120), 200)
+        compare(c.niceMax(0.4), 0.5)
+        compare(c.niceMax(5), 5)
+        c.destroy()
+    }
+
+    function test_paletteColorCycles() {
+        const c = makeChart('')
+        compare(c.paletteColor(0), c.paletteColor(8))      // 8-color palette wraps
+        verify(c.paletteColor(0) !== c.paletteColor(1))
+        c.destroy()
+    }
+
+    function test_chartTitle() {
+        const withTitle = makeChart(
+            '{"type":"bar","data":{"datasets":[]},"options":{"title":{"text":"Spec title"}}}',
+            'Fallback')
+        compare(withTitle.chartTitle(withTitle.parseSpec()), 'Spec title')
+
+        const withoutTitle = makeChart('{"type":"bar","data":{"datasets":[]}}', 'Fallback')
+        compare(withoutTitle.chartTitle(withoutTitle.parseSpec()), 'Fallback')
+        withoutTitle.destroy()
+        withTitle.destroy()
+    }
+
+    function test_datasetsAndLabels() {
+        const c = makeChart(
+            '{"type":"line","data":{"labels":["a","b"],"datasets":[{"label":"S","data":[1,2]}]}}')
+        const s = c.parseSpec()
+        compare(c.datasets(s).length, 1)
+        compare(c.labels(s).length, 2)
+        c.destroy()
+    }
+}

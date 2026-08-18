@@ -47,21 +47,37 @@ the core.
 
 - **Android (Kotlin/Compose)** consumes the uniffi-generated Kotlin bindings.
 - **macOS (SwiftUI)** will consume the uniffi-generated Swift bindings.
-- **Linux desktop (Qt6/KF6 Kirigami)** consumes a hand-written C ABI on the core
-  (`extern "C"`), mirroring the `src/capi.rs` pattern proven in
-  `core/grouse-roam-core`;
-  Qt dlopens/links that ABI.
+- **Linux desktop (Qt6/KF6 Kirigami)** will consume a hand-written C ABI on the
+  core (`extern "C"`), mirroring the `src/capi.rs` pattern proven in
+  `core/grouse-roam-core`; Qt dlopens/links that ABI. **Not yet true — see the
+  deviation below.**
 - **CLI (Rust TUI)** consumes the crates directly as Rust libraries — no FFI.
 
 Rule: a change to shared behavior changes the uniffi interface (and the C ABI)
 first, regenerates the bindings, then adapts each UI. Never fork client logic
 into a UI to avoid changing the contract.
 
+### Known deviation: the desktop carries its own client
+
+`clients/desktop/` predates the Rust core and still implements the client logic
+itself, in C++: `src/acpclient.{h,cpp}` is a second ACP wire client,
+`src/manager.{h,cpp}` a second session/chat state machine and cache (the format
+`core/grouse-core/src/cache.rs` mirrors), and `src/{websocket,roam}transport.*`
+second transports. It reaches the core only by dlopening
+`libgrouse_roam_core.so` for the iroh dial.
+
+This is the exact fork the rule above forbids, and it is a migration debt, not a
+sanctioned pattern: two implementations of the session state machine will drift.
+The path out is to give `grouse-core` the C ABI the table promises, then delete
+`acpclient`, `manager`, and the transports in favour of it. Until that lands,
+protocol fixes must be applied to BOTH the Rust core and the desktop's C++, and
+`clients/desktop/AGENTS.md` documents the C++ side.
+
 ## Per-platform native toolkits
 
 |Platform|Toolkit|Binding|
 |---|---|---|
-|Linux desktop|Qt6 + KF6 Kirigami (QML/C++)|C ABI|
+|Linux desktop|Qt6 + KF6 Kirigami (QML/C++)|C ABI (planned; today: own C++ client)|
 |Android|Kotlin + Jetpack Compose|uniffi Kotlin|
 |CLI|Rust TUI|direct crate dependency|
 |macOS (later)|SwiftUI|uniffi Swift|

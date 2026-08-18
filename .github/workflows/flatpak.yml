@@ -4,38 +4,68 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  flatpak:
+  # Host-side components that cannot be built inside the flatpak SDK, handed to
+  # the flatpak job as artifacts and staged into the manifest.
+  host-components:
     runs-on: ubuntu-latest
+    container:
+      image: fedora:44
     steps:
       - uses: actions/checkout@v4
 
-      # The desktop client is not in the monorepo yet (clients/desktop is a
-      # placeholder); these steps light up when the manifest lands.
-      # (hashFiles is only valid in step-level if, hence the per-step gate.)
-      - name: Install flatpak and flatpak-builder
-        if: hashFiles('clients/desktop/id.gauvin.Grouse.json') != ''
+      # The KRunner plugin has no dev headers in the flathub-infra image and no
+      # package manager to add them, so it is built against Fedora 44's KF6 (the
+      # host range KRunner runs on); the app self-installs it on first run.
+      - name: Build KRunner plugin
         run: |
-          sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
+          dnf install -y qt6-qtbase-devel extra-cmake-modules \
+            kf6-krunner-devel kf6-kservice-devel kf6-ki18n-devel \
+            kf6-kcoreaddons-devel
+          cmake -S clients/desktop/krunner -B /tmp/krunner-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib64
+          cmake --build /tmp/krunner-build -j"$(nproc)"
+          mkdir -p clients/desktop/krunner-prebuild
+          cp /tmp/krunner-build/krunner/kf6/krunner/grouserunner.so \
+             clients/desktop/krunner-prebuild/grouserunner.so
 
-      - name: Add Flathub and install the KDE runtime/SDK
-        if: hashFiles('clients/desktop/id.gauvin.Grouse.json') != ''
+      # The roam transport the desktop dlopens. It is a workspace member now, so
+      # this builds the in-tree crate — it used to shallow-clone the standalone
+      # repo at a pinned SHA (which a --depth 1 clone cannot even reach).
+      - name: Build grouse-roam-core
         run: |
-          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak install --user -y flathub org.kde.Platform//6.10 org.kde.Sdk//6.10
-
-      - name: Build the Flatpak bundle
-        if: hashFiles('clients/desktop/id.gauvin.Grouse.json') != ''
-        run: |
-          flatpak-builder --user --install-deps-from=flathub --force-clean \
-            build-dir clients/desktop/id.gauvin.Grouse.json
-          flatpak build-bundle \
-            flatpak-repo grouse-desktop.flatpak id.gauvin.Grouse
+          dnf install -y rust cargo cmake gcc
+          cargo build --release --manifest-path core/Cargo.toml -p grouse-roam-core
+          mkdir -p clients/desktop/roam-prebuild
+          cp core/target/release/libgrouse_roam_core.so clients/desktop/roam-prebuild/
 
       - uses: actions/upload-artifact@v4
-        if: hashFiles('clients/desktop/id.gauvin.Grouse.json') != ''
         with:
-          name: grouse-desktop-flatpak
-          path: grouse-desktop.flatpak
+          name: host-components
+          path: |
+            clients/desktop/krunner-prebuild/grouserunner.so
+            clients/desktop/roam-prebuild/libgrouse_roam_core.so
+
+  flatpak:
+    runs-on: ubuntu-latest
+    needs: host-components
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:kde-6.10
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: host-components
+          path: clients/desktop
+
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: grouse-desktop.flatpak
+          manifest-path: clients/desktop/id.gauvin.Grouse.json
+          cache: true
+          upload-artifact: true

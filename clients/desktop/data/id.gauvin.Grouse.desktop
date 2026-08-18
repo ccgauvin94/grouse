@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Grouse
+GenericName=ACP thin client for goosed
+Comment=KDE-native chat client for a self-hosted goose agent
+Exec=grouse-desktop
+Icon=id.gauvin.Grouse
+Categories=Network;InstantMessaging;
+Terminal=false

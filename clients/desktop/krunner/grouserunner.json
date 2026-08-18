@@ -1,0 +1,10 @@
+{
+    "KPlugin": {
+        "Name": "Grouse",
+        "Description": "Search and open Grouse chats",
+        "Icon": "id.gauvin.Grouse",
+        "ServiceTypes": ["Plasma/Runner"],
+        "EnabledByDefault": true,
+        "Version": "0.1.0"
+    }
+}

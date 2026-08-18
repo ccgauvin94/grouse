@@ -1,0 +1,11 @@
+build/
+build-krunner-host/
+krunner-prebuild/
+roam-prebuild/
+.cache/
+*.user
+
+# Flatpak build artifacts
+*.flatpak
+.flatpak-builder/
+flatpak-repo/
