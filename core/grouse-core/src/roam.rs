@@ -1267,7 +1267,7 @@ impl RoamPeer {
         };
         drop(inner);
         if !mine && staged_new {
-            let _ = self.staged_touch(session_id);
+            self.staged_touch(session_id);
         }
         Some(if is_new {
             TranscriptEvent::Append { message }
@@ -1315,7 +1315,7 @@ impl RoamPeer {
         };
         drop(inner);
         if !mine && staged_new {
-            let _ = self.staged_touch(session_id);
+            self.staged_touch(session_id);
         }
         result
     }
