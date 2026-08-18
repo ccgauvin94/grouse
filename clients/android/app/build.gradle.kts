@@ -13,16 +13,16 @@ android {
         applicationId = "id.gauvin.grouse"
         minSdk = 26
         targetSdk = 34
-        // The only native code is the arm64-v8a roam transport (grouse-roam-core
-        // .so + its transitive natives); building the other ABIs just carries
-        // dead weight in the single sideloaded APK.
+        // The only native code is libgrouse_core.so (the roam transport links
+        // statically into it — there is no separate grouse-roam-core .so).
+        // arm64-v8a for devices, x86_64 for emulators; see `just android-libs`.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         // MUST be bumped on every sideloaded build. It sat at 1 through many rebuilds, and a
         // same-versionCode install is a reinstall Android may silently skip or refuse -- the
         // installer reports success while the old APK stays in place, so fixes appear not to
         // work and get re-debugged from scratch. versionName carries the date for the same
         // reason: so "which build is this?" is answerable from the About/app-info screen.
-        versionCode = 71
+        versionCode = 72
         versionName = "0.68-20260816"
     }
 

@@ -17,6 +17,11 @@ test:
 desktop:
     cd clients/desktop && ./build-flatpak.sh
 
+# Rebuild the Android native libs + uniffi bindings and stage them into the
+# grouse-core-aar module. Run after any change to core/.
+android-libs:
+    ./scripts/build-android-libs.sh
+
 # Build the Android debug APK.
 android:
     cd clients/android && ./gradlew assembleDebug

@@ -4,9 +4,12 @@ plugins {
 }
 
 // The uniffi-generated Kotlin bindings for BOTH crates (grouse-core + grouse-roam-core)
-// plus their native cdylibs, packaged as one Android library module. The bindings live in
-// core/grouse-core/bindings/kotlin and the .so files in the crates' target dirs; they are
-// staged here (see the monorepo README for the regen/repack step).
+// plus the native cdylib, packaged as one Android library module.
+//
+// ONE .so ships: libgrouse_core.so. grouse-roam-core is an rlib dependency of grouse-core,
+// so the roam transport links statically into it and exports its uniffi symbols from there
+// — the generated uniffi.grouse_roam_core package loads "grouse_core", not a library of its
+// own. Regenerate and stage everything with `just android-libs`.
 android {
     namespace = "dev.grouse.grousecore"
     compileSdk = 34
