@@ -318,6 +318,14 @@ struct CoreState {
     user_disconnect: bool,
     /// Remote-change resync: session_info_update debounce generation.
     touch_gen: u64,
+    /// Which session the transcript store's current content BELONGS to.
+    ///
+    /// Not always the active session: a cold start paints the last chat's cache
+    /// and only then opens a connection, which creates a throwaway session
+    /// first — so between those two the store holds one session's rows while
+    /// another is active. Persisting then would file the wrong transcript under
+    /// the wrong id, so [`Core::save_cache`] requires the two to agree.
+    store_session_id: Option<String>,
     /// Follow-up probes left in the current resync cycle (desktop m_resyncTicks).
     resync_ticks: i32,
     /// Last probed (updatedAt, messageCount) — the "did it move?" comparison.
@@ -449,13 +457,20 @@ impl Core {
         }
         self.emit_status(ConnectionStatus::Disconnected);
         self.inner.store.clear();
+        self.inner.state.lock().store_session_id = None;
     }
 
     /// `session/new` with `_meta.client` + cwd; replaces the current wire.
     pub fn new_session(&self, recipe_id: Option<String>) {
         *self.inner.active_peer_label.write() = None;
         self.reset_chat_state();
-        let config = self.inner.state.lock().last_config.clone();
+        self.inner.store.clear();
+        let config = {
+            let mut state = self.inner.state.lock();
+            // Unowned until the server hands back an id (claimed at ready).
+            state.store_session_id = None;
+            state.last_config.clone()
+        };
         let Some(config) = config else { return };
         let (_, _rx) =
             self.connect_impl(config, ConnectSpec::New { recipe_id }, false, false);
@@ -510,7 +525,11 @@ impl Core {
                 false
             }
         };
-        let config = self.inner.state.lock().last_config.clone();
+        let config = {
+            let mut state = self.inner.state.lock();
+            state.store_session_id = Some(session_id.clone());
+            state.last_config.clone()
+        };
         let Some(config) = config else { return };
         let (_, _rx) = self.connect_impl(
             config,
@@ -528,6 +547,9 @@ impl Core {
     pub fn load_cached_transcript(&self, session_id: String) {
         if let Some((messages, _)) = self.inner.cache.load_transcript(&session_id) {
             self.inner.store.replace(messages);
+            // These rows are this session's, whatever session the connection
+            // that follows happens to bind first (see `store_session_id`).
+            self.inner.state.lock().store_session_id = Some(session_id);
         }
     }
 
@@ -897,6 +919,15 @@ impl Core {
             // same delta again. on_prompt_done alone only covered the
             // prompt-turn case, which is why reopening a replayed session
             // re-streamed it every time.
+            // An unowned store belongs to whatever session just bound: a fresh
+            // session/new starts empty and its rows accumulate from here.
+            {
+                let active = self.active_session_id();
+                let mut state = self.inner.state.lock();
+                if state.store_session_id.is_none() {
+                    state.store_session_id = active;
+                }
+            }
             self.save_cache();
             // The replay itself sends NO session_info_update (the real server
             // doesn't), so the stamp above can race the session/list reply and
@@ -1189,6 +1220,15 @@ impl Core {
     /// updatedAt (the freshness check on the next open).
     fn save_cache(&self) {
         let Some(session_id) = self.active_session_id() else { return };
+        // Only persist rows this session actually owns. A cold start paints the
+        // last chat's cache and THEN connects, and the connect creates a
+        // throwaway session before the real resume — without this the painted
+        // rows were filed under the throwaway's id, one junk cache file per
+        // launch, and opening that empty chat replayed another conversation
+        // into it.
+        if self.inner.state.lock().store_session_id.as_deref() != Some(session_id.as_str()) {
+            return;
+        }
         let messages = self.inner.store.transcript();
         let updated_at = self
             .inner

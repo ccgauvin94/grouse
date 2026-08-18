@@ -787,3 +787,79 @@ fn stale_cache_is_painted_then_replaced_not_appended() {
     core.disconnect();
     let _ = std::fs::remove_dir_all(&data_dir);
 }
+
+// ---------------------------------------------------------------------------
+// Cold start: the painted cache belongs to the session it came from, NOT to the
+// throwaway session the first connect creates on the way to resuming it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cold_start_paint_is_not_filed_under_the_transient_session() {
+    let _cache_guard = CACHE_TEST_LOCK.lock();
+    let data_dir =
+        std::env::temp_dir().join(format!("grouse-owner-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    std::env::set_var("XDG_DATA_HOME", &data_dir);
+    let cache_dir = data_dir.join("grouse");
+
+    let cache = grouse_core::cache::CacheStore::new(cache_dir.clone());
+    let seeded = vec![grouse_core::Message {
+        id: "m-1".into(),
+        role: "agent".into(),
+        content: "OWNED-BY-SESS-R".into(),
+        output: String::new(),
+    }];
+    assert!(cache.save_transcript("sess-r", &seeded, "2026-01-01T00:00:00.000Z"));
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let _server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
+
+    // The cold-start sequence the UI runs: paint the last chat, THEN connect.
+    // connect() creates a throwaway session before the real resume.
+    core.load_cached_transcript("sess-r".to_string());
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
+    // save_cache runs on ready, and probe_stamp_and_save follows asynchronously.
+    std::thread::sleep(Duration::from_millis(600));
+
+    // sess-e2e is the throwaway the fake server hands back from session/new.
+    assert!(
+        cache.load_transcript("sess-e2e").is_none(),
+        "the painted rows were filed under the throwaway session"
+    );
+
+    // And nothing else picked them up either: exactly one transcript file, the
+    // one they came from.
+    let transcripts: Vec<String> = std::fs::read_dir(&cache_dir)
+        .expect("cache dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".json") && n != "directory.json" && !n.ends_with("-tools.json"))
+        .collect();
+    assert_eq!(
+        transcripts,
+        vec!["sess-r.json".to_string()],
+        "one transcript file, owned by the session it came from"
+    );
+
+    // The paint itself must survive — it is what the user is looking at.
+    let painted: String =
+        core.transcript().iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("");
+    assert!(painted.contains("OWNED-BY-SESS-R"), "paint must stay on screen: {painted}");
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
