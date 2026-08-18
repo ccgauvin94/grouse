@@ -2721,13 +2721,12 @@ private fun ErrorBubble(text: String) {
 
 @Composable
 private fun TypingIndicator() {
-    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp, horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically) {
-        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
-        Spacer(Modifier.width(8.dp))
-        Text("Grouse is thinking…", style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.outline)
-    }
+    // Text-only: the spinner read as a stuck progress bar and the user wanted
+    // the thinking message alone while a turn runs. The loading indicator is
+    // reserved for opening a session and waiting for its replay.
+    Text("Grouse is thinking…", style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.outline,
+        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
 }
 
 // ---- Schedules and recipes ------------------------------------------------------------------

@@ -292,6 +292,13 @@ struct PeerInner {
     /// The live turn's run id (`_meta.goose.activeRunId`); None when no turn
     /// is running. Mirrors the spine's active_run_id.
     active_run: Option<String>,
+    /// True while a `session/load` (or reconnect) replay is streaming its
+    /// history back. Dedupe is scoped to this: re-delivered staged content must
+    /// not double, but LIVE chunks must always append (they never dedupe — that
+    /// would swallow legitimately repeated streamed text, the way serve only
+    /// pushes text with no containment guard). Cleared when the first live turn
+    /// of the session starts.
+    replaying: bool,
     /// The SDK connection handle, set once `initialize` succeeds.
     conn: Option<agent_client_protocol::ConnectionTo<Agent>>,
     /// Peer-owned transcript of the open session (never cached).
@@ -328,6 +335,7 @@ impl PeerInner {
             active_run: None,
             conn: None,
             transcript: Vec::new(),
+            replaying: false,
             pending_permission: None,
             stream: None,
             closing: false,
@@ -941,6 +949,10 @@ impl RoamPeer {
             let staged = inner.staging.remove(&raw_session_id).map(|s| s.messages);
             inner.transcript = staged.or(cached).unwrap_or_default();
             inner.open_session_id = Some(raw_session_id);
+            // The session/load replay that follows re-delivers the promoted
+            // (or cached) content; dedupe against it during this replay only,
+            // cleared once a live turn begins (dispatch SessionInfoUpdate).
+            inner.replaying = true;
             // Promotion (or simply visiting) clears the green dot: has_new is
             // gone with the staging entry, and sessions() re-reads it live.
         }
@@ -1118,6 +1130,10 @@ impl RoamPeer {
                             && self.inner.lock().active_run.take().is_some();
                         if let Some(run_id) = started {
                             self.inner.lock().active_run = Some(run_id.clone());
+                            // The load/reconnect replay is done; a live turn is
+                            // streaming now. From here on chunks never dedupe
+                            // (that would swallow legitimately repeated text).
+                            self.inner.lock().replaying = false;
                             self.listener.on_active_run(
                                 format!("roam:{}:{session_id}", self.label),
                                 run_id,
@@ -1175,6 +1191,7 @@ impl RoamPeer {
     fn accumulate(&self, session_id: &str, role: &str, text: &str, message_id: &str) -> Option<TranscriptEvent> {
         let mut inner = self.inner.lock();
         let mine = inner.open_session_id.as_deref() == Some(session_id);
+        let replaying = inner.replaying;   // snapshot before the target borrow
         let mut staged_new = false;
         let target: &mut Vec<Message> = if mine {
             &mut inner.transcript
@@ -1194,7 +1211,9 @@ impl RoamPeer {
             // transcript and swallowed thinking blocks).
             let msg = target.last_mut().filter(|m| m.role == role && m.id.is_empty());
             match msg {
-                Some(m) if !m.content.contains(text) => {
+                // Live chunks append unconditionally (serve parity). Only a
+                // replay (load re-delivering promoted/cached content) dedupes.
+                Some(m) if !replaying || !m.content.contains(text) => {
                     m.content.push_str(text);
                     Some(TranscriptEvent::Update {
                         message: Message {
@@ -1212,8 +1231,9 @@ impl RoamPeer {
             .find(|m| m.role == role && m.id == message_id)
         {
             // Replay dedupe: a staged message being re-sent by session/load
-            // is identical — appending it again would double the text.
-            if !msg.content.contains(text) {
+            // is identical — appending it again would double the text. Live
+            // chunks (replaying==false) never dedupe.
+            if !replaying || !msg.content.contains(text) {
                 msg.content.push_str(text);
                 Some(TranscriptEvent::Update {
                     message: Message {
@@ -1331,6 +1351,7 @@ impl RoamPeer {
     fn accumulate_tool_append(&self, session_id: &str, tool_call_id: &str, output: &str) -> Option<TranscriptEvent> {
         let mut inner = self.inner.lock();
         let mine = inner.open_session_id.as_deref() == Some(session_id);
+        let replaying = inner.replaying;   // snapshot before the target borrow
         let mut staged_new = false;
         let target: &mut Vec<Message> = if mine {
             &mut inner.transcript
@@ -1341,12 +1362,13 @@ impl RoamPeer {
             &mut st.messages
         };
         // Appends go to Message.output (title stays in content). Dedupe: a
-        // replay re-delivering already-staged output must not double it.
+        // replay re-delivering already-staged output must not double it (live
+        // chunks always append — same rule as accumulate).
         let result = if let Some(msg) = target
             .iter_mut()
             .find(|m| m.role == "tool" && m.id == tool_call_id)
         {
-            if !msg.output.contains(output) {
+            if !replaying || !msg.output.contains(output) {
                 msg.output.push_str(output);
                 Some(TranscriptEvent::Update {
                     message: Message {

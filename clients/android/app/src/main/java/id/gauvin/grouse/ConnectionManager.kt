@@ -1465,7 +1465,12 @@ class ConnectionManager private constructor(context: Context) {
         val cur = messages[idx]
         messages[idx] = cur.copy(
             role = if (m.role == "agent") "assistant" else m.role,
-            text = if (m.role == "tool" && m.output.isNotEmpty()) cur.text else m.content,
+            // For tool role, NEVER clobber the existing label with an update's
+            // content — a tool bubble's title is set once at append time and is
+            // only ever changed by output/status. Some update paths (replay or a
+            // tool with no appended output) deliver an empty/partial content that
+            // would erase the just-painted name ("label shows then vanishes").
+            text = if (m.role == "tool") cur.text else m.content,
             // Roam tool output arrives via the core's on_transcript update now
             // (serve streams it separately); land it in the chip's output field.
             output = if (m.role == "tool" && m.output.isNotEmpty()) m.output else cur.output,
