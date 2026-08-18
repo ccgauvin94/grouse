@@ -81,6 +81,47 @@ pub fn card_fingerprint(card: &str) -> Result<String, RoamError> {
         .fingerprint())
 }
 
+/// The process-wide iroh endpoint, bound once and shared by every dial.
+///
+/// Binding per dial looks harmless and is not: every node built from the same
+/// device secret has the same NodeId, and an iroh relay keys its clients by
+/// exactly that. Registering a second connection under a NodeId DEACTIVATES the
+/// first (iroh-relay `Clients::register` replaces the active client and sends
+/// the old one `SameEndpointIdConnected`), so dialing a second peer silently
+/// knocked the first one's relay path out. Whichever peer lost the race then
+/// failed with "connect failed: timed out" — reproducibly flaky above one peer,
+/// and fine with exactly one, which is what made it look like a host problem.
+///
+/// `RoamingNode::connect` takes `&self` precisely so one node can carry many
+/// connections; each dial still gets its own QUIC connection and its own stream.
+///
+/// Keyed by the secret so a rotated identity rebinds rather than dialing under
+/// the old key. Streams already handed out keep their own `Arc`, so replacing
+/// the shared node never cuts a live connection.
+fn shared_node(secret_b64: &str) -> Result<Arc<RoamingNode>, RoamError> {
+    /// The bound endpoint and the secret it was bound from.
+    type BoundNode = parking_lot::Mutex<Option<(String, Arc<RoamingNode>)>>;
+    static NODE: OnceLock<BoundNode> = OnceLock::new();
+    let slot = NODE.get_or_init(|| parking_lot::Mutex::new(None));
+    let mut held = slot.lock();
+    if let Some((secret, node)) = held.as_ref() {
+        if secret == secret_b64 {
+            return Ok(node.clone());
+        }
+    }
+    let secret = decode_secret(secret_b64)?;
+    let identity = RoamingIdentity::from_secret(secret);
+    // Bind with defaults: public relays, no inbound trust (this is the client
+    // side; `goose serve --roam` is what accepts connections).
+    let node = runtime().block_on(async {
+        RoamingNode::bind(RoamingConfig::new(identity))
+            .await
+            .map_err(|e| RoamError::Message(format!("bind: {e}")))
+    })?;
+    *held = Some((secret_b64.to_string(), node.clone()));
+    Ok(node)
+}
+
 /// Dial a host from its card (endpoint id + relay URLs), complete the roam
 /// handshake, and return the authorized stream. Only succeeds once the host
 /// has accepted this device's key into its allowlist.
@@ -93,29 +134,21 @@ pub fn roam_connect(
     card: &str,
     label: Option<String>,
 ) -> Result<Arc<RoamStream>, RoamError> {
-    let secret = decode_secret(secret_b64)?;
-    let identity = RoamingIdentity::from_secret(secret);
     let card = ConnectionCard::decode(card)
         .map_err(|e| RoamError::Message(format!("invalid card: {e}")))?;
 
     let rt = runtime();
-    // Keep the NODE (iroh Endpoint) alive for the stream's whole lifetime. iroh 1.0.3
-    // tears down every connection when its Endpoint drops — holding only the `Connection`
-    // is not enough (the Endpoint runs the IO actor). Dropping the node here is what made
-    // connect succeed, then the very first read return "stream closed".
-    let (node, stream): (Arc<RoamingNode>, RoamingClientStream) = rt
-        .block_on(async {
-            // Client node: bind with defaults (public relays, no inbound trust)
-            // and dial the card's endpoint.
-            let node = RoamingNode::bind(RoamingConfig::new(identity))
-                .await
-                .map_err(|e| RoamError::Message(format!("bind: {e}")))?;
-            let stream = node
-                .connect(&card, label)
-                .await
-                .map_err(|e| RoamError::Message(format!("connect: {e}")))?;
-            Ok::<_, RoamError>((node, stream))
-        })?;
+    // ONE endpoint for every peer — see `shared_node`. Keep the node alive for the
+    // stream's whole lifetime too: iroh 1.0.3 tears down every connection when its
+    // Endpoint drops, and holding only the `Connection` is not enough (the Endpoint runs
+    // the IO actor). Dropping the node was what made connect succeed and then the very
+    // first read return "stream closed".
+    let node = shared_node(secret_b64)?;
+    let stream: RoamingClientStream = rt.block_on(async {
+        node.connect(&card, label)
+            .await
+            .map_err(|e| RoamError::Message(format!("connect: {e}")))
+    })?;
 
     let (write, read, conn) = stream.into_futures_io();
     let (tx, rx) = mpsc::channel::<Chunk>();
@@ -240,3 +273,33 @@ impl std::fmt::Display for RoamError {
     }
 }
 impl std::error::Error for RoamError {}
+
+#[cfg(test)]
+mod tests {
+    use super::{identity_generate, shared_node};
+
+    /// The >1-peer bug in one assertion: every dial must reuse ONE endpoint.
+    /// Binding per dial gave each peer its own node under the SAME NodeId, and
+    /// the relay deactivates the older client when a second registers under an
+    /// id it already has — so peer two silently killed peer one's relay path.
+    #[test]
+    fn dials_share_one_endpoint_per_identity() {
+        let secret = identity_generate();
+        let a = shared_node(&secret).expect("bind");
+        let b = shared_node(&secret).expect("second dial reuses the node");
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "same identity must reuse the same endpoint, not bind a second one"
+        );
+        assert_eq!(a.endpoint_id(), b.endpoint_id());
+
+        // A rotated identity is a different device key, so it must rebind
+        // rather than keep dialing under the old one.
+        let other = identity_generate();
+        let c = shared_node(&other).expect("rebind on a new identity");
+        assert!(!std::sync::Arc::ptr_eq(&a, &c));
+        assert_ne!(a.endpoint_id(), c.endpoint_id());
+        // The earlier node stays alive for streams already handed out.
+        assert_eq!(a.endpoint_id(), a.endpoint_id());
+    }
+}
