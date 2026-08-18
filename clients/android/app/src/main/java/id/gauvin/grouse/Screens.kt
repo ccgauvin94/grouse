@@ -8,6 +8,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
@@ -591,16 +595,43 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             Text("Compacting…", style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.outline)
                         }
-                    } else if (showContextDetail && usage != null && usage.size > 0) {
-                        // Context window used/size, so you can see how full the conversation is
-                        // (goose compacts around the limit). Hidden by default; tapping the
-                        // donut next to the chat name reveals it.
-                        val pct = (usage.used * 100 / usage.size).coerceIn(0, 100)
-                        Text("${fmtTokens(usage.used)} / ${fmtTokens(usage.size)} · ${pct}%",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (pct >= 90) MaterialTheme.colorScheme.error
-                                    else MaterialTheme.colorScheme.outline,
-                            modifier = Modifier.padding(start = 18.dp))
+                    } else {
+                        // Context window panel — slides down under the title when
+                        // the donut is tapped: colored bar, number, Compact button.
+                        val u = usage
+                        AnimatedVisibility(visible = showContextDetail && u != null && u.size > 0,
+                            enter = expandVertically() + fadeIn(),
+                            exit = shrinkVertically() + fadeOut()) {
+                            u?.let { uu ->
+                                val pct = (uu.used * 100 / uu.size).coerceIn(0, 100)
+                                val barColor = when {
+                                    pct >= 90 -> MaterialTheme.colorScheme.error
+                                    pct >= 60 -> Color(0xFFF5A623)
+                                    else -> Color(0xFF2E7D32)
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(start = 18.dp, top = 2.dp).fillMaxWidth()) {
+                                    Row(verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)) {
+                                        Box(Modifier.width(64.dp).height(6.dp)
+                                            .clip(RoundedCornerShape(3.dp))
+                                            .background(MaterialTheme.colorScheme.surfaceVariant)) {
+                                            Box(Modifier.fillMaxWidth(pct / 100f).fillMaxHeight()
+                                                .background(barColor))
+                                        }
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("${fmtTokens(uu.used)} / ${fmtTokens(uu.size)} · ${pct}%",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (pct >= 90) MaterialTheme.colorScheme.error
+                                                    else MaterialTheme.colorScheme.outline)
+                                    }
+                                    TextButton(onClick = { cm.compact() },
+                                        enabled = !cm.compacting.value) {
+                                        Text("Compact")
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             },
