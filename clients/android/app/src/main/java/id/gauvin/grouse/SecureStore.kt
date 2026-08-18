@@ -124,11 +124,6 @@ class SecureStore(context: Context) {
      *  recipes alike, which one client doing it for itself cannot. Turn this on only when
      *  talking to a goose whose traffic does NOT go through that proxy; with the proxy in place
      *  it just does the same work a second time, more slowly, before the message is even sent. */
-    var describeImages: Boolean
-        get() = cfg.getBoolean("describe_images", false)
-        set(v) = cfg.edit().putBoolean("describe_images", v).apply()
-
-
     /** Absolute directory new sessions are created in. goose validates that session/new's cwd
      *  is absolute and refuses anything else, and it has no notion of a per-user default, so
      *  this is asked for at connect time rather than guessed. */

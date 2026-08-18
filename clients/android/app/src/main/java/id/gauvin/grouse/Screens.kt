@@ -3288,7 +3288,7 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
     LaunchedEffect(cm.online.value) {
         if (cm.online.value) {
             cm.readServerConfig(
-                "GOOSE_PROVIDER", "GOOSE_MODEL", "GOOSE_FAST_MODEL", "VISION_MODEL", "VISION_PROVIDER")
+                "GOOSE_PROVIDER", "GOOSE_MODEL", "GOOSE_FAST_MODEL")
             // Refresh the inventory on entry: providers can be configured server-side while
             // the app is running, and this screen is where that would be noticed.
             cm.refreshProviders()
@@ -3336,25 +3336,6 @@ fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
                 onModel = { cm.setServerConfig("GOOSE_FAST_MODEL", it) },
                 providers = cm.providerChoices(cfg("GOOSE_PROVIDER")),
                 modelChoices = cm.knownModels.value.toList(),
-            )
-
-            ModelRow(
-                title = "Vision",
-                caption = "Turns images into text on the server before the chat model sees them, " +
-                    "so a model that can't see still gets the picture — and the description is " +
-                    "cached per image, so re-sent history stops costing tokens. Off sends the " +
-                    "image as-is. A local provider keeps images on the box but evicts the " +
-                    "resident chat model to load the vision one.",
-                enabled = cfg("VISION_MODEL").isNotBlank(),
-                onEnabled = { on -> if (!on) cm.setServerConfig("VISION_MODEL", "") },
-                provider = cfg("VISION_PROVIDER"),
-                onProvider = { cm.setServerConfig("VISION_PROVIDER", it) },
-                model = cfg("VISION_MODEL"),
-                onModel = { cm.setServerConfig("VISION_MODEL", it) },
-                providers = cm.providerChoices(cfg("VISION_PROVIDER")),
-                // The inventory carries each provider's own models, so vision no longer has
-                // to borrow the chat provider's list.
-                modelChoices = cm.modelsFor(cfg("VISION_PROVIDER")),
             )
 
             SettingsSection("Catalog") {

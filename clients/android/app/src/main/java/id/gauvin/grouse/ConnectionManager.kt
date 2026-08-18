@@ -1109,47 +1109,7 @@ class ConnectionManager private constructor(context: Context) {
         messages.add(ChatMessage("user", text, images, files)); busy.value = true
         lastMessageUsage.value = null   // stale stats from the previous turn shouldn't linger
         startService()   // keep the socket alive if the user backgrounds mid-turn
-        if (images.isNotEmpty() && store.describeImages) { describeThenSend(text, images, files); return }
         dispatch(text, images, files)
-    }
-
-    /** Turn the attached images into text, then send a text-only prompt.
-     *
-     *  WHY, given goose has a `read_image` tool: read_image is not a proxy. It loads the file and
-     *  returns image content, so the image still lands in the token stream -- the same bytes, one
-     *  layer over, still unreadable to a model that cannot see. Nothing in goose transcodes an
-     *  image to text, so the conversion has to happen before the prompt is built.
-     *
-     *  The user's typed text is passed as the question, so the answer is about what they actually
-     *  asked rather than a generic caption -- the difference between "a screenshot of a terminal"
-     *  and the error message they wanted read.
-     *
-     *  The bubble is already on screen with its thumbnail; only what goes to the model changes.
-     *  On failure the send still happens, with the failure written into the prompt: a silent
-     *  fallback to sending the raw image would put us back where we started, and dropping the
-     *  message would lose what the user typed. */
-    private fun describeThenSend(text: String, images: List<ImageBlock>, files: List<FileBlock> = emptyList()) {
-        status.value = if (images.size == 1) "reading the image…" else "reading ${images.size} images…"
-        val parts = arrayOfNulls<String>(images.size)
-        var remaining = images.size
-        images.forEachIndexed { i, img ->
-            runToolDirect("vision__describe_image", kotlinx.serialization.json.buildJsonObject {
-                put("image", kotlinx.serialization.json.JsonPrimitive("data:${img.mimeType};base64,${img.dataB64}"))
-                put("question", kotlinx.serialization.json.JsonPrimitive(
-                    text.ifBlank { "Describe this image in detail." }))
-            }, timeoutMs = 120_000) { err, out ->
-                parts[i] = err?.let { "(could not read this image: $it)" } ?: out
-                if (--remaining == 0) {
-                    val described = images.indices.joinToString("\n\n") { n ->
-                        val label = if (images.size == 1) "Image" else "Image ${n + 1}"
-                        "[$label, described by a vision model because I can't see images: " +
-                            "${parts[n].orEmpty().trim()}]"
-                    }
-                    status.value = ""
-                    dispatch(if (text.isBlank()) described else "$text\n\n$described", emptyList(), files)
-                }
-            }
-        }
     }
 
     private fun dispatch(text: String, images: List<ImageBlock>, files: List<FileBlock> = emptyList()) {
