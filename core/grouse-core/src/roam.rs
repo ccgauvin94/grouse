@@ -1184,7 +1184,30 @@ impl RoamPeer {
             st.has_new = true;
             &mut st.messages
         };
-        let event = if let Some(msg) = target
+        let event = if message_id.is_empty() {
+            // Live text chunks have no stable id. Serve keeps a tracked stream
+            // bubble; roam mirrors that by appending to the LAST message ONLY
+            // when it is still the open stream for this role — i.e. it is this
+            // role and still empty-id. A tool/thought/user bubble in between (or
+            // a prior turn's bubble) means the stream closed: start a fresh
+            // bubble instead of merging non-contiguous text (which garbled the
+            // transcript and swallowed thinking blocks).
+            let msg = target.last_mut().filter(|m| m.role == role && m.id.is_empty());
+            match msg {
+                Some(m) if !m.content.contains(text) => {
+                    m.content.push_str(text);
+                    Some(TranscriptEvent::Update {
+                        message: Message {
+                            id: m.id.clone(),
+                            role: m.role.clone(),
+                            content: m.content.clone(),
+                            output: String::new(),
+                        },
+                    })
+                }
+                _ => None,
+            }
+        } else if let Some(msg) = target
             .iter_mut()
             .find(|m| m.role == role && m.id == message_id)
         {
@@ -1204,6 +1227,11 @@ impl RoamPeer {
                 None
             }
         } else {
+            None
+        };
+        let event = event.or_else(|| {
+            // No open stream bubble matched (empty id, or a new stream after a tool/
+            // thought/other role, or a fresh id): start a new bubble.
             let msg = Message {
                 id: message_id.to_string(),
                 role: role.to_string(),
@@ -1217,7 +1245,7 @@ impl RoamPeer {
                 output: String::new(),
             });
             Some(TranscriptEvent::Append { message: msg })
-        };
+        });
         drop(inner);
         if !mine && staged_new {
             // First backgrounded content for this session: tell the UI once
@@ -2149,6 +2177,47 @@ mod tests {
             ),
         ));
         assert_eq!(peer.transcript().len(), 2);
+    }
+
+    #[test]
+    fn dispatch_live_turn_keeps_thinking_separate_and_does_not_garble() {
+        let listener = test_listener();
+        let (peer, _cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(false))));
+        peer.open("s1".to_string());  // live-transcript path
+
+        // Real turn shape: thinking chunks (empty id) → tool call → final answer (empty id).
+        // The final answer must NOT merge into the thinking bubble (garbling), and the
+        // thinking must not be swallowed by the replay `contains` dedupe.
+        for t in ["think one", " think two"] {
+            peer.dispatch(SessionNotification::new(
+                "s1",
+                SessionUpdate::AgentThoughtChunk(
+                    ContentChunk::new(ContentBlock::Text(TextContent::new(t))),
+                ),
+            ));
+        }
+        peer.dispatch(SessionNotification::new(
+            "s1",
+            SessionUpdate::ToolCall(ToolCall::new(ToolCallId::new("tool1"), "shell")),
+        ));
+        for t in ["answer "] {
+            peer.dispatch(SessionNotification::new(
+                "s1",
+                SessionUpdate::AgentMessageChunk(
+                    ContentChunk::new(ContentBlock::Text(TextContent::new(t))),
+                ),
+            ));
+        }
+
+        let tr = peer.transcript();
+        // thinking + tool + answer = 3 separate bubbles; nothing merged, nothing lost.
+        assert_eq!(tr.len(), 3, "expected thinking+tool+answer separate, got {}", tr.len());
+        assert_eq!(tr[0].role, "thought");
+        assert!(!tr[0].content.is_empty(), "thinking was not lost");
+        assert_eq!(tr[1].role, "tool");
+        assert_eq!(tr[1].content, "shell");
+        assert_eq!(tr[2].role, "agent");
+        assert_eq!(tr[2].content, "answer ");
     }
 
     #[test]
