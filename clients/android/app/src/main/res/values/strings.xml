@@ -1,6 +1,155 @@
 <resources>
+    <!-- Single-language by design; extraction is for hygiene, not i18n. -->
     <string name="app_name">Grouse</string>
     <string name="new_chat">New chat</string>
     <string name="new_chat_long">Start a new Grouse chat</string>
     <string name="tile_label">Ask Grouse</string>
+
+    <!-- ConnectScreens -->
+    <string name="what_would_you_like_to_do">What would you like to do?</string>
+    <string name="recent">Recent</string>
+    <string name="no_chats_yet">No chats yet — start a new one above.</string>
+    <string name="connect_to_grouse">Connect to Grouse</string>
+    <string name="welcome_to_grouse">Welcome to Grouse</string>
+    <string name="connect_blurb">Connect to your self-hosted goose server over the tailnet.</string>
+    <string name="host">Host</string>
+    <string name="host_hint">host or IP of the machine running goose serve</string>
+    <string name="port">Port</string>
+    <string name="secret_key">Secret key</string>
+    <string name="working_directory">Working directory</string>
+    <string name="workdir_hint">Absolute path on the server, e.g. /home/you/projects</string>
+    <string name="verify_server_certificate">Verify server certificate</string>
+    <string name="cert_note">On by default; disable only for a self-signed tailnet host.</string>
+    <string name="ca_certificate">CA certificate (PEM, optional)</string>
+    <string name="ca_certificate_hint">Trust this private CA in addition to public roots</string>
+    <string name="connect">Connect</string>
+
+    <!-- ChatScreen -->
+    <string name="model_may_not_support_images">Model may not support images</string>
+    <string name="send_anyway">Send anyway</string>
+    <string name="cancel">Cancel</string>
+    <string name="close">Close</string>
+    <string name="assistant_briefings">Assistant briefings</string>
+    <string name="briefing_schedule_note">Runs hourly, 7 AM–10 PM.</string>
+    <string name="schedule_managed_on_server">Schedule is managed on the server.</string>
+    <string name="compacting">Compacting…</string>
+    <string name="compact">Compact</string>
+    <string name="loading_conversation">Loading conversation…</string>
+    <string name="wired_up_hint">Calendar, notes, web search, and memory are wired up — type below to start.</string>
+    <string name="allow_tool">Allow tool?</string>
+    <string name="decline">Decline</string>
+    <string name="submit">Submit</string>
+    <string name="session_only_note">Session only — not global. Other chats and your defaults are untouched.</string>
+    <string name="loading">loading…</string>
+
+    <!-- Drawer -->
+    <string name="projects">PROJECTS</string>
+    <string name="chats">CHATS</string>
+    <string name="archived">ARCHIVED</string>
+    <string name="rename_chat_menu">Rename…</string>
+    <string name="move_to_project_menu">Move to project…</string>
+    <string name="export_chat">Export…</string>
+    <string name="unarchive_chat">Unarchive…</string>
+    <string name="archive_chat_menu">Archive…</string>
+    <string name="delete_chat_menu">Delete…</string>
+    <string name="rename_chat">Rename chat</string>
+    <string name="rename">Rename</string>
+    <string name="move_to_project">Move to project</string>
+    <string name="chats_no_project">Chats (no project)</string>
+    <string name="archive_chat_question">Archive chat?</string>
+    <string name="archive">Archive</string>
+    <string name="delete_chat_question">Delete chat?</string>
+    <string name="new_project">New project</string>
+    <string name="new_project_guidelines">Lowercase letters, digits and hyphens only. Creates a project on the server — no folder is made, and chats can be moved between projects freely.</string>
+    <string name="example_project">e.g. bird-feeder-cam</string>
+    <string name="creating_on_server">Creating on the server…</string>
+    <string name="create">Create</string>
+
+    <!-- ProjectScreens -->
+    <string name="delete_project_question">Delete project?</string>
+    <string name="working">Working…</string>
+    <string name="delete">Delete</string>
+    <string name="project_deleted">Project deleted</string>
+    <string name="ok">OK</string>
+    <string name="goosehints_memory">GOOSEHINTS &amp; MEMORY</string>
+    <string name="asking_fast_model">Asking the fast model to read them…</string>
+    <string name="reload">Reload</string>
+    <string name="project_hints_info">The project\'s .goosehints and local memory (.goose/memory) live on the server; loading them runs a quick fast-model session.</string>
+    <string name="load">Load</string>
+    <string name="delete_project">Delete project…</string>
+    <string name="reset_assistant_thread">Reset assistant thread?</string>
+    <string name="reset_note">Your current assistant conversation is renamed aside (history preserved) and a fresh empty thread takes its place.</string>
+    <string name="reset">Reset</string>
+
+    <!-- SettingsScreens -->
+    <string name="settings">Settings</string>
+    <string name="tools">Tools</string>
+    <string name="extensions_note">Turn off extensions you don\'t use to shrink the context every chat carries. Changes apply to new chats.</string>
+    <string name="couldnt_load_extensions">Couldn\'t load extensions — make sure you\'re connected.</string>
+    <string name="model_title">Model</string>
+    <string name="loading_model_options">loading model options…</string>
+    <string name="always_on_assistant">Your always-on assistant</string>
+    <string name="assistant_actions_note">Briefings, alerts, and voice all land here. Let it act on your behalf in Settings › Assistant › Assistant actions.</string>
+
+    <!-- Dropdowns -->
+    <string name="model">model</string>
+    <string name="custom_model_menu">Custom model…</string>
+    <string name="custom_model_title">Custom model</string>
+    <string name="model_id">model id</string>
+    <string name="model_id_placeholder">e.g. poolside/laguna-s-2.1</string>
+    <string name="set">Set</string>
+    <string name="tool_mode">Tool mode</string>
+
+    <!-- Bubbles -->
+    <string name="copy_text">Copy text</string>
+    <string name="thinking">Thinking</string>
+    <string name="grouse_is_thinking">Grouse is thinking…</string>
+
+    <!-- RecipeScreens -->
+    <string name="cron_expression">Cron expression</string>
+    <string name="six_fields_hint">Six fields, seconds first.</string>
+    <string name="recipe_not_found">Recipe not found.</string>
+    <string name="start_session">Start session</string>
+    <string name="unschedule">Unschedule</string>
+    <string name="save_schedule">Save schedule</string>
+    <string name="run_now">Run now</string>
+    <string name="blank_server_default">blank = the server default</string>
+    <string name="save_model">Save model</string>
+    <string name="prompt">Prompt</string>
+    <string name="prompt_hint">The message the run starts from.</string>
+    <string name="save_prompt">Save prompt</string>
+    <string name="instructions">Instructions</string>
+    <string name="instructions_hint">The system prompt for this run.</string>
+    <string name="save_instructions">Save instructions</string>
+    <string name="delete_recipe">Delete recipe</string>
+    <string name="recipe_delete_body">The recipe file is removed from the server. Any schedule running it stops working.</string>
+    <string name="save">Save</string>
+
+    <!-- InstanceScreens -->
+    <string name="instance">Instance</string>
+    <string name="replace_secret_key">Replace secret key (optional)</string>
+    <string name="instance_workdir_hint">Absolute path on the server; new sessions start here</string>
+    <string name="save_and_reconnect">Save &amp; reconnect</string>
+    <string name="providers">Providers</string>
+
+    <!-- CatalogScreens -->
+    <string name="recipes">Recipes</string>
+    <string name="skills">Skills</string>
+    <string name="skill_not_found">Skill not found.</string>
+
+    <!-- RoamScreens -->
+    <string name="endpoints">ENDPOINTS</string>
+    <string name="no_endpoints">No endpoints yet — use “New connection” to pair with a `goose serve --roam` host.</string>
+    <string name="new_connection">New connection</string>
+    <string name="name">Name</string>
+    <string name="connection_card">Connection card</string>
+    <string name="scan_qr">Scan QR</string>
+    <string name="save_host">Save host</string>
+    <string name="disconnect">Disconnect</string>
+
+    <!-- QrScan -->
+    <string name="scan_host_card">Scan host card</string>
+    <string name="camera_access_note">Camera access is needed to scan a host\'s QR card. You can also paste the card by hand on the Roam screen.</string>
+    <string name="allow_camera">Allow camera</string>
+    <string name="couldnt_render_qr">Couldn\'t render pairing QR.</string>
 </resources>
