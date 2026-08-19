@@ -143,57 +143,55 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
             val ready = st == "ready"
             val sessions = sessionsByLocalPeer[peer.name].orEmpty()
             item(key = peerKey) {
-                Row(Modifier.fillMaxWidth().padding(start = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Row(Modifier.weight(1f)
-                        .clickable { expanded = if (open) expanded - peerKey else expanded + peerKey }
-                        .padding(vertical = 9.dp),
+                // Each endpoint is a card: colored status dot + name, count of
+                // sessions, and a toggle that expands/collapses the chats below.
+                // Clicking the NAME (not a caret) drops it down / slides it up.
+                // Status is the dot's color — the textual "ready/connecting" label
+                // is gone.
+                Card(
+                    modifier = Modifier.fillMaxWidth()
+                        .padding(start = 10.dp, end = 10.dp, bottom = 6.dp)
+                        .clickable { expanded = if (open) expanded - peerKey else expanded + peerKey },
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                            .copy(alpha = 0.5f))
+                ) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.Public, contentDescription = null,
-                            modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                        // Status dot: online/connecting/error, no text.
+                        Box(Modifier.size(10.dp)
+                            .background(
+                                when {
+                                    ready -> MaterialTheme.statusColors.online
+                                    st?.startsWith("connecting") == true -> MaterialTheme.statusColors.connecting
+                                    st?.startsWith("error") == true -> MaterialTheme.colorScheme.error
+                                    else -> MaterialTheme.colorScheme.outline
+                                },
+                                CircleShape))
                         Spacer(Modifier.width(10.dp))
+                        Icon(Icons.Filled.Public, contentDescription = null,
+                            modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(8.dp))
                         Text(peer.name, style = MaterialTheme.typography.bodyLarge,
                             modifier = Modifier.weight(1f),
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        // widthIn caps the status STRUCTURALLY, not just by trusting
-                        // roamStatusShort to stay terse: this Text is unweighted, so
-                        // without a bound it is measured against the full row width and
-                        // the name's weight(1f) collapses to nothing (a raw transport
-                        // error used to erase the endpoint name entirely).
-                        Text(ConnectionManager.roamStatusShort(st),
-                            style = MaterialTheme.typography.labelSmall,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.widthIn(max = 132.dp),
-                            color = when {
-                                ready -> MaterialTheme.statusColors.online
-                                st?.startsWith("connecting") == true -> MaterialTheme.statusColors.connecting
-                                st?.startsWith("error") == true -> MaterialTheme.colorScheme.error
-                                else -> MaterialTheme.colorScheme.outline
-                            })
-                        Spacer(Modifier.width(6.dp))
                         if (sessions.isNotEmpty()) Text("${sessions.size}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.outline)
-                    }
-                    IconButton(onClick = {
-                        expanded = if (open) expanded - peerKey else expanded + peerKey
-                    }) {
-                        Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                            contentDescription = if (open) "collapse" else "expand",
-                            tint = MaterialTheme.colorScheme.outline)
-                    }
-                    // New chat ON this peer (session/new on its connection).
-                    if (ready) {
-                        IconButton(onClick = {
-                            cm.newRoamSession(peer.name)
-                            // Leave the browse slide: the chat opens on the
-                            // peer's on_peer_new_session, and this state change
-                            // (currentSession.next) drives the ChatScreen.
-                            onOpen()
-                        }) {
-                            Icon(Icons.Filled.Add,
-                                contentDescription = "new chat on ${peer.name}",
-                                tint = MaterialTheme.colorScheme.primary)
+                        // New chat ON this peer (session/new on its connection).
+                        if (ready) {
+                            IconButton(onClick = {
+                                cm.newRoamSession(peer.name)
+                                // Leave the browse slide: the chat opens on the
+                                // peer's on_peer_new_session, and this state change
+                                // (currentSession.next) drives the ChatScreen.
+                                onOpen()
+                            }) {
+                                Icon(Icons.Filled.Add,
+                                    contentDescription = "new chat on ${peer.name}",
+                                    tint = MaterialTheme.colorScheme.primary)
+                            }
                         }
                     }
                 }

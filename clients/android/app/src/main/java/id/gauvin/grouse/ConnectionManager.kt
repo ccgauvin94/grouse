@@ -1504,6 +1504,10 @@ class ConnectionManager private constructor(context: Context) {
     private fun onRunEnded(stopReason: String) {
         compacting.value = false
         turnInFlight = false
+        // The run is over: drop any stale run id so the next send doesn't try to
+        // steer a dead turn ("no turn exists to steer"). activeRunId is app-global,
+        // so an un-cleared value would infect every chat, not just the one that ran.
+        activeRunId = null
         // We got the authoritative completion straight from our own socket -- stop waiting
         // on the Stop-hook push for this turn so a later turn from another client in the
         // same (possibly shared) session doesn't spuriously match the stale flag.

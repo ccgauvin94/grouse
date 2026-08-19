@@ -397,7 +397,7 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         val u = cm.usage.value
                         if (u != null && u.size > 0 && !cm.compacting.value) {
                             Spacer(Modifier.weight(1f))   // push the donut to the right edge
-                            Spacer(Modifier.width(20.dp)) // breathing room off the action icons
+                            Spacer(Modifier.width(8.dp))  // breathing room off the action icons
                             ContextRing(
                                 pct = (u.used * 100 / u.size).coerceIn(0, 100),
                                 modifier = Modifier.size(14.dp),

@@ -654,11 +654,16 @@ impl RoamPeer {
         // the peer has no store, so emit RunEnded straight to the listener so
         // the app clears its in-flight/turnInFlight state and drains the queue.
         let end_turn = |stop: &str| {
-            if (self.is_active)() {
-                self.emit_stream(StreamEvent::RunEnded {
-                    stop_reason: stop.to_string(),
-                });
-            }
+            // Emit RunEnded UNCONDITIONALLY, not just when this peer owns the
+            // screen. The turn has ended regardless of what the user is viewing;
+            // gating it on `is_active` let the app keep busy=true + a stale
+            // activeRunId when the turn finished off-screen — and because that
+            // state is app-global, one wedged roam turn then made EVERY chat
+            // steer a dead run ("no turn exists to steer"). The app matches the
+            // completion to its own session/queue.
+            self.emit_stream(StreamEvent::RunEnded {
+                stop_reason: stop.to_string(),
+            });
             // The peer's turn bookkeeping mirrors the spine: a live run id is
             // now over, whether or not the server sent an activeRunId update.
             self.inner.lock().active_run = None;
