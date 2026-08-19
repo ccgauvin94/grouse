@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 @file:OptIn(ExperimentalMaterial3Api::class)
 
 package id.gauvin.grouse

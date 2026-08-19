@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package id.gauvin.grouse.ui.theme
 
 import androidx.compose.material3.Typography

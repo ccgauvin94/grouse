@@ -1,9 +1,13 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package id.gauvin.grouse
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import java.security.GeneralSecurityException
 
 /**
  * Persisted app state. Non-secret config lives in plain SharedPreferences; the X-Secret-Key
@@ -26,16 +30,29 @@ class SecureStore(context: Context) {
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
             )
         }
+        // Only the Keystore-wrapped keyset failing to decrypt (key invalidated or app data
+        // restored to a device with a different Keystore key) justifies wiping the store: that
+        // state is permanent and the app must re-onboard. Transient failures (disk I/O, generic
+        // storage errors) must NOT destroy the stored key and iroh identity — log and propagate
+        // so the caller can retry/surface, instead of nuking the secret on every hiccup.
         return try {
             create()
-        } catch (e: Exception) {
+        } catch (e: GeneralSecurityException) {
             // The Keystore-wrapped keyset can't be decrypted (e.g. app data restored to a new
             // device, or the key was invalidated). Reset the store so the app starts and can
             // re-onboard, instead of hard-crashing on every launch. The secret must be re-entered.
+            Log.w(TAG, "goose_secure unreadable (key invalidated); resetting store", e)
             app.deleteSharedPreferences("goose_secure")
             create()
+        } catch (e: Exception) {
+            // Recoverable/transient failure — keep the store intact and propagate it. The value
+            // wrapped by `secure` stays unusable for this call, but the data is not destroyed.
+            Log.e(TAG, "goose_secure open failed (transient); keeping store", e)
+            throw e
         }
     }
+
+    private companion object { const val TAG = "SecureStore" }
 
     init {
         // One-time migration: the POC stored the key in plaintext "goose" prefs.
@@ -130,6 +147,18 @@ class SecureStore(context: Context) {
     var workingDir: String
         get() = cfg.getString("working_dir", "") ?: ""
         set(v) = cfg.edit().putString("working_dir", v.trim().trimEnd('/')).apply()
+
+    // ---- Transport security (S-RC-1) ---------------------------------------
+    // The core verifies the server chain + hostname against WebPKI by default
+    // (accept_invalid_certs = false). These let a self-signed tailnet host opt
+    // out, or a private CA be trusted explicitly.
+    var verifyTls: Boolean
+        get() = cfg.getBoolean("verify_tls", true)
+        set(v) = cfg.edit().putBoolean("verify_tls", v).apply()
+
+    var caCertPem: String
+        get() = cfg.getString("ca_cert_pem", "") ?: ""
+        set(v) = cfg.edit().putString("ca_cert_pem", v.trim()).apply()
 
     /** Last opened session, so a notification reply after process death can resume it. */
     var lastSessionId: String?
@@ -227,7 +256,6 @@ class SecureStore(context: Context) {
         get() = cfg.getString("assistant_session", null)
         set(v) = cfg.edit().putString("assistant_session", v).apply()
 
-    /** How the privileged Assistant thread handles tool actions: confirm | auto | readonly. */
     /** Master switch for every assistant feature — the drawer entry, landing on the thread at
      *  startup, and the Assistant settings screen. OFF BY DEFAULT, deliberately.
      *

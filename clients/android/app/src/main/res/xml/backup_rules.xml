@@ -6,4 +6,7 @@
     <!-- Chat transcript snapshots (cold-start repaint cache): private content, and the
          server is the source of truth anyway - never ship them to cloud backup. -->
     <exclude domain="file" path="transcripts" />
+    <!-- Plaintext copy of the iroh identity exported to filesDir: pairing identity, never
+         ship it to cloud backup (the core's cacheDir copy is device-local anyway). -->
+    <exclude domain="file" path="roam_identity" />
 </full-backup-content>

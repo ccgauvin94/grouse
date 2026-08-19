@@ -37,5 +37,41 @@ else
   echo "        Install one, or set JAVA_HOME before sourcing this." >&2
 fi
 
-export ANDROID_HOME=$HOME/Android/Sdk
-export PATH=$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH
+# ANDROID_HOME is DETECTED, NOT HARDCODED, for the same reason as JAVA_HOME: this
+# checkout is built from two places (the host and the goose container), and the
+# Android SDK can live in different places on each. A hardcoded path is right for
+# whoever edited it last and broken for the other.
+#
+# Order of preference: an already-set ANDROID_HOME that looks like a real SDK (a
+# build-tools/platform-tools/cmdline-tools directory), ANDROID_SDK_ROOT, then the
+# common per-OS locations, then the documented default as a last resort (with a
+# warning). Nothing here is required — Gradle can provision its own SDK if
+# ANDROID_HOME is left unset.
+
+# A plausible SDK has at least one of build-tools/platform-tools/cmdline-tools.
+_sdk_ok() { [ -z "$1" ] && return 1; [ -d "$1/build-tools" ] || [ -d "$1/platform-tools" ] || [ -d "$1/cmdline-tools" ]; }
+
+if ! _sdk_ok "${ANDROID_HOME:-}"; then
+  for _cand in "${ANDROID_SDK_ROOT:-}" "$HOME/Android/Sdk" "$HOME/Library/Android/sdk" \
+               /usr/lib/android-sdk /opt/android-sdk /usr/local/share/android-sdk; do
+    if _sdk_ok "$_cand"; then ANDROID_HOME="$_cand"; break; fi
+  done
+  unset _cand
+fi
+
+if _sdk_ok "${ANDROID_HOME:-}"; then
+  export ANDROID_HOME
+else
+  # No SDK detected; fall back to the documented default and warn, so a silently
+  # wrong path does not replace an explicit one.
+  ANDROID_HOME="$HOME/Android/Sdk"
+  export ANDROID_HOME
+  echo "env.sh: no Android SDK found (looked in \$ANDROID_HOME, \$ANDROID_SDK_ROOT," >&2
+  echo "        \$HOME/Android/Sdk, \$HOME/Library/Android/sdk, /usr/lib/android-sdk)." >&2
+  echo "        Defaulting to \$ANDROID_HOME=$ANDROID_HOME — install the SDK there or" >&2
+  echo "        set ANDROID_HOME first." >&2
+fi
+
+# ${JAVA_HOME:-} keeps this sourcing `set -u`-safe even when JAVA_HOME was not
+# resolved above (the file only warns about that, it does not fail).
+export PATH="${JAVA_HOME:-}/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"

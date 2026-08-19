@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package id.gauvin.grouse
 
 import kotlinx.serialization.json.JsonArray
@@ -55,9 +57,13 @@ data class SessionInfo(
     val hasRecipe: Boolean = false,
     /** The project this session is filed under, or null for unfiled. */
     val projectId: String? = null,
-    /** True while the session has backgrounded (staged) content the UI has not
-     *  shown yet — the green-dot indicator. */
+    /** True while the session has backgrounded (staged) content the UI has
+     *  not shown yet — the green-dot indicator. */
     val hasNew: Boolean = false,
+    /** True when the session is archived (server stamps `_meta.archivedAt`).
+     *  Archived chats stay reachable under the drawer's ARCHIVED section and
+     *  can be restored via unarchive. */
+    val archived: Boolean = false,
 )
 
 /** A goose project: a named source with a slug, NOT a directory. */

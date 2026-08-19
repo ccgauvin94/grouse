@@ -7,8 +7,13 @@
         <exclude domain="sharedpref" path="goose_secure.xml" />
         <!-- Transcript snapshots: private content, server holds the truth. -->
         <exclude domain="file" path="transcripts" />
+        <!-- Plaintext copy of the iroh identity exported to filesDir. -->
+        <exclude domain="file" path="roam_identity" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="goose_secure.xml" />
+        <!-- Same reasoning as cloud-backup: the plaintext identity must not be
+             transferred unless the device-bound Keystore master key goes too. -->
+        <exclude domain="file" path="roam_identity" />
     </device-transfer>
 </data-extraction-rules>
