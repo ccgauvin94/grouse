@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package id.gauvin.grouse
 
 import android.content.Context
@@ -9,19 +11,15 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.doubleOrNull
-import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
-import uniffi.grouse_core.ConfigChoice
 import uniffi.grouse_core.ConfigOption as CoreConfigOption
 import uniffi.grouse_core.ConnectionStatus
 import uniffi.grouse_core.Core
@@ -31,7 +29,6 @@ import uniffi.grouse_core.GrouseUnstableListener
 import uniffi.grouse_core.Message
 import uniffi.grouse_core.PermissionOutcome
 import uniffi.grouse_core.PermissionRequest
-import uniffi.grouse_core.PermissionOption
 import uniffi.grouse_core.ProjectSummary
 import uniffi.grouse_core.Prompt
 import uniffi.grouse_core.PromptBlock
@@ -478,11 +475,6 @@ class ConnectionManager private constructor(context: Context) {
     fun modelsFor(provider: String): List<String> =
         providers.value.firstOrNull { it.id == provider }?.models.orEmpty()
 
-    /** Provider ids the server reports as usable, derived from the inventory rather than
-     *  assumed. Reads [providers], so a Composable using it recomposes when it lands. */
-    val configuredProviders: Set<String>
-        get() = providers.value.filter { it.configured }.map { it.id }.toSet()
-
     /** Re-ask the server for its provider inventory. */
     fun refreshProviders() { io { unstable.providersList() } }
 
@@ -526,7 +518,9 @@ class ConnectionManager private constructor(context: Context) {
     // hung; the count proves it is advancing.
     val replayProgress = mutableStateOf(0)
 
-    private val optionIds = listOf("provider", "model", "mode", "thinking_effort")
+    /** Config option ids this client exposes — shared with Screens.kt so the same single
+     *  list drives both the Settings picker and the saved-option restore. */
+    private val optionIds = CONFIG_IDS
 
     /** The ServerConfig the app last handed the core (mirrors the core's own last_config, so
      *  this process knows whether a fresh `connect()` is needed before new/open intents). */
@@ -764,6 +758,10 @@ class ConnectionManager private constructor(context: Context) {
         sessions.value = sessions.value.filterNot { it.sessionId == sessionId }   // optimistic
         if (sessionId == store.assistantSessionId) store.assistantSessionId = null
     }
+
+    /** Restore an archived session: the core re-lists and the drawer repopulates,
+     *  so there is no optimistic removal to undo here. */
+    fun unarchiveSession(sessionId: String) { core.unarchiveSession(sessionId) }
 
     /** Serialize a session server-side; the reply lands in [exportData] and the UI opens the
      *  Android share sheet with it. */
@@ -1723,7 +1721,7 @@ class ConnectionManager private constructor(context: Context) {
         // Only the session the UI is showing (stale replies from a switched session must
         // not clobber the current sheet).
         if (sessionId != currentSession.value) return
-        val infos = parseSessionExtensions(json)
+        val infos = parseSessionExtensions(json, roamPeer(currentSession.value) != null)
         sessionExtensionNames.value = infos.map { it.name }
         sessionExtensionInfos.value = infos
         // A re-listed name is attached again; its detached-row copy is stale.
@@ -1933,8 +1931,12 @@ class ConnectionManager private constructor(context: Context) {
         // so defaulting to 3284 here broke the "host + key, no port" setup that worked.
         port = store.port.toUShortOrNull() ?: 443u,
         secretKey = store.secretKey,
-        // The app has always spoken wss to goosed (trust-all TLS); no TLS toggle exists.
+        // Verification is on by default (the goosed public host serves a WebPKI-valid
+        // Let's Encrypt chain). Self-signed tailnet hosts opt out in the Connect screen;
+        // a private CA can be supplied instead. trust-all was a silent MITM downgrade.
         useTls = true,
+        acceptInvalidCerts = !store.verifyTls,
+        caCertPem = store.caCertPem.takeIf { it.isNotBlank() },
         cwd = store.workingDir,
         autoConnect = true,
         clientId = "grouse",
@@ -1943,61 +1945,6 @@ class ConnectionManager private constructor(context: Context) {
     // ---------------------------------------------------------------------------
     // Unstable payload parsers (the core hands the raw JSON reply payloads)
     // ---------------------------------------------------------------------------
-
-    private fun parseRecipes(json: String): List<RecipeInfo> {
-        val arr = try { Json.parseToJsonElement(json) as? JsonArray } catch (e: Exception) { null } ?: return emptyList()
-        return arr.mapNotNull { el ->
-            val e = el as? JsonObject ?: return@mapNotNull null
-            val r = e["recipe"] as? JsonObject ?: return@mapNotNull null
-            val settings = r["settings"] as? JsonObject
-            RecipeInfo(
-                id = e["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
-                title = r["title"]?.jsonPrimitive?.contentOrNull ?: "(untitled)",
-                description = r["description"]?.jsonPrimitive?.contentOrNull ?: "",
-                // snake_case, like recipes/schedule's cron_schedule and unlike most of goose's
-                // ACP surface.
-                cron = e["schedule_cron"]?.jsonPrimitive?.contentOrNull,
-                // settings keys are snake_case here, like the recipe YAML they came from
-                provider = settings?.get("goose_provider")?.jsonPrimitive?.contentOrNull,
-                model = settings?.get("goose_model")?.jsonPrimitive?.contentOrNull,
-                prompt = r["prompt"]?.jsonPrimitive?.contentOrNull,
-                instructions = r["instructions"]?.jsonPrimitive?.contentOrNull,
-                parameters = (r["parameters"] as? JsonArray).orEmpty().mapNotNull { p ->
-                    val po = p as? JsonObject ?: return@mapNotNull null
-                    RecipeParam(
-                        key = po["key"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
-                        requirement = po["requirement"]?.jsonPrimitive?.contentOrNull ?: "required",
-                        description = po["description"]?.jsonPrimitive?.contentOrNull ?: "",
-                        default = po["default"]?.jsonPrimitive?.contentOrNull,
-                    )
-                },
-                subRecipes = (r["sub_recipes"] as? JsonArray).orEmpty().mapNotNull {
-                    (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
-                },
-                extensions = (r["extensions"] as? JsonArray).orEmpty().mapNotNull {
-                    (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
-                },
-                filePath = e["file_path"]?.jsonPrimitive?.contentOrNull ?: "",
-                raw = r,
-            )
-        }.sortedBy { it.title.lowercase() }
-    }
-
-    private fun parseSchedules(json: String): List<ScheduleInfo> {
-        val arr = try { Json.parseToJsonElement(json) as? JsonArray } catch (e: Exception) { null } ?: return emptyList()
-        return arr.mapNotNull { el ->
-            val o = el as? JsonObject ?: return@mapNotNull null
-            ScheduleInfo(
-                id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
-                cron = o["cron"]?.jsonPrimitive?.contentOrNull ?: "",
-                source = o["source"]?.jsonPrimitive?.contentOrNull ?: "",
-                paused = o["paused"]?.jsonPrimitive?.booleanOrNull ?: false,
-                running = o["currentlyRunning"]?.jsonPrimitive?.booleanOrNull ?: false,
-                lastRun = o["lastRun"]?.jsonPrimitive?.contentOrNull,
-                currentSessionId = o["currentSessionId"]?.jsonPrimitive?.contentOrNull,
-            )
-        }.sortedBy { it.id.lowercase() }
-    }
 
     private fun parseProjects(json: String): List<ProjectInfo> {
         val arr = try { Json.parseToJsonElement(json) as? JsonArray } catch (e: Exception) { null } ?: return emptyList()
@@ -2034,51 +1981,6 @@ class ConnectionManager private constructor(context: Context) {
         }.sortedBy { it.name.lowercase() }
     }
 
-    private fun parseGlobalExtensions(json: String): List<ExtInfo> {
-        val arr = try { Json.parseToJsonElement(json) as? JsonArray } catch (e: Exception) { null } ?: return emptyList()
-        return arr.mapNotNull { el ->
-            val o = el as? JsonObject ?: return@mapNotNull null
-            val ext = o["extension"] as? JsonObject ?: return@mapNotNull null
-            // type=mcp extensions (nextcloud, kagi, fastmail, Fetch -- anything backed by an
-            // actual MCP server) carry their name NESTED at extension.server.name, not the
-            // top-level extension.name that builtin/platform types use.
-            val name = ext["name"]?.jsonPrimitive?.contentOrNull
-                ?: (ext["server"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
-                ?: return@mapNotNull null
-            ExtInfo(
-                name = name,
-                enabled = o["enabled"]?.jsonPrimitive?.booleanOrNull ?: false,
-                type = ext["type"]?.jsonPrimitive?.contentOrNull ?: "",
-                description = ext["description"]?.jsonPrimitive?.contentOrNull ?: "",
-                configKey = o["configKey"]?.jsonPrimitive?.contentOrNull ?: name,
-                bundled = ext["bundled"]?.jsonPrimitive?.booleanOrNull ?: false,
-                raw = ext,
-            )
-        }
-    }
-
-    /** Session-scoped extensions: the array elements ARE the extension objects (goose's tagged
-     *  union carries `name` at the top level), unlike config/extensions/list's wrap. */
-    private fun parseSessionExtensions(json: String): List<ExtInfo> {
-        val arr = try { Json.parseToJsonElement(json) as? JsonArray } catch (e: Exception) { null } ?: return emptyList()
-        return arr.mapNotNull { el ->
-            val ext = el as? JsonObject ?: return@mapNotNull null
-            val name = ext["name"]?.jsonPrimitive?.contentOrNull
-                ?: (ext["server"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
-                ?: return@mapNotNull null
-            ExtInfo(
-                name = name,
-                enabled = true,   // attached to the session by definition
-                type = ext["type"]?.jsonPrimitive?.contentOrNull ?: "",
-                description = ext["description"]?.jsonPrimitive?.contentOrNull ?: "",
-                configKey = name,
-                bundled = ext["bundled"]?.jsonPrimitive?.booleanOrNull ?: false,
-                raw = ext,
-                fromPeer = roamPeer(currentSession.value) != null,
-            )
-        }
-    }
-
     private fun parseToolNames(json: String): List<String> {
         val arr = try { Json.parseToJsonElement(json) as? JsonArray } catch (e: Exception) { null } ?: return emptyList()
         return arr.mapNotNull { (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull }
@@ -2088,37 +1990,6 @@ class ConnectionManager private constructor(context: Context) {
         val arr = try { Json.parseToJsonElement(json) as? JsonArray } catch (e: Exception) { null } ?: return emptySet()
         return arr.mapNotNull { it.jsonPrimitive.contentOrNull }.toSet()
     }
-
-    // ---------------------------------------------------------------------------
-    // Record translation (core -> app DTO)
-    // ---------------------------------------------------------------------------
-
-    private fun SessionSummary.toInfo(): SessionInfo = SessionInfo(
-        sessionId = id,
-        title = title,
-        updatedAt = updatedAt,
-        messageCount = messageCount.toInt(),
-        model = model,
-        snippet = lastMessageSnippet.orEmpty(),
-        hasRecipe = hasRecipe,
-        projectId = projectId,
-        hasNew = hasNew,
-    )
-
-    private fun CoreConfigOption.toApp(): ConfigOption = ConfigOption(
-        id = id,
-        name = name,
-        currentValue = value,
-        choices = choices.map { Choice(it.value, it.name) },
-    )
-
-    private fun ProjectSummary.toInfo(): ProjectInfo = ProjectInfo(
-        id = path.substringAfterLast('/').removeSuffix(".md").ifEmpty { name },
-        name = name,
-        description = description.orEmpty(),
-        path = path,
-        root = "",
-    )
 
     companion object {
         /** Server-side name of the persistent assistant thread (see docker/llm/goose-recipes).
