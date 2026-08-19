@@ -1,3 +1,14 @@
+# Core (Rust) test + lint.
+#
+# Version pinning (X-7): actions below are pinned to major tags (@v4/@v2), the
+# accepted lock level; upgrade them to full commit SHAs for stricter supply-chain
+# hardening. See the toolchain note just below.
+#
+# RUST TOOLCHAIN PIN (X-7): CI runs 1.97.1 via dtolnay/rust-toolchain
+# (toolchain: "1.97.1"), matching core/rust-toolchain.toml and the devcontainer
+# (ARG RUST_VERSION=1.97.1). The toolchain is centralized so every contributor,
+# this job, and the devcontainer resolve the same compiler. If it must move,
+# bump rust-toolchain.toml and this input together and align the devcontainer.
 name: Core
 
 on:
@@ -15,6 +26,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          toolchain: "1.97.1"
 
       - uses: Swatinem/rust-cache@v2
         with:

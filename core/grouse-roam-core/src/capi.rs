@@ -1,10 +1,13 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! C ABI for the KDE desktop client.
 //!
 //! The desktop app dlopens this library (QLibrary) and speaks ACP framing over
 //! the returned byte-stream handle — the same surface the uniffi Kotlin
 //! bindings expose, without a binding generator. All functions are
-//! panic-safe where possible (note: release builds use panic=abort, so the
-//! transport's own error paths — not panics — are the failure contract).
+//! panic-safe where possible: the workspace release profile sets panic="unwind"
+//! (see core/Cargo.toml), so uniffi's catch_unwind turns a panic into a foreign
+//! exception rather than aborting the process.
 //!
 //! Conventions:
 //!   * Strings are malloc-allocated UTF-8, freed with `grc_string_free`.

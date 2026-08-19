@@ -38,7 +38,8 @@ transport:
   `agent-client-protocol` SDK: initialize handshake, session lifecycle,
   prompt/streaming, tools, permissions, config, and the standard `session/update`
   tags. Owns the WebSocket transport (`transport.rs`: custom `ConnectTo` sending
-  the `X-Secret-Key` header; trust-all TLS for the server's self-signed cert).
+  the `X-Secret-Key` header; WebPKI-verifying TLS with an `accept_invalid_certs`
+  opt-out).
 - **`grouse-roam-core`** — the roam transport: iroh peer dialing, device identity,
   connection cards, and the authenticated byte duplex ACP is framed over. Exposes
   its own uniffi Kotlin bindings **and** a C ABI (`src/capi.rs`). Linked into
@@ -138,8 +139,16 @@ keep them when extending the core.
   goose has no default. It is asked for at connect time.
 - **Recipe parameter requests** hard-fail unless the client declares
   `clientCapabilities._meta.goose.recipeParameterRequests: true` at initialize.
-- **WebSocket TLS is deliberately trust-all** (self-signed cert; tailnet-only,
-  authed by `X-Secret-Key`). A regenerated cert must not lock clients out.
+- **Trust boundary** for `content`/`output`/`appHtml`/chart specs: the core
+  never escapes server-provided content; every UI must treat it as untrusted at
+  its rendering surface and sanitize or sandbox any HTML/JS renderer. See
+  `core/CONTRACT.md` §8.
+- **WebSocket TLS verifies by default** (WebPKI chain + hostname; the public
+  host serves a valid Let's Encrypt cert). `ServerConfig.accept_invalid_certs`
+  is the documented trust-all opt-out for self-signed tailnet hosts, and
+  `ca_cert_pem` trusts a private CA. The desktop's own C++ `VerifyNone` path
+  is a known parity gap (it still trusts all) — keep it in mind when touching
+  transport code on either side.
 
 ## Key Directories
 

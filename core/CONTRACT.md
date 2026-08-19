@@ -32,6 +32,14 @@ UI (native)                    core (Rust, tokio)
 
 - **Intents** never return the result of network work; they change a state
   machine or queue a request. Outcomes arrive as events.
+  **Known exception — the blocking-intent reality:** for operations where the
+  UI cannot proceed without the reply, the core deliberately makes synchronous
+  in-intent network RPCs on the calling thread. This covers `connect` (blocks,
+  bounded, until ready) and the roam peer / `grouse-unstable` shim
+  request/reply calls (cwd resolution, `session_info`/probe, `export`,
+  tools/extension/config lists). These are bounded by
+  `RoamPeer::RPC_TIMEOUT` (30s) so a hung remote goose never pins the caller
+  forever (S-RC-6); outcomes still also arrive as events where applicable.
 - **Events** arrive as typed methods on `CoreListener` (one per event family).
 - **Getters** return immutable snapshots (`Record`s). They are cheap; the core
   is authoritative, the UI mirrors what events tell it and may re-read a
@@ -48,6 +56,8 @@ pub struct ServerConfig {
     pub port: u16,
     pub secret_key: String,    // X-Secret-Key
     pub use_tls: bool,
+    pub accept_invalid_certs: bool,  // true -> historical trust-all; false (default) -> WebPKI + hostname verify
+    pub ca_cert_pem: Option<String>, // PEM CA(s) added to the verifier trust store (ignored when trust-all)
     pub cwd: String,           // absolute, must exist in the goose container
     pub auto_connect: bool,
     pub client_id: String,     // _meta.client, e.g. "grouse-desktop" | "grouse" | "grouse-cli"
@@ -56,8 +66,9 @@ pub struct ServerConfig {
 ```
 
 The transport is INTERNAL to the core (WebSocket with `X-Secret-Key` header +
-trust-all TLS; roam byte stream). The UI supplies only `ServerConfig`/roam
-intents, never a socket.
+verifying TLS; the self-signed-tailnet downgrade is `accept_invalid_certs`,
+defaulting to real verification; roam byte stream). The UI supplies only
+`ServerConfig`/roam intents, never a socket.
 
 ---
 
@@ -109,7 +120,10 @@ pub trait CoreListener {
 - `active_session_id(): Option<String>`
 - `sessions(): Vec<SessionSummary>` — carries the full session metadata the
   UIs render: id, title, updated_at, last_message_snippet, project_id,
-  message_count, model, has_recipe.
+  message_count, model, has_recipe, plus `archived` (set from the server's
+  `_meta.archivedAt`; `session/list` has no archived filter, so the flag —
+  not a drop — is how a UI distinguishes archived chats and restores them via
+  `unarchive_session`).
 - `transcript(): Vec<Message>` — the accumulated active-session transcript
 - `config(): Vec<ConfigOption>` — carries id, value, name, and the choices
   list for dropdowns (empty on the config_option_update path; the schema
@@ -178,6 +192,18 @@ the UI prompted only where a human decision is needed:
 Custom notifications (gated on `customNotifications`): `status_message` →
 `on_compaction_status`; `message_usage` → `on_message_usage`.
 
+> **Raw-JSON listeners (deliberate, documented here).** The unstable shim's
+> list families deliver their payloads to the UI **verbatim as JSON strings**
+> on `GrouseUnstableListener`: `on_recipes`, `on_projects`, `on_skills`,
+> `on_tools`, `on_extensions`, `on_session_extensions`, `on_supported_models`,
+> `on_providers`, `on_config_value`, `on_export`, `on_session_probe`,
+> `on_app_resource`, and `on_tool_result` (+ the error/compaction/message
+> families). The fork wire shapes are intentionally NOT mirrored into typed
+> uniffi records here — the shim is slated for retirement (GDK absorbs each
+> feature), so the UI parses these JSON payloads directly and the shim is
+> dropped without touching the stable contract. This is the documented
+> exception to the "typed event per family" rule in §1.
+
 ---
 
 ## 6. Roam (parallel peers)
@@ -207,7 +233,38 @@ dependency of `grouse-core`'s transport layer.
    single callback interface; the C ABI mirrors it as one function-pointer table.
 2. **Sync intents + callback events.** Every `Core` method is a synchronous
    fire-and-forget into the core's tokio runtime; results arrive on
-   `CoreListener`. No async uniffi methods.
+   `CoreListener`. No async uniffi methods. See the blocking-intent exception
+   in §1 (roam/unstable RPCs that must block on the reply).
 3. **Full-vector `transcript()` getter.** The UI diffs against its last render.
 4. **UI supplies `CacheDir` at `Core` construction**; the core owns the cache
    files under it.
+
+---
+
+## 8. Trust boundary for server-provided content
+
+The core delivers server-provided content to the UI **verbatim**: `Message`
+text (`Message.content`), tool output (`ToolCallUpdate.output`), app resources
+(`appHtml`/`resources_read`), and chart specs (`ToolCall.kind == Chart(spec)`).
+The core never escapes, sanitizes, or re-renders this content — it is raw text
+and raw server-rendered HTML/JS as the goose server produced it.
+
+Consequences for every UI (this is a policy, not implemented in the core):
+
+- The server is **untrusted** at the rendering boundary. All bytes that
+  originate from `content`/`output`/`appHtml`/chart specs MUST be treated as
+  untrusted by the UI that renders them.
+- **Plain-text renderers are safe by construction.** Rendering
+  `Message.content` as plain text (no parser that interprets HTML/JS) cannot be
+  injected into.
+- **Any HTML/JS surface MUST sanitize or sandbox at that surface.** A WebView
+  that renders `appHtml`, or a RichText/HTML renderer for `Message.content`,
+  must apply a Content-Security-Policy, a sandboxed iframe, and/or HTML
+  sanitization before the bytes can reach the document. Escaping in the core
+  would corrupt servers that legitimately send HTML (see S-RC-8): the guard
+  belongs at render time, owned by the platform UI.
+- Chart specs are embedded as JavaScript string literals; a UI embedding them
+  into a `<script>` element MUST JSON-escape the spec and neutralize `<` so the
+  spec cannot terminate the surrounding script element.
+
+Root policy reference: `AGENTS.md` protocol notes → "Trust boundary".
