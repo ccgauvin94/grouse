@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! GrouseUnstable: the goose-fork `_goose/unstable/...` shim (CONTRACT §5), marked for
 //! retirement as GDK absorbs each feature.
 //!
@@ -64,8 +66,12 @@ impl GrouseUnstable {
     /// that ended between typing and sending fails loudly instead of starting a stray turn.
     /// The reply streams back as chunks (nothing to do here).
     pub fn steer(&self, text: String, expected_run_id: String) {
-        let Some(conn) = spine::current_conn() else { return };
-        let Some(sid) = conn.active_session_id() else {
+        // RC-5: route to the OWNER of the active session via `route()`/`peer_for`.
+        // A roam-owned chat (`roam:<label>:<id>` active session) must be steered
+        // through its peer — the old code always hit `current_conn()`, injecting
+        // into the wrong conversation while a roam peer owned the chat.
+        let Some(active_conn) = spine::current_conn() else { return };
+        let Some(active) = active_conn.active_session_id() else {
             // Desktop parity: steering without a bound session is a user-visible failure.
             self.listener.on_error(
                 "_goose/unstable/session/steer".to_string(),
@@ -73,11 +79,20 @@ impl GrouseUnstable {
             );
             return;
         };
+        let Some(conn) = self.route(&active) else {
+            // The active session resolved to no live connection: refuse cleanly
+            // rather than inject into a stale/absent conversation.
+            self.listener.on_error(
+                "_goose/unstable/session/steer".to_string(),
+                "not ready — no connection".to_string(),
+            );
+            return;
+        };
         self.call(
             &*conn,
             "_goose/unstable/session/steer",
             json!({
-                "sessionId": sid,
+                "sessionId": active,
                 "prompt": [{"type": "text", "text": text}],
                 "expectedRunId": expected_run_id,
             }),
@@ -1256,6 +1271,47 @@ mod tests {
             )]
         );
         assert!(stub.calls().is_empty(), "nothing may hit the wire without a session");
+    }
+
+    #[test]
+    fn steer_routes_roam_owned_active_session_to_peer() {
+        let _guard = TEST_LOCK.lock();
+        // The active chat belongs to a roam peer (roam:<label>:<id> session).
+        let main = StubConn::new();
+        main.set_session("roam:p1:s1");
+        let peer = StubConn::new();
+        peer.set_session("roam:p1:s1");
+        peer.script(vec![Ok(Value::Null)]);
+        let resolver_peer = peer.clone();
+        spine::register_peer_resolver(Arc::new(move |sid: &str| {
+            if sid == "roam:p1:s1" {
+                Some(resolver_peer.clone())
+            } else {
+                None
+            }
+        }));
+        let (g, _rec) = harness(main.clone());
+
+        g.steer("hello".to_string(), "run-9".to_string());
+
+        // RC-5 regression: steer must route to the OWNING peer, never inject
+        // into the main connection's (wrong) conversation.
+        assert!(main.calls().is_empty(), "roam-owned steer must not hit the main connection");
+        assert_calls(
+            &peer,
+            &[(
+                "_goose/unstable/session/steer",
+                json!({
+                    "sessionId": "roam:p1:s1",
+                    "prompt": [{"type": "text", "text": "hello"}],
+                    "expectedRunId": "run-9",
+                }),
+            )],
+        );
+        // Restore the neutral resolver so other tests are unaffected.
+        spine::register_peer_resolver(Arc::new(
+            |_: &str| -> Option<Arc<dyn RpcConn>> { None },
+        ));
     }
 
     #[test]

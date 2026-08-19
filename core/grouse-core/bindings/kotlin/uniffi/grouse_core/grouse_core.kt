@@ -4314,6 +4314,19 @@ data class ServerConfig (
     var `useTls`: kotlin.Boolean
     , 
     /**
+     * `true` -> accept any server certificate (historical trust-all). When
+     * `false` (the default) the transport verifies the chain and hostname
+     * against WebPKI roots plus any `ca_cert_pem`. Set on a self-signed host.
+     */
+    var `acceptInvalidCerts`: kotlin.Boolean
+    , 
+    /**
+     * PEM-encoded CA certificate(s) added to the verifier's trust store when
+     * verifying (ignored when `accept_invalid_certs` is `true`).
+     */
+    var `caCertPem`: kotlin.String?
+    , 
+    /**
      * Absolute working directory; must exist in the goose container.
      */
     var `cwd`: kotlin.String
@@ -4350,6 +4363,8 @@ public object FfiConverterTypeServerConfig: FfiConverterRustBuffer<ServerConfig>
             FfiConverterUShort.read(buf),
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterString.read(buf),
@@ -4362,6 +4377,8 @@ public object FfiConverterTypeServerConfig: FfiConverterRustBuffer<ServerConfig>
             FfiConverterUShort.allocationSize(value.`port`) +
             FfiConverterString.allocationSize(value.`secretKey`) +
             FfiConverterBoolean.allocationSize(value.`useTls`) +
+            FfiConverterBoolean.allocationSize(value.`acceptInvalidCerts`) +
+            FfiConverterOptionalString.allocationSize(value.`caCertPem`) +
             FfiConverterString.allocationSize(value.`cwd`) +
             FfiConverterBoolean.allocationSize(value.`autoConnect`) +
             FfiConverterString.allocationSize(value.`clientId`) +
@@ -4373,6 +4390,8 @@ public object FfiConverterTypeServerConfig: FfiConverterRustBuffer<ServerConfig>
             FfiConverterUShort.write(value.`port`, buf)
             FfiConverterString.write(value.`secretKey`, buf)
             FfiConverterBoolean.write(value.`useTls`, buf)
+            FfiConverterBoolean.write(value.`acceptInvalidCerts`, buf)
+            FfiConverterOptionalString.write(value.`caCertPem`, buf)
             FfiConverterString.write(value.`cwd`, buf)
             FfiConverterBoolean.write(value.`autoConnect`, buf)
             FfiConverterString.write(value.`clientId`, buf)
@@ -4423,6 +4442,14 @@ data class SessionSummary (
      * not shown yet — the green-dot indicator (roam staging, serve parity).
      */
     var `hasNew`: kotlin.Boolean
+    , 
+    /**
+     * True when the session is archived (goose stamps `_meta.archivedAt` and
+     * `session/list` has no archived filter — the flag lets UIs list and
+     * restore archived chats instead of dropping them). Always false for
+     * roam peer sessions.
+     */
+    var `archived`: kotlin.Boolean
     
 ){
     
@@ -4448,6 +4475,7 @@ public object FfiConverterTypeSessionSummary: FfiConverterRustBuffer<SessionSumm
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -4460,7 +4488,8 @@ public object FfiConverterTypeSessionSummary: FfiConverterRustBuffer<SessionSumm
             FfiConverterLong.allocationSize(value.`messageCount`) +
             FfiConverterString.allocationSize(value.`model`) +
             FfiConverterBoolean.allocationSize(value.`hasRecipe`) +
-            FfiConverterBoolean.allocationSize(value.`hasNew`)
+            FfiConverterBoolean.allocationSize(value.`hasNew`) +
+            FfiConverterBoolean.allocationSize(value.`archived`)
     )
 
     override fun write(value: SessionSummary, buf: ByteBuffer) {
@@ -4473,6 +4502,7 @@ public object FfiConverterTypeSessionSummary: FfiConverterRustBuffer<SessionSumm
             FfiConverterString.write(value.`model`, buf)
             FfiConverterBoolean.write(value.`hasRecipe`, buf)
             FfiConverterBoolean.write(value.`hasNew`, buf)
+            FfiConverterBoolean.write(value.`archived`, buf)
     }
 }
 

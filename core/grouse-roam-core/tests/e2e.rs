@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 #![cfg_attr(rustfmt, rustfmt::skip)]
 //! Full end-to-end test: this crate's `roam_connect` against a real
 //! `goose serve --roam` host over a real relay. Needs infrastructure, so it is

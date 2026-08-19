@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! CacheStore: per-session transcript + tool caches under the UI-supplied
 //! cache directory. Pure dumb I/O — NO network, NO uniffi exports; freshness
 //! (comparing `updatedAt` against the server's stamp) is the CALLER's job.
@@ -181,6 +183,7 @@ impl CacheStore {
                     // The cache is a replay of the last list; a cached summary is
                     // never "new" — has_new is live-only, derived from staging.
                     has_new: false,
+                    archived: false,
                 })
             })
             .collect::<Vec<_>>();
@@ -218,15 +221,47 @@ fn escape(session_id: &str) -> String {
 }
 
 fn write_json(path: &Path, value: &Value) -> bool {
-    if let Some(parent) = path.parent() {
-        if fs::create_dir_all(parent).is_err() {
-            return false;
-        }
-    }
     let Ok(bytes) = serde_json::to_vec(value) else {
         return false;
     };
-    fs::write(path, bytes).is_ok()
+    atomic_write(path, &bytes).is_ok()
+}
+
+/// Write `data` to `path` atomically (S-RC-5): a temp file in the same
+/// directory, fsync'd, then renamed over the target — mirroring the desktop's
+/// mktemp+swap discipline in `scripts/build-android-libs.sh`. A crash or
+/// partial write never leaves a truncated/zero-length cache file, and the
+/// rename is atomic on POSIX.
+pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_file_name(format!(
+        ".{}.tmp{}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("cache"),
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    // Durable rename: fsync the directory so the swap survives a crash.
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
+}
+
+/// Force 0600 perms on a file (POSIX), for the roam identity secret (S-RC-5).
+#[cfg(unix)]
+pub(crate) fn make_private(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
 /// Map one desktop-format cache row to a flat `Message`.
@@ -426,6 +461,7 @@ mod tests {
             model: "gpt-4o".into(),
             has_recipe: true,
             has_new: false,
+            archived: false,
         }];
         let mut cwds = BTreeMap::new();
         cwds.insert("sess/1".into(), "/tmp".into());

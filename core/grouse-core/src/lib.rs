@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! grouse-core: the stable ACP client for Grouse, built on the official
 //! `agent-client-protocol` SDK.
 //!
@@ -55,6 +57,13 @@ pub struct ServerConfig {
     pub secret_key: String,
     /// `true` -> `wss://`, `false` -> `ws://`.
     pub use_tls: bool,
+    /// `true` -> accept any server certificate (historical trust-all). When
+    /// `false` (the default) the transport verifies the chain and hostname
+    /// against WebPKI roots plus any `ca_cert_pem`. Set on a self-signed host.
+    pub accept_invalid_certs: bool,
+    /// PEM-encoded CA certificate(s) added to the verifier's trust store when
+    /// verifying (ignored when `accept_invalid_certs` is `true`).
+    pub ca_cert_pem: Option<String>,
     /// Absolute working directory; must exist in the goose container.
     pub cwd: String,
     pub auto_connect: bool,
@@ -96,6 +105,11 @@ pub struct SessionSummary {
     /// True while the session has backgrounded (staged) content the UI has
     /// not shown yet — the green-dot indicator (roam staging, serve parity).
     pub has_new: bool,
+    /// True when the session is archived (goose stamps `_meta.archivedAt` and
+    /// `session/list` has no archived filter — the flag lets UIs list and
+    /// restore archived chats instead of dropping them). Always false for
+    /// roam peer sessions.
+    pub archived: bool,
 }
 
 /// One accumulated transcript bubble (CONTRACT §3.3/§4.3).
@@ -420,7 +434,11 @@ impl Core {
             let label = rest.split(':').next()?;
             let core = weak.upgrade()?;
             let peers = core.inner.peers.lock();
-            peers.iter().find(|peer| peer.label() == label).cloned()
+            peers
+                .iter()
+                .find(|peer| peer.label() == label)
+                .cloned()
+                .map(|peer: Arc<crate::roam::RoamPeer>| peer as Arc<dyn crate::spine::RpcConn>)
         }));
         core
     }
@@ -884,8 +902,14 @@ impl Core {
         conn.set_on_ended(self.ended_hook(gen));
         crate::spine::set_current_conn(Some(conn.clone()));
 
-        let transport =
-            WsTransport::new(&config.host, config.port, &config.secret_key, config.use_tls);
+        let transport = WsTransport::new(
+            &config.host,
+            config.port,
+            &config.secret_key,
+            config.use_tls,
+            config.accept_invalid_certs,
+            config.ca_cert_pem.clone(),
+        );
         let task_conn = conn.clone();
         let task = crate::roam::runtime().spawn(async move {
             let result = crate::spine::run_connection(task_conn.clone(), transport).await;
@@ -1513,16 +1537,25 @@ impl Core {
     /// The device's roam identity (grouse-roam-core), generated + persisted
     /// under the cache dir on first use (desktop m_store roam_identity).
     fn roam_identity(&self) -> String {
-        let path = self.inner.cache.dir().join("roam_identity");
+        let dir = self.inner.cache.dir();
+        let path = dir.join("roam_identity");
         if let Ok(existing) = std::fs::read_to_string(&path) {
             let existing = existing.trim();
             if !existing.is_empty() {
+                // A pre-existing (pre-fix) 0644 identity is still world-readable;
+                // tighten it even on the read path.
+                #[cfg(unix)]
+                crate::cache::make_private(&path);
                 return existing.to_string();
             }
         }
         let secret = grouse_roam_core::identity_generate();
-        let _ = std::fs::create_dir_all(self.inner.cache.dir());
-        let _ = std::fs::write(&path, &secret);
+        // Atomic write (S-RC-5): a crash mid-write must not leave a truncated
+        // identity that would re-roll the secret on next launch.
+        let _ = crate::cache::atomic_write(&path, secret.as_bytes());
+        // The identity is an iroh secret — never world-readable.
+        #[cfg(unix)]
+        crate::cache::make_private(&path);
         secret
     }
 }

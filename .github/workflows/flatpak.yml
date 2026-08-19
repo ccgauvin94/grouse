@@ -1,3 +1,10 @@
+# Flatpak bundle build.
+#
+# Version pinning (X-7): actions below are pinned to major tags (@v4/@v6) and the
+# two container images are pinned to named tags (fedora:44, ...kde-6.10). That is
+# the accepted lock level here; for stricter supply-chain hardening, pin actions
+# to full commit SHAs and the container images to immutable digests
+# (sha256:…). See core.yml for the Rust toolchain "dedrift" note.
 name: Flatpak
 
 on:

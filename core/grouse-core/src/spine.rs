@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! The live connection: owns the SDK `Client` + [`WsTransport`], the
 //! `initialize` → new/resume handshake, and the notification dispatch
 //! (`SessionNotification` → `TranscriptStore` + `CoreListener`).
@@ -48,7 +50,6 @@ use tokio::sync::oneshot;
 
 use crate::transcript::TranscriptStore;
 use crate::transport::WsTransport;
-use crate::roam::RoamPeer;
 use crate::{
     ConfigChoice, ConfigOption, ConnectionStatus, CoreListener, PermissionOption, PermissionOutcome,
     PermissionRequest, ServerConfig, SessionSummary, ToolCallKind,
@@ -90,16 +91,16 @@ pub(crate) fn set_current_conn(conn: Option<Arc<dyn RpcConn>>) {
 /// Maps a session id to the owning roam peer (`roam:<peer>:<id>` prefix), so
 /// the unstable shim can route session-bound RPCs to the peer's connection.
 /// Registered by the Core, which owns the peer list.
-static PEER_RESOLVER: Mutex<Option<Arc<dyn Fn(&str) -> Option<Arc<RoamPeer>> + Send + Sync>>> =
+static PEER_RESOLVER: Mutex<Option<Arc<dyn Fn(&str) -> Option<Arc<dyn RpcConn>> + Send + Sync>>> =
     Mutex::new(None);
 
 pub(crate) fn register_peer_resolver(
-    f: Arc<dyn Fn(&str) -> Option<Arc<RoamPeer>> + Send + Sync>,
+    f: Arc<dyn Fn(&str) -> Option<Arc<dyn RpcConn>> + Send + Sync>,
 ) {
     *PEER_RESOLVER.lock() = Some(f);
 }
 
-pub(crate) fn peer_for(session_id: &str) -> Option<Arc<RoamPeer>> {
+pub(crate) fn peer_for(session_id: &str) -> Option<Arc<dyn RpcConn>> {
     PEER_RESOLVER
         .lock()
         .as_ref()
@@ -774,63 +775,7 @@ impl Conn {
     fn dispatch_tool_call(&self, tc: &agent_client_protocol::schema::v1::ToolCall) {
         let tool_call_id = tc.tool_call_id.to_string();
         let title = tc.title.clone();
-        let raw_input = tc.raw_input.clone().unwrap_or(Value::Null);
-        let detail = raw_input
-            .get("command")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let goose = tc
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.get("goose"))
-            .cloned()
-            .unwrap_or(Value::Null);
-
-        // MCP-App path: the server names a UI resource for this tool's output
-        // (how ALL autovisualiser types work). Until the template is fetched
-        // it is still a plain chip.
-        let mcp_app = goose.get("mcpApp").cloned().unwrap_or(Value::Null);
-        let app_uri = mcp_app
-            .get("resourceUri")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let app_ext = mcp_app
-            .get("extensionName")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-
-        let kind = if !app_uri.is_empty() && !app_ext.is_empty() {
-            let input = compact_json(&raw_input);
-            ToolCallKind::McpApp {
-                app_key: format!("{app_ext}|{app_uri}"),
-                uri: app_uri,
-                extension: app_ext,
-                input,
-            }
-        } else {
-            // Legacy chart fallback only (server too old to send mcpApp meta):
-            // `data` arrives as a JSON object, not a string.
-            let tool_name = goose
-                .pointer("/toolCall/toolName")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let chart_data = raw_input
-                .get("data")
-                .map(|data| match data {
-                    Value::Object(_) => compact_json(data),
-                    Value::String(s) => s.clone(),
-                    _ => String::new(),
-                })
-                .unwrap_or_default();
-            if tool_name == "autovisualiser__show_chart" && !chart_data.is_empty() {
-                ToolCallKind::Chart { spec: chart_data }
-            } else {
-                ToolCallKind::Plain
-            }
-        };
+        let (kind, detail) = tool_call_kind(tc);
         self.inner
             .store
             .tool_call(&title, &detail, &tool_call_id, kind);
@@ -1102,7 +1047,7 @@ async fn wait_optional(rx: &mut Option<oneshot::Receiver<()>>) {
     }
 }
 
-/// The transport's trust-all TLS uses rustls' `ring` provider (Cargo.toml
+/// The transport's TLS uses rustls' `ring` provider (Cargo.toml
 /// pins it); `async-tungstenite`'s tokio-rustls feature re-enables the
 /// `aws-lc-rs` default, so rustls cannot auto-select. Install `ring`
 /// explicitly (once) before any connection builds a `ClientConfig`.
@@ -1166,10 +1111,9 @@ pub(crate) fn parse_sessions(result: &Value) -> (Vec<SessionSummary>, Vec<(Strin
             }
             let meta = obj.get("_meta").and_then(Value::as_object);
             // goose's archive only stamps archivedAt; session/list has no
-            // archived filter, so drop them or they reappear on refresh.
-            if meta.map(|m| m.contains_key("archivedAt")).unwrap_or(false) {
-                continue;
-            }
+            // archived filter — surface the flag instead of dropping the
+            // session so UIs can list and restore archived chats (A-1).
+            let archived = meta.map(|m| m.contains_key("archivedAt")).unwrap_or(false);
             let snippet = meta
                 .and_then(|m| m.get("lastMessageSnippet"))
                 .and_then(Value::as_str)
@@ -1211,6 +1155,7 @@ pub(crate) fn parse_sessions(result: &Value) -> (Vec<SessionSummary>, Vec<(Strin
                 model,
                 has_recipe,
                 has_new: false,
+                archived,
             });
             if !cwd.is_empty() {
                 cwds.push((session_id.to_string(), cwd));
@@ -1278,10 +1223,13 @@ pub(crate) fn config_option_value(option: &agent_client_protocol::schema::v1::Se
     }
 }
 
-/// Chunk text with the desktop's content-type mapping: text passes through,
-/// resources are placeholders, anything else is bracketed.
-fn chunk_text(chunk: &ContentChunk) -> String {
-    match &chunk.content {
+/// Canonical text rendering for a content block — the SINGLE shared
+/// translator (RC-3), used by the spine and the roam peer so every surface
+/// renders text/image/audio/resource identically. Text passes through;
+/// non-text blocks become a bracketed marker (desktop `standardUpdate`'s
+/// `text()` lambda).
+pub(crate) fn content_block_text(block: &ContentBlock) -> String {
+    match block {
         ContentBlock::Text(text) => text.text.clone(),
         ContentBlock::ResourceLink(_) => "[resource]".to_string(),
         ContentBlock::Resource(_) => "[resource]".to_string(),
@@ -1291,11 +1239,84 @@ fn chunk_text(chunk: &ContentChunk) -> String {
     }
 }
 
+/// Chunk text with the desktop's content-type mapping: text passes through,
+/// resources are placeholders, anything else is bracketed.
+fn chunk_text(chunk: &ContentChunk) -> String {
+    content_block_text(&chunk.content)
+}
+
+/// Map a wire `ToolCall` to the CONTRACT's `ToolCallKind` plus the tool's
+/// command detail — the SINGLE shared translator for tool rows (RC-3), used
+/// by the spine dispatch and the roam peer so mcp-app/chart calls and the
+/// detail string are identical across surfaces.
+pub(crate) fn tool_call_kind(
+    tc: &agent_client_protocol::schema::v1::ToolCall,
+) -> (ToolCallKind, String) {
+    let raw_input = tc.raw_input.clone().unwrap_or(Value::Null);
+    let detail = raw_input
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let goose = tc
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("goose"))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    // MCP-App path: the server names a UI resource for this tool's output
+    // (how ALL autovisualiser types work). Until the template is fetched it
+    // is still a plain chip.
+    let mcp_app = goose.get("mcpApp").cloned().unwrap_or(Value::Null);
+    let app_uri = mcp_app
+        .get("resourceUri")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let app_ext = mcp_app
+        .get("extensionName")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let kind = if !app_uri.is_empty() && !app_ext.is_empty() {
+        let input = compact_json(&raw_input);
+        ToolCallKind::McpApp {
+            app_key: format!("{app_ext}|{app_uri}"),
+            uri: app_uri,
+            extension: app_ext,
+            input,
+        }
+    } else {
+        // Legacy chart fallback only (server too old to send mcpApp meta):
+        // `data` arrives as a JSON object, not a string.
+        let tool_name = goose
+            .pointer("/toolCall/toolName")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let chart_data = raw_input
+            .get("data")
+            .map(|data| match data {
+                Value::Object(_) => compact_json(data),
+                Value::String(s) => s.clone(),
+                _ => String::new(),
+            })
+            .unwrap_or_default();
+        if tool_name == "autovisualiser__show_chart" && !chart_data.is_empty() {
+            ToolCallKind::Chart { spec: chart_data }
+        } else {
+            ToolCallKind::Plain
+        }
+    };
+    (kind, detail)
+}
+
 fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_default()
 }
 
-fn tool_call_status_str(status: &ToolCallStatus) -> &'static str {
+pub(crate) fn tool_call_status_str(status: &ToolCallStatus) -> &'static str {
     match status {
         ToolCallStatus::Pending => "pending",
         ToolCallStatus::InProgress => "in_progress",
@@ -1305,7 +1326,7 @@ fn tool_call_status_str(status: &ToolCallStatus) -> &'static str {
     }
 }
 
-fn permission_option_kind_str(kind: &PermissionOptionKind) -> &'static str {
+pub(crate) fn permission_option_kind_str(kind: &PermissionOptionKind) -> &'static str {
     match kind {
         PermissionOptionKind::AllowOnce => "allow_once",
         PermissionOptionKind::AllowAlways => "allow_always",

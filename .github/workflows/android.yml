@@ -1,3 +1,11 @@
+# Android APK build.
+#
+# Version pinning (X-7): every GitHub Action below is pinned to a major tag
+# (e.g. @v4). Major-tag pins are the accepted level here — they get compatible
+# patch updates automatically while still being a coarse lock. For stricter
+# supply-chain hardening, replace the major tag with a full commit SHA; the
+# action's owning-project tag notes and this comment are where that decision
+# would be recorded. See core.yml for the Rust toolchain "dedrift" note.
 name: Android
 
 on:

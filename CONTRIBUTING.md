@@ -16,12 +16,13 @@ The contract lives in three places:
 
 ## Development environment (devcontainer)
 
-The recommended way to work on the Rust core and CLI is the devcontainer in
+The recommended way to work on the Rust core is the devcontainer in
 `.devcontainer/`: a Rocky Linux 9 image (matching the home-server deployment OS)
 with the Rust toolchain plus the core's native build deps (gcc, cmake, clang,
-openssl-devel, pkg-config, perl). It is deliberately scoped to `core/` +
-`clients/cli/` only — the desktop and Android toolchains are separate
-per-platform setups (below), not part of the image.
+openssl-devel, pkg-config, perl). It is deliberately scoped to `core/` only —
+the CLI under `clients/cli/` is not yet written (nothing but a README stub), and
+the desktop and Android toolchains are separate per-platform setups (below), not
+part of the image.
 
 Two ways in, same image:
 
@@ -41,8 +42,10 @@ Then build and test as usual:
 ```sh
 cargo build --manifest-path core/Cargo.toml
 cargo test  --manifest-path core/Cargo.toml
-cargo build --manifest-path clients/cli/Cargo.toml
 ```
+
+(The CLI under `clients/cli/` is not yet written, so there is no
+`clients/cli/Cargo.toml` to build.)
 
 ### Per-platform extras (not in the devcontainer image)
 
@@ -55,13 +58,15 @@ cargo build --manifest-path clients/cli/Cargo.toml
 Everything builds from a single checkout. No secrets are committed; local
 endpoint configuration is developer-specific.
 
-### Core (Rust) and CLI (Rust)
+### Core (Rust)
 
 ```sh
 cargo build --manifest-path core/Cargo.toml
 cargo test --manifest-path core/Cargo.toml
-cargo build --manifest-path clients/cli/Cargo.toml
 ```
+
+The CLI (`clients/cli/`) is not yet written — nothing lives there but a README
+stub, so there is no `clients/cli/Cargo.toml` to build yet.
 
 Or via Just: `just build` / `just test`.
 

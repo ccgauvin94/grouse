@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! JVM-independent unit tests for the core. The dial-path test needs no host:
 //! a card pointing at a dead relay exercises the full bind→dial→handshake
 //! plumbing and must fail cleanly.

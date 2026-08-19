@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! grouse-roam-core: the native roam transport for the Grouse Android (and
 //! later KDE) clients.
 //!

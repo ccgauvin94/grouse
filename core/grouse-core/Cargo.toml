@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 [package]
 name = "grouse-core"
 version = "0.1.0"
@@ -30,3 +32,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync",
 # the `ring` provider above.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 uniffi = "0.32"
+# Trust store for WebPKI server-certificate verification (S-RC-1). The goosed
+# public host serves a Let's Encrypt chain; trust-all is only the opt-out.
+webpki-roots = "1.0.9"

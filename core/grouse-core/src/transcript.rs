@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! TranscriptStore: chunk accumulation → Message bubbles; emits `on_stream` +
 //! `on_transcript`. Pure internal state — NO network, NO uniffi exports.
 #![allow(clippy::type_complexity)] // test helper returns event-recorder tuples
@@ -12,6 +14,8 @@
 //! - live tool output APPENDS, the completion update REPLACES;
 //! - stream chunks / tool events / usage / run-ended go out on `on_stream`;
 //!   bubble structure changes (append / update / clear) on `on_transcript`.
+
+use std::collections::HashMap;
 
 use parking_lot::Mutex;
 
@@ -116,6 +120,54 @@ struct State {
     stream_idx: Option<usize>,
     stream_role: String,
     stream_msg_id: String,
+    /// `tool_call_id` → the newest bubble index holding it, for O(1)
+    /// `tool_update` (S-RC-4). Bubble indices are stable — bubbles are only
+    /// appended, and a lone `Tool` converts in place to a `ToolGroup` at the
+    /// same index — so this never goes stale short of a `clear`/`replace`,
+    /// which rebuild it.
+    tool_by_id: HashMap<String, usize>,
+}
+
+/// Hard cap on retained bubbles (S-RC-4). A transcript is inherently
+/// unbounded over a run, but we evict the OLDEST bubbles past this watermark
+/// (bulk, to a ¾ mark) so a pathological session cannot grow memory without
+/// bound. Far above any realistic screenful.
+const MAX_BUBBLES: usize = 2000;
+
+/// Rebuild `tool_by_id` from scratch — used after a bulk eviction or rebuild,
+/// when the surviving bubbles' absolute indices have shifted.
+fn index_bubbles(map: &mut HashMap<String, usize>, bubbles: &[Bubble]) {
+    for (i, b) in bubbles.iter().enumerate() {
+        match b {
+            Bubble::Tool(r) | Bubble::Chart(r) | Bubble::McpApp(r) => {
+                map.insert(r.tool_call_id.clone(), i);
+            }
+            Bubble::ToolGroup(calls) => {
+                for call in calls {
+                    map.insert(call.tool_call_id.clone(), i);
+                }
+            }
+            Bubble::Text { .. } => {}
+        }
+    }
+}
+
+impl State {
+    /// Enforce the [`MAX_BUBBLES`] cap, evicting the oldest bubbles in bulk to
+    /// a watermark so eviction stays rare (amortized O(1) per append). The id
+    /// index is rebuilt and the stream anchor cleared (an evicted bubble may
+    /// have been the one streaming into).
+    fn trim(&mut self) {
+        if self.bubbles.len() <= MAX_BUBBLES {
+            return;
+        }
+        let keep = MAX_BUBBLES - MAX_BUBBLES / 4;
+        let drop = self.bubbles.len() - keep;
+        self.bubbles.drain(0..drop);
+        self.tool_by_id.clear();
+        index_bubbles(&mut self.tool_by_id, &self.bubbles);
+        self.stream_idx = None;
+    }
 }
 
 /// Accumulates streamed chunks into transcript bubbles and fans events out to
@@ -135,6 +187,7 @@ impl TranscriptStore {
                 stream_idx: None,
                 stream_role: String::new(),
                 stream_msg_id: String::new(),
+                tool_by_id: HashMap::new(),
             }),
         }
     }
@@ -194,6 +247,7 @@ impl TranscriptStore {
             } else {
                 TranscriptEvent::Update { message: st.bubbles[idx].project() }
             };
+            st.trim();
             (stream_evt, transcript_evt)
         };
 
@@ -213,6 +267,8 @@ impl TranscriptStore {
         let transcript_evt = {
             let mut st = self.state.lock();
             let row = ToolRow::new(title, detail, tool_call_id);
+            // Indexed by id (S-RC-4) so a later tool_update is O(1).
+            let row_id = row.tool_call_id.clone();
             let plain = matches!(&kind, ToolCallKind::Plain);
             let last = st.bubbles.last().map(|b| match b {
                 Bubble::Tool(_) => LastRow::Tool,
@@ -220,7 +276,7 @@ impl TranscriptStore {
                 _ => LastRow::Other,
             });
 
-            let evt = if plain {
+            let (evt, idx) = if plain {
                 match last {
                     Some(LastRow::Tool) => {
                         // Convert the lone first call into a group.
@@ -230,19 +286,19 @@ impl TranscriptStore {
                             _ => unreachable!("last row is Tool"),
                         };
                         st.bubbles[idx] = Bubble::ToolGroup(vec![first, row]);
-                        TranscriptEvent::Update { message: st.bubbles[idx].project() }
+                        (TranscriptEvent::Update { message: st.bubbles[idx].project() }, idx)
                     }
                     Some(LastRow::Group) => {
                         let idx = st.bubbles.len() - 1;
                         if let Bubble::ToolGroup(calls) = &mut st.bubbles[idx] {
                             calls.push(row);
                         }
-                        TranscriptEvent::Update { message: st.bubbles[idx].project() }
+                        (TranscriptEvent::Update { message: st.bubbles[idx].project() }, idx)
                     }
                     _ => {
                         st.bubbles.push(Bubble::Tool(row));
                         let idx = st.bubbles.len() - 1;
-                        TranscriptEvent::Append { message: st.bubbles[idx].project() }
+                        (TranscriptEvent::Append { message: st.bubbles[idx].project() }, idx)
                     }
                 }
             } else {
@@ -252,8 +308,10 @@ impl TranscriptStore {
                 };
                 st.bubbles.push(bubble);
                 let idx = st.bubbles.len() - 1;
-                TranscriptEvent::Append { message: st.bubbles[idx].project() }
+                (TranscriptEvent::Append { message: st.bubbles[idx].project() }, idx)
             };
+            st.tool_by_id.insert(row_id, idx);
+            st.trim();
 
             // Desktop: every tool call resets the streaming anchor so the next
             // chunk opens a fresh bubble.
@@ -282,9 +340,13 @@ impl TranscriptStore {
     pub fn tool_update(&self, id: &str, status: &str, output: &str, live: bool) {
         let transcript_evt = {
             let mut st = self.state.lock();
+            // O(1) lookup via the tool_by_id index (S-RC-4) — the previous
+            // newest-backwards scan was O(n) per update, quadratic over a long
+            // chat. Fall back to a scan only if the index is somehow stale.
+            let idx = st.tool_by_id.get(id).copied().filter(|i| *i < st.bubbles.len());
             let mut updated = None;
-            for i in (0..st.bubbles.len()).rev() {
-                let found = match &mut st.bubbles[i] {
+            if let Some(idx) = idx {
+                let found = match &mut st.bubbles[idx] {
                     Bubble::Tool(r) if r.tool_call_id == id => {
                         r.status = status.to_string();
                         apply_output(&mut r.output, output, live);
@@ -309,8 +371,7 @@ impl TranscriptStore {
                     _ => false,
                 };
                 if found {
-                    updated = Some(TranscriptEvent::Update { message: st.bubbles[i].project() });
-                    break;
+                    updated = Some(TranscriptEvent::Update { message: st.bubbles[idx].project() });
                 }
             }
             updated
@@ -349,6 +410,7 @@ impl TranscriptStore {
         {
             let mut st = self.state.lock();
             st.bubbles.clear();
+            st.tool_by_id.clear();
             st.stream_idx = None;
             st.stream_role.clear();
             st.stream_msg_id.clear();
@@ -393,11 +455,14 @@ impl TranscriptStore {
                 return;
             }
             st.bubbles.clear();
+            st.tool_by_id.clear();
             st.stream_idx = None;
             st.stream_role.clear();
             st.stream_msg_id.clear();
             for m in messages {
                 if m.role == "tool" {
+                    let idx = st.bubbles.len();
+                    st.tool_by_id.insert(m.id.clone(), idx);
                     st.bubbles.push(Bubble::Tool(ToolRow {
                         title: m.content.clone(),
                         detail: String::new(),

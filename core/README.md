@@ -9,8 +9,9 @@ Two crates, one boundary:
   `agent-client-protocol` SDK: the initialize handshake, session lifecycle,
   prompt/streaming, tools, permissions, config, and the standard `session/update`
   tags. It owns the WebSocket transport (via `agent-client-protocol-http`),
-  including a custom `ConnectTo` that sends the `X-Secret-Key` header and applies
-  a trust-all TLS configuration (the server's self-signed cert).
+  including a custom `ConnectTo` that sends the `X-Secret-Key` header and
+  applies WebPKI-verifying TLS (with an `accept_invalid_certs` trust-all
+  opt-out for self-signed hosts).
 - **`grouse-unstable`** — the goose-fork compatibility shim: every
   `_goose/unstable/*` method, plus the SDK's `unstable_elicitation` feature and
   the goose-custom `status_message`/`message_usage` notifications. Marked for

@@ -24,7 +24,8 @@ during a pending `send_request`.
 lib.rs         the uniffi surface: records/enums (DONE), Core + GrouseUnstable
                objects, listener fan-out. Owns the intents, status machine,
                reconnect orchestration, and the resync cycle.
-transport.rs   WsTransport (DONE) — ConnectTo<Client>, X-Secret-Key + trust-all.
+transport.rs   WsTransport (DONE) — ConnectTo<Client>, X-Secret-Key + WebPKI-verifying TLS
+               (accept_invalid_certs opt-out).
 spine.rs       the live connection: owns the SDK Client + WsTransport, the
                initialize → new/resume handshake, the notification dispatch
                (SessionNotification → seams below), and server-request answers.

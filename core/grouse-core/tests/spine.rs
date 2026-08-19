@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! End-to-end spine tests against an in-process scripted WebSocket server
 //! (the Rust twin of the desktop's tests/fakeserver.h).
 //!
@@ -394,6 +396,8 @@ fn resume_replay_persists_the_fresh_cache() {
         port,
         secret_key: "test-secret".to_string(),
         use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
         cwd: "/tmp".to_string(),
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),
@@ -451,6 +455,7 @@ fn cold_start_emits_cached_directory() {
         model: String::new(),
         has_recipe: false,
         has_new: false,
+        archived: false,
     }];
     let mut cwds = std::collections::BTreeMap::new();
     cwds.insert("sess-c".into(), "/tmp".into());
@@ -490,6 +495,7 @@ fn cold_start_emits_cached_directory_from_supplied_dir() {
         model: String::new(),
         has_recipe: false,
         has_new: false,
+        archived: false,
     }];
     assert!(cache.save_directory(&sessions, &std::collections::BTreeMap::new()));
 
@@ -529,6 +535,8 @@ fn spine_e2e_active_run_commands_and_recipe_connect() {
         port,
         secret_key: "test-secret".to_string(),
         use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
         cwd: "/tmp".to_string(),
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),
@@ -579,6 +587,8 @@ fn spine_e2e_connect_prompt_stream() {
         port,
         secret_key: "test-secret".to_string(),
         use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
         cwd: "/tmp".to_string(),
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),
@@ -754,6 +764,8 @@ fn stale_cache_is_painted_then_replaced_not_appended() {
         port,
         secret_key: "test-secret".to_string(),
         use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
         cwd: "/tmp".to_string(),
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),
@@ -831,6 +843,8 @@ fn cold_start_paint_is_not_filed_under_the_transient_session() {
         port,
         secret_key: "test-secret".to_string(),
         use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
         cwd: "/tmp".to_string(),
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),

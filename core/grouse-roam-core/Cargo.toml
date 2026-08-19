@@ -20,10 +20,6 @@ goose-roaming = { git = "https://github.com/aaif-goose/goose.git", rev = "05798b
 iroh = { version = "1.0.3", features = ["tls-aws-lc-rs"] }
 futures = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "io-util", "time"] }
-rand = "0.8"
 base64 = "0.22"
 uniffi = "0.32"
 parking_lot = "0.12"
-
-[dev-dependencies]
-anyhow = "1"

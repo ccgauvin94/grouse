@@ -11,3 +11,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 grouse-core = { path = "../grouse-core" }
+
+# Test-only; same crate the core already uses for its own test harness.
+[dev-dependencies]
+parking_lot = "0.12"

@@ -215,7 +215,7 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
 |`ui/main.qml`|Window shell: `Controls.ApplicationWindow` (NOT Kirigami's — its `contentItem` is read-only, so a sidebar+chat split can't be injected there); sidebar + ChatPage/landing page; every dialog instance and inline menu/dialog; landing provider/model ComboBoxes.|
 |`ui/ChatPage.qml`|Transcript ListView with pinned-to-end scroll logic, input bar, mode menu, attachments, ChartBubble, permission routing.|
 |`ui/*Dialog.qml`|ConnectDialog, SettingsDialog, ProvidersDialog, GlobalExtensionsDialog, SkillsDialog, RecipesDialog, SchedulerDialog, ProjectDialog, PermissionDialog.|
-|`CMakeLists.txt`|Qt6 (Quick Qml QuickControls2 WebSockets Widgets) + ECM + KF6 (Kirigami CoreAddons); `qt_add_resources` embeds ALL `ui/*.qml`; install rules only; no test targets.|
+|`CMakeLists.txt`|Qt6 (Quick Qml QuickControls2 WebSockets Widgets) + ECM + KF6 (Kirigami CoreAddons); `qt_add_resources` embeds ALL `ui/*.qml`; app install rules only — the test targets live under `tests/` (wired via `include(CTest)` + `add_subdirectory(tests)`).|
 |`id.gauvin.Grouse.json` / `build-flatpak.sh`|Flatpak manifest (org.kde.Platform/Sdk 6.10, cmake-ninja Release) + bundle script.|
 |`.github/workflows/flatpak.yml`|CI: builds and uploads the Flatpak bundle only — no native build, no tests, no lint gates.|
 

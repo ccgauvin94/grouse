@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Custom WebSocket transport for the grouse core.
 //!
 //! The stock `agent-client-protocol-http::HttpClient` cannot express what the
@@ -5,13 +7,14 @@
 //! and the platform's default TLS roots. grouse requires:
 //!
 //!   * an `X-Secret-Key` header on the WebSocket upgrade request, and
-//!   * trust-all TLS (the server presents a self-signed certificate).
+//!   * hostname+chain TLS verification by default, with a documented
+//!     trust-all opt-out for self-signed hosts.
 //!
 //! This module implements [`ConnectTo<Client>`] directly: it performs the
-//! handshake with a rustls connector whose certificate verifier accepts every
-//! server certificate, then feeds the resulting byte stream into the SDK's
-//! [`Channel`] exactly like `HttpClient::run_ws` does — newline-independent,
-//! JSON-RPC text frames both ways.
+//! handshake with a rustls connector (WebPKI-verifying unless
+//! `accept_invalid_certs` is set), then feeds the resulting byte stream into
+//! the SDK's [`Channel`] exactly like `HttpClient::run_ws` does —
+//! newline-independent, JSON-RPC text frames both ways.
 
 use std::sync::Arc;
 
@@ -39,11 +42,25 @@ pub struct WsTransport {
     port: u16,
     use_tls: bool,
     secret_key: String,
+    /// Accept any server certificate. When `false` (default) the connector
+    /// verifies the chain and hostname against WebPKI roots plus
+    /// `ca_cert_pem`.
+    accept_invalid_certs: bool,
+    /// PEM-encoded CA certificate(s) for the verifier's trust store.
+    ca_cert_pem: Option<String>,
 }
 
 impl WsTransport {
     /// Build a transport from the parts of a `ServerConfig`.
-    pub fn new(host: &str, port: u16, secret_key: &str, use_tls: bool) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        host: &str,
+        port: u16,
+        secret_key: &str,
+        use_tls: bool,
+        accept_invalid_certs: bool,
+        ca_cert_pem: Option<String>,
+    ) -> Self {
         let scheme = if use_tls { "wss" } else { "ws" };
         Self {
             endpoint: format!("{scheme}://{host}:{port}/acp"),
@@ -51,6 +68,8 @@ impl WsTransport {
             port,
             use_tls,
             secret_key: secret_key.to_string(),
+            accept_invalid_certs,
+            ca_cert_pem,
         }
     }
 
@@ -82,10 +101,20 @@ impl WsTransport {
             .map_err(|e| AcpError::internal_error().data(format!("invalid WebSocket request: {e}")))
     }
 
+    /// The TLS connector for this transport: trust-all when
+    /// `accept_invalid_certs`, otherwise WebPKI verification (with any
+    /// user-supplied CA) — hostname included.
+    fn connector(&self) -> Result<TlsConnector, AcpError> {
+        if self.accept_invalid_certs {
+            return Ok(trust_all_connector());
+        }
+        verified_connector(self.ca_cert_pem.as_deref())
+    }
+
     /// Connect and drive the WebSocket against the SDK channel.
     async fn run(self, channel: Channel) -> Result<(), AcpError> {
         let request = self.handshake_request()?;
-        let connector = trust_all_connector();
+        let connector = self.connector()?;
         let (ws_stream, _response) =
             connect_async_with_tls_connector_and_config(request, Some(connector), None).await.map_err(
                 |e| AcpError::internal_error().data(format!("WebSocket connect failed: {e}")),
@@ -174,6 +203,18 @@ where
         Ok::<(), AcpError>(())
     };
 
+    // Bounded inbound hand-off (S-RC-3): cap the number of server frames held
+    // before the reader pauses the socket read. When the SDK client is slow
+    // this stops the reader from buffering inbound frames without bound and
+    // lets TCP flow-control push genuine backpressure onto the server. The
+    // SDK channel's own internal queue is unbounded by design and out of our
+    // control; this bounds everything the reader accepts. Ordering is
+    // preserved — the forwarder copies the bounded queue into the SDK channel
+    // FIFO.
+    const INBOUND_CAP: usize = 128;
+    let (inbound_tx, mut inbound_rx) =
+        tokio::sync::mpsc::channel::<TransportFrame>(INBOUND_CAP);
+
     let reader = async move {
         let mut discard_incoming = false;
         loop {
@@ -183,9 +224,11 @@ where
                         continue;
                     }
                     let frame = TransportFrame::parse_json(text.as_str());
-                    if incoming.unbounded_send(frame).is_err() {
-                        // The client channel closed; drain the socket until it
-                        // ends so graceful shutdown still works.
+                    // Await capacity: a full buffer stalls the socket read, so
+                    // TCP flow control pushes backpressure onto the server.
+                    if inbound_tx.send(frame).await.is_err() {
+                        // Forwarder gone (client channel closed); drain the
+                        // socket until it ends so graceful shutdown still works.
                         discard_incoming = true;
                     }
                 }
@@ -205,16 +248,31 @@ where
         }
     };
 
-    pin_mut!(writer, reader);
-    match select(writer, reader).await {
-        futures::future::Either::Left((result, _))
-        | futures::future::Either::Right((result, _)) => result,
+    let forwarder = async move {
+        let mut forward = true;
+        while let Some(frame) = inbound_rx.recv().await {
+            if forward && incoming.unbounded_send(frame).is_err() {
+                // Client channel closed: stop forwarding but keep draining
+                // the bounded queue so the reader unblocks and finishes.
+                forward = false;
+            }
+        }
+        Ok::<(), AcpError>(())
+    };
+
+    pin_mut!(writer, reader, forwarder);
+    // Run writer, reader and forwarder concurrently; finish when the socket
+    // side completes (mirrors the pre-existing select(writer, reader)).
+    tokio::select! {
+        result = writer => result,
+        result = reader => result,
+        _ = forwarder => Ok(()),
     }
 }
 
-/// A `ServerCertVerifier` that accepts every certificate. Trust-all for the
-/// goosed server's self-signed cert — this is the whole point of the custom
-/// transport, so it is deliberately not configurable here.
+/// A `ServerCertVerifier` that accepts every certificate. The trust-all path
+/// for self-signed goosed hosts — only used when `accept_invalid_certs` is
+/// set (the WebPKI verifier is the default).
 #[derive(Debug)]
 struct NoVerify;
 
@@ -273,6 +331,29 @@ fn trust_all_connector() -> TlsConnector {
     TlsConnector::from(Arc::new(config))
 }
 
+/// Build a TLS connector that verifies the server chain and hostname against
+/// the WebPKI trust store, extended by any user-supplied CA. This is the
+/// default — the goosed public host already serves a WebPKI-valid Let's
+/// Encrypt certificate, so trust-all was a silent downgrade on every public
+/// path (an on-path party could substitute a certificate, read the
+/// `X-Secret-Key`, and impersonate the server).
+fn verified_connector(ca_cert_pem: Option<&str>) -> Result<TlsConnector, AcpError> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    if let Some(pem) = ca_cert_pem {
+        use rustls::pki_types::pem::PemObject;
+        for cert in CertificateDer::pem_slice_iter(pem.as_bytes()).flatten() {
+            roots.add(cert).map_err(|e| {
+                AcpError::internal_error().data(format!("invalid CA certificate: {e}"))
+            })?;
+        }
+    }
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(TlsConnector::from(Arc::new(config)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,17 +362,17 @@ mod tests {
     fn host_header_is_authority_only() {
         // Regression: the Host header used to carry the path (`host:443/acp`),
         // which Caddy rejects with 400 Bad Request on the upgrade.
-        let t = WsTransport::new("goose.gauvin.id", 443, "k", true);
+        let t = WsTransport::new("goose.gauvin.id", 443, "k", true, false, None);
         let req = t.handshake_request().unwrap();
         // Default wss port: the Host MUST omit it (Caddy's site matcher 403s
         // an explicit :443 on the upgrade; OkHttp omits it and gets 101).
         assert_eq!(req.headers().get("Host").unwrap(), "goose.gauvin.id");
 
-        let t = WsTransport::new("192.168.1.5", 3284, "k", false);
+        let t = WsTransport::new("192.168.1.5", 3284, "k", false, false, None);
         let req = t.handshake_request().unwrap();
         assert_eq!(req.headers().get("Host").unwrap(), "192.168.1.5:3284");
 
-        let t = WsTransport::new("example.com", 80, "k", false);
+        let t = WsTransport::new("example.com", 80, "k", false, false, None);
         let req = t.handshake_request().unwrap();
         assert_eq!(req.headers().get("Host").unwrap(), "example.com");
     }

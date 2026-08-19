@@ -3,13 +3,13 @@
 KDE-native (Kirigami / Qt 6 / C++) desktop thin client for a self-hosted
 [goose](https://github.com/block/goose) agent (`goose serve`), spoken to over
 ACP (Agent Client Protocol). This is the Agentic AI Foundation client for the
-desktop — the counterpart to the Android client in `ccgauvin94/grouse`.
+desktop — the counterpart to the Android client in this monorepo.
 
 As with the phone app, this is a **dumb pipe**: `goosed` on the server holds all
 state (sessions, memory, tools, model chain). The app is an ACP JSON-RPC client
 over a tailnet-only WebSocket plus a chat UI.
 
-## Server contract (see the Android repo's `AGENTS.md` for the full notes)
+## Server contract (see the repo's `AGENTS.md` for the full notes)
 - Endpoint: `wss://<host>:3284/acp` — goosed serves TLS with a self-signed cert,
   so the client is trust-all (see `AcpClient::connectTo`) and authenticated by the
   key header. The TLS/wss toggle lives in the Connect dialog.
@@ -44,19 +44,28 @@ xvfb-run -a -s "-screen 0 1280x800x24" timeout 8 ./build/grouse-desktop
 - Provider / model selectors via `session/set_config_option`
 - Markdown→HTML rendering for agent output
 
-Not yet: recipes, schedules, projects, skills, extensions, MCP-App
-visualizations, steering, image attachments.
+Implemented beyond the initial scope: recipes, schedules, projects, skills,
+global extensions, steering, MCP-App visualizations (ChartBubble), and image
+attachments.
 
 ## Layout
 | File | What lives there |
 |---|---|
-| `src/acpclient.h/.cpp` | The wire: ACP JSON-RPC over QtWebSockets |
-| `src/manager.h/.cpp` | Process-scoped connection + chat state, exposed to QML as `Mgr` |
+| `src/acpclient.h/.cpp` | The wire: ACP JSON-RPC over a pluggable transport, response/notification/serverRequest dispatch |
+| `src/acptransport.h/.cpp` | The ACP transport over the tailnet WebSocket |
+| `src/websockettransport.h/.cpp` | QtWebSockets transport plumbing |
+| `src/roamframecodec.h/.cpp` | Roam frame encode/decode |
+| `src/roamtransport.h/.cpp` | Roam peer transport (iroh) |
+| `src/roamlistmodel.h/.cpp` | Roam peer sidebar model |
+| `src/messagelistmodel.h/.cpp` | Transcript model (16 roles) |
+| `src/sessionlistmodel.h/.cpp` | Sidebar session model |
 | `src/markdown.h/.cpp` | Lightweight markdown→HTML renderer |
+| `src/dbusadapter.h/.cpp` | DBus surface (KRunner/window integration) |
+| `src/manager.h/.cpp` | Process-scoped connection + chat state, exposed to QML as `Mgr` |
 | `src/main.cpp` | App setup + QML engine |
 | `ui/*.qml` | Kirigami windows / pages / dialogs |
 
 ## Agents
 Check `git status`/`git diff` before starting — this tree is edited from both
-the host and inside the goose container (see the Android repo's AGENTS.md for
+the host and inside the goose container (see the repo's AGENTS.md for
 the two-agents-one-checkout hazards). Do not commit or push unless asked.

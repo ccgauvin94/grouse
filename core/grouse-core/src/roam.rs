@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! The peer registry: parallel roam connections in browse mode (CONTRACT §6,
 //! INTERNAL.md seam 4).
 //!
@@ -94,12 +96,23 @@ pub struct RoamCodec {
 }
 
 impl RoamCodec {
+    /// Hard cap on a single frame (partial-frame buffer) in bytes.
+    /// ACP messages are compact JSON well below 1 MiB; the cap exists only to
+    /// keep a newline-less peer from growing the buffer without bound.
+    pub const MAX_FRAME_BYTES: usize = 1 << 20; // 1 MiB
+
     /// A fresh codec with an empty partial-frame buffer.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Feed raw stream bytes; returns every complete frame (newline removed).
+    ///
+    /// Memory-bounded (S-RC-2): the partial-frame buffer stops growing at
+    /// [`MAX_FRAME_BYTES`](Self::MAX_FRAME_BYTES). ACP messages are compact
+    /// JSON orders of magnitude below this, so a newline-less (or single
+    /// giant-line) peer cannot grow the buffer without bound — bytes past the
+    /// cap are dropped until the next newline re-syncs the codec.
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
         let mut frames = Vec::new();
         for &byte in chunk {
@@ -110,7 +123,13 @@ impl RoamCodec {
                     );
                 }
                 b'\r' => {} // CRLF tolerance (BufReader::lines strips \r)
-                _ => self.buf.push(byte),
+                _ => {
+                    if self.buf.len() < Self::MAX_FRAME_BYTES {
+                        self.buf.push(byte);
+                    }
+                    // Over-cap: drop the byte and wait for the newline; the
+                    // frame is malformed/oversized anyway.
+                }
             }
         }
         frames
@@ -345,6 +364,10 @@ impl PeerInner {
 }
 
 impl RoamPeer {
+    /// Hard ceiling on a single post-handshake RPC (S-RC-6). A hung remote
+    /// goose must not pin a UI/intent thread forever blocking on a reply.
+    const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
     /// Connect to a roam peer in browse mode. The dial (blocking, seconds) and
     /// the ACP handshake run on the core runtime; this returns immediately
     /// with a peer in `Connecting` state. `is_active` is the spine's routing
@@ -471,6 +494,7 @@ impl RoamPeer {
                 model: String::new(),
                 has_recipe: false,
                 has_new: inner.staging.get(&s.id).map(|st| st.has_new).unwrap_or(false),
+                archived: false,
             })
             .collect()
     }
@@ -612,27 +636,52 @@ impl RoamPeer {
         runtime().spawn(async move {
             let _ = tx.send(conn.send_request(msg).block_task().await);
         });
+        // S-RC-6: a hung remote goose must not pin the calling thread forever.
+        // The request task is detached; if we time out, its eventual reply is
+        // simply dropped.
         let result = rx
-            .recv()
-            .map_err(|_| AcpError::internal_error().data("roam rpc task failed"))??;
-        // The turn's completion rides the session/prompt REPLACE (the reply's
+            .recv_timeout(Self::RPC_TIMEOUT)
+            .map_err(|e| {
+                let detail = match e {
+                    std::sync::mpsc::RecvTimeoutError::Timeout => "roam rpc timed out",
+                    std::sync::mpsc::RecvTimeoutError::Disconnected => "roam rpc task failed",
+                };
+                AcpError::internal_error().data(detail)
+            })?;
+        // End-of-turn fan-out, shared by both the success and failure arms:
+        // the turn's completion rides the session/prompt REPLACE (the reply's
         // stopReason) — the main connection surfaces it via store.run_ended;
         // the peer has no store, so emit RunEnded straight to the listener so
         // the app clears its in-flight/turnInFlight state and drains the queue.
+        let end_turn = |stop: &str| {
+            if (self.is_active)() {
+                self.emit_stream(StreamEvent::RunEnded {
+                    stop_reason: stop.to_string(),
+                });
+            }
+            // The peer's turn bookkeeping mirrors the spine: a live run id is
+            // now over, whether or not the server sent an activeRunId update.
+            self.inner.lock().active_run = None;
+        };
+        let result = match result {
+            Ok(reply) => reply,
+            Err(error) => {
+                // A prompt that fails must still end the turn so the UI can
+                // clear in-flight state and drain the queue (mirrors spine's
+                // run_ended("error") — the desktop wedges here).
+                if method == "session/prompt" {
+                    end_turn("error");
+                }
+                return Err(error);
+            }
+        };
         if method == "session/prompt" {
             let stop = result
                 .get("stopReason")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            if (self.is_active)() {
-                self.emit_stream(StreamEvent::RunEnded {
-                    stop_reason: stop,
-                });
-            }
-            // The peer's turn bookkeeping mirrors the spine: a live run id is
-            // now over, whether or not the server sent an activeRunId update.
-            self.inner.lock().active_run = None;
+            end_turn(&stop);
         }
         Ok(result)
     }
@@ -1266,6 +1315,7 @@ impl RoamPeer {
             });
             Some(TranscriptEvent::Append { message: msg })
         });
+        cap_messages(target);
         drop(inner);
         if !mine && staged_new {
             // First backgrounded content for this session: tell the UI once
@@ -1334,6 +1384,7 @@ impl RoamPeer {
             });
             (msg, true)
         };
+        cap_messages(target);
         drop(inner);
         if !mine && staged_new {
             self.staged_touch(session_id);
@@ -1384,6 +1435,7 @@ impl RoamPeer {
         } else {
             None
         };
+        cap_messages(target);
         drop(inner);
         if !mine && staged_new {
             self.staged_touch(session_id);
@@ -1418,7 +1470,7 @@ impl RoamPeer {
             .map(|o| crate::PermissionOption {
                 option_id: o.option_id.to_string(),
                 name: o.name.clone(),
-                kind: format!("{:?}", o.kind),
+                kind: crate::spine::permission_option_kind_str(&o.kind).to_string(),
             })
             .collect();
         self.inner.lock().pending_permission = Some(responder);
@@ -1470,89 +1522,21 @@ impl RpcConn for RoamPeer {
 // SessionNotification translation helpers (the "same dispatch the spine uses")
 // ---------------------------------------------------------------------------
 
-/// The text of a chunk's content block; non-text blocks render as a marker
-/// (desktop `standardUpdate`'s `text()` lambda).
+/// The text of a chunk's content block; non-text blocks render as a marker.
+/// Delegates to the spine's SINGLE shared translator (RC-3) so roam and the
+/// spine render text/image/audio/resource identically (the old local copy
+/// drifted and rendered image/audio as `[unknown]`).
 fn chunk_text(block: &agent_client_protocol::schema::v1::ContentBlock) -> Option<String> {
-    use agent_client_protocol::schema::v1::ContentBlock;
-    match block {
-        ContentBlock::Text(t) => Some(t.text.clone()),
-        ContentBlock::ResourceLink(_) => Some("[resource]".to_string()),
-        other => Some(format!("[{}]", block_type_name(other))),
-    }
+    // Preserves the original contract: every block renders to SOME text.
+    Some(crate::spine::content_block_text(block))
 }
 
-fn block_type_name(block: &agent_client_protocol::schema::v1::ContentBlock) -> &'static str {
-    use agent_client_protocol::schema::v1::ContentBlock;
-    match block {
-        ContentBlock::ResourceLink(_) => "resource_link",
-        ContentBlock::Resource(_) => "resource",
-        _ => "unknown",
-    }
-}
-
-/// ToolCall → `StreamEvent::ToolCall`, collapsing the desktop's mcpapp/chart
-/// split into `ToolCallKind` (CONTRACT §3.4). MCP-App resources come from
-/// `_meta.goose.mcpApp`; the legacy chart fallback keys on the goose tool
-/// name + `data` input.
+/// ToolCall → `(ToolCallKind, detail)`, collapsing the desktop's mcpapp/chart
+/// split into `ToolCallKind` (CONTRACT §3.4). Delegates to the spine's SINGLE
+/// shared translator (RC-3) so roam and the spine produce identical kinds and
+/// detail strings.
 fn tool_kind(tool: &agent_client_protocol::schema::v1::ToolCall) -> (ToolCallKind, String) {
-    let detail = tool
-        .raw_input
-        .as_ref()
-        .and_then(|input| input.get("command"))
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let goose = tool
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.get("goose"))
-        .and_then(|v| v.as_object());
-    let mcp_app = goose
-        .and_then(|g| g.get("mcpApp"))
-        .and_then(|v| v.as_object());
-    if let (Some(uri), Some(extension)) = (
-        mcp_app
-            .and_then(|m| m.get("resourceUri"))
-            .and_then(|v| v.as_str()),
-        mcp_app
-            .and_then(|m| m.get("extensionName"))
-            .and_then(|v| v.as_str()),
-    ) {
-        let input = tool
-            .raw_input
-            .as_ref()
-            .map(|v| v.to_string())
-            .unwrap_or_default();
-        return (
-            ToolCallKind::McpApp {
-                app_key: format!("{extension}|{uri}"),
-                uri: uri.to_string(),
-                extension: extension.to_string(),
-                input,
-            },
-            detail,
-        );
-    }
-    let tool_name = goose
-        .and_then(|g| g.get("toolCall"))
-        .and_then(|v| v.as_object())
-        .and_then(|t| t.get("toolName"))
-        .and_then(|v| v.as_str());
-    let chart_data = tool
-        .raw_input
-        .as_ref()
-        .and_then(|input| input.get("data"))
-        .and_then(|d| match d {
-            Value::String(s) => Some(s.clone()),
-            Value::Object(_) => Some(d.to_string()),
-            _ => None,
-        });
-    if tool_name == Some("autovisualiser__show_chart") {
-        if let Some(spec) = chart_data {
-            return (ToolCallKind::Chart { spec }, detail);
-        }
-    }
-    (ToolCallKind::Plain, detail)
+    crate::spine::tool_call_kind(tool)
 }
 
 /// ToolCallUpdate → status/output/live. Live shell output rides
@@ -1565,8 +1549,9 @@ fn tool_update(
         .fields
         .status
         .as_ref()
-        .map(|s| format!("{:?}", s))
-        .unwrap_or_default();
+        .map(crate::spine::tool_call_status_str)
+        .unwrap_or_default()
+        .to_string();
     let notif = update
         .meta
         .as_ref()
@@ -1615,6 +1600,7 @@ fn to_summary(label: &str, info: &SessionInfo) -> SessionSummary {
         model: String::new(),
         has_recipe: false,
         has_new: false,
+        archived: false,
     }
 }
 
@@ -1670,15 +1656,31 @@ fn new_session_meta() -> Map<String, Value> {
 // Routing (CONTRACT §6: chat routes to the last-opened session's owner)
 // ---------------------------------------------------------------------------
 
-/// Pick the peer that owns the active session: the one whose label equals
-/// `active_label`. `None` when no roam session is active (chat routes to the
-/// main connection). The spine calls this from its chat/unstable intents.
+/// Route a chat intent (CONTRACT §6: chat routes to the last-opened session's
+/// owner). Pick the peer that owns the active session: the one whose label
+/// equals `active_label`. `None` when no roam session is active (chat routes
+/// to the main connection). The spine calls this from its chat/unstable intents.
 pub fn active_peer<'a>(
     peers: &'a [Arc<RoamPeer>],
     active_label: &Option<String>,
 ) -> Option<&'a Arc<RoamPeer>> {
     let label = active_label.as_ref()?;
     peers.iter().find(|peer| &peer.label == label)
+}
+
+/// Cap a roam-side message list (S-RC-4) so a pathological session cannot grow
+/// memory without bound — and, because the backward `.find()` scans for tool
+/// updates are bounded by this cap, the per-update cost cannot scale with
+/// unbounded history. Evicts the OLDEST messages in bulk to a watermark
+/// (amortized O(1) per append).
+fn cap_messages(messages: &mut Vec<Message>) {
+    const MAX: usize = 2000;
+    if messages.len() <= MAX {
+        return;
+    }
+    let keep = MAX - MAX / 4;
+    let drop = messages.len() - keep;
+    messages.drain(0..drop);
 }
 
 // ---------------------------------------------------------------------------
@@ -2222,14 +2224,13 @@ mod tests {
             "s1",
             SessionUpdate::ToolCall(ToolCall::new(ToolCallId::new("tool1"), "shell")),
         ));
-        for t in ["answer "] {
-            peer.dispatch(SessionNotification::new(
-                "s1",
-                SessionUpdate::AgentMessageChunk(
-                    ContentChunk::new(ContentBlock::Text(TextContent::new(t))),
-                ),
-            ));
-        }
+        let t = "answer ";
+        peer.dispatch(SessionNotification::new(
+            "s1",
+            SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(ContentBlock::Text(TextContent::new(t))),
+            ),
+        ));
 
         let tr = peer.transcript();
         // thinking + tool + answer = 3 separate bubbles; nothing merged, nothing lost.
@@ -2311,5 +2312,25 @@ mod tests {
     #[test]
     fn routing_empty_registry_never_picks() {
         assert!(active_peer(&[], &Some("x".to_string())).is_none());
+    }
+
+    // -- wire-format contract ------------------------------------------------
+    //
+    // The spine and the roam peer MUST emit the same snake_case status/kind
+    // strings; the Android UI matches on these exact values (Screens.kt:
+    // "in_progress" / "failed" / "allow_once"...). Debug-format drift here
+    // silently breaks roam-peer tool progress and permission labels.
+
+    #[test]
+    fn shared_status_and_kind_strings_are_snake_case_variants() {
+        use agent_client_protocol::schema::v1::{PermissionOptionKind, ToolCallStatus};
+        assert_eq!(crate::spine::tool_call_status_str(&ToolCallStatus::Pending), "pending");
+        assert_eq!(crate::spine::tool_call_status_str(&ToolCallStatus::InProgress), "in_progress");
+        assert_eq!(crate::spine::tool_call_status_str(&ToolCallStatus::Completed), "completed");
+        assert_eq!(crate::spine::tool_call_status_str(&ToolCallStatus::Failed), "failed");
+        assert_eq!(crate::spine::permission_option_kind_str(&PermissionOptionKind::AllowOnce), "allow_once");
+        assert_eq!(crate::spine::permission_option_kind_str(&PermissionOptionKind::AllowAlways), "allow_always");
+        assert_eq!(crate::spine::permission_option_kind_str(&PermissionOptionKind::RejectOnce), "reject_once");
+        assert_eq!(crate::spine::permission_option_kind_str(&PermissionOptionKind::RejectAlways), "reject_always");
     }
 }

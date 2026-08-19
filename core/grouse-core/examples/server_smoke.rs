@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Smoke-test the core's wire against a REAL goose server (used for the
 //! Android login + cache debugging).
 //! Usage: KEY=<secret> cargo run --example server_smoke -- <host> <port>
@@ -78,6 +80,8 @@ fn main() {
         port,
         secret_key: key,
         use_tls: true,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
         cwd: "/tmp".into(),
         auto_connect: false,
         client_id: "grouse-smoke".into(),
