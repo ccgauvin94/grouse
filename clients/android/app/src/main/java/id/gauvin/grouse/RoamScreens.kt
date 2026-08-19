@@ -206,8 +206,15 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
                 }
             }
             if (open && sessions.isNotEmpty()) {
-                item(key = peerKey + ":sessions") {
-                    sessions.sortedBy { it.updatedAt }.forEach { s ->
+                // Stable per-session keys + a deterministic tiebreak (updatedAt desc, then id):
+                // a session/load on tap bumps that session's updatedAt, which re-sorts the
+                // list mid-gesture; without a stable key the tapped Row is replaced and the
+                // click's navigation is swallowed (the classic "click twice to open").
+                sessions.sortedWith(
+                    compareByDescending<SessionInfo> { it.updatedAt }
+                        .thenBy { it.sessionId }
+                ).forEach { s ->
+                    item(key = "roam-sess:${s.sessionId}") {
                         Row(Modifier.fillMaxWidth()
                             .clickable { cm.openSession(s.sessionId); onOpen() }
                             .padding(start = 34.dp, end = 8.dp).padding(vertical = 9.dp),

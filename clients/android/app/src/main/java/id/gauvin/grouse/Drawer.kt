@@ -149,7 +149,9 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     // All sessions here are LOCAL — remote (roam peer) sessions moved to the Roam tab's
     // per-peer groups (RoamTabBody). Grouped naively a federated SessionInfo carries the
     // REMOTE server's project_id, so it must never mix into the local project/free split.
-    val localChats = all
+    // Filter them out of the drawer explicitly: onCoreSessions keeps roam entries in the
+    // shared list for the Roam tab, so without this the Main drawer shows peer chats.
+    val localChats = all.filterNot { it.sessionId.startsWith("roam:") }
     val activeChats = localChats.filterNot { it.archived }
     val byProjectId = activeChats.groupBy { it.projectId }
     val freeChats = byProjectId[null].orEmpty()

@@ -346,6 +346,7 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     )
 
     Scaffold(topBar = {
+        Column {
         TopAppBar(
             title = {
                 val online = cm.online.value
@@ -356,10 +357,12 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         cm.status.value.contains("load", true) -> MaterialTheme.statusColors.connecting  // connecting → amber
                     else -> MaterialTheme.colorScheme.error          // offline → red
                 }
-                val usage = cm.usage.value
                 Column {
                     Row(verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.clickable(enabled = !online) { cm.connectSaved() }) {
+                        // fillMaxWidth lets the weight spacer push the donut to the
+                        // far right of the title row.
+                        modifier = Modifier.fillMaxWidth()
+                            .clickable(enabled = !online) { cm.connectSaved() }) {
                         Surface(color = dot, shape = RoundedCornerShape(50), modifier = Modifier.size(10.dp)) {}
                         Spacer(Modifier.width(8.dp))
                         // Single line + ellipsis: this Row shares the app bar with up to 3 action
@@ -388,66 +391,18 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        // Context window fullness, as a colored donut next to the
-                        // chat name. Shown once the first turn reports usage.
+                        // Context window fullness, as a colored donut aligned to the
+                        // FAR RIGHT of the title row (it's a status readout, not part of
+                        // the chat name). Shown once the first turn reports usage.
                         val u = cm.usage.value
                         if (u != null && u.size > 0 && !cm.compacting.value) {
-                            Spacer(Modifier.width(10.dp))
+                            Spacer(Modifier.weight(1f))   // push the donut to the right edge
+                            Spacer(Modifier.width(20.dp)) // breathing room off the action icons
                             ContextRing(
                                 pct = (u.used * 100 / u.size).coerceIn(0, 100),
                                 modifier = Modifier.size(14.dp),
                                 onClick = { showContextDetail = !showContextDetail }
                             )
-                        }
-                    }
-                    // Compacting (manual /compact or a server-triggered auto-compact) takes priority
-                    // over the usage line — it's transient and explains why the numbers are about to
-                    // change. INDETERMINATE: the protocol only ever sends text status lines, never a
-                    // numeric percentage, so there's no real fraction to show.
-                    if (cm.compacting.value) {
-                        Row(verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(start = 18.dp, top = 2.dp)) {
-                            LinearProgressIndicator(modifier = Modifier.width(40.dp).height(3.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(stringResource(R.string.compacting), style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.outline)
-                        }
-                    } else {
-                        // Context window panel — slides down under the title when
-                        // the donut is tapped: colored bar, number, Compact button.
-                        val u = usage
-                        AnimatedVisibility(visible = showContextDetail && u != null && u.size > 0,
-                            enter = expandVertically() + fadeIn(),
-                            exit = shrinkVertically() + fadeOut()) {
-                            u?.let { uu ->
-                                val pct = (uu.used * 100 / uu.size).coerceIn(0, 100)
-                                val barColor = when {
-                                    pct >= 90 -> MaterialTheme.colorScheme.error
-                                    pct >= 60 -> MaterialTheme.statusColors.connecting
-                                    else -> MaterialTheme.statusColors.online
-                                }
-                                Row(verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(start = 18.dp, top = 2.dp).fillMaxWidth()) {
-                                    Row(verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.weight(1f)) {
-                                        Box(Modifier.width(64.dp).height(6.dp)
-                                            .clip(RoundedCornerShape(3.dp))
-                                            .background(MaterialTheme.colorScheme.surfaceVariant)) {
-                                            Box(Modifier.fillMaxWidth(pct / 100f).fillMaxHeight()
-                                                .background(barColor))
-                                        }
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("${fmtTokens(uu.used)} / ${fmtTokens(uu.size)} · ${pct}%",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = if (pct >= 90) MaterialTheme.colorScheme.error
-                                                    else MaterialTheme.colorScheme.outline)
-                                    }
-                                    TextButton(onClick = { cm.compact() },
-                                        enabled = !cm.compacting.value) {
-                                        Text(stringResource(R.string.compact))
-                                    }
-                                }
-                            }
                         }
                     }
                 }
@@ -485,6 +440,57 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                 )
             }
         )
+                        // Compacting (manual /compact or a server-triggered auto-compact) takes priority
+                        // over the usage line — it's transient and explains why the numbers are about to
+                        // change. INDETERMINATE: the protocol only ever sends text status lines, never a
+                        // numeric percentage, so there's no real fraction to show.
+                        if (cm.compacting.value) {
+                            Row(verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(start = 18.dp, top = 2.dp)) {
+                                LinearProgressIndicator(modifier = Modifier.width(40.dp).height(3.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(stringResource(R.string.compacting), style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.outline)
+                            }
+                        } else {
+                            // Context window panel — slides down under the title when
+                            // the donut is tapped: colored bar, number, Compact button.
+                            val u = cm.usage.value
+                            AnimatedVisibility(visible = showContextDetail && u != null && u.size > 0,
+                                enter = expandVertically() + fadeIn(),
+                                exit = shrinkVertically() + fadeOut()) {
+                                u?.let { uu ->
+                                    val pct = (uu.used * 100 / uu.size).coerceIn(0, 100)
+                                    val barColor = when {
+                                        pct >= 90 -> MaterialTheme.colorScheme.error
+                                        pct >= 60 -> MaterialTheme.statusColors.connecting
+                                        else -> MaterialTheme.statusColors.online
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(start = 18.dp, top = 2.dp).fillMaxWidth()) {
+                                        Row(verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.weight(1f)) {
+                                            Box(Modifier.width(64.dp).height(6.dp)
+                                                .clip(RoundedCornerShape(3.dp))
+                                                .background(MaterialTheme.colorScheme.surfaceVariant)) {
+                                                Box(Modifier.fillMaxWidth(pct / 100f).fillMaxHeight()
+                                                    .background(barColor))
+                                            }
+                                            Spacer(Modifier.width(8.dp))
+                                            Text("${fmtTokens(uu.used)} / ${fmtTokens(uu.size)} · ${pct}%",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = if (pct >= 90) MaterialTheme.colorScheme.error
+                                                        else MaterialTheme.colorScheme.outline)
+                                        }
+                                        TextButton(onClick = { cm.compact() },
+                                            enabled = !cm.compacting.value) {
+                                            Text(stringResource(R.string.compact))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+        }
     }) { pad ->
         Column(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
             if (cm.onAssistant && !hintDismissed) AssistantHint {

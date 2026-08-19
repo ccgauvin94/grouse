@@ -29,7 +29,6 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
@@ -339,15 +338,7 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                 nav.navigate("chat") { launchSingleTop = true; popUpTo("landing") { inclusive = true } }
             }) }
         }
-        // System-wide activity: a turn in flight (or a replay/connect) squeezes a
-        // thin bar under the status bar so any screen telegraphs that work is
-        // happening, not just the chat header.
-        if (cm.busy.value) {
-            LinearProgressIndicator(
-                modifier = Modifier.fillMaxWidth().height(2.dp).align(Alignment.TopCenter),
-            )
-        }
-        }
+    }
     }
 }
 
