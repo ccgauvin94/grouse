@@ -1,0 +1,27 @@
+# Grouse repository gitleaks configuration (audit X-6).
+#
+# This is the explicit allowlist mechanism for the secrets scan. It is loaded by
+# .github/workflows/secrets.yml via the GITLEAKS_CONFIG env var, and it extends —
+# never replaces — gitleaks' built-in default rules, so no default detection is
+# lost.
+#
+# Audit X-10 already verified this repo has no committed secrets, so this
+# allowlist is intentionally conservative: it suppresses nothing today. gitleaks
+# rejects an allowlist with no populated checks, so the [allowlist] table is
+# omitted until there is a real false positive to register. To suppress a known
+# non-secret value, add a table here:
+#
+#   [allowlist]
+#   description = "known non-secret values (placeholder keys, generated blobs)"
+#   paths = ["**/example/path.ext"]
+#   regexes = ["placeholder-token-[a-f0-9]{8}"]
+#   stopwords = ["intermediateCA"]
+#
+# Prefer the least risky check that scopes the exception to an exact path or
+# value rather than muting whole files.
+title = "Grouse repository gitleaks config"
+
+[extend]
+# Keep all default gitleaks rules; nothing is added on top. The [allowlist]
+# table is deliberately absent until a false positive needs registering.
+useDefault = true
