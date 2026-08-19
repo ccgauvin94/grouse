@@ -73,7 +73,10 @@ ramp.
 
 1. **`color`** — `raw` (the fixed brand palette) and `semantic` (role-based `light` / `dark`
    schemes). Semantic roles: `background`, `surface`, `primary`, `text`, `textSecondary`,
-   `secondary`, `accent`, `danger`, `chatUser`, `chatAgent`.
+   `secondary`, `accent`, `danger`, `chatUser`, `chatAgent`, plus a `status` sub-role
+   (`online` / `connecting` / `offline`) for connection-state dots. `raw` additionally carries
+   `chart.series` — the fixed multi-series palette servers render into chart specs (shared with
+   the desktop's `ChartBubble.qml`).
 2. **`type`** — `family` and the Material 3 `scale` (size in sp, weight, line-height). grouse-android
    ships the stock M3 scale (`ui/theme/Type.kt` → `GooseTypography = Typography()`); we pin those
    values as tokens so the other platforms match, and leave the scale open to tuning later without

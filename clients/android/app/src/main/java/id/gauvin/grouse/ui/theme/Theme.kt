@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package id.gauvin.grouse.ui.theme
 
 import android.app.Activity
@@ -10,6 +12,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
@@ -33,6 +36,7 @@ fun GooseTheme(
         darkTheme -> FallbackDark
         else -> FallbackLight
     }
+    val statusColors = if (darkTheme) DarkStatusColors else LightStatusColors
 
     val view = LocalView.current
     if (!view.isInEditMode) SideEffect {
@@ -53,6 +57,7 @@ fun GooseTheme(
             large = RoundedCornerShape(26.dp),
             extraLarge = RoundedCornerShape(32.dp),
         ),
-        content = content,
-    )
+    ) {
+        CompositionLocalProvider(LocalGrouseStatusColors provides statusColors) { content() }
+    }
 }
