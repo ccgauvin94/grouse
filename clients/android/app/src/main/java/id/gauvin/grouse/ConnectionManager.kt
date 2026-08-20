@@ -1456,13 +1456,23 @@ class ConnectionManager private constructor(context: Context) {
         val idx = if (m.id.isNotEmpty()) {
             coreKeyToAppId[m.id]?.let { appId -> messages.indexOfFirst { it.id == appId } } ?: -1
         } else {
-            // Live text bubble (empty key): the core's stream bubble is always the last one.
-            messages.lastIndex
+            // Live stream bubble (empty key): target the LAST message of the SAME
+            // role as the incoming chunk. Roam interleaves agent/thought on the
+            // same empty-id stream; always grabbing `lastIndex` could hit the wrong
+            // bubble (thinking text appended to the assistant bubble, or an assistant
+            // bubble flipped to a thinking block mid stream).
+            messages.indexOfLast { it.role == (if (m.role == "agent") "assistant" else m.role) }
         }
         if (idx < 0 || idx >= messages.size) return
         val cur = messages[idx]
         messages[idx] = cur.copy(
-            role = if (m.role == "agent") "assistant" else m.role,
+            // NEVER reclassify an existing bubble's role from an update: a live
+            // roam stream interleaves AgentMessageChunk (assistant) and
+            // AgentThoughtChunk (thought) on the same empty-id stream, and a
+            // role overwrite here turned a streaming assistant bubble into a
+            // "thinking block mid stream". The role is decided at append time;
+            // an update only changes content/output/status.
+            role = cur.role,
             // For tool role, NEVER clobber the existing label with an update's
             // content — a tool bubble's title is set once at append time and is
             // only ever changed by output/status. Some update paths (replay or a
