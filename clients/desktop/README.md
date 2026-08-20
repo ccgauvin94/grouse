@@ -51,17 +51,13 @@ attachments.
 ## Layout
 | File | What lives there |
 |---|---|
-| `src/acpclient.h/.cpp` | The wire: ACP JSON-RPC over a pluggable transport, response/notification/serverRequest dispatch |
-| `src/acptransport.h/.cpp` | The ACP transport over the tailnet WebSocket |
-| `src/websockettransport.h/.cpp` | QtWebSockets transport plumbing |
-| `src/roamframecodec.h/.cpp` | Roam frame encode/decode |
-| `src/roamtransport.h/.cpp` | Roam peer transport (iroh) |
+| `src/corebridge.h/.cpp` | The only wire path: dlopens `libgrouse_core.so` (grouse-core C ABI), the thin client's link to the ACP server |
 | `src/roamlistmodel.h/.cpp` | Roam peer sidebar model |
 | `src/messagelistmodel.h/.cpp` | Transcript model (16 roles) |
 | `src/sessionlistmodel.h/.cpp` | Sidebar session model |
 | `src/markdown.h/.cpp` | Lightweight markdown→HTML renderer |
 | `src/dbusadapter.h/.cpp` | DBus surface (KRunner/window integration) |
-| `src/manager.h/.cpp` | Process-scoped connection + chat state, exposed to QML as `Mgr` |
+| `src/manager.h/.cpp` | Thin client facade (chat state), exposed to QML as `Mgr` |
 | `src/main.cpp` | App setup + QML engine |
 | `ui/*.qml` | Kirigami windows / pages / dialogs |
 

@@ -4,12 +4,12 @@ Grouse Desktop — a KDE-native (Kirigami/Qt6/C++) client for a self-hosted goos
 (`goose serve`), spoken to over ACP (JSON-RPC over WebSocket).
 
 This lives in the grouse monorepo at `clients/desktop/`. **Read the repo-root
-`AGENTS.md` first** — it owns the architecture contract, and it records this
-directory as a known deviation from it: the desktop predates the Rust core and
-still implements the client logic itself (`src/acpclient.*`, `src/manager.*`,
-`src/*transport.*`) instead of consuming `grouse-core`. Until that migration
-lands, a protocol fix here must also be made in `core/`. This file documents the
-C++ side.
+`AGENTS.md` first** — it owns the architecture contract. This directory is now
+a THIN CLIENT: it consumes `grouse-core` through the C ABI (`grouse_*`,
+dlopen'd as `libgrouse_core.so` via `src/corebridge.{h,cpp}`), which
+owns the ACP connection, the transcript, streaming, reconnect and the roam
+transport. No protocol logic lives here anymore; a protocol fix is made in
+`core/` only. This file documents the thin (native-UI-only) side.
 
 ## Project Overview
 
@@ -29,38 +29,36 @@ C++ side.
 
 ## Architecture & Data Flow
 
-- `Manager` (QML context property `Mgr`) owns exactly one `AcpClient` plus the two
-  QAbstractListModels. Everything runs on the main thread with direct connects.
-- QML → `Mgr` Q_INVOKABLEs → `AcpClient` RPC → server. Server → notifications →
-  `AcpClient` signals → `Manager` slots → model `insertRows`/`dataChanged` → QML
-  delegates.
+- `Manager` (QML context property `Mgr`) is the thin native facade. It owns NO
+  wire client; it holds the two QAbstractListModels and a single `CoreBridge`
+  (dlopen of `libgrouse_core.so` -> the `grouse_*` C ABI). Events from the core
+  arrive on the listing thread, are marshalled onto the Qt main thread by
+  `CoreBridge`, and drive the models.
+- QML → `Mgr` Q_INVOKABLEs → `grouse_*` intent (via `CoreBridge::api()`) → the
+  Rust core → server. Server → core (`on_status`/`on_transcript`/`on_stream`/
+  `on_config`/...) → `CoreBridge` listener → `Manager` `coreOn*` slots → models
+  → QML delegates.
 - Connection lifecycle: `main.cpp` calls `manager.autoConnect()` at startup
   (resumes the last chat when settings exist); `Mgr.connectToServer()` otherwise.
-  The MAIN connection is rebuilt for every connect/open/new; resume
-  (`session/load`) vs fresh (`session/new`) is the `setResumeSession` switch.
-- **Roam peers are PARALLEL connections, not replacements.** Each `RoamPeer`
-  (label → own `AcpClient` + `RoamTransport`) connects straight to a
-  `goose serve --roam` host over iroh (native `libgrouse_roam_core.so`,
-  dlopen'd — see the transport seam below), in browse mode (initialize →
-  `session/list`, never auto-opens). The sidebar's Main|Roam tabs both stay
-  live; the ROAM tab lists endpoints as drop-downs of sessions. Chat-scoped
-  ops route through `Manager::activeClient()` (the peer owning the active
-  session, else the main client); global catalogs (recipes/schedules/skills/
-  projects/config) always hit the main client. The device iroh identity is
-  generated on first view and stored in QSettings (`roam_identity`); hosts see
-  its key in `peers list` and must `roam peers accept` it before the dial
-  succeeds.
-- **Transport seam**: `AcpClient` speaks to an `AcpTransport` (signals
-  opened/textReceived/closed/error + `sendText`). `WebSocketTransport` wraps
-  the old QWebSocket path; `RoamTransport` dlopens grouse-roam-core and pumps
-  newline-framed ACP (see `RoamFrameCodec`, ACP's ByteStreams framing — same
-  as goose on stdio). The native lib resolves via `GROUSE_ROAM_CORE`, the app
-  image's `../lib`, `/app/lib`, or the system path; its C API lives in the
-  crate's `src/capi.rs`. Set `GROUSE_ROAM_CORE` in tests/dev, bundle the .so
-  for the flatpak.
-- Streamed chunks accumulate into `MessageListModel` incrementally (insertRows +
-  deferred dataChanged) — never republish a QVariantList: QML treats it as a
-  brand-new model (full reset, scroll jump, quadratic slowdown).
+  The core owns connect/open/new and reconnect (exponential backoff, core-side).
+- **Roam peers are PARALLEL connections, not replacements.** `connectRoam`
+  dials a `goose serve --roam` peer through the core's bundled roam transport
+  (no separate dlopen of `libgrouse_roam_core.so` — it is inside
+  `libgrouse_core.so`). The sidebar's Main|Roam tabs both stay live; the ROAM
+  tab lists endpoints as drop-downs of sessions. Chat-scoped and
+  session-bound ops route through the core, which resolves the owning peer from
+  the `roam:<label>:<id>` session prefix.
+- **The C ABI is the only wire path.** `CoreBridge` resolves the exact
+  `grouse_*` symbols from `core/grouse-core/src/capi.rs` and installs the
+  `GrouseCoreListener` callback table. The library resolves via `GROUSE_CORE`,
+  the app image's `../lib`, `/app/lib`, or the system path. Set `GROUSE_CORE`
+  in tests/dev, bundle the .so for the flatpak.
+- Transcript rendering: the core owns the transcript and emits BOTH
+  `on_stream` (chunks) and `on_transcript` (full bubble Append/Update/Clear)
+  for the same content. To avoid double-render the desktop renders text
+  bubbles from `on_transcript` and tool/chart/MCP-App + usage/run-ended from
+  `on_stream`. Never republish a QVariantList to `MessageListModel` per event:
+  use the model's `insertRows`/`dataChanged` (coalesced via `requestMessagesUpdate`).
 - Per-session transcript/tool caches live in `QStandardPaths::CacheLocation`,
   keyed by sessionId. Reconnects use exponential backoff.
 
@@ -95,7 +93,7 @@ C++ side.
 
 |Dir|What lives there|
 |---|---|
-|`src/`|C++ core: `acpclient.{h,cpp}` (the wire), `manager.{h,cpp}` (connection + chat state, `Mgr`), `messagelistmodel`, `sessionlistmodel`, `markdown.{h,cpp}`, `dbusadapter.{h,cpp}` (session-bus service for KRunner), `main.cpp`|
+|`src/`|C++ core: `corebridge.{h,cpp}` (dlopen of `libgrouse_core.so`, the ONLY wire path), `manager.{h,cpp}` (thin facade, `Mgr`), `messagelistmodel`, `sessionlistmodel`, `markdown.{h,cpp}`, `dbusadapter.{h,cpp}` (session-bus service for KRunner), `main.cpp`|
 |`krunner/`|Host-side KRunner plugin (searches/opens sessions via the DBus service); standalone-buildable CMake, excluded from the flatpak (`BUILD_KRUNNER=OFF`)|
 |`ui/`|All QML, embedded into the binary via `qt_add_resources` (PREFIX `/`): `main.qml` (window root, sidebar, all dialog instances), `ChatPage.qml` (transcript/input/attachments/charts), feature dialogs|
 |`data/`|Desktop file + SVG icon (single scalable icon; no size dirs, no index.theme)|
@@ -206,8 +204,8 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
 
 |File|Role|
 |---|---|
-|`src/acpclient.h/.cpp`|The wire: initialize handshake (clientCapabilities), `session/new` vs `session/load`, response/notification/serverRequest dispatch, goose extensions (`session/request_permission`, `session/set_config_option`, `_goose/unstable/session/steer`, recipes/schedules/skills/projects/global-extensions). ~30 outbound RPC methods + ~30 signals; `friend class Manager`.|
-|`src/manager.h/.cpp`|Process-scoped connection + chat state; `Mgr` context property: ~30 Q_INVOKABLEs (`sendPrompt`, `openSession`, `renameSession`, `setConfigOption`, `refreshRecipes`, `runRecipe`, `scheduleRecipe`, `saveSkill`, `setGlobalExtensionEnabled`, `respondPermission`, `pickAttachmentFiles`, `exportSessionTo`, `compactConversation`, …), writable Q_PROPERTYs (host/port/secretKey/workingDir/useTls/autoConnectEnabled), status Q_PROPERTYs (status/online/landingPage/prompting/compacting/queuedCount/contextSize/…).|
+|`src/corebridge.h/.cpp`|The ONLY path to the wire: dlopens `libgrouse_core.so`, resolves every `grouse_*` symbol, installs the `GrouseCoreListener` table, marshals every core event from the worker thread onto the Qt main thread, and dispatches to `Manager`'s `coreOn*` handlers. The core owns the ACP connection, transcript, streaming, reconnect and the roam transport.|
+|`src/manager.h/.cpp`|Thin native facade (`Mgr` context property): ~30 Q_INVOKABLEs (`sendPrompt`, `openSession`, `renameSession`, `setConfigOption`, `refreshRecipes`, `runRecipe`, `scheduleRecipe`, `saveSkill`, `setGlobalExtensionEnabled`, `respondPermission`, `pickAttachmentFiles`, `exportSessionTo`, `compactConversation`, …), writable Q_PROPERTYs (host/port/secretKey/workingDir/useTls/autoConnectEnabled), status Q_PROPERTYs (status/online/landingPage/prompting/compacting/queuedCount/contextSize/…). Every intent routes through `CoreBridge::api()`; `coreOn*` fold core events into the models.|
 |`src/messagelistmodel.h/.cpp`|Transcript model, 16 roles (role/text/html/title/detail/output/status/images/usage/chartData/appHtml/calls/…); `updateDeferred` coalesces dataChanged on a 120 ms QTimer; `commitDeferred` guards the cleared-model race.|
 |`src/sessionlistmodel.h/.cpp`|Sidebar model, 11 roles; flat list of group-header + session rows; sections prefixed `proj:`/`peer:` (id = `section.substring(5)`); `cwdFor()` is the source of cwd for `session/load` — never invent one; `toggleSection()`; no-op guard so unchanged lists never reset the model.|
 |`src/markdown.h/.cpp`|`markdownToHtml()` — Qt CommonMark → HTML, escapes input.|
@@ -236,21 +234,16 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
 - Automated tests live in `tests/` (CTest; `BUILD_TESTING` defaults ON for dev
   builds, OFF in the flatpak manifest). Run everything with
   `ctest --output-on-failure` from `build/`, or one suite with
-  `ctest -R tst_acpclient --verbose`.
+  `ctest -R tst_manager --verbose`.
 - Suite layout (all share the `grouse_core` static lib = `src/*` minus
   `main.cpp`):
   - `tst_markdown`, `tst_messagelistmodel`, `tst_sessionlistmodel` — unit tests
     for the pure logic (escaping, deferred/coalesced model updates, grouping /
     collapse / cwdFor / no-op reset guard).
-  - `tst_acpclient` — 30 wire tests against an in-process fake goose
-    (`tests/fakeserver.h`, a scriptable QWebSocketServer): handshake
-    capabilities, `_meta.client`, cwd, load-failure fallback, steer, permissions,
-    streaming, every reply parser, `toExtensionDto`. This is where the protocol
-    gotchas are pinned down — change the wire, expect a failure here.
-  - `tst_manager` — integration end to end: connect → open → prompt → streamed
-    chunks → model rows, permissions, queue/steer, error bubbles. QSettings and
-    caches are redirected via XDG_CONFIG_HOME/XDG_CACHE_HOME so tests never
-    touch real user config.
+  - `tst_manager` — thin-client intent-mapping smoke: Manager Q_INVOKABLE ->
+    CoreBridge routing and model invariant checks. The wire-level protocol
+    (handshake, session/load, permissions, streaming, every reply parser) is
+    covered by the grouse-core Rust crate (`cargo test -p grouse-core`).
   - `tst_qml` — QtQuickTest run of `tests/qml/`: ChartBubble (chart-spec parsing
     and axis math) and ComboBox `valueRole` (provider/model wiring contract).
 - QML test gotcha: QuickTest resolves relative imports against neither the test

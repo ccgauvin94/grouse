@@ -4,8 +4,10 @@
 #include <QFileInfo>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQmlEngine>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QtQml>
 
 #include "dbusadapter.h"
 #include "manager.h"
@@ -69,6 +71,11 @@ int main(int argc, char *argv[])
     // font hinting instead of rasterizing small labels as Qt Quick textures.
     QQuickWindow::setTextRenderType(QQuickWindow::NativeTextRendering);
     QQuickStyle::setStyle(QStringLiteral("org.kde.desktop"));
+
+    // Grouse design tokens (design/tokens.json v1.1.0), exposed as the
+    // Grouse.Theme singleton for the flagged token-consumer surfaces.
+    qmlRegisterSingletonType(QUrl(QStringLiteral("qrc:/GrouseTheme.qml")),
+                             "Grouse", 1, 0, "Theme");
 
     Manager manager;
     // Session-bus service for the KRunner plugin (id.gauvin.Grouse).

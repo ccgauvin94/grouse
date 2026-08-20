@@ -1,7 +1,7 @@
 build/
 build-krunner-host/
 krunner-prebuild/
-roam-prebuild/
+grouse-core-prebuild/
 .cache/
 *.user
 

@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
+import Grouse 1.0
 import org.kde.kirigami as Kirigami
 
 Kirigami.Page {
@@ -491,7 +492,7 @@ Kirigami.Page {
                     anchors.rightMargin: mdel.gap + mdel.scrollbarReserve
                     width: mdel.userBubbleW
                     implicitHeight: userCol.implicitHeight + mdel.pad * 2
-                    radius: 12
+                    radius: Theme.radius.xl
                     color: Kirigami.Theme.highlightColor
                     clip: true
 
@@ -573,7 +574,7 @@ Kirigami.Page {
                     anchors.leftMargin: mdel.gap
                     width: mdel.agentBubbleW
                     implicitHeight: agentCol.implicitHeight + mdel.pad * 2
-                    radius: 12
+                    radius: Theme.radius.xl
                     color: Kirigami.Theme.alternateBackgroundColor
                     border.color: Kirigami.Theme.separatorColor
                     border.width: 1
@@ -620,7 +621,7 @@ Kirigami.Page {
                     anchors.leftMargin: mdel.gap
                     width: Math.min(mdel.agentBubbleW * 0.78, 560)
                     implicitHeight: chipCol.implicitHeight + mdel.pad * 2
-                    radius: 10
+                    radius: Theme.radius.lg
                     color: Qt.lighter(Kirigami.Theme.backgroundColor, 1.18)
                     border.color: Kirigami.Theme.separatorColor
                     border.width: 1
@@ -688,7 +689,7 @@ Kirigami.Page {
                     anchors.leftMargin: mdel.gap
                     width: Math.min(mdel.agentBubbleW * 0.78, 560)
                     implicitHeight: groupCol.implicitHeight + mdel.pad * 2
-                    radius: 10
+                    radius: Theme.radius.lg
                     color: Qt.lighter(Kirigami.Theme.backgroundColor, 1.18)
                     border.color: Kirigami.Theme.separatorColor
                     border.width: 1
@@ -803,7 +804,7 @@ Kirigami.Page {
                     anchors.leftMargin: mdel.gap
                     width: Math.min(mdel.agentBubbleW * 0.78, 560)
                     implicitHeight: mcpCol.implicitHeight + mdel.pad * 2
-                    radius: 8
+                    radius: Theme.radius.sm
                     color: Qt.lighter(Kirigami.Theme.backgroundColor, 1.18)
                     border.color: Kirigami.Theme.separatorColor
                     border.width: 1

@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 #include "manager.h"
 
-#include "acpclient.h"
+#include "corebridge.h"
 #include "markdown.h"
 #include "messagelistmodel.h"
 #include "roamlistmodel.h"
-#include "roamtransport.h"
 #include "sessionlistmodel.h"
 
 #include <QDir>
@@ -14,16 +15,26 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QMetaObject>
 #include <QMimeDatabase>
-#include <QNetworkRequest>
 #include <QSet>
-#include <QSslConfiguration>
-#include <QSslSocket>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
-#include <QtWebSockets/QWebSocket>
+
+// ---------------------------------------------------------------------------
+// Implementation notes
+//
+// This is the thin-client Manager: it owns NO wire. Every Q_INVOKABLE below
+// becomes a call into the grouse-core C ABI (via CoreBridge::api()), and every
+// event from the wire arrives through the CoreBridge listener table on the Qt
+// main thread as a `coreOn*` handler. The core owns the connection, the
+// transcript, streaming and reconnect; the Manager only renders state the core
+// reports and sends intents the user triggers.
+//
+// The core serializes structured records/enums as JSON (serde external
+// tagging). The coreOn* handlers parse that JSON and fold it into the models'
+// existing QVariant shapes so the QML surface is unchanged.
+// ---------------------------------------------------------------------------
 
 Manager::Manager(QObject *parent)
     : QObject(parent)
@@ -32,37 +43,23 @@ Manager::Manager(QObject *parent)
     m_sessionsModel = new SessionListModel(this);
     m_messageModel = new MessageListModel(this);
     m_roamModel = new RoamListModel(this);
-    // Coalesces server session_info_update notifications: another client's turn
-    // can bump a session repeatedly, and each bump must not trigger a full resync.
-    m_touchDebounce = new QTimer(this);
-    m_touchDebounce->setSingleShot(true);
-    m_touchDebounce->setInterval(1500);
-    connect(m_touchDebounce, &QTimer::timeout, this, &Manager::onTouchDebounced);
+
+    // Coalesce transcript updates while a turn streams (same rate-limit as the
+    // old per-chunk path): the signal fires at most every 50ms.
     m_updateTimer = new QTimer(this);
     m_updateTimer->setSingleShot(true);
     m_updateTimer->setInterval(50);
     connect(m_updateTimer, &QTimer::timeout, this, [this] { emit messagesChanged(); });
-    // Auto-reconnect after an UNEXPECTED drop (not an explicit disconnect): exponential
-    // backoff, capped at 6 attempts, reset once a session re-opens. Mirrors the Android
-    // client's ensureConnected + turnResyncTick recovery at a desktop granularity.
-    m_reconnectTimer = new QTimer(this);
-    m_reconnectTimer->setSingleShot(true);
-    connect(m_reconnectTimer, &QTimer::timeout, this, [this] {
-        if (m_userDisconnect)
-            return;
-        ++m_reconnectAttempts;
-        const QString cwd = m_sessionsModel->cwdFor(m_currentSessionId);
-        if (!m_currentSessionId.isEmpty())
-            resumeSession(m_currentSessionId, cwd.isEmpty() ? m_lastCwd : cwd);
-        else
-            connectToServer();
-    });
+
+    // The core is the sole wire path. dlopen + resolve on first use.
+    CoreBridge *bridge = CoreBridge::instance();
+    m_bridge = bridge;
+    bridge->setTarget(this);
+    bridge->installListener();
 }
 
 void Manager::requestMessagesUpdate()
 {
-    if (m_deferMessageUpdates)
-        return;
     if (!m_updateTimer->isActive())
         m_updateTimer->start();
 }
@@ -87,8 +84,9 @@ void Manager::setWorkingDir(const QString &v)
 
 QString Manager::wsUrl() const
 {
-    // goosed serves a self-signed TLS cert on its ACP port, so wss is the norm;
-    // ws (raw) is only for a server that doesn't terminate TLS itself.
+    // Kept for the Connect dialog; the core builds its own WebSocket from the
+    // same settings. wss is the norm (goosed serves a self-signed cert); ws is
+    // only for a server that does not terminate TLS itself.
     return QStringLiteral("%1://%2:%3/acp")
         .arg(useTls() ? QStringLiteral("wss") : QStringLiteral("ws"),
              host().trimmed(), port().trimmed());
@@ -101,8 +99,8 @@ QString Manager::currentSessionTitle() const
     return m_currentSessionId.isEmpty() ? QStringLiteral("New chat") : m_currentSessionId;
 }
 
-QObject* Manager::sessionsModel() const { return m_sessionsModel; }
-QObject* Manager::messageModel() const { return m_messageModel; }
+QObject *Manager::sessionsModel() const { return m_sessionsModel; }
+QObject *Manager::messageModel() const { return m_messageModel; }
 
 void Manager::setStatus(const QString &s)
 {
@@ -120,204 +118,119 @@ void Manager::setOnline(bool o)
     emit onlineChanged();
 }
 
-void Manager::ensureClient()
+QString Manager::activeSessionId() const
 {
-    if (m_client)
-        return;
-    m_client = new AcpClient(this);
-    wireClient(m_client, -1);
+    if (!m_bridge || !m_bridge->isAvailable())
+        return QString();
+    return m_bridge->takeString(m_bridge->api().grouse_active_session_id(m_bridge->handle()));
 }
 
-/** Wire one ACP client's signals. peerIndex < 0 = the main connection;
- *  otherwise a roam peer (peerLabel names it). Chat/session-scoped signals
- *  only forward to the shared handlers while this client owns the active
- *  session, so the main connection and a peer can both stay live with the
- *  chat page bound to whichever session the user last opened. */
-void Manager::wireClient(AcpClient *c, int peerIndex, const QString &peerLabel)
-{
-    const bool isMain = peerIndex < 0;
-    auto active = [this, isMain, peerLabel] {
-        return isMain ? m_activePeerLabel.isEmpty() : m_activePeerLabel == peerLabel;
-    };
+// ---------------------------------------------------------------------------
+// ServerConfig JSON (input to grouse_connect)
+// ---------------------------------------------------------------------------
 
-    if (isMain) {
-        connect(c, &AcpClient::statusChanged, this, [this](const QString &s) {
-            setStatus(s);
-            // An unexpected drop (disconnected / error) after a session was live should heal
-            // itself; an explicit disconnect() or a still-in-flight manual connect must not.
-            if (!m_userDisconnect && !m_currentSessionId.isEmpty()
-                && (s == QStringLiteral("disconnected") || s.startsWith(QLatin1String("error:"))))
-                maybeReconnect();
-        });
-        // Global catalogs are the MAIN server's; roam peers never feed them.
-        connect(c, &AcpClient::sessionsReady, this, &Manager::onSessions);
-        connect(c, &AcpClient::projectsReady, this, &Manager::onProjects);
-        connect(c, &AcpClient::recipesReady, this, &Manager::onRecipes);
-        connect(c, &AcpClient::schedulesReady, this, &Manager::onSchedules);
-        connect(c, &AcpClient::skillsReady, this, &Manager::onSkills);
-        connect(c, &AcpClient::extensionsReady, this, &Manager::onExtensions);
-        connect(c, &AcpClient::serverConfigValue, this, &Manager::onServerConfigValue);
-        connect(c, &AcpClient::supportedModelsReady, this, &Manager::onSupportedModels);
-    } else {
-        connect(c, &AcpClient::statusChanged, this, [this, peerLabel](const QString &s) {
-            const bool down = s == QStringLiteral("disconnected")
-                || s.startsWith(QLatin1String("error:"));
-            m_roamModel->setPeerStatus(peerLabel, s, !down);
-        });
-        connect(c, &AcpClient::sessionsReady, this, [this, peerLabel](const QVariantList &sessions) {
-            for (RoamPeer &p : m_roamPeers) {
-                if (p.label == peerLabel) {
-                    p.sessions = sessions;
-                    break;
-                }
-            }
-            m_roamModel->setPeerSessions(peerLabel, sessions);
-        });
+QString Manager::serverConfigJson()
+{
+    QJsonObject o;
+    o["host"] = host().trimmed();
+    o["port"] = port().trimmed().toInt();
+    o["secret_key"] = secretKey();
+    o["use_tls"] = useTls();
+    o["accept_invalid_certs"] = true; // historical self-signed-tailnet trust-all
+    o["ca_cert_pem"] = QJsonValue::Null;
+    o["cwd"] = workingDir();
+    o["auto_connect"] = true;
+    o["client_id"] = QStringLiteral("grouse-desktop");
+    o["initial_recipe_id"] = m_pendingRecipeId.isEmpty()
+        ? QJsonValue::Null : QJsonValue(m_pendingRecipeId);
+    m_pendingRecipeId.clear();
+    return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
+}
+
+// ---------------------------------------------------------------------------
+// Prompt JSON (input to grouse_send_prompt): serde Prompt { blocks: [...] }
+// ---------------------------------------------------------------------------
+
+QString Manager::promptJson(const QString &text, const QVariantList &blocks) const
+{
+    QJsonArray arr;
+    if (!text.trimmed().isEmpty()) {
+        arr.append(QJsonObject{{"Text", QJsonObject{{"text", text}}}});
     }
-
-    // Remote-change tracking: another client touching a session surfaces as
-    // session_info_update (touched) + the cheap probe reply; the Manager
-    // debounces and replays the ACTIVE session when it moved.
-    connect(c, &AcpClient::sessionTouched, this,
-            [this, c](const QString &sid, const QString &title, const QString &u) {
-        onSessionTouched(c, sid, title, u);
-    });
-    connect(c, &AcpClient::sessionProbe, this,
-            [this](const QString &sid, const QString &u, int n) { onSessionProbe(sid, u, n); });
-
-    // Chat/session-scoped signals: forward only while this client is active.
-    connect(c, &AcpClient::sessionReady, this, [this, active](const QString &id) { if (active()) onReady(id); });
-    connect(c, &AcpClient::configReady, this, [this, active](const QVariantList &v) { if (active()) onConfig(v); });
-    connect(c, &AcpClient::toolsReady, this, [this, active](const QVariantList &v) { if (active()) onTools(v); });
-    connect(c, &AcpClient::sessionExtensionsReady, this, [this, active](const QStringList &v) { if (active()) onSessionExtensions(v); });
-    connect(c, &AcpClient::agentChunk, this, [this, active](const QString &t, const QString &id) { if (active()) onAgentChunk(t, id); });
-    connect(c, &AcpClient::userChunk, this, [this, active](const QString &t, const QString &id) { if (active()) onUserChunk(t, id); });
-    connect(c, &AcpClient::thoughtChunk, this, [this, active](const QString &t) { if (active()) onThoughtChunk(t); });
-    connect(c, &AcpClient::toolCall, this, [this, active](const QString &t, const QString &d, const QString &id) { if (active()) onToolCall(t, d, id); });
-    connect(c, &AcpClient::toolCallUpdate, this, [this, active](const QString &id, const QString &st, const QString &o, bool l) { if (active()) onToolCallUpdate(id, st, o, l); });
-    connect(c, &AcpClient::chartToolCall, this, [this, active](const QString &t, const QString &id, const QString &s) { if (active()) onChartToolCall(t, id, s); });
-    connect(c, &AcpClient::mcpAppToolCall, this, [this, active](const QString &t, const QString &id, const QString &k, const QString &u, const QString &x, const QString &in) { if (active()) onMcpAppToolCall(t, id, k, u, x, in); });
-    connect(c, &AcpClient::appResource, this, [this, active](const QString &k, const QString &h) { if (active()) onAppResource(k, h); });
-    connect(c, &AcpClient::permissionRequest, this, [this, active](const QString &id, const QString &t, const QString &d, const QVariantList &o) { if (active()) onPermission(id, t, d, o); });
-    connect(c, &AcpClient::usageUpdate, this, [this, active](int u, int sz, double c, const QString &cur) { if (active()) onUsage(u, sz, c, cur); });
-    connect(c, &AcpClient::exportResult, this, [this, active](const QString &d) { if (active()) onExportResult(d); });
-    connect(c, &AcpClient::compactionStatus, this, [this, active](const QString &m) { if (active()) onCompactionStatus(m); });
-    connect(c, &AcpClient::messageUsage, this, [this, active](const QVariantMap &u) { if (active()) onMessageUsage(u); });
-    connect(c, &AcpClient::commandsReady, this, [this, active](const QStringList &v) { if (active()) onCommands(v); });
-    connect(c, &AcpClient::modeChanged, this, [this, active](const QString &m) { if (active()) onModeChanged(m); });
-    connect(c, &AcpClient::activeRunChanged, this, [this, active](const QString &s, const QString &r) { if (active()) onActiveRunChanged(s, r); });
-    connect(c, &AcpClient::runEnded, this, [this, active] {
-        if (!active())
-            return;
-        finalizeCurrentMessage();
-        m_prompting = false;
-        m_compacting = false;
-        m_activeRunId.clear();
-        emit promptingChanged();
-        emit compactingChanged();
-        flushQueue();
-    });
-    connect(c, &AcpClient::error, this, [this, active](const QString &t, bool b) { if (active()) onError(t, b); });
-}
-
-void Manager::onSessionTouched(AcpClient *owner, const QString &sid, const QString &title,
-                               const QString &updatedAt)
-{
-    // Keep the sidebar's updatedAt map fresh — it drives openSession's cache check.
-    if (!updatedAt.isEmpty())
-        m_sessionUpdatedAt.insert(sid, updatedAt);
-    m_lastTouchedSid = sid;
-    m_lastTouchedClient = owner;
-    m_touchDebounce->start();
-}
-
-void Manager::onTouchDebounced()
-{
-    const QString sid = m_lastTouchedSid;
-    if (sid.isEmpty())
-        return;
-    if (sid == m_currentSessionId) {
-        // The active chat moved remotely. A resync cycle is already running
-        // (its follow-up probes will catch the rest) — don't stack another.
-        if (m_resyncTicks > 0)
-            return;
-        m_resyncTicks = 4;
-        probeAndMaybeResync(sid);
-    } else if (m_lastTouchedClient) {
-        // Sidebar: refresh the owner's list so order/title/status pick it up.
-        m_lastTouchedClient->listSessions();
+    for (const auto &b : blocks) {
+        const QVariantMap m = b.toMap();
+        const QString type = m.value("type").toString();
+        if (type == QLatin1String("image")) {
+            arr.append(QJsonObject{{"Image", QJsonObject{
+                {"mime_type", m.value("mimeType").toString()},
+                {"data", m.value("data").toString()}}}});
+        } else if (type == QLatin1String("resource")) {
+            const QVariantMap r = m.value("resource").toMap();
+            QJsonObject res{{"uri", r.value("uri").toString()},
+                            {"mime_type", r.value("mimeType").toString()}};
+            if (r.contains("text"))
+                res["text"] = r.value("text").toString();
+            else
+                res["text"] = QJsonValue::Null;
+            res["blob"] = r.contains("blob") ? QJsonValue(r.value("blob").toString())
+                                             : QJsonValue::Null;
+            arr.append(QJsonObject{{"Resource", res}});
+        }
     }
+    return QString::fromUtf8(QJsonDocument(QJsonObject{{"blocks", arr}})
+                                 .toJson(QJsonDocument::Compact));
 }
 
-void Manager::probeAndMaybeResync(const QString &sid)
-{
-    if (m_prompting)
-        return;   // our own turn owns the transcript; the session re-syncs on open
-    AcpClient *c = activeClient();
-    if (c && sid == m_currentSessionId)
-        c->probeSession(sid);
-}
-
-void Manager::onSessionProbe(const QString &sid, const QString &updatedAt, int messageCount)
-{
-    if (sid != m_currentSessionId)
-        return;   // stale probe for a session we left
-    if (updatedAt.isEmpty() || messageCount < 0)
-        return;   // probe failed; leave the transcript as-is
-    const bool moved = updatedAt != m_syncStamp
-        || (messageCount >= 0 && messageCount != m_syncCount);
-    if (!moved)
-        return;
-    m_syncStamp = updatedAt;
-    m_syncCount = messageCount;
-    resyncCurrentSession();
-    if (m_resyncTicks > 0) {
-        --m_resyncTicks;
-        // goose streams a turn only to the prompting client, so a snapshot can
-        // cut a still-running turn short — re-probe a few times to catch it.
-        QTimer::singleShot(8000, this, [this, sid] { probeAndMaybeResync(sid); });
-    }
-}
-
-void Manager::resyncCurrentSession()
-{
-    const QString sid = m_currentSessionId;
-    if (sid.isEmpty())
-        return;
-    AcpClient *c = activeClient();
-    if (!c)
-        return;
-    // Light in-place replay: same state prep as openSession's stale path, but
-    // no reconnect — the wire is already live.
-    m_suppressReplay = false;
-    m_deferMessageUpdates = true;
-    m_messageModel->clear();
-    m_currentIndex = -1;
-    emit messagesChanged();
-    setStatus(QStringLiteral("syncing…"));
-    const QString cwd = m_sessionsModel->cwdFor(sid);
-    c->setResumeSession(sid, cwd.isEmpty() ? m_lastCwd : cwd);
-    c->openSessionNow();
-}
+// ---------------------------------------------------------------------------
+// Intents (UI -> core)
+// ---------------------------------------------------------------------------
 
 void Manager::connectToServer()
 {
-    ensureClient();
-    m_userDisconnect = false;
-    if (m_online) {
-        m_client->close();
-    }
-    const QString url = wsUrl();
-    const QString key = secretKey();
-    if (key.isEmpty()) {
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    if (secretKey().isEmpty()) {
         setStatus(QStringLiteral("no secret key"));
         return;
     }
-    m_client->setDesiredOptions({});
-    m_client->setDesiredCwd(workingDir());
-    m_client->setResumeSession(QString(), QString());
+    m_landing = false;
+    emit landingChanged();
     m_lastCwd = workingDir();
-    m_client->connectTo(url, key);
+    char *err = nullptr;
+    const QByteArray cfg = serverConfigJson().toUtf8();
+    m_bridge->api().grouse_connect(m_bridge->handle(), cfg.constData(), &err);
+    if (err) {
+        setStatus(QStringLiteral("connect failed: ") + QString::fromUtf8(err));
+        m_bridge->api().grouse_string_free(err);
+    } else {
+        setStatus(QStringLiteral("connecting…"));
+    }
+}
+
+void Manager::autoConnect()
+{
+    if (!autoConnectEnabled())
+        return;
+    if (host().trimmed().isEmpty() || secretKey().isEmpty()) {
+        setStatus(QStringLiteral("not configured — press Connect"));
+        return;
+    }
+    m_landing = true;
+    connectToServer();
+}
+
+void Manager::disconnect()
+{
+    if (m_bridge && m_bridge->isAvailable())
+        m_bridge->api().grouse_disconnect(m_bridge->handle());
+    setOnline(false);
+    m_prompting = false;
+    emit promptingChanged();
+    m_compacting = false;
+    emit compactingChanged();
+    m_landing = true;
+    emit landingChanged();
+    setStatus(QStringLiteral("disconnected"));
 }
 
 void Manager::connectRoam(const QString &card, const QString &label)
@@ -326,83 +239,48 @@ void Manager::connectRoam(const QString &card, const QString &label)
         setStatus(QStringLiteral("roam: label required"));
         return;
     }
-    // One peer per label: reconnect replaces the old one.
-    for (const RoamPeer &p : m_roamPeers) {
-        if (p.label == label) {
-            disconnectRoam(label);
-            break;
-        }
+    if (m_bridge && m_bridge->isAvailable()) {
+        const QByteArray c = card.toUtf8();
+        const QByteArray l = label.toUtf8();
+        m_bridge->api().grouse_roam_connect(m_bridge->handle(), c.constData(), l.constData());
+        m_roamModel->addPeer(label);
     }
-    const QString secret = roamIdentity();
-    if (secret.isEmpty()) {
-        setStatus(QStringLiteral("roam: no identity"));
-        return;
-    }
-    auto *client = new AcpClient(this);
-    client->setBrowseOnly(true);   // list the peer's sessions, don't auto-open
-    m_roamPeers.append(RoamPeer{label, client});
-    m_roamModel->addPeer(label);
-    wireClient(client, m_roamPeers.size() - 1, label);
-    client->connectRoam(secret, card, label);
 }
 
 void Manager::disconnectRoam(const QString &label)
 {
-    for (int i = 0; i < m_roamPeers.size(); ++i) {
-        if (m_roamPeers.at(i).label == label) {
-            if (m_activePeerLabel == label)
-                m_activePeerLabel.clear();
-            m_roamPeers.at(i).client->close();
-            m_roamPeers.at(i).client->deleteLater();
-            m_roamPeers.removeAt(i);
-            m_roamModel->removePeer(label);
-            return;
-        }
+    if (m_activePeerLabel == label)
+        m_activePeerLabel.clear();
+    if (m_bridge && m_bridge->isAvailable()) {
+        const QByteArray l = label.toUtf8();
+        m_bridge->api().grouse_roam_disconnect(m_bridge->handle(), l.constData());
     }
+    m_roamModel->removePeer(label);
 }
 
 void Manager::openRoamSession(const QString &label, const QString &sessionId, const QString &cwd)
 {
-    for (int i = 0; i < m_roamPeers.size(); ++i) {
-        if (m_roamPeers.at(i).label != label)
-            continue;
-        AcpClient *client = m_roamPeers.at(i).client;
-        m_activePeerLabel = label;
-        m_userDisconnect = false;
-        m_reconnectTimer->stop();
-        m_pendingQueue.clear();
-        emit queuedChanged();
-        m_landing = false;
-        emit landingChanged();
-        m_currentSessionId = sessionId;
-        emit currentSessionChanged();
-        for (const auto &v : m_roamPeers.at(i).sessions) {
-            if (v.toMap().value("sessionId").toString() == sessionId) {
-                m_currentSessionTitle = v.toMap().value("title").toString();
-                break;
-            }
-        }
-        m_tools.clear();
-        m_extDefs.clear();
-        m_sessionExts.clear();
-        m_toolCatalog.clear();
-        m_cacheDirty = false;
-        publishToolGroups();
-        emit toolsChanged();
-        // Peer transcripts aren't cached (the cache is keyed by sessionId, which
-        // could collide across machines) — always replay from the peer.
-        m_suppressReplay = false;
-        m_deferMessageUpdates = true;
-        m_messageModel->clear();
-        m_currentIndex = -1;
-        emit messagesChanged();
-        setStatus(QStringLiteral("loading…"));
-        m_lastCwd = cwd.isEmpty() ? workingDir() : cwd;
-        client->setResumeSession(sessionId, cwd);
-        client->openSessionNow();
-        return;
+    m_activePeerLabel = label;
+    m_pendingQueue.clear();
+    emit queuedChanged();
+    m_landing = false;
+    emit landingChanged();
+    m_currentSessionId = sessionId;
+    m_currentSessionTitle.clear();
+    m_tools.clear();
+    m_extDefs.clear();
+    m_sessionExts.clear();
+    m_toolCatalog.clear();
+    publishToolGroups();
+    emit currentSessionChanged();
+    emit toolsChanged();
+    setStatus(QStringLiteral("loading…"));
+    m_lastCwd = cwd.isEmpty() ? workingDir() : cwd;
+    if (m_bridge && m_bridge->isAvailable()) {
+        const QByteArray l = label.toUtf8();
+        const QByteArray sid = sessionId.toUtf8();
+        m_bridge->api().grouse_roam_open_session(m_bridge->handle(), l.constData(), sid.constData());
     }
-    setStatus(QStringLiteral("roam: unknown peer ") + label);
 }
 
 void Manager::toggleRoamPeer(const QString &label)
@@ -412,28 +290,15 @@ void Manager::toggleRoamPeer(const QString &label)
 
 void Manager::setActiveTab(const QString &tab)
 {
-    // Opening a Main session clears the roam routing; the tab itself is pure UI.
-    if (tab == QLatin1String("main") && !m_activePeerLabel.isEmpty()) {
+    if (tab == QLatin1String("main") && !m_activePeerLabel.isEmpty())
         m_activePeerLabel.clear();
-    }
-}
-
-AcpClient *Manager::activeClient() const
-{
-    if (!m_activePeerLabel.isEmpty()) {
-        for (const RoamPeer &p : m_roamPeers) {
-            if (p.label == m_activePeerLabel)
-                return p.client;
-        }
-    }
-    return m_client;
 }
 
 QString Manager::roamIdentity()
 {
     QString secret = m_store.value("roam_identity").toString();
-    if (secret.isEmpty()) {
-        secret = RoamTransport::generateIdentity();
+    if (secret.isEmpty() && m_bridge && m_bridge->isAvailable()) {
+        secret = m_bridge->takeString(m_bridge->api().grouse_identity_generate());
         if (!secret.isEmpty())
             m_store.setValue("roam_identity", secret);
     }
@@ -443,205 +308,105 @@ QString Manager::roamIdentity()
 QString Manager::roamPublicKey() const
 {
     const QString secret = m_store.value("roam_identity").toString();
-    return secret.isEmpty() ? QString() : RoamTransport::publicKeyFor(secret);
+    if (secret.isEmpty() || !m_bridge || !m_bridge->isAvailable())
+        return QString();
+    char *err = nullptr;
+    const QByteArray s = secret.toUtf8();
+    QString key = m_bridge->takeString(
+        m_bridge->api().grouse_identity_public_key(s.constData(), &err));
+    if (err) {
+        m_bridge->api().grouse_string_free(err);
+        return QString();
+    }
+    return key;
 }
 
 QObject *Manager::roamModel() const { return m_roamModel; }
 
-void Manager::disconnect()
-{
-    m_userDisconnect = true;
-    m_reconnectTimer->stop();
-    if (m_client)
-        m_client->close();
-    setOnline(false);
-    m_prompting = false;
-    emit promptingChanged();
-    m_compacting = false;
-    emit compactingChanged();
-    // Back to the landing page (offline variant with Connect).
-    m_landing = true;
-    emit landingChanged();
-    setStatus(QStringLiteral("disconnected"));
-}
-
 void Manager::testConnection()
 {
-    const QString key = secretKey();
-    if (key.isEmpty()) {
+    if (!m_bridge || !m_bridge->isAvailable()) {
+        emit connectionTested(false, QStringLiteral("grouse-core not loaded."));
+        return;
+    }
+    if (secretKey().isEmpty()) {
         emit connectionTested(false, QStringLiteral("No secret key set — fill it in above."));
         return;
     }
-    // A second socket, isolated from the live client: the probe must never
-    // disturb an open chat or trip the reconnect logic.
-    if (m_testWs)
-        m_testWs->deleteLater();
-    m_testWs = new QWebSocket(QString(), QWebSocketProtocol::VersionLatest, this);
-    // Same trust-all TLS as the real wire (goosed uses a self-signed cert).
-    m_testWs->setSslConfiguration([] {
-        QSslConfiguration cfg;
-        cfg.setPeerVerifyMode(QSslSocket::VerifyNone);
-        return cfg;
-    }());
-    m_testFinished = false;
-    setStatus(QStringLiteral("testing connection…"));
-
-    connect(m_testWs, &QWebSocket::connected, this, [this] {
-        // Mirror the real handshake: initialize right after opening. Any
-        // reply means the endpoint is reachable, speaks ACP, and accepted the
-        // secret key (a bad key fails the HTTP handshake before this).
-        QJsonObject caps;
-        caps.insert("protocolVersion", 1);
-        QJsonObject clientCaps;
-        clientCaps.insert("_meta", QJsonObject{
-            {"goose", QJsonObject{{"recipeParameterRequests", true}}}});
-        caps.insert("clientCapabilities", clientCaps);
-        m_testWs->sendTextMessage(QString::fromUtf8(QJsonDocument(
-            QJsonObject{{"jsonrpc", "2.0"}, {"id", 1},
-                        {"method", "initialize"}, {"params", caps}})
-            .toJson(QJsonDocument::Compact)));
-    });
-    connect(m_testWs, &QWebSocket::textMessageReceived, this, [this](const QString &msg) {
-        if (m_testFinished)
-            return;
-        const QJsonDocument doc = QJsonDocument::fromJson(msg.toUtf8());
-        if (doc.isObject() && doc.object().contains(QStringLiteral("id")))
-            finishTest(true, QStringLiteral("Connection OK — the server responded."));
-    });
-    connect(m_testWs, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::errorOccurred),
-            this, [this] {
-        if (!m_testFinished)
-            finishTest(false, QStringLiteral("Connection failed: ") + m_testWs->errorString());
-    });
-    connect(m_testWs, &QWebSocket::disconnected, this, [this] {
-        if (!m_testFinished) {
-            // Qt 6 emits disconnected (not errorOccurred) for some open
-            // failures, e.g. connection refused — surface the socket's reason.
-            const QString err = m_testWs->errorString();
-            finishTest(false, QStringLiteral("Connection failed: %1").arg(
-                err.isEmpty() ? QStringLiteral("disconnected before the server replied — "
-                                               "check host, port, and secret key.")
-                              : err));
-        }
-    });
-
-    if (!m_testTimer) {
-        m_testTimer = new QTimer(this);
-        m_testTimer->setSingleShot(true);
-        connect(m_testTimer, &QTimer::timeout, this, [this] {
-            if (!m_testFinished)
-                finishTest(false, QStringLiteral("Timed out — no reply from the server."));
-        });
-    }
-    m_testTimer->start(8000);
-
-    QNetworkRequest req;
-    req.setUrl(QUrl(wsUrl()));
-    req.setRawHeader("X-Secret-Key", key.toUtf8());
-    m_testWs->open(req);
-}
-
-void Manager::finishTest(bool ok, const QString &message)
-{
-    m_testFinished = true;
-    m_testTimer->stop();
-    emit connectionTested(ok, message);
-    if (m_testWs) {
-        m_testWs->deleteLater();
-        m_testWs = nullptr;
-    }
+    // Drive a real connect; the resulting on_status (Ready/Error) resolves the
+    // probe via coreOnStatus. The core owns the connection.
+    m_testPending = true;
+    connectToServer();
 }
 
 void Manager::openSession(const QString &sessionId)
 {
-    ensureClient();
-    m_userDisconnect = false;
-    m_activePeerLabel.clear();   // a Main session owns the chat now
-    m_reconnectTimer->stop();
+    m_activePeerLabel.clear();
     m_pendingQueue.clear();
     emit queuedChanged();
     m_landing = false;
     emit landingChanged();
-    // find cwd so session/load doesn't silently rewrite working_dir
-    const QString cwd = m_sessionsModel->cwdFor(sessionId);
+    m_currentSessionId = sessionId;
+    m_currentSessionTitle.clear();
     for (const auto &v : m_sessions) {
-        if (v.toMap().value("sessionId").toString() == sessionId) {
-            m_currentSessionTitle = v.toMap().value("title").toString();
+        const QVariantMap s = v.toMap();
+        if (s.value("sessionId").toString() == sessionId) {
+            m_currentSessionTitle = s.value("title").toString();
             break;
         }
     }
-    m_currentSessionId = sessionId;
-    emit currentSessionChanged();
     m_tools.clear();
     m_extDefs.clear();
     m_sessionExts.clear();
     m_toolCatalog.clear();
-    m_cacheDirty = false;
     publishToolGroups();
+    m_messageModel->clear();
+    m_currentIndex = -1;
+    emit currentSessionChanged();
     emit toolsChanged();
-
-    // Render a fresh cached transcript instantly, and only let session/load
-    // rebuild us when the cache is missing or stale. This avoids pulling and
-    // re-scrolling the whole history on every open.
-    const QString updatedAt = m_sessionUpdatedAt.value(sessionId);
-    const bool freshCache = loadCache(sessionId) && !updatedAt.isEmpty() && updatedAt == m_cachedUpdatedAt;
-    if (freshCache) {
-        m_currentIndex = -1;
-        emit messagesChanged();
-        setStatus(QStringLiteral("cached"));
-        m_suppressReplay = true;
-        m_deferMessageUpdates = false;
-    } else {
-        m_messageModel->clear();
-        m_currentIndex = -1;
-        emit messagesChanged();
-        setStatus(QStringLiteral("loading…"));
-        m_suppressReplay = false;
-        m_deferMessageUpdates = true;
+    emit messagesChanged();
+    setStatus(QStringLiteral("loading…"));
+    m_lastCwd = workingDir();
+    if (m_bridge && m_bridge->isAvailable()) {
+        const QByteArray sid = sessionId.toUtf8();
+        m_bridge->api().grouse_open_session(m_bridge->handle(), sid.constData());
+        m_bridge->api().grouse_load_cached_transcript(m_bridge->handle(), sid.constData());
     }
-    m_client->setResumeSession(sessionId, cwd);
-    m_client->setDesiredCwd(workingDir());
-    m_lastCwd = cwd.isEmpty() ? workingDir() : cwd;
-    m_client->connectTo(wsUrl(), secretKey());
 }
 
 void Manager::newChat()
 {
-    ensureClient();
-    m_userDisconnect = false;
-    m_activePeerLabel.clear();   // a fresh Main chat owns the chat now
-    m_reconnectTimer->stop();
+    m_activePeerLabel.clear();
     m_pendingQueue.clear();
     emit queuedChanged();
     m_landing = false;
     emit landingChanged();
-    m_suppressReplay = false;
-    m_deferMessageUpdates = false;
     m_currentSessionId.clear();
     m_currentSessionTitle.clear();
-    m_messageModel->clear();
     m_tools.clear();
     m_extDefs.clear();
     m_sessionExts.clear();
     m_toolCatalog.clear();
-    m_cacheDirty = false;
-    publishToolGroups();
+    m_messageModel->clear();
     m_currentIndex = -1;
-    if (!m_deferMessageUpdates)
-        emit messagesChanged();
+    publishToolGroups();
     emit currentSessionChanged();
     emit toolsChanged();
-    m_client->setResumeSession(QString(), QString());
-    m_client->setDesiredCwd(workingDir());
-    m_lastCwd = workingDir();
-    m_client->connectTo(wsUrl(), secretKey());
+    emit messagesChanged();
+    setStatus(QStringLiteral("connecting…"));
+    char *err = nullptr;
+    const QByteArray cfg = serverConfigJson().toUtf8();
+    if (m_bridge && m_bridge->isAvailable()) {
+        m_bridge->api().grouse_new_session(m_bridge->handle(), nullptr, &err);
+        if (err) {
+            setStatus(QStringLiteral("new session failed: ") + QString::fromUtf8(err));
+            m_bridge->api().grouse_string_free(err);
+        }
+    }
 }
 
 void Manager::beginChat()
 {
-    // The landing page's staging session already exists (with the provider and
-    // model the user picked there); stepping off the landing page reveals it as
-    // the active chat.
     if (!m_landing)
         return;
     m_landing = false;
@@ -650,76 +415,40 @@ void Manager::beginChat()
 
 void Manager::sendPrompt(const QString &text, const QVariantList &images)
 {
-    if (!m_client || (text.trimmed().isEmpty() && images.isEmpty()))
+    if (!m_bridge || !m_bridge->isAvailable() || (text.trimmed().isEmpty() && images.isEmpty()))
         return;
-
-    // Typing a first message steps off the landing page into the staging chat.
     m_landing = false;
     emit landingChanged();
 
-    // A reply must stream in even if we opened this session from a fresh cache.
-    m_suppressReplay = false;
-    m_deferMessageUpdates = false;
+    const QString expectJson = m_currentSessionId.isEmpty()
+        ? QString() : QStringLiteral("{\"session_id\":\"%1\"}").arg(m_currentSessionId);
 
-    // Keep the attachments ON the message so the bubble renders them (image
-    // thumbnails + file chips), not a placeholder. (Live-session only — a
-    // replayed transcript reconstructs text, not attachments.)
-    QVariantMap bubble{{"id", m_seq++}, {"role", "user"},
-                       {"text", text}, {"html", markdownToHtml(text)}};
-    if (!images.isEmpty()) {
-        QMimeDatabase mimeDb;
-        QVariantList attach;
-        for (const auto &v : images) {
-            const QString path = v.toString();
-            if (path.isEmpty())
-                continue;
-            const QFileInfo fi(path);
-            attach << QVariantMap{{"url", QUrl::fromLocalFile(path).toString()},
-                                  {"name", fi.fileName()},
-                                  {"image", mimeDb.mimeTypeForFile(path).name().startsWith(QLatin1String("image/"))}};
-        }
-        if (!attach.isEmpty())
-            bubble["images"] = attach;
-    }
-    m_messageModel->append(bubble);
-    m_currentIndex = m_messageModel->count() - 1;
-    m_streamRole = "user";
-    m_streamMsgId.clear();
-    m_cacheDirty = true;
-    emit messagesChanged();
-
-    // Convert the local file paths into the ACP content blocks the wire wants.
     dispatchSend(text.trimmed(), buildAttachmentBlocks(images));
 }
 
 void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
 {
-    if (!m_client) {
-        enqueue({text, blocks});
-        return;
-    }
-    if (activeClient() && activeClient()->ready() && !m_prompting) {
+    const QString expectJson = m_currentSessionId.isEmpty()
+        ? QString() : QStringLiteral("{\"session_id\":\"%1\"}").arg(m_currentSessionId);
+    const bool ready = m_bridge && m_bridge->isAvailable() && m_bridge->api().grouse_ready(m_bridge->handle());
+    if (ready && !m_prompting) {
         m_prompting = true;
         emit promptingChanged();
-        activeClient()->sendPrompt(text, blocks);
-    } else if (activeClient() && activeClient()->ready() && m_prompting && !m_activeRunId.isEmpty() && blocks.isEmpty()) {
-        // A turn is running AND we know its run id: STEER — inject into the live turn
-        // instead of waiting for it to end. The server validates the id, so a run that
-        // ended between typing and sending fails loudly. Images still queue (text-only).
-        activeClient()->steer(text);
-    } else if (activeClient() && activeClient()->ready()) {
-        // A turn is running but we can't steer it: queue rather than firing a second
-        // session/prompt into the same session. Flushed one-per-TurnDone.
-        enqueue({text, blocks});
-    } else {
-        // Not connected yet (initial connect / reconnect window): queue and try to
-        // open a connection (Android does the same via ensureConnected). onReady flushes.
-        enqueue({text, blocks});
-        if (!online() && !secretKey().isEmpty()) {
-            const bool connecting = status().startsWith(QLatin1String("connecting"));
-            if (!connecting)
-                connectToServer();
+        char *err = nullptr;
+        const QByteArray prompt = promptJson(text, blocks).toUtf8();
+        const QByteArray expect = expectJson.toUtf8();
+        m_bridge->api().grouse_send_prompt(m_bridge->handle(), prompt.constData(),
+                                           expectJson.isEmpty() ? nullptr : expect.constData(), &err);
+        if (err) {
+            onError(QString::fromUtf8(err), false);
+            m_bridge->api().grouse_string_free(err);
         }
+    } else {
+        // Not ready or a turn is already running: queue (the core flushes the
+        // prompt queue itself; this app-level queue only waits for ready()).
+        enqueue({text, blocks});
+        if (!ready && !secretKey().isEmpty())
+            connectToServer();
     }
 }
 
@@ -736,16 +465,6 @@ void Manager::flushQueue()
     const PendingSend p = m_pendingQueue.takeFirst();
     emit queuedChanged();
     dispatchSend(p.text, p.images);
-}
-
-void Manager::maybeReconnect()
-{
-    // Exponential backoff, reset on every successful open (onReady). Give up after 6
-    // attempts so a dead server surfaces as an actionable status rather than a silent loop.
-    if (m_reconnectAttempts >= 6 || m_userDisconnect)
-        return;
-    const int delay = qMin(500 * (1 << qMin(m_reconnectAttempts, 5)), 15000);
-    m_reconnectTimer->start(delay);
 }
 
 namespace {
@@ -771,8 +490,6 @@ bool isTextishMime(const QString &mime)
 
 QStringList Manager::pickAttachmentFiles()
 {
-    // QFileDialog delegates to the platform theme's file dialog helper on
-    // Plasma — the native Dolphin-style picker. Any file type, multi-select.
     const QString dir = m_store.value(QStringLiteral("last_attach_dir"), QDir::homePath()).toString();
     const QStringList files = QFileDialog::getOpenFileNames(
         nullptr, QStringLiteral("Attach files"), dir);
@@ -785,9 +502,8 @@ QStringList Manager::pickAttachmentFiles()
 
 QVariantList Manager::buildAttachmentBlocks(const QVariantList &paths)
 {
-    // ACP prompt content blocks. Images ride the `image` block (rendered by the
-    // model). Everything else rides an embedded `resource` block: text content
-    // is forwarded by goose as text; binary content is a schema-valid blob.
+    // Same ACP content-block shapes as before; promptJson() converts them to the
+    // core's serde Prompt JSON at the wire boundary.
     QVariantList out;
     QMimeDatabase mimeDb;
     for (const auto &v : paths) {
@@ -822,93 +538,101 @@ QVariantList Manager::buildAttachmentBlocks(const QVariantList &paths)
 
 void Manager::cancelTurn()
 {
-    // Android cancels the turn AND drops the queue: a stop means the user wants nothing
-    // more of this conversation to send.
     m_pendingQueue.clear();
     emit queuedChanged();
-    if (m_client)
-        if (activeClient()) activeClient()->cancel();
+    if (m_bridge && m_bridge->isAvailable())
+        m_bridge->api().grouse_cancel(m_bridge->handle());
 }
 
 void Manager::compactConversation()
 {
-    // /compact must not appear as a user bubble (Android sends it bare); it's a command,
-    // not a message. compacting flips on immediately so the UI doesn't wait for the
-    // server's own status echo; runEnded / a "complete" status clears it.
-    AcpClient *cc = activeClient(); if (!cc || !cc->ready() || m_prompting)
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_ready(m_bridge->handle()) || m_prompting)
         return;
     m_compacting = true;
     emit compactingChanged();
-    cc->sendPrompt(QStringLiteral("/compact"));
+    const QByteArray prompt = promptJson(QStringLiteral("/compact"), {}).toUtf8();
+    char *err = nullptr;
+    m_bridge->api().grouse_send_prompt(m_bridge->handle(), prompt.constData(), nullptr, &err);
+    if (err)
+        m_bridge->api().grouse_string_free(err);
 }
 
 void Manager::exportSessionTo(const QString &sessionId, const QString &filePath)
 {
-    if (!m_client || filePath.isEmpty())
+    if (!m_bridge || !m_bridge->isAvailable() || filePath.isEmpty())
         return;
     m_pendingExportPath = filePath;
-    activeClient()->exportSession(sessionId);
+    const QByteArray sid = sessionId.toUtf8();
+    m_bridge->api().grouse_unstable_export_session(m_bridge->handle(), sid.constData());
 }
 
 void Manager::unarchiveSession(const QString &sessionId)
 {
-    if (m_client)
-        activeClient()->unarchiveSession(sessionId);
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const QByteArray sid = sessionId.toUtf8();
+    m_bridge->api().grouse_unarchive_session(m_bridge->handle(), sid.constData());
 }
 
 void Manager::respondPermission(const QString &toolCallId, const QString &optionId)
 {
-    if (m_client) {
-        activeClient()->respondPermission(toolCallId, optionId);
-        // add a tool-role summary so the user sees what was approved
-        QVariantMap m{{"id", m_seq++}, {"role", "tool"}, {"text", ""}, {"html", ""},
-                      {"detail", m_permTitle}, {"status", "completed"}, {"output", "permission " + (optionId.isEmpty() ? QStringLiteral("denied") : QStringLiteral("granted"))}};
-        m_messageModel->append(m);
-        m_cacheDirty = true;
-        emit messagesChanged();
+    if (m_bridge && m_bridge->isAvailable()) {
+        const QByteArray id = toolCallId.toUtf8();
+        const QByteArray outcome = optionId.isEmpty()
+            ? QByteArrayLiteral("\"Cancelled\"")
+            : QJsonDocument(QJsonObject{{"Selected", QJsonObject{{"option_id", optionId}}}})
+                  .toJson(QJsonDocument::Compact);
+        m_bridge->api().grouse_respond_permission(m_bridge->handle(), id.constData(), outcome.constData());
     }
     m_permToolCallId.clear();
 }
 
 void Manager::setConfigOption(const QString &id, const QString &value)
 {
-    if (m_client)
-        activeClient()->setConfigOption(id, value);
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    char *err = nullptr;
+    const QByteArray cid = id.toUtf8();
+    const QByteArray v = value.toUtf8();
+    m_bridge->api().grouse_set_config_option(m_bridge->handle(), cid.constData(), v.constData(), &err);
+    if (err)
+        m_bridge->api().grouse_string_free(err);
 }
 
 void Manager::refreshSessions()
 {
-    if (m_client)
-        m_client->listSessions();
+    if (m_bridge && m_bridge->isAvailable())
+        m_bridge->api().grouse_list_sessions(m_bridge->handle());
 }
 
 void Manager::refreshProjects()
 {
-    if (m_client)
-        m_client->listProjects();
+    if (m_bridge && m_bridge->isAvailable())
+        m_bridge->api().grouse_unstable_sources_list(m_bridge->handle(), "project");
 }
 
 void Manager::createProject(const QString &name)
 {
-    if (m_client) {
-        // Mirror the Android client's validation: lowercase/digits/hyphens, <= 64.
-        QString n = name.trimmed();
-        if (n.isEmpty() || n.size() > 64)
+    QString n = name.trimmed();
+    if (n.isEmpty() || n.size() > 64)
+        return;
+    for (const QChar &c : n) {
+        if (!c.isLower() && !c.isDigit() && c != QLatin1Char('-'))
             return;
-        for (const QChar &c : n) {
-            if (!c.isLower() && !c.isDigit() && c != QLatin1Char('-'))
-                return;
-        }
-        m_client->createProject(n, QString(), QString());
     }
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const QByteArray type = QByteArrayLiteral("project");
+    const QByteArray nm = n.toUtf8();
+    const QByteArray empty = QByteArray();
+    m_bridge->api().grouse_unstable_sources_create(m_bridge->handle(), type.constData(),
+                                                   nm.constData(), empty.constData(), empty.constData());
 }
 
 void Manager::deleteProject(const QString &nameOrPath)
 {
-    if (!m_client)
+    if (!m_bridge || !m_bridge->isAvailable())
         return;
-    // Resolve the source path from the project id or name; sessions are unfiled
-    // by the server when the project goes away, and the reply re-lists.
     QString path;
     for (const auto &v : m_projects) {
         const QVariantMap p = v.toMap();
@@ -917,14 +641,21 @@ void Manager::deleteProject(const QString &nameOrPath)
             break;
         }
     }
-    if (!path.isEmpty())
-        m_client->deleteProject(path);
+    if (!path.isEmpty()) {
+        const QByteArray type = QByteArrayLiteral("project");
+        const QByteArray p = path.toUtf8();
+        m_bridge->api().grouse_unstable_sources_delete(m_bridge->handle(), type.constData(), p.constData());
+    }
 }
 
 void Manager::moveSessionToProject(const QString &sessionId, const QString &projectId)
 {
-    if (m_client)
-        activeClient()->assignSessionProject(sessionId, projectId);
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const QByteArray sid = sessionId.toUtf8();
+    const QByteArray pid = projectId.isEmpty() ? QByteArray() : projectId.toUtf8();
+    m_bridge->api().grouse_unstable_session_project(m_bridge->handle(), sid.constData(),
+                                                    projectId.isEmpty() ? nullptr : pid.constData());
 }
 
 void Manager::newChatInProject(const QString &projectId)
@@ -935,72 +666,78 @@ void Manager::newChatInProject(const QString &projectId)
 
 void Manager::refreshRecipes()
 {
-    // Dialogs can be opened while a reconnect/session replay is still in flight.
-    // Keep the request instead of sending an RPC against a client with no session;
-    // onReady() always drains this pending refresh.
-    if (!m_client || !m_client->ready()) {
-        m_recipeRefreshPending = true;
+    if (!m_bridge || !m_bridge->isAvailable())
         return;
-    }
-    m_recipeRefreshPending = false;
-    m_client->listRecipes();
-    m_client->listSchedules();
+    m_bridge->api().grouse_unstable_recipes_list(m_bridge->handle());
+    m_bridge->api().grouse_unstable_schedules_list(m_bridge->handle());
 }
 
 void Manager::runRecipe(const QString &id)
 {
-    // A recipe runs by starting a fresh session with _meta.recipeId; the server
-    // wires the prompt/instructions and requests any parameters (answered with
-    // their defaults in AcpClient::serverRequest).
-    if (m_client) {
-        m_client->setDesiredRecipeId(id);
-        m_pendingProjectFiling.clear();
-        newChat();
-    }
+    m_pendingRecipeId = id;
+    m_pendingProjectFiling.clear();
+    newChat();
 }
 
 void Manager::scheduleRecipe(const QString &id, const QString &cron)
 {
-    if (m_client)
-        m_client->scheduleRecipe(id, cron);
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const QByteArray rid = id.toUtf8();
+    const QByteArray c = cron.isEmpty() ? QByteArray() : cron.toUtf8();
+    m_bridge->api().grouse_unstable_recipes_schedule(m_bridge->handle(), rid.constData(),
+                                                     cron.isEmpty() ? nullptr : c.constData());
 }
 
 void Manager::deleteRecipe(const QString &id)
 {
-    if (m_client)
-        m_client->deleteRecipe(id);
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const QByteArray rid = id.toUtf8();
+    m_bridge->api().grouse_unstable_recipes_delete(m_bridge->handle(), rid.constData());
 }
 
 void Manager::setSchedulePaused(const QString &scheduleId, bool paused)
 {
-    if (m_client)
-        m_client->setSchedulePaused(scheduleId, paused);
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const QByteArray s = scheduleId.toUtf8();
+    auto f = paused ? m_bridge->api().grouse_unstable_schedules_pause
+                    : m_bridge->api().grouse_unstable_schedules_unpause;
+    f(m_bridge->handle(), s.constData());
 }
 
 void Manager::runScheduleNow(const QString &scheduleId)
 {
-    if (m_client)
-        m_client->runScheduleNow(scheduleId);
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const QByteArray s = scheduleId.toUtf8();
+    m_bridge->api().grouse_unstable_schedules_run_now(m_bridge->handle(), s.constData());
 }
 
 void Manager::renameSession(const QString &sessionId, const QString &title)
 {
-    if (m_client)
-        activeClient()->renameSession(sessionId, title);
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const QByteArray sid = sessionId.toUtf8();
+    const QByteArray t = title.toUtf8();
+    m_bridge->api().grouse_rename_session(m_bridge->handle(), sid.constData(), t.constData());
 }
 
 void Manager::archiveSession(const QString &sessionId)
 {
-    if (m_client)
-        activeClient()->archiveSession(sessionId);
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const QByteArray sid = sessionId.toUtf8();
+    m_bridge->api().grouse_archive_session(m_bridge->handle(), sid.constData());
 }
 
 void Manager::deleteSession(const QString &sessionId)
 {
-    if (m_client)
-        activeClient()->deleteSession(sessionId);
-    // If it was the open chat, drop it and start fresh so the UI doesn't keep a
-    // deleted session selected (delete's reply re-lists without it).
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const QByteArray sid = sessionId.toUtf8();
+    m_bridge->api().grouse_delete_session(m_bridge->handle(), sid.constData());
     if (sessionId == m_currentSessionId) {
         m_currentSessionId.clear();
         m_currentSessionTitle.clear();
@@ -1019,722 +756,109 @@ void Manager::deleteSession(const QString &sessionId)
 
 void Manager::refreshSkills()
 {
-    if (m_client)
-        m_client->listSkills();
+    if (m_bridge && m_bridge->isAvailable())
+        m_bridge->api().grouse_unstable_sources_list(m_bridge->handle(), "skill");
 }
 
 void Manager::saveSkill(const QString &path, const QString &name,
                         const QString &description, const QString &content)
 {
-    if (m_client && !path.isEmpty())
-        m_client->updateSkill(path, name, description, content);
+    if (!m_bridge || !m_bridge->isAvailable() || path.isEmpty())
+        return;
+    const QByteArray type = QByteArrayLiteral("skill");
+    const QByteArray p = path.toUtf8();
+    const QByteArray nm = name.toUtf8();
+    const QByteArray d = description.toUtf8();
+    const QByteArray c = content.toUtf8();
+    m_bridge->api().grouse_unstable_sources_update(m_bridge->handle(), type.constData(),
+                                                   p.constData(), nm.constData(), d.constData(), c.constData());
 }
 
 void Manager::deleteSkill(const QString &path)
 {
-    if (m_client && !path.isEmpty())
-        m_client->deleteSkill(path);
-}
-
-void Manager::onSkills(const QVariantList &skills)
-{
-    m_skills = skills;
-    emit skillsChanged();
+    if (!m_bridge || !m_bridge->isAvailable() || path.isEmpty())
+        return;
+    const QByteArray type = QByteArrayLiteral("skill");
+    const QByteArray p = path.toUtf8();
+    m_bridge->api().grouse_unstable_sources_delete(m_bridge->handle(), type.constData(), p.constData());
 }
 
 // ---- server config (providers) ---------------------------------------------
 
 void Manager::setServerConfig(const QString &key, const QString &value)
 {
-    if (!m_client)
+    if (!m_bridge || !m_bridge->isAvailable())
         return;
-    // Upsert then re-read to confirm: the upsert reply is empty. These are global
-    // (config.yaml) values that take effect for NEW sessions/tasks only.
-    m_client->upsertConfig(key, value);
-    m_client->readConfig(key);
+    const QByteArray k = key.toUtf8();
+    const QByteArray v = value.toUtf8();
+    m_bridge->api().grouse_unstable_config_upsert(m_bridge->handle(), k.constData(), v.constData());
+    m_bridge->api().grouse_unstable_config_read(m_bridge->handle(), k.constData());
 }
 
 void Manager::readServerConfig(const QString &key)
 {
-    if (m_client)
-        m_client->readConfig(key);
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const QByteArray k = key.toUtf8();
+    m_bridge->api().grouse_unstable_config_read(m_bridge->handle(), k.constData());
 }
 
 void Manager::refreshSupportedModels(const QString &providerId)
 {
-    if (m_client && !providerId.isEmpty())
-        m_client->listSupportedModels(providerId);
-}
-
-void Manager::onServerConfigValue(const QString &key, const QString &value)
-{
-    m_serverConfig[key] = value;
-    emit serverConfigChanged();
-}
-
-void Manager::onSupportedModels(const QString &providerId, const QStringList &models)
-{
-    Q_UNUSED(providerId);
-    m_supportedModels.clear();
-    for (const auto &m : models)
-        m_supportedModels << m;
-    emit supportedModelsChanged();
-}
-
-void Manager::onExportResult(const QString &data)
-{
-    if (m_pendingExportPath.isEmpty())
-        return;
-    if (!data.isEmpty()) {
-        QFile f(m_pendingExportPath);
-        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            f.write(data.toUtf8());
-            f.close();
-            setStatus(QStringLiteral("exported to ") + m_pendingExportPath);
-        } else {
-            setStatus(QStringLiteral("export failed — cannot write ") + m_pendingExportPath);
-        }
-    } else {
-        setStatus(QStringLiteral("export failed — empty reply"));
-    }
-    m_pendingExportPath.clear();
-}
-
-// ---- streaming handlers ----------------------------------------------------
-
-void Manager::appendChunk(const QString &role, const QString &text, const QString &messageId, bool thought)
-{
-    // New bubble when role or messageId changes.
-    const bool fresh = m_currentIndex < 0
-        || m_streamRole != role
-        || (!messageId.isEmpty() && !m_streamMsgId.isEmpty() && messageId != m_streamMsgId);
-
-    if (fresh) {
-        m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", role},
-                                        {"text", text}, {"html", QString()},
-                                        {"thought", thought}});
-        m_currentIndex = m_messageModel->count() - 1;
-        m_streamRole = role;
-        m_streamMsgId = messageId;
-    } else {
-        QVariantMap m = m_messageModel->row(m_currentIndex);
-        const QString acc = m.value("text").toString() + text;
-        m["text"] = acc;
-        m["thought"] = thought;
-        // Deferred + coalesced dataChanged: an immediate one per chunk made the
-        // delegate rebuild the whole bubble (HTML re-parse + shaping + layout)
-        // on every token — quadratic as a long reply streamed in.
-        m_messageModel->updateDeferred(m_currentIndex, m);
-    }
-    m_cacheDirty = true;
-    requestMessagesUpdate();
-}
-
-void Manager::finalizeCurrentMessage()
-{
-    // Render markdown only when a turn completes, not on every streaming chunk:
-    // per-chunk markdown re-render made long replies/replays visibly laggy.
-    if (m_currentIndex >= 0 && m_currentIndex < m_messageModel->count()) {
-        QVariantMap m = m_messageModel->row(m_currentIndex);
-        const QString role = m.value("role").toString();
-        if (role == "agent" || role == "user") {
-            m["html"] = markdownToHtml(m.value("text").toString());
-            m_messageModel->update(m_currentIndex, m);
-            m_cacheDirty = true;
-            requestMessagesUpdate();
-        }
+    if (m_bridge && m_bridge->isAvailable() && !providerId.isEmpty()) {
+        const QByteArray p = providerId.toUtf8();
+        m_bridge->api().grouse_unstable_supported_models(m_bridge->handle(), p.constData());
     }
 }
 
-void Manager::onAgentChunk(const QString &text, const QString &messageId)
-{
-    if (m_suppressReplay)
-        return;
-    m_prompting = true;
-    appendChunk("agent", text, messageId, false);
-}
-
-void Manager::onUserChunk(const QString &text, const QString &messageId)
-{
-    if (m_suppressReplay)
-        return;
-    appendChunk("user", text, messageId, false);
-}
-
-void Manager::onThoughtChunk(const QString &text)
-{
-    if (m_suppressReplay)
-        return;
-    appendChunk("thought", text, QString(), true);
-}
-
-void Manager::onToolCall(const QString &title, const QString &detail, const QString &toolCallId)
-{
-    if (m_suppressReplay)
-        return;
-    const QVariantMap call{{"title", title}, {"detail", detail}, {"output", QString()},
-                           {"status", QStringLiteral("in_progress")}, {"toolCallId", toolCallId}};
-    const int lastIndex = m_messageModel->count() - 1;
-    if (lastIndex >= 0) {
-        QVariantMap last = m_messageModel->row(lastIndex);
-        const QString lastRole = last.value("role").toString();
-        if (lastRole == QStringLiteral("tool")) {
-            // Convert the first standalone call into a group when a consecutive
-            // second call arrives. Subsequent calls append to the same row.
-            const QVariantMap first{{"title", last.value("title")},
-                                    {"detail", last.value("detail")},
-                                    {"output", last.value("output")},
-                                    {"status", last.value("status")},
-                                    {"toolCallId", last.value("toolCallId")}};
-            last["role"] = QStringLiteral("toolgroup");
-            last["calls"] = QVariantList{first, call};
-            m_messageModel->update(lastIndex, last);
-        } else if (lastRole == QStringLiteral("toolgroup")) {
-            QVariantList calls = last.value("calls").toList();
-            calls << call;
-            last["calls"] = calls;
-            m_messageModel->update(lastIndex, last);
-        } else {
-            m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", "tool"}, {"text", ""}, {"html", ""},
-                                               {"title", title}, {"detail", detail}, {"output", ""},
-                                               {"status", "in_progress"}, {"toolCallId", toolCallId}});
-        }
-    } else {
-        m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", "tool"}, {"text", ""}, {"html", ""},
-                                           {"title", title}, {"detail", detail}, {"output", ""},
-                                           {"status", "in_progress"}, {"toolCallId", toolCallId}});
-    }
-    m_currentIndex = -1;
-    m_cacheDirty = true;
-    requestMessagesUpdate();
-}
-
-void Manager::onToolCallUpdate(const QString &toolCallId, const QString &status,
-                               const QString &output, bool live)
-{
-    if (m_suppressReplay)
-        return;
-    for (int i = m_messageModel->count() - 1; i >= 0; --i) {
-        QVariantMap m = m_messageModel->row(i);
-        const QString role = m.value("role").toString();
-        // Chart / MCP-App bubbles also carry their tool's id and follow the same lifecycle.
-        if ((role == "tool" || role == "chart" || role == "mcpapp")
-            && m.value("toolCallId").toString() == toolCallId) {
-            m["status"] = status;
-            if (role == "tool" && !output.isEmpty())
-                m["output"] = (live ? m.value("output").toString() : QString()) + output;
-            m_messageModel->update(i, m);
-            break;
-        }
-        if (role == QStringLiteral("toolgroup")) {
-            QVariantList calls = m.value("calls").toList();
-            bool found = false;
-            for (int j = 0; j < calls.size(); ++j) {
-                QVariantMap call = calls.at(j).toMap();
-                if (call.value("toolCallId").toString() != toolCallId)
-                    continue;
-                call["status"] = status;
-                if (!output.isEmpty())
-                    call["output"] = (live ? call.value("output").toString() : QString()) + output;
-                calls[j] = call;
-                found = true;
-                break;
-            }
-            if (found) {
-                m["calls"] = calls;
-                m_messageModel->update(i, m);
-                break;
-            }
-        }
-    }
-    m_cacheDirty = true;
-    requestMessagesUpdate();
-}
-
-void Manager::onChartToolCall(const QString &title, const QString &toolCallId, const QString &chartSpec)
-{
-    if (m_suppressReplay)
-        return;
-    m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", "chart"}, {"text", ""},
-                                       {"title", title}, {"chartData", chartSpec},
-                                       {"toolCallId", toolCallId}, {"status", "in_progress"}});
-    m_currentIndex = -1;
-    m_cacheDirty = true;
-    requestMessagesUpdate();
-}
-
-void Manager::onMcpAppToolCall(const QString &title, const QString &toolCallId, const QString &appKey,
-                               const QString &appUri, const QString &appExt, const QString &appInput)
-{
-    if (m_suppressReplay)
-        return;
-    m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", "mcpapp"}, {"text", ""},
-                                       {"title", title}, {"detail", appInput}, {"appKey", appKey},
-                                       {"appHtml", QString()}, {"toolCallId", toolCallId},
-                                       {"status", "in_progress"}});
-    m_currentIndex = -1;
-    m_cacheDirty = true;
-    // Fetch the server-hosted template now; the bubble swaps in the rendered view when
-    // it lands (or a failed fetch marks the bubble failed instead of wedging it).
-    if (activeClient()) activeClient()->readAppResource(appKey, appUri, appExt);
-    requestMessagesUpdate();
-}
-
-void Manager::onAppResource(const QString &appKey, const QString &html)
-{
-    for (int i = m_messageModel->count() - 1; i >= 0; --i) {
-        QVariantMap m = m_messageModel->row(i);
-        if (m.value("role").toString() == "mcpapp" && m.value("appKey").toString() == appKey) {
-            m["appHtml"] = html;
-            if (html.isEmpty())
-                m["status"] = "failed";
-            m_messageModel->update(i, m);
-            break;
-        }
-    }
-    m_cacheDirty = true;
-    requestMessagesUpdate();
-}
-
-void Manager::onCompactionStatus(const QString &message)
-{
-    // Substring-match goose's status lines exactly as the Android client does: a line
-    // mentioning "compact" starts (or continues) a compaction; "complete"/"error" ends it.
-    const QString m = message.toLower();
-    if (m.contains(QLatin1String("compact")))
-        m_compacting = true;
-    if (m.contains(QLatin1String("complete")) || m.contains(QLatin1String("error")))
-        m_compacting = false;
-    emit compactingChanged();
-}
-
-void Manager::onMessageUsage(const QVariantMap &usage)
-{
-    // Attach the tok/s + cost stats to the currently-streaming agent bubble. The stats
-    // are derived client-side from outputTokens/elapsedMs (can't divide a zero duration).
-    const int out = usage.value("outputTokens").toInt();
-    const qint64 elapsed = usage.value("elapsedMs").toLongLong();
-    if (elapsed <= 0)
-        return;
-    const QString label = formatUsage(usage);
-    if (label.isEmpty())
-        return;
-    // If we're streaming an agent bubble, tag it; otherwise the last agent bubble.
-    for (int i = m_messageModel->count() - 1; i >= 0; --i) {
-        QVariantMap m = m_messageModel->row(i);
-        if (m.value("role").toString() == "agent") {
-            m["usage"] = label;
-            m_messageModel->update(i, m);
-            break;
-        }
-    }
-    m_cacheDirty = true;
-}
-
-QString Manager::formatUsage(const QVariantMap &usage) const
-{
-    const int out = usage.value("outputTokens").toInt();
-    const qint64 elapsed = usage.value("elapsedMs").toLongLong();
-    const qint64 ttft = usage.value("timeToFirstTokenMs").toLongLong();
-    const double cost = usage.value("cost").toDouble();
-    if (elapsed <= 0)
-        return {};
-    const double toksPerSec = out > 0 ? double(out) / (elapsed / 1000.0) : 0.0;
-    QString label = QStringLiteral("%1 tok/s · %2 tokens · %3s TTFT")
-        .arg(toksPerSec, 0, 'f', 1)
-        .arg(out)
-        .arg(double(ttft) / 1000.0, 0, 'f', 1);
-    if (cost > 0.0)
-        label += QStringLiteral(" · $%1").arg(cost, 0, 'f', 4);
-    return label;
-}
-
-void Manager::onCommands(const QStringList &commands)
-{
-    m_availableCommands.clear();
-    for (const auto &c : commands)
-        m_availableCommands << c;
-    emit commandsChanged();
-}
-
-void Manager::onModeChanged(const QString &modeId)
-{
-    // Patch the single "mode" entry in the existing config list rather than replacing
-    // it: configReady carries the whole list and the provider/model selectors read it.
-    for (auto &m : m_config) {
-        QVariantMap entry = m.toMap();
-        if (entry.value("id").toString() == QStringLiteral("mode")) {
-            entry["currentValue"] = modeId;
-            m = entry;
-            emit configChanged();
-            return;
-        }
-    }
-    m_config << QVariantMap{{"id", "mode"}, {"name", "mode"}, {"currentValue", modeId}};
-    emit configChanged();
-}
-
-void Manager::onActiveRunChanged(const QString &sessionId, const QString &runId)
-{
-    // Only the run of the chat on screen is steerable; a run from another client on the
-    // same session must not let us inject into it.
-    if (sessionId == m_currentSessionId || sessionId.isEmpty())
-        m_activeRunId = runId;
-    else
-        m_activeRunId.clear();
-}
-
-void Manager::onUsage(int used, int size, double cost, const QString &currency)
-{
-    Q_UNUSED(cost);
-    Q_UNUSED(currency);
-    m_contextUsed = used;
-    m_contextSize = size;
-    emit contextChanged();
-}
-
-void Manager::onReady(const QString &sessionId)
-{
-    if (!sessionId.isEmpty())
-        m_currentSessionId = sessionId;
-    m_store.setValue("last_session", m_currentSessionId);
-    if (!m_lastCwd.isEmpty())
-        m_store.setValue("last_session_cwd", m_lastCwd);
-    // Replay for this open is done (or was suppressed by a fresh cache).
-    m_suppressReplay = false;
-    m_deferMessageUpdates = false;
-    // The connection is healthy again: reset the reconnect budget and clear turn state
-    // that belonged to the previous wire (a new client can't see the old client's TurnDone).
-    m_reconnectAttempts = 0;
-    m_reconnectTimer->stop();
-    m_activeRunId.clear();
-    m_compacting = false;
-    emit compactingChanged();
-    // session/load replays transcript chunks but never emits runEnded. Render every
-    // completed user/assistant row before exposing the replay as ready.
-    renderMarkdownRows();
-    if (!m_currentSessionId.isEmpty() && m_cacheDirty)
-        saveCache(m_currentSessionId);
-    if (!m_currentSessionId.isEmpty())
-        loadToolCache(m_currentSessionId);
-    emit messagesChanged();
-    setOnline(true);
-    setStatus(QStringLiteral("ready"));
-    m_prompting = false;
-    emit promptingChanged();
-    flushQueue();
-    refreshSessions();
-    refreshProjects();
-    m_recipeRefreshPending = false;
-    refreshRecipes();
-    // File a freshly-created chat into the project it was started from.
-    if (!m_pendingProjectFiling.isEmpty()) {
-        const QString proj = m_pendingProjectFiling;
-        m_pendingProjectFiling.clear();
-        if (!m_currentSessionId.isEmpty())
-            moveSessionToProject(m_currentSessionId, proj);
-    }
-    // Tool metadata is restored from the per-session cache. The drawer performs
-    // the network refresh lazily when the user opens it.
-}
-
-void Manager::autoConnect()
-{
-    if (!autoConnectEnabled())
-        return;
-    // Only auto-connect once credentials are configured; otherwise stay on the
-    // landing page and let the user fill the Connect dialog.
-    if (host().trimmed().isEmpty() || secretKey().isEmpty()) {
-        setStatus(QStringLiteral("not configured — press Connect"));
-        return;
-    }
-    // Cold start never resumes the last conversation. Connect and form a fresh
-    // (empty) staging session; the landing page stays up so the user can pick
-    // a provider + model before stepping into the chat (beginChat).
-    m_landing = true;
-    connectToServer();
-}
-
-void Manager::resumeSession(const QString &sessionId, const QString &cwd)
-{
-    ensureClient();
-    m_userDisconnect = false;
-    m_reconnectTimer->stop();
-    m_currentSessionId = sessionId;
-    m_currentSessionTitle.clear();
-    m_cacheDirty = false;
-    const bool cached = loadCache(sessionId);
-    if (cached) {
-        m_currentIndex = -1;
-        m_suppressReplay = true;
-        m_deferMessageUpdates = false;
-        emit messagesChanged();
-        setStatus(QStringLiteral("cached"));
-    } else {
-        m_messageModel->clear();
-        m_currentIndex = -1;
-        m_suppressReplay = false;
-        m_deferMessageUpdates = true;
-        emit messagesChanged();
-        setStatus(QStringLiteral("loading…"));
-    }
-    emit currentSessionChanged();
-    m_client->setResumeSession(sessionId, cwd);
-    m_client->setDesiredCwd(workingDir());
-    m_lastCwd = cwd.isEmpty() ? workingDir() : cwd;
-    m_client->connectTo(wsUrl(), secretKey());
-}
-
-void Manager::onSessions(const QVariantList &sessions)
-{
-    m_sessions = sessions;
-    m_sessionsModel->setSessions(sessions);
-    m_sessionUpdatedAt.clear();
-    for (const auto &v : sessions) {
-        const QVariantMap m = v.toMap();
-        m_sessionUpdatedAt.insert(m.value("sessionId").toString(), m.value("updatedAt").toString());
-    }
-    // Stamp the session's updatedAt on the cache (onReady runs before the first
-    // list) but only re-serialize when the transcript actually changed — a plain
-    // session/list refresh must not rewrite the whole transcript to disk.
-    if (!m_currentSessionId.isEmpty() && m_cacheDirty)
-        saveCache(m_currentSessionId);
-    emit sessionsChanged();
-}
-
-void Manager::onProjects(const QVariantList &projects)
-{
-    m_projects = projects;
-    // Sessions and projects refresh together so the sidebar's project groups
-    // never render against a stale id->name map.
-    m_sessionsModel->setProjects(projects);
-    emit projectsChanged();
-    emit sessionsChanged();
-}
-
-void Manager::onRecipes(const QVariantList &recipes)
-{
-    m_recipes = recipes;
-    emit recipesChanged();
-}
-
-void Manager::onSchedules(const QVariantList &schedules)
-{
-    m_schedules = schedules;
-    emit schedulesChanged();
-}
-
-void Manager::onConfig(const QVariantList &config)
-{
-    m_config = config;
-    emit configChanged();
-}
-
-void Manager::onTools(const QVariantList &tools)
-{
-    QStringList names;
-    for (const auto &v : tools)
-        names << v.toString();
-    m_tools = names;
-
-    if (!m_discoveringExt.isEmpty()) {
-        // A catalog read: the session was briefly re-added unfiltered, so tools now contain that
-        // extension's FULL set. Record it under the extension's prefix, then restore the real
-        // allowlist (which re-fires tools/list; discovering is cleared so that pass is normal).
-        const QString prefix = m_discoveringExt + QStringLiteral("__");
-        QStringList full;
-        for (const auto &n : std::as_const(names))
-            if (n.startsWith(prefix))
-                full << n;
-        m_toolCatalog[m_discoveringExt] = full;
-        const QString target = m_discoveringExt;
-        m_discoveringExt.clear();
-        const ExtDef *e = extDef(target);
-        if (e) {
-            const QStringList allowed = e->availableTools;
-            setSessionTools(target, allowed.isEmpty() ? full : allowed);
-        }
-    } else {
-        publishToolGroups();
-    }
-    saveToolCache(m_currentSessionId);
-    emit toolsChanged();
-}
-
-void Manager::onExtensions(const QVariantList &extensions)
-{
-    m_extDefs.clear();
-    for (const auto &v : extensions) {
-        const QVariantMap m = v.toMap();
-        ExtDef d;
-        d.name = m.value("name").toString();
-        d.type = m.value("type").toString();
-        d.attrib = m.value("attrib").toBool();
-        d.enabled = m.value("enabled").toBool();
-        d.raw = m.value("raw").value<QJsonObject>();
-        const QVariantList at = m.value("availableTools").toList();
-        for (const auto &a : at)
-            d.availableTools << a.toString();
-        m_extDefs << d;
-    }
-    publishToolGroups();
-    emit globalExtensionsChanged();
-    saveToolCache(m_currentSessionId);
-    emit toolsChanged();
-}
-
-void Manager::onSessionExtensions(const QStringList &names)
-{
-    m_sessionExts = names;
-    publishToolGroups();
-    saveToolCache(m_currentSessionId);
-}
-
-const Manager::ExtDef *Manager::extDef(const QString &name) const
-{
-    for (const auto &d : m_extDefs)
-        if (d.name == name)
-            return &d;
-    return nullptr;
-}
-
-QVariant Manager::toolGroups() const
-{
-    QVariantList out;
-    const QSet<QString> active(m_tools.constBegin(), m_tools.constEnd());
-    const QSet<QString> enabled(m_sessionExts.constBegin(), m_sessionExts.constEnd());
-    // Session extensions not in the config list (couldn't be re-added) still get a group so
-    // they can at least be disabled; they have no tools to show.
-    QStringList allNames;
-    for (const auto &d : m_extDefs)
-        allNames << d.name;
-    for (const auto &n : m_sessionExts)
-        if (!allNames.contains(n))
-            allNames << n;
-
-    // Some goose versions expose tools before they expose extension profiles.
-    // Keep the panel useful in that state by grouping the active names directly;
-    // later config/session replies replace these fallback groups with toggleable
-    // extension-backed groups.
-    if (allNames.isEmpty() && !m_tools.isEmpty()) {
-        QHash<QString, QVariantList> grouped;
-        QStringList groupNames;
-        for (const auto &tool : m_tools) {
-            const int sep = tool.indexOf(QStringLiteral("__"));
-            const QString group = sep > 0 ? tool.left(sep) : QStringLiteral("Built-in");
-            const QString child = sep > 0 ? tool.mid(sep + 2) : tool;
-            if (!grouped.contains(group))
-                groupNames << group;
-            grouped[group] << QVariantMap{{"name", child}, {"on", true}};
-        }
-        for (const auto &groupName : std::as_const(groupNames)) {
-            out << QVariantMap{{"name", groupName},
-                               {"attrib", groupName != QStringLiteral("Built-in")},
-                               {"enabled", true},
-                               {"known", true},
-                               {"tools", grouped.value(groupName)}};
-        }
-        return out;
-    }
-
-    for (const auto &name : std::as_const(allNames)) {
-        QVariantMap group;
-        group["name"] = name;
-        const ExtDef *d = extDef(name);
-        const bool attrib = d && d->attrib;
-        group["attrib"] = attrib;
-        group["enabled"] = enabled.contains(name);
-        group["known"] = m_toolCatalog.contains(name);
-        QVariantList tools;
-        const QString prefix = name + QStringLiteral("__");
-        QStringList pool = m_toolCatalog.value(name);
-        // Active names are useful even when this extension was reported with a
-        // type we cannot attribute or its catalog discovery is still pending.
-        if (pool.isEmpty()) {
-            for (const auto &t : m_tools)
-                if (t.startsWith(prefix))
-                    pool << t;
-        }
-        for (const auto &t : pool) {
-            tools << QVariantMap{{"name", t.mid(prefix.length())},
-                                 {"on", active.contains(t)}};
-        }
-        group["tools"] = tools;
-        out << group;
-    }
-    return out;
-}
-
-void Manager::publishToolGroups()
-{
-    emit toolGroupsChanged();
-}
-
-void Manager::setSessionTools(const QString &extName, const QStringList &allowed)
-{
-    const ExtDef *d = extDef(extName);
-    if (!d)
-        return;
-    // An allowlist equal to the whole catalog is the same as no allowlist; store [] so it stays
-    // that way if the extension later gains tools.
-    const QStringList full = m_toolCatalog.value(extName);
-    const QStringList list =
-        (!full.isEmpty() && allowed.size() >= full.size()) ? QStringList() : allowed;
-    QJsonObject scoped = d->raw;
-    QJsonArray arr;
-    for (const auto &t : list)
-        arr.append(t);
-    scoped.insert("available_tools", arr);
-    m_discoveringExt.clear();
-    m_client->removeSessionExtension(extName);
-    m_client->addSessionExtension(toExtensionDto(scoped));
-}
+// ---- per-session tool management ------------------------------------------
 
 void Manager::refreshToolGroups()
 {
-    AcpClient *c = activeClient();
-    if (!c || !c->ready())
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_ready(m_bridge->handle()))
         return;
-    c->listConfigExtensions();
-    c->listTools();
+    const QByteArray sid = m_currentSessionId.toUtf8();
+    m_bridge->api().grouse_unstable_list_global_extensions(m_bridge->handle());
+    m_bridge->api().grouse_unstable_list_tools(m_bridge->handle(), sid.constData());
 }
 
 void Manager::discoverToolGroup(const QString &extName)
 {
     const ExtDef *d = extDef(extName);
-    if (!d || m_toolCatalog.contains(extName))
+    if (!d || m_toolCatalog.contains(extName) || !m_bridge || !m_bridge->isAvailable())
         return;
-    // Only mcp-backed extensions namespace their tools; there's nothing more to discover otherwise.
     QJsonObject unfiltered = d->raw;
     unfiltered.insert("available_tools", QJsonArray());
     m_discoveringExt = extName;
-    m_client->removeSessionExtension(extName);
-    m_client->addSessionExtension(toExtensionDto(unfiltered));  // reply triggers listTools
+    const QByteArray sid = m_currentSessionId.toUtf8();
+    const QByteArray ext = QJsonDocument(unfiltered).toJson(QJsonDocument::Compact);
+    m_bridge->api().grouse_unstable_session_extensions_remove(m_bridge->handle(), sid.constData(),
+                                                              d->name.toUtf8().constData());
+    m_bridge->api().grouse_unstable_session_extensions_add(m_bridge->handle(), sid.constData(),
+                                                           ext.constData());
 }
 
 void Manager::setSessionExtensionEnabled(const QString &extName, bool enabled)
 {
-    if (!m_client)
+    if (!m_bridge || !m_bridge->isAvailable())
         return;
     const ExtDef *d = extDef(extName);
     if (!d)
-        return;  // cannot re-add a profile we have not received from Goose
-    // MCP startup can take many seconds. Keep the user's choice visible while
-    // Goose brings the extension up; the post-mutation session list remains the
-    // authority and corrects it if the server rejects the change.
+        return;
+    const QByteArray sid = m_currentSessionId.toUtf8();
     if (enabled) {
         if (!m_sessionExts.contains(extName))
             m_sessionExts << extName;
+        m_bridge->api().grouse_unstable_session_extensions_add(
+            m_bridge->handle(), sid.constData(),
+            QJsonDocument(d->raw).toJson(QJsonDocument::Compact).constData());
     } else {
         m_sessionExts.removeAll(extName);
+        m_bridge->api().grouse_unstable_session_extensions_remove(
+            m_bridge->handle(), sid.constData(), extName.toUtf8().constData());
     }
     publishToolGroups();
     saveToolCache(m_currentSessionId);
-    if (enabled) {
-        m_client->addSessionExtension(toExtensionDto(d->raw));
-    } else {
-        m_client->removeSessionExtension(extName);
-    }
 }
 
 void Manager::setSessionToolEnabled(const QString &extName, const QString &toolName, bool on)
@@ -1748,7 +872,7 @@ void Manager::setSessionToolEnabled(const QString &extName, const QString &toolN
         if (t.startsWith(prefix))
             current << t;
     if (on == current.contains(prefix + toolName))
-        return;  // no-op
+        return;
     if (on) current << (prefix + toolName);
     else current.remove(prefix + toolName);
     setSessionTools(extName, current.values());
@@ -1758,8 +882,6 @@ void Manager::setSessionToolEnabled(const QString &extName, const QString &toolN
 
 QVariant Manager::globalExtensions() const
 {
-    // Same shape as toolGroups() but driven by the GLOBAL config list: per-extension
-    // enabled switch + per-tool allowlist for mcp extensions (defaults for new sessions).
     QVariantList out;
     for (const auto &d : m_extDefs) {
         QVariantMap group;
@@ -1769,9 +891,6 @@ QVariant Manager::globalExtensions() const
         group["enabled"] = d.enabled;
         QVariantList tools;
         const QString prefix = d.name + QStringLiteral("__");
-        // Tool names in the allowlist are namespaced; strip the prefix for display. An
-        // empty allowlist means "all tools" — the catalog (if a session discovered it)
-        // shows them as on; otherwise the row just shows the enabled switch.
         const QSet<QString> allowed(d.availableTools.constBegin(), d.availableTools.constEnd());
         if (allowed.isEmpty()) {
             const QStringList full = m_toolCatalog.value(d.name);
@@ -1791,18 +910,19 @@ QVariant Manager::globalExtensions() const
 
 void Manager::refreshGlobalExtensions()
 {
-    if (m_client)
-        m_client->listConfigExtensions();
+    if (m_bridge && m_bridge->isAvailable())
+        m_bridge->api().grouse_unstable_list_global_extensions(m_bridge->handle());
 }
 
 void Manager::setGlobalExtensionEnabled(const QString &extName, bool enabled)
 {
-    if (!m_client)
+    if (!m_bridge || !m_bridge->isAvailable())
         return;
     const ExtDef *d = extDef(extName);
     if (!d)
         return;
-    m_client->setConfigExtensionEnabled(extName, enabled);
+    m_bridge->api().grouse_unstable_set_extension_enabled(
+        m_bridge->handle(), extName.toUtf8().constData(), enabled ? 1 : 0);
 }
 
 void Manager::setGlobalToolEnabled(const QString &extName, const QString &toolName, bool on)
@@ -1813,224 +933,54 @@ void Manager::setGlobalToolEnabled(const QString &extName, const QString &toolNa
     const QString prefix = extName + QStringLiteral("__");
     QSet<QString> current(d->availableTools.constBegin(), d->availableTools.constEnd());
     if (on == current.contains(prefix + toolName))
-        return;  // no-op
+        return;
     if (on) current << (prefix + toolName);
     else current.remove(prefix + toolName);
-    // Saving a global allowlist = re-adding the extension (with the modified
-    // available_tools) to config.yaml; the reply re-lists the global set.
     QJsonObject scoped = d->raw;
     QJsonArray arr;
     for (const auto &t : std::as_const(current))
         arr.append(t);
     scoped.insert("available_tools", arr);
-    m_client->addConfigExtension(toExtensionDto(scoped), d->enabled);
+    m_bridge->api().grouse_unstable_add_extension(
+        m_bridge->handle(),
+        QJsonDocument(scoped).toJson(QJsonDocument::Compact).constData(), d->enabled ? 1 : 0);
 }
 
-void Manager::onPermission(const QString &toolCallId, const QString &title,
-                           const QString &detail, const QVariantList &options)
+// ---- tool-group plumbing ---------------------------------------------------
+
+const Manager::ExtDef *Manager::extDef(const QString &name) const
 {
-    Q_UNUSED(detail);
-    m_permToolCallId = toolCallId;
-    m_permTitle = title;
-    m_permOptions = options;
-    emit permissionRequested();
+    for (const auto &d : m_extDefs)
+        if (d.name == name)
+            return &d;
+    return nullptr;
 }
 
-void Manager::onError(const QString &text, bool background)
+void Manager::setSessionTools(const QString &extName, const QStringList &allowed)
 {
-    if (!background) {
-        QVariantMap m{{"id", m_seq++}, {"role", "error"}, {"text", text}, {"html", QStringLiteral("<div>") + text + QStringLiteral("</div>")}};
-        m_messageModel->append(m);
-        m_cacheDirty = true;
-        emit messagesChanged();
-    }
-    setStatus(text);
-}
-
-void Manager::renderMarkdownRows()
-{
-    bool changed = false;
-    for (int i = 0; i < m_messageModel->count(); ++i) {
-        QVariantMap message = m_messageModel->row(i);
-        const QString role = message.value("role").toString();
-        const QString text = message.value("text").toString();
-        if ((role != QStringLiteral("agent") && role != QStringLiteral("user"))
-            || text.isEmpty() || !message.value("html").toString().isEmpty())
-            continue;
-        message["html"] = markdownToHtml(text);
-        m_messageModel->update(i, message);
-        changed = true;
-    }
-    if (changed) {
-        m_cacheDirty = true;
-        requestMessagesUpdate();
-    }
-}
-
-QString Manager::cacheFilePath(const QString &sessionId) const
-{
-    const QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-    QDir().mkpath(base);
-    // session ids are opaque but filesystem-safe (e.g. "20260729_115"); still
-    // escape to guard against any pathological value.
-    QString safe = QString(sessionId).replace(QLatin1Char('/'), QLatin1Char('_'));
-    return base + QStringLiteral("/") + safe + QStringLiteral(".json");
-}
-
-bool Manager::loadCache(const QString &sessionId)
-{
-    QFile f(cacheFilePath(sessionId));
-    if (!f.open(QIODevice::ReadOnly))
-        return false;
-    const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
-    f.close();
-    const QJsonObject root = doc.object();
-    m_cachedUpdatedAt = root.value("updatedAt").toString();
-    const QJsonArray arr = root.value("messages").toArray();
-    if (arr.isEmpty())
-        return false;
-    m_messageModel->clear();
-    for (const auto &el : arr) {
-        const QJsonObject o = el.toObject();
-        const QString role = o.value("role").toString();
-        const QString text = o.value("text").toString();
-        QString html = o.value("html").toString();
-        if ((role == QStringLiteral("agent") || role == QStringLiteral("user"))
-            && !text.isEmpty() && html.isEmpty()) {
-            html = markdownToHtml(text);
-            m_cacheDirty = true;
-        }
-        m_messageModel->append(QVariantMap{
-            {"id", m_seq++},
-            {"role", role},
-            {"text", text},
-            {"html", html},
-            {"title", o.value("title").toString()},
-            {"detail", o.value("detail").toString()},
-            {"output", o.value("output").toString()},
-            {"status", o.value("status").toString()},
-            {"thought", o.value("thought").toBool()},
-            {"chartData", o.value("chartData").toString()},
-        });
-        if (role == QStringLiteral("toolgroup")) {
-            QVariantMap group = m_messageModel->row(m_messageModel->count() - 1);
-            QVariantList calls;
-            for (const auto &callValue : o.value("calls").toArray()) {
-                const QJsonObject call = callValue.toObject();
-                calls << QVariantMap{{"title", call.value("title").toString()},
-                                     {"detail", call.value("detail").toString()},
-                                     {"output", call.value("output").toString()},
-                                     {"status", call.value("status").toString()},
-                                     {"toolCallId", call.value("toolCallId").toString()}};
-            }
-            group["calls"] = calls;
-            m_messageModel->update(m_messageModel->count() - 1, group);
-        }
-    }
-    return true;
-}
-
-void Manager::saveCache(const QString &sessionId)
-{
-    if (sessionId.isEmpty() || m_messageModel->count() == 0)
+    const ExtDef *d = extDef(extName);
+    if (!d)
         return;
+    const QStringList full = m_toolCatalog.value(extName);
+    const QStringList list =
+        (!full.isEmpty() && allowed.size() >= full.size()) ? QStringList() : allowed;
+    QJsonObject scoped = d->raw;
     QJsonArray arr;
-    for (const auto &v : m_messageModel->rows()) {
-        const QVariantMap m = v;
-        const QString role = m.value("role").toString();
-        // History only has plain text; render markdown once here so reopening
-        // from disk is both instant and nicely formatted (paid per session, not
-        // per open).
-        QString html = m.value("html").toString();
-        if (html.isEmpty() && (role == "agent" || role == "user"))
-            html = markdownToHtml(m.value("text").toString());
-        QJsonObject o;
-        o["role"] = role;
-        o["text"] = m.value("text").toString();
-        o["html"] = html;
-        o["detail"] = m.value("detail").toString();
-        o["title"] = m.value("title").toString();
-        o["output"] = m.value("output").toString();
-        o["status"] = m.value("status").toString();
-        o["thought"] = m.value("thought").toBool();
-        if (role == "chart")
-            o["chartData"] = m.value("chartData").toString();
-        if (role == "toolgroup") {
-            QJsonArray calls;
-            for (const auto &callValue : m.value("calls").toList()) {
-                const QVariantMap call = callValue.toMap();
-                calls.append(QJsonObject{
-                    {"title", call.value("title").toString()},
-                    {"detail", call.value("detail").toString()},
-                    {"output", call.value("output").toString()},
-                    {"status", call.value("status").toString()},
-                    {"toolCallId", call.value("toolCallId").toString()},
-                });
-            }
-            o["calls"] = calls;
-        }
-        arr.append(o);
-    }
-    QJsonObject root;
-    root["updatedAt"] = m_sessionUpdatedAt.value(sessionId);
-    root["messages"] = arr;
-    QFile f(cacheFilePath(sessionId));
-    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        f.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
-        f.close();
-        m_cacheDirty = false;
-    }
+    for (const auto &t : list)
+        arr.append(t);
+    scoped.insert("available_tools", arr);
+    m_discoveringExt.clear();
+    const QByteArray sid = m_currentSessionId.toUtf8();
+    m_bridge->api().grouse_unstable_session_extensions_remove(
+        m_bridge->handle(), sid.constData(), extName.toUtf8().constData());
+    m_bridge->api().grouse_unstable_session_extensions_add(
+        m_bridge->handle(), sid.constData(),
+        QJsonDocument(scoped).toJson(QJsonDocument::Compact).constData());
 }
 
-QString Manager::toolCacheFilePath(const QString &sessionId) const
+void Manager::publishToolGroups()
 {
-    QString safe = sessionId;
-    safe.replace(QLatin1Char('/'), QLatin1Char('_'));
-    return cacheFilePath(sessionId).left(cacheFilePath(sessionId).lastIndexOf(QLatin1Char('/')) + 1)
-        + safe + QStringLiteral("-tools.json");
-}
-
-bool Manager::loadToolCache(const QString &sessionId)
-{
-    QFile f(toolCacheFilePath(sessionId));
-    if (!f.open(QIODevice::ReadOnly))
-        return false;
-    const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
-    f.close();
-
-    m_tools.clear();
-    for (const auto &v : root.value("tools").toArray())
-        m_tools << v.toString();
-
-    m_sessionExts.clear();
-    for (const auto &v : root.value("sessionExtensions").toArray())
-        m_sessionExts << v.toString();
-
-    m_extDefs.clear();
-    for (const auto &v : root.value("extensions").toArray()) {
-        const QJsonObject o = v.toObject();
-        ExtDef d;
-        d.name = o.value("name").toString();
-        d.type = o.value("type").toString();
-        d.attrib = o.value("attrib").toBool();
-        d.raw = o.value("raw").toObject();
-        for (const auto &tool : o.value("availableTools").toArray())
-            d.availableTools << tool.toString();
-        if (!d.name.isEmpty())
-            m_extDefs << d;
-    }
-
-    m_toolCatalog.clear();
-    const QJsonObject catalogs = root.value("catalog").toObject();
-    for (auto it = catalogs.constBegin(); it != catalogs.constEnd(); ++it) {
-        QStringList tools;
-        for (const auto &v : it.value().toArray())
-            tools << v.toString();
-        m_toolCatalog.insert(it.key(), tools);
-    }
-    publishToolGroups();
-    emit toolsChanged();
-    return true;
+    emit toolGroupsChanged();
 }
 
 void Manager::saveToolCache(const QString &sessionId) const
@@ -2072,9 +1022,850 @@ void Manager::saveToolCache(const QString &sessionId) const
     }
     root.insert("catalog", catalogs);
 
-    QFile f(toolCacheFilePath(sessionId));
+    QString safe = sessionId;
+    safe.replace(QLatin1Char('/'), QLatin1Char('_'));
+    const QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    QDir().mkpath(base);
+    QFile f(base + QStringLiteral("/") + safe + QStringLiteral("-tools.json"));
     if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         f.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
         f.close();
     }
+}
+
+// ---------------------------------------------------------------------------
+// CoreBridge event handlers (main-thread entry points — see corebridge.cpp)
+//
+// Rendering contract (matches the core's emission discipline in
+// core/grouse-core/src/transcript.rs): the core emits BOTH an on_stream chunk
+// AND an on_transcript Append/Update for the same text/tool event. To avoid
+// double-rendering, this Manager renders
+//   * user/agent/thought/error bubbles from on_transcript (authoritative), and
+//   * tool / chart / MCP-App bubbles + usage / run-ended from on_stream.
+// The chunk-level text handlers below are kept for API compatibility but are
+// NOT driven by on_stream for text (the transcript carries full bubbles).
+// ---------------------------------------------------------------------------
+
+static QJsonObject parseObj(const QString &json)
+{
+    return QJsonDocument::fromJson(json.toUtf8()).object();
+}
+static QJsonArray parseArr(const QString &json)
+{
+    return QJsonDocument::fromJson(json.toUtf8()).array();
+}
+
+void Manager::coreOnStatus(const QString &json)
+{
+    const QString s = json;
+    if (s == QStringLiteral("\"Ready\"") || s == QStringLiteral("Ready")) {
+        setOnline(true);
+        setStatus(QStringLiteral("ready"));
+        m_prompting = false;
+        emit promptingChanged();
+        if (m_testPending) {
+            m_testPending = false;
+            emit connectionTested(true, QStringLiteral("Connection OK — the server responded."));
+        }
+        flushQueue();
+        refreshSessions();
+        refreshProjects();
+        refreshRecipes();
+        if (!m_pendingProjectFiling.isEmpty()) {
+            const QString proj = m_pendingProjectFiling;
+            m_pendingProjectFiling.clear();
+            if (!m_currentSessionId.isEmpty())
+                moveSessionToProject(m_currentSessionId, proj);
+        }
+    } else if (s == QStringLiteral("\"Connecting\"") || s == QStringLiteral("Connecting")) {
+        setOnline(false);
+        setStatus(QStringLiteral("connecting…"));
+    } else if (s == QStringLiteral("\"Syncing\"") || s == QStringLiteral("Syncing")) {
+        setStatus(QStringLiteral("syncing…"));
+    } else if (s == QStringLiteral("\"Disconnected\"") || s == QStringLiteral("Disconnected")) {
+        setOnline(false);
+        setStatus(QStringLiteral("not connected"));
+        if (m_testPending) {
+            m_testPending = false;
+            emit connectionTested(false, QStringLiteral("Connection failed — disconnected."));
+        }
+    } else {
+        // Error { "message": ... }
+        QJsonObject o = parseObj(s);
+        QString msg = o.value(QStringLiteral("Error")).toObject().value(QStringLiteral("message")).toString();
+        setOnline(false);
+        setStatus(msg.isEmpty() ? QStringLiteral("connection error") : msg);
+        if (m_testPending) {
+            m_testPending = false;
+            emit connectionTested(false, msg.isEmpty() ? QStringLiteral("Connection failed.") : msg);
+        }
+    }
+}
+
+void Manager::coreOnSessions(const QString &json)
+{
+    QVariantList sessions;
+    const QJsonArray arr = parseArr(json);
+    for (const auto &el : arr) {
+        const QJsonObject o = el.toObject();
+        QVariantMap m;
+        m["sessionId"] = o.value("id").toString();
+        m["id"] = o.value("id").toString();
+        m["title"] = o.value("title").toString();
+        m["updatedAt"] = o.value("updated_at").toString();
+        m["lastMessageAt"] = o.value("updated_at").toString();
+        m["snippet"] = o.value("last_message_snippet").toString();
+        m["projectId"] = o.value("project_id").toString();
+        m["messageCount"] = o.value("message_count").toVariant();
+        m["hasRecipe"] = o.value("has_recipe").toBool();
+        m["archived"] = o.value("archived").toBool();
+        m["peer"] = m_activePeerLabel;
+        sessions << m;
+    }
+    onSessions(sessions);
+}
+
+void Manager::coreOnTranscript(const QString &json)
+{
+    QJsonObject root = parseObj(json);
+    if (root.contains(QStringLiteral("Clear"))) {
+        m_messageModel->clear();
+        m_currentIndex = -1;
+        requestMessagesUpdate();
+        return;
+    }
+    QString tag = root.contains(QStringLiteral("Append")) ? QStringLiteral("Append")
+                : root.contains(QStringLiteral("Update")) ? QStringLiteral("Update") : QString();
+    if (tag.isEmpty())
+        return;
+    const QJsonObject message = root.value(tag).toObject().value(QStringLiteral("message")).toObject();
+    const QString role = message.value(QStringLiteral("role")).toString();
+    // Tool rows are rendered from on_stream (rich title/output/status); the
+    // transcript's tool projection (title-only) would duplicate them.
+    if (role == QStringLiteral("tool"))
+        return;
+    const QString content = message.value(QStringLiteral("content")).toString();
+    const QString output = message.value(QStringLiteral("output")).toString();
+    const QString messageId = message.value(QStringLiteral("id")).toString();
+
+    QVariantMap row;
+    row["id"] = messageId;
+    row["role"] = role;
+    row["text"] = content;
+    row["output"] = output;
+    if (role == QStringLiteral("thought")) {
+        row["thought"] = true;
+    } else if (role == QStringLiteral("error")) {
+        row["html"] = QStringLiteral("<div>") + content + QStringLiteral("</div>");
+    } else {
+        row["html"] = markdownToHtml(content);
+    }
+
+    int idx = -1;
+    for (int i = m_messageModel->count() - 1; i >= 0; --i) {
+        if (m_messageModel->row(i).value("id").toString() == messageId
+            && m_messageModel->row(i).value("role").toString() == role) {
+            idx = i;
+            break;
+        }
+    }
+    if (tag == QStringLiteral("Append")) {
+        if (idx < 0) {
+            m_messageModel->append(row);
+        } else {
+            m_messageModel->update(idx, row);
+        }
+    } else { // Update
+        if (idx >= 0)
+            m_messageModel->update(idx, row);
+    }
+    m_currentIndex = m_messageModel->count() - 1;
+    requestMessagesUpdate();
+}
+
+void Manager::coreOnConfig(const QString &json)
+{
+    QVariantList config;
+    const QJsonArray arr = parseArr(json);
+    for (const auto &el : arr) {
+        const QJsonObject o = el.toObject();
+        QVariantMap m{{"id", o.value("id").toString()},
+                      {"name", o.value("name").toString()},
+                      {"currentValue", o.value("value").toString()}};
+        QVariantList choices;
+        for (const auto &c : o.value("choices").toArray()) {
+            const QJsonObject co = c.toObject();
+            choices << QVariantMap{{"value", co.value("value").toString()},
+                                   {"name", co.value("name").toString()}};
+        }
+        m["choices"] = choices;
+        config << m;
+    }
+    onConfig(config);
+}
+
+void Manager::coreOnPermission(const QString &json)
+{
+    const QJsonObject o = parseObj(json);
+    const QJsonObject req = o.value(QStringLiteral("PermissionRequest")).isObject()
+        ? o.value(QStringLiteral("PermissionRequest")).toObject() : o;
+    QString toolCallId = req.value("tool_call_id").toString();
+    // serde external tag puts the variant under the root; unwrap if needed.
+    if (toolCallId.isEmpty()) {
+        // Root may be the untagged object already.
+    }
+    QVariantList options;
+    for (const auto &opt : req.value("options").toArray()) {
+        const QJsonObject oo = opt.toObject();
+        options << QVariantMap{{"option_id", oo.value("option_id").toString()},
+                               {"name", oo.value("name").toString()},
+                               {"kind", oo.value("kind").toString()}};
+    }
+    onPermission(toolCallId, req.value("title").toString(),
+                 req.value("detail").toString(), options);
+}
+
+void Manager::coreOnSessionTouched(const QString &sid, const QString &title, const QString &u)
+{
+    Q_UNUSED(sid); Q_UNUSED(title); Q_UNUSED(u);
+    // The core performs its own debounced resync of the active session. The UI
+    // only needs to refresh the sidebar so order/title/status reflect the touch.
+    refreshSessions();
+}
+
+void Manager::coreOnProjects(const QString &json)
+{
+    QVariantList projects;
+    const QJsonArray arr = parseArr(json);
+    for (const auto &el : arr) {
+        const QJsonObject o = el.toObject();
+        projects << QVariantMap{{"id", o.value("path").toString()},
+                                {"name", o.value("name").toString()},
+                                {"path", o.value("path").toString()},
+                                {"description", o.value("description").toString()}};
+    }
+    onProjects(projects);
+}
+
+void Manager::coreOnRoamPeerStatus(const QString &label, const QString &status)
+{
+    const bool down = status == QStringLiteral("disconnected") || status.startsWith(QStringLiteral("error:"));
+    m_roamModel->setPeerStatus(label, status, !down);
+}
+
+void Manager::coreOnRoamSessions(const QString &label, const QString &json)
+{
+    QVariantList sessions;
+    const QJsonArray arr = parseArr(json);
+    for (const auto &el : arr) {
+        const QJsonObject o = el.toObject();
+        sessions << QVariantMap{{"sessionId", o.value("id").toString()},
+                                {"title", o.value("title").toString()},
+                                {"updatedAt", o.value("updated_at").toString()},
+                                {"peer", label}};
+    }
+    m_roamModel->setPeerSessions(label, sessions);
+}
+
+void Manager::coreOnPeerNewSession(const QString &label, const QString &sid)
+{
+    refreshSessions();
+    if (label == m_activePeerLabel) {
+        m_currentSessionId = sid;
+        m_currentSessionTitle.clear();
+        emit currentSessionChanged();
+    }
+}
+
+void Manager::coreOnActiveRun(const QString &sid, const QString &runId)
+{
+    onActiveRunChanged(sid, runId);
+}
+
+void Manager::coreOnCommands(const QString &json)
+{
+    QStringList commands;
+    for (const auto &c : parseArr(json))
+        commands << c.toString();
+    onCommands(commands);
+}
+
+void Manager::coreOnExport(const QString &data)
+{
+    onExportResult(data);
+}
+
+void Manager::coreOnRecipeParams(const QString &) {}
+void Manager::coreOnElicitation(const QString &) {}
+
+void Manager::coreOnCompactionStatus(const QString &message)
+{
+    onCompactionStatus(message);
+}
+
+void Manager::coreOnMessageUsage(std::uint64_t outTok, std::uint64_t elapsedMs,
+                                 std::uint64_t ttftMs, double cost)
+{
+    QVariantMap usage;
+    usage["outputTokens"] = qint64(outTok);
+    usage["elapsedMs"] = qint64(elapsedMs);
+    usage["timeToFirstTokenMs"] = qint64(ttftMs);
+    usage["cost"] = cost;
+    onMessageUsage(usage);
+}
+
+void Manager::coreOnAppResource(const QString &key, const QString &html)
+{
+    onAppResource(key, html);
+}
+
+void Manager::coreOnRecipes(const QString &json)
+{
+    QVariantList list;
+    for (const auto &el : parseArr(json))
+        list << el.toObject().toVariantMap();
+    onRecipes(list);
+}
+
+void Manager::coreOnSchedules(const QString &json)
+{
+    QVariantList list;
+    for (const auto &el : parseArr(json))
+        list << el.toObject().toVariantMap();
+    onSchedules(list);
+}
+
+void Manager::coreOnUnstableProjects(const QString &json)
+{
+    coreOnProjects(json);
+}
+
+void Manager::coreOnSkills(const QString &json)
+{
+    QVariantList list;
+    for (const auto &el : parseArr(json))
+        list << el.toObject().toVariantMap();
+    onSkills(list);
+}
+
+void Manager::coreOnTools(const QString &sid, const QString &json)
+{
+    Q_UNUSED(sid);
+    QVariantList names;
+    for (const auto &el : parseArr(json)) {
+        if (el.isObject())
+            names << el.toObject().value("name").toString();
+        else
+            names << el.toString();
+    }
+    onTools(names);
+}
+
+void Manager::coreOnExtensions(const QString &json)
+{
+    QVariantList list;
+    for (const auto &el : parseArr(json))
+        list << el.toObject().toVariantMap();
+    onExtensions(list);
+}
+
+void Manager::coreOnSessionExtensions(const QString &sid, const QString &json)
+{
+    Q_UNUSED(sid);
+    QStringList names;
+    for (const auto &el : parseArr(json)) {
+        if (el.isObject())
+            names << el.toObject().value("name").toString();
+        else
+            names << el.toString();
+    }
+    onSessionExtensions(names);
+}
+
+void Manager::coreOnConfigValue(const QString &key, const QString &value)
+{
+    onServerConfigValue(key, value);
+}
+
+void Manager::coreOnSupportedModels(const QString &provider, const QString &json)
+{
+    QStringList models;
+    for (const auto &el : parseArr(json))
+        models << (el.isObject() ? el.toObject().value("name").toString() : el.toString());
+    onSupportedModels(provider, models);
+}
+
+void Manager::coreOnProviders(const QString &)
+{
+    // Provider inventory is server-authoritative; currently not surfaced in the
+    // desktop UI beyond the model list handled above.
+}
+
+void Manager::coreOnSessionProbe(const QString &sid, const QString &u, qint64 n)
+{
+    Q_UNUSED(sid); Q_UNUSED(u); Q_UNUSED(n);
+    // The core owns resync probing; nothing to do client-side.
+}
+
+void Manager::coreOnToolResult(const QString &text, int isError)
+{
+    Q_UNUSED(text); Q_UNUSED(isError);
+}
+
+void Manager::coreOnError(const QString &method, const QString &message)
+{
+    Q_UNUSED(method);
+    onError(message, false);
+}
+
+// ---------------------------------------------------------------------------
+// Streaming (on_stream): tool/chart/MCP-App bubbles + usage + run-ended.
+// Text bubbles are rendered via on_transcript (see coreOnTranscript).
+// ---------------------------------------------------------------------------
+
+void Manager::coreOnStream(const QString &json)
+{
+    const QJsonObject root = parseObj(json);
+    if (root.contains(QStringLiteral("AgentChunk"))
+        || root.contains(QStringLiteral("UserChunk"))
+        || root.contains(QStringLiteral("ThoughtChunk")))
+        return; // text handled by on_transcript
+    if (root.contains(QStringLiteral("ToolCall"))) {
+        const QJsonObject o = root.value("ToolCall").toObject();
+        const QJsonObject kind = o.value("kind").toObject();
+        const QString title = o.value("title").toString();
+        const QString id = o.value("tool_call_id").toString();
+        if (kind.contains(QStringLiteral("Chart"))) {
+            onChartToolCall(title, id, kind.value("Chart").toObject().value("spec").toString());
+        } else if (kind.contains(QStringLiteral("McpApp"))) {
+            const QJsonObject m = kind.value("McpApp").toObject();
+            onMcpAppToolCall(title, id,
+                             QStringLiteral("%1|%2").arg(m.value("app_key").toString(), m.value("uri").toString()),
+                             m.value("uri").toString(), m.value("extension").toString(),
+                             m.value("input").toString());
+        } else {
+            onToolCall(title, o.value("detail").toString(), id);
+        }
+    } else if (root.contains(QStringLiteral("ToolCallUpdate"))) {
+        const QJsonObject o = root.value("ToolCallUpdate").toObject();
+        onToolCallUpdate(o.value("id").toString(), o.value("status").toString(),
+                         o.value("output").toString(), o.value("live").toBool());
+    } else if (root.contains(QStringLiteral("Usage"))) {
+        const QJsonObject o = root.value("Usage").toObject();
+        onUsage(int(o.value("used").toDouble()), int(o.value("size").toDouble()),
+                o.value("cost").toDouble(), o.value("currency").toString());
+    } else if (root.contains(QStringLiteral("RunEnded"))) {
+        m_prompting = false;
+        m_compacting = false;
+        m_activeRunId.clear();
+        emit promptingChanged();
+        emit compactingChanged();
+        flushQueue();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Model-update handlers (called by the coreOn* entry points above)
+// ---------------------------------------------------------------------------
+
+void Manager::appendChunk(const QString &role, const QString &text, const QString &messageId, bool thought)
+{
+    Q_UNUSED(role); Q_UNUSED(text); Q_UNUSED(messageId); Q_UNUSED(thought);
+    // Text is rendered via on_transcript; retained for API compatibility.
+}
+
+void Manager::finalizeCurrentMessage()
+{
+    // Render markdown for completed agent/user bubbles (on_transcript already
+    // emits html; nothing further needed).
+}
+
+void Manager::onAgentChunk(const QString &text, const QString &messageId)
+{
+    Q_UNUSED(text); Q_UNUSED(messageId);
+}
+
+void Manager::onUserChunk(const QString &text, const QString &messageId)
+{
+    Q_UNUSED(text); Q_UNUSED(messageId);
+}
+
+void Manager::onThoughtChunk(const QString &text)
+{
+    Q_UNUSED(text);
+}
+
+void Manager::onToolCall(const QString &title, const QString &detail, const QString &toolCallId)
+{
+    m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", "tool"}, {"text", ""}, {"html", ""},
+                                       {"title", title}, {"detail", detail}, {"output", ""},
+                                       {"status", "in_progress"}, {"toolCallId", toolCallId}});
+    m_currentIndex = -1;
+    requestMessagesUpdate();
+}
+
+void Manager::onToolCallUpdate(const QString &toolCallId, const QString &status,
+                               const QString &output, bool live)
+{
+    for (int i = m_messageModel->count() - 1; i >= 0; --i) {
+        QVariantMap m = m_messageModel->row(i);
+        const QString role = m.value("role").toString();
+        if ((role == "tool" || role == "chart" || role == "mcpapp")
+            && m.value("toolCallId").toString() == toolCallId) {
+            m["status"] = status;
+            if ((role == "tool" || role == "mcpapp") && !output.isEmpty())
+                m["output"] = (live ? m.value("output").toString() : QString()) + output;
+            m_messageModel->update(i, m);
+            break;
+        }
+    }
+    requestMessagesUpdate();
+}
+
+void Manager::onChartToolCall(const QString &title, const QString &toolCallId, const QString &chartSpec)
+{
+    m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", "chart"}, {"text", ""},
+                                       {"title", title}, {"chartData", chartSpec},
+                                       {"toolCallId", toolCallId}, {"status", "in_progress"}});
+    m_currentIndex = -1;
+    requestMessagesUpdate();
+}
+
+void Manager::onMcpAppToolCall(const QString &title, const QString &toolCallId, const QString &appKey,
+                               const QString &appUri, const QString &appExt, const QString &appInput)
+{
+    m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", "mcpapp"}, {"text", ""},
+                                       {"title", title}, {"detail", appInput}, {"appKey", appKey},
+                                       {"appHtml", QString()}, {"toolCallId", toolCallId},
+                                       {"status", "in_progress"}});
+    m_currentIndex = -1;
+    if (m_bridge && m_bridge->isAvailable()) {
+        const QByteArray sid = m_currentSessionId.toUtf8();
+        const QByteArray uri = appUri.toUtf8();
+        const QByteArray ext = appExt.toUtf8();
+        m_bridge->api().grouse_unstable_resources_read(m_bridge->handle(), sid.constData(),
+                                                       uri.constData(), ext.constData());
+    }
+    requestMessagesUpdate();
+}
+
+void Manager::onAppResource(const QString &appKey, const QString &html)
+{
+    for (int i = m_messageModel->count() - 1; i >= 0; --i) {
+        QVariantMap m = m_messageModel->row(i);
+        if (m.value("role").toString() == "mcpapp" && m.value("appKey").toString() == appKey) {
+            m["appHtml"] = html;
+            if (html.isEmpty())
+                m["status"] = "failed";
+            m_messageModel->update(i, m);
+            break;
+        }
+    }
+    requestMessagesUpdate();
+}
+
+void Manager::onCompactionStatus(const QString &message)
+{
+    const QString m = message.toLower();
+    if (m.contains(QLatin1String("compact")))
+        m_compacting = true;
+    if (m.contains(QLatin1String("complete")) || m.contains(QLatin1String("error")))
+        m_compacting = false;
+    emit compactingChanged();
+}
+
+void Manager::onMessageUsage(const QVariantMap &usage)
+{
+    const QString label = formatUsage(usage);
+    if (label.isEmpty())
+        return;
+    for (int i = m_messageModel->count() - 1; i >= 0; --i) {
+        QVariantMap m = m_messageModel->row(i);
+        if (m.value("role").toString() == "agent") {
+            m["usage"] = label;
+            m_messageModel->update(i, m);
+            break;
+        }
+    }
+}
+
+QString Manager::formatUsage(const QVariantMap &usage) const
+{
+    const int out = usage.value("outputTokens").toInt();
+    const qint64 elapsed = usage.value("elapsedMs").toLongLong();
+    const qint64 ttft = usage.value("timeToFirstTokenMs").toLongLong();
+    const double cost = usage.value("cost").toDouble();
+    if (elapsed <= 0)
+        return {};
+    const double toksPerSec = out > 0 ? double(out) / (elapsed / 1000.0) : 0.0;
+    QString label = QStringLiteral("%1 tok/s · %2 tokens · %3s TTFT")
+        .arg(toksPerSec, 0, 'f', 1)
+        .arg(out)
+        .arg(double(ttft) / 1000.0, 0, 'f', 1);
+    if (cost > 0.0)
+        label += QStringLiteral(" · $%1").arg(cost, 0, 'f', 4);
+    return label;
+}
+
+void Manager::onCommands(const QStringList &commands)
+{
+    m_availableCommands.clear();
+    for (const auto &c : commands)
+        m_availableCommands << c;
+    emit commandsChanged();
+}
+
+void Manager::onModeChanged(const QString &modeId)
+{
+    for (auto &m : m_config) {
+        QVariantMap entry = m.toMap();
+        if (entry.value("id").toString() == QStringLiteral("mode")) {
+            entry["currentValue"] = modeId;
+            m = entry;
+            emit configChanged();
+            return;
+        }
+    }
+    m_config << QVariantMap{{"id", "mode"}, {"name", "mode"}, {"currentValue", modeId}};
+    emit configChanged();
+}
+
+void Manager::onActiveRunChanged(const QString &sessionId, const QString &runId)
+{
+    if (sessionId == m_currentSessionId || sessionId.isEmpty())
+        m_activeRunId = runId;
+    else
+        m_activeRunId.clear();
+}
+
+void Manager::onUsage(int used, int size, double cost, const QString &currency)
+{
+    Q_UNUSED(cost);
+    Q_UNUSED(currency);
+    m_contextUsed = used;
+    m_contextSize = size;
+    emit contextChanged();
+}
+
+void Manager::onSessions(const QVariantList &sessions)
+{
+    m_sessions = sessions;
+    m_sessionsModel->setSessions(sessions);
+    emit sessionsChanged();
+}
+
+void Manager::onProjects(const QVariantList &projects)
+{
+    m_projects = projects;
+    m_sessionsModel->setProjects(projects);
+    emit projectsChanged();
+    emit sessionsChanged();
+}
+
+void Manager::onRecipes(const QVariantList &recipes)
+{
+    m_recipes = recipes;
+    emit recipesChanged();
+}
+
+void Manager::onSchedules(const QVariantList &schedules)
+{
+    m_schedules = schedules;
+    emit schedulesChanged();
+}
+
+void Manager::onConfig(const QVariantList &config)
+{
+    m_config = config;
+    emit configChanged();
+}
+
+void Manager::onTools(const QVariantList &tools)
+{
+    QStringList names;
+    for (const auto &v : tools)
+        names << v.toString();
+    m_tools = names;
+    if (!m_discoveringExt.isEmpty()) {
+        const QString prefix = m_discoveringExt + QStringLiteral("__");
+        QStringList full;
+        for (const auto &n : std::as_const(names))
+            if (n.startsWith(prefix))
+                full << n;
+        m_toolCatalog[m_discoveringExt] = full;
+        const QString target = m_discoveringExt;
+        m_discoveringExt.clear();
+        const ExtDef *e = extDef(target);
+        if (e) {
+            const QStringList allowed = e->availableTools;
+            setSessionTools(target, allowed.isEmpty() ? full : allowed);
+        }
+    } else {
+        publishToolGroups();
+    }
+    saveToolCache(m_currentSessionId);
+    emit toolsChanged();
+}
+
+void Manager::onExtensions(const QVariantList &extensions)
+{
+    m_extDefs.clear();
+    for (const auto &v : extensions) {
+        const QVariantMap m = v.toMap();
+        ExtDef d;
+        d.name = m.value("name").toString();
+        d.type = m.value("type").toString();
+        d.attrib = m.value("attrib").toBool();
+        d.enabled = m.value("enabled").toBool();
+        d.raw = m.value("raw").value<QJsonObject>();
+        const QVariantList at = m.value("availableTools").toList();
+        for (const auto &a : at)
+            d.availableTools << a.toString();
+        m_extDefs << d;
+    }
+    publishToolGroups();
+    saveToolCache(m_currentSessionId);
+    emit globalExtensionsChanged();
+    emit toolsChanged();
+}
+
+void Manager::onSessionExtensions(const QStringList &names)
+{
+    m_sessionExts = names;
+    publishToolGroups();
+    saveToolCache(m_currentSessionId);
+}
+
+void Manager::onPermission(const QString &toolCallId, const QString &title,
+                           const QString &detail, const QVariantList &options)
+{
+    Q_UNUSED(detail);
+    m_permToolCallId = toolCallId;
+    m_permTitle = title;
+    m_permOptions = options;
+    emit permissionRequested();
+}
+
+void Manager::onError(const QString &text, bool background)
+{
+    if (!background) {
+        QVariantMap m{{"id", m_seq++}, {"role", "error"}, {"text", text},
+                      {"html", QStringLiteral("<div>") + text + QStringLiteral("</div>")}};
+        m_messageModel->append(m);
+        emit messagesChanged();
+    }
+    setStatus(text);
+}
+
+void Manager::onSkills(const QVariantList &skills)
+{
+    m_skills = skills;
+    emit skillsChanged();
+}
+
+void Manager::onServerConfigValue(const QString &key, const QString &value)
+{
+    m_serverConfig[key] = value;
+    emit serverConfigChanged();
+}
+
+void Manager::onSupportedModels(const QString &providerId, const QStringList &models)
+{
+    Q_UNUSED(providerId);
+    m_supportedModels.clear();
+    for (const auto &m : models)
+        m_supportedModels << m;
+    emit supportedModelsChanged();
+}
+
+void Manager::onExportResult(const QString &data)
+{
+    if (m_pendingExportPath.isEmpty())
+        return;
+    if (!data.isEmpty()) {
+        QFile f(m_pendingExportPath);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            f.write(data.toUtf8());
+            f.close();
+            setStatus(QStringLiteral("exported to ") + m_pendingExportPath);
+        } else {
+            setStatus(QStringLiteral("export failed — cannot write ") + m_pendingExportPath);
+        }
+    } else {
+        setStatus(QStringLiteral("export failed — empty reply"));
+    }
+    m_pendingExportPath.clear();
+}
+
+void Manager::onSessionTouched(const QString &sid, const QString &title, const QString &updatedAt)
+{
+    Q_UNUSED(sid); Q_UNUSED(title); Q_UNUSED(updatedAt);
+    refreshSessions();
+}
+
+void Manager::onReady(const QString &sessionId)
+{
+    // The core drives readiness via on_status; this is a compatibility hook.
+    Q_UNUSED(sessionId);
+}
+
+QVariant Manager::toolGroups() const
+{
+    QVariantList out;
+    const QSet<QString> active(m_tools.constBegin(), m_tools.constEnd());
+    const QSet<QString> enabled(m_sessionExts.constBegin(), m_sessionExts.constEnd());
+    QStringList allNames;
+    for (const auto &d : m_extDefs)
+        allNames << d.name;
+    for (const auto &n : m_sessionExts)
+        if (!allNames.contains(n))
+            allNames << n;
+
+    // Some goose versions expose tools before extension profiles: group the
+    // active names directly so the panel stays useful.
+    if (allNames.isEmpty() && !m_tools.isEmpty()) {
+        QHash<QString, QVariantList> grouped;
+        QStringList groupNames;
+        for (const auto &tool : m_tools) {
+            const int sep = tool.indexOf(QStringLiteral("__"));
+            const QString group = sep > 0 ? tool.left(sep) : QStringLiteral("Built-in");
+            const QString child = sep > 0 ? tool.mid(sep + 2) : tool;
+            if (!grouped.contains(group))
+                groupNames << group;
+            grouped[group] << QVariantMap{{"name", child}, {"on", true}};
+        }
+        for (const auto &groupName : std::as_const(groupNames)) {
+            out << QVariantMap{{"name", groupName},
+                               {"attrib", groupName != QStringLiteral("Built-in")},
+                               {"enabled", true},
+                               {"known", true},
+                               {"tools", grouped.value(groupName)}};
+        }
+        return out;
+    }
+
+    for (const auto &name : std::as_const(allNames)) {
+        QVariantMap group;
+        group["name"] = name;
+        const ExtDef *d = extDef(name);
+        const bool attrib = d && d->attrib;
+        group["attrib"] = attrib;
+        group["enabled"] = enabled.contains(name);
+        group["known"] = m_toolCatalog.contains(name);
+        QVariantList tools;
+        const QString prefix = name + QStringLiteral("__");
+        QStringList pool = m_toolCatalog.value(name);
+        if (pool.isEmpty()) {
+            for (const auto &t : m_tools)
+                if (t.startsWith(prefix))
+                    pool << t;
+        }
+        for (const auto &t : pool) {
+            tools << QVariantMap{{"name", t.mid(prefix.length())},
+                                 {"on", active.contains(t)}};
+        }
+        group["tools"] = tools;
+        out << group;
+    }
+    return out;
 }

@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Controls as Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
+import Grouse 1.0
 import org.kde.kirigami as Kirigami
 
 // Controls.ApplicationWindow (not Kirigami.ApplicationWindow): its contentItem
@@ -469,7 +470,11 @@ Controls.ApplicationWindow {
                                         }
                                         Rectangle {
                                             width: 8; height: 8; radius: 4
-                                            color: connected ? "#3ddc84" : Kirigami.Theme.negativeTextColor
+                                            color: connected
+                                                ? (Kirigami.Theme.colorScheme === Kirigami.Theme.ColorScheme.Dark
+                                                   ? Theme.semantic.dark.status.online
+                                                   : Theme.semantic.light.status.online)
+                                                : Kirigami.Theme.negativeTextColor
                                             Layout.alignment: Qt.AlignVCenter
                                         }
                                         Controls.Label {

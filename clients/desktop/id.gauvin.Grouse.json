@@ -30,15 +30,15 @@
       ]
     },
     {
-      "name": "grouse-roam-core",
+      "name": "grouse-core",
       "buildsystem": "simple",
       "build-commands": [
-        "install -D libgrouse_roam_core.so /app/lib/libgrouse_roam_core.so"
+        "install -D libgrouse_core.so /app/lib/libgrouse_core.so"
       ],
       "sources": [
         {
           "type": "file",
-          "path": "roam-prebuild/libgrouse_roam_core.so"
+          "path": "grouse-core-prebuild/libgrouse_core.so"
         }
       ]
     },

@@ -3,33 +3,29 @@
 #
 # Layout:
 #   tst_markdown / tst_messagelistmodel / tst_sessionlistmodel — pure unit tests
-#   tst_acpclient  — wire tests against an in-process fake goose (QWebSocketServer)
-#   tst_manager    — integration tests: Manager <-> fake goose, end to end
+#   tst_manager    — thin-client intent mapping: Manager Q_INVOKABLE -> CoreBridge ABI
+#   tst_roamlistmodel — roam peer-list model tests
 #   tst_qml        — QtQuickTest run of tests/qml/tst_*.qml (ChartBubble)
 #
 # Run everything with `ctest --test-dir build` (or `ctest -R <name> --verbose`).
 
-find_package(Qt6 REQUIRED COMPONENTS Test QuickTest WebSockets)
+find_package(Qt6 REQUIRED COMPONENTS Test QuickTest)
 
 # The app's core minus main.cpp, compiled once and shared by every C++ test.
+# libgrouse_core.so is dlopen'd at runtime (never linked) — see src/corebridge.
 add_library(grouse_core STATIC
-    ${CMAKE_SOURCE_DIR}/src/acpclient.cpp
+    ${CMAKE_SOURCE_DIR}/src/corebridge.cpp
     ${CMAKE_SOURCE_DIR}/src/manager.cpp
     ${CMAKE_SOURCE_DIR}/src/messagelistmodel.cpp
     ${CMAKE_SOURCE_DIR}/src/sessionlistmodel.cpp
     ${CMAKE_SOURCE_DIR}/src/markdown.cpp
-    ${CMAKE_SOURCE_DIR}/src/acptransport.cpp
-    ${CMAKE_SOURCE_DIR}/src/websockettransport.cpp
-    ${CMAKE_SOURCE_DIR}/src/roamframecodec.cpp
-    ${CMAKE_SOURCE_DIR}/src/roamtransport.cpp
     ${CMAKE_SOURCE_DIR}/src/roamlistmodel.cpp
 )
 target_include_directories(grouse_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(grouse_core PUBLIC Qt6::WebSockets Qt6::Widgets)
+target_link_libraries(grouse_core PUBLIC Qt6::Widgets)
 
 foreach(test_name tst_markdown tst_messagelistmodel tst_sessionlistmodel
-                  tst_acpclient tst_manager tst_roamcodec tst_roamtransport
-                  tst_roamlistmodel)
+                  tst_manager tst_roamlistmodel)
     qt_add_executable(${test_name} ${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE grouse_core Qt6::Test)
     add_test(NAME ${test_name} COMMAND ${test_name})

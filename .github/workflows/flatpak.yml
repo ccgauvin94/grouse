@@ -39,22 +39,22 @@ jobs:
           cp /tmp/krunner-build/krunner/kf6/krunner/grouserunner.so \
              clients/desktop/krunner-prebuild/grouserunner.so
 
-      # The roam transport the desktop dlopens. It is a workspace member now, so
-      # this builds the in-tree crate — it used to shallow-clone the standalone
-      # repo at a pinned SHA (which a --depth 1 clone cannot even reach).
-      - name: Build grouse-roam-core
+      # The core the desktop dlopens (transport, session state machine, roam —
+      # the whole thin-client engine). It is a workspace member, so this builds
+      # the in-tree grouse-core crate.
+      - name: Build grouse-core
         run: |
           dnf install -y rust cargo cmake gcc
-          cargo build --release --manifest-path core/Cargo.toml -p grouse-roam-core
-          mkdir -p clients/desktop/roam-prebuild
-          cp core/target/release/libgrouse_roam_core.so clients/desktop/roam-prebuild/
+          cargo build --release --manifest-path core/Cargo.toml -p grouse-core
+          mkdir -p clients/desktop/grouse-core-prebuild
+          cp core/target/release/libgrouse_core.so clients/desktop/grouse-core-prebuild/
 
       - uses: actions/upload-artifact@v4
         with:
           name: host-components
           path: |
             clients/desktop/krunner-prebuild/grouserunner.so
-            clients/desktop/roam-prebuild/libgrouse_roam_core.so
+            clients/desktop/grouse-core-prebuild/libgrouse_core.so
 
   flatpak:
     runs-on: ubuntu-latest

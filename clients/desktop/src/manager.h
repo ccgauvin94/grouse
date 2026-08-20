@@ -7,27 +7,21 @@
 #include <QVariant>
 #include <QVariantList>
 
-class AcpClient;
+class CoreBridge;
 class RoamListModel;
 class SessionListModel;
 class MessageListModel;
 class QTimer;
-class QWebSocket;
-
-/** One active roam endpoint: a direct iroh peer running its own goose. The
- *  peer's client stays connected in browse mode; sessions are listed under
- *  the peer's label in the Roam sidebar tab. */
-struct RoamPeer {
-    QString label;
-    AcpClient *client = nullptr;
-    QVariantList sessions;   // last session/list from the peer
-};
 
 /**
- * Process-scoped owner of the ACP connection + chat state, exposed to QML as a
- * context property named `Mgr`. The thin-client rule from the Android app holds
- * here too: the server owns all state, this object keeps no authoritative copy
- * of anything the server answers.
+ * Process-scoped owner of the chat state, exposed to QML as a context property
+ * named `Mgr`. THE THIN CLIENT: the grouse-core library owns the connection,
+ * the transcript, streaming and reconnect; this object keeps no wire client.
+ * Every Q_INVOKABLE / Q_PROPERTY keeps its exact QML-visible name and
+ * semantics; its body is now a call into the corresponding `grouse_*` intent
+ * bridged through CoreBridge (dlopen'ed libgrouse_core.so). Core events arrive
+ * via the listener table, are marshalled onto the Qt main thread, and drive the
+ * models with identical observable behavior to the old local ACP client.
  */
 class Manager : public QObject
 {
@@ -81,6 +75,7 @@ public:
     void setUseTls(bool v);
     void setAutoConnectEnabled(bool v);
     void setWorkingDir(const QString &v);
+    /** The ACP endpoint URL the configured host/port/key map to ("wss://host:port/acp"). */
     QString wsUrl() const;
     QString status() const { return m_status; }
     bool online() const { return m_online; }
@@ -121,22 +116,17 @@ public:
     /** True when the active session lives on a roam peer. */
     Q_INVOKABLE bool onRoamSession() const { return !m_activePeerLabel.isEmpty(); }
     Q_INVOKABLE void setActiveTab(const QString &tab);
-    /** Which client session-scoped ops route to: the active roam peer, else main. */
-    AcpClient *activeClient() const;
     /** Sidebar model for the Roam tab (endpoint headers + sessions). */
     QObject *roamModel() const;
     /**
-     * Probe the configured endpoint on a throwaway socket WITHOUT touching the
-     * live connection: opens the WebSocket (with the secret-key header and
-     * trust-all TLS, exactly like the real wire) and waits for an ACP
-     * initialize reply. Result arrives via the connectionTested signal, so the
-     * Connect dialog can show reachability/auth errors instead of a silent
-     * landing page.
+     * Probe the configured endpoint WITHOUT disturbing the live chat: drives a
+     * real connect through the core and reports the resulting reachability +
+     * secret-key auth + ACP handshake via the connectionTested signal.
      */
     Q_INVOKABLE void testConnection();
     /** Send a message. `files` is a list of LOCAL file paths; they are read, base64-encoded,
      *  and attached as content blocks (images as image blocks, everything else as embedded
-     *  resources). While a turn runs the message queues or steers (see dispatchSend). */
+     *  resources). The Prompt is built here (pure UI) and handed to grouse_send_prompt. */
     Q_INVOKABLE void sendPrompt(const QString &text, const QVariantList &files = QVariantList());
     /** Open the native KDE file picker (any file type, multi-select) and return chosen paths. */
     Q_INVOKABLE QStringList pickAttachmentFiles();
@@ -200,6 +190,43 @@ public:
     QVariant supportedModels() const { return m_supportedModels; }
     QVariant skills() const { return m_skills; }
 
+    // ---- CoreBridge event entry points ---------------------------------------
+    // Invoked (on the main thread) by the CoreBridge listener table. They are
+    // the ONLY route from the wire into the Manager/models.
+    void coreOnStatus(const QString &json);
+    void coreOnSessions(const QString &json);
+    void coreOnTranscript(const QString &json);
+    void coreOnStream(const QString &json);
+    void coreOnConfig(const QString &json);
+    void coreOnPermission(const QString &json);
+    void coreOnSessionTouched(const QString &sid, const QString &title, const QString &u);
+    void coreOnProjects(const QString &json);
+    void coreOnRoamPeerStatus(const QString &label, const QString &status);
+    void coreOnRoamSessions(const QString &label, const QString &json);
+    void coreOnPeerNewSession(const QString &label, const QString &sid);
+    void coreOnActiveRun(const QString &sid, const QString &runId);
+    void coreOnCommands(const QString &json);
+    void coreOnExport(const QString &data);
+    void coreOnRecipeParams(const QString &parameters);
+    void coreOnElicitation(const QString &schema);
+    void coreOnCompactionStatus(const QString &message);
+    void coreOnMessageUsage(std::uint64_t outTok, std::uint64_t elapsedMs,
+                            std::uint64_t ttftMs, double cost);
+    void coreOnAppResource(const QString &key, const QString &html);
+    void coreOnRecipes(const QString &json);
+    void coreOnSchedules(const QString &json);
+    void coreOnUnstableProjects(const QString &json);
+    void coreOnSkills(const QString &json);
+    void coreOnTools(const QString &sid, const QString &json);
+    void coreOnExtensions(const QString &json);
+    void coreOnSessionExtensions(const QString &sid, const QString &json);
+    void coreOnConfigValue(const QString &key, const QString &value);
+    void coreOnSupportedModels(const QString &provider, const QString &json);
+    void coreOnProviders(const QString &json);
+    void coreOnSessionProbe(const QString &sid, const QString &u, qint64 n);
+    void coreOnToolResult(const QString &text, int isError);
+    void coreOnError(const QString &method, const QString &message);
+
 signals:
     void settingsChanged();
     void statusChanged();
@@ -230,37 +257,59 @@ signals:
 private:
     void setStatus(const QString &s);
     void setOnline(bool o);
-    void ensureClient();
-    void wireClient(AcpClient *client, int peerIndex, const QString &peerLabel = QString());
-    void onSessionTouched(AcpClient *owner, const QString &sessionId, const QString &title,
-                          const QString &updatedAt);
-    void onSessionProbe(const QString &sessionId, const QString &updatedAt, int messageCount);
-    void onTouchDebounced();
-    void probeAndMaybeResync(const QString &sessionId);
-    void resyncCurrentSession();
-    void resumeSession(const QString &sessionId, const QString &cwd);
+    void onSessionTouched(const QString &sid, const QString &title, const QString &updatedAt);
     void appendChunk(const QString &role, const QString &text, const QString &messageId, bool thought);
     void finalizeCurrentMessage();
-    /** Backfill rendered Markdown for replayed or legacy cached text rows. */
-    void renderMarkdownRows();
-    /** Coalesce messagesChanged emissions while a turn streams (see m_updateTimer). */
-    void requestMessagesUpdate();
-    QString cacheFilePath(const QString &sessionId) const;
-    bool loadCache(const QString &sessionId);
-    void saveCache(const QString &sessionId);
-    QString toolCacheFilePath(const QString &sessionId) const;
-    bool loadToolCache(const QString &sessionId);
-    void saveToolCache(const QString &sessionId) const;
+    void onAgentChunk(const QString &text, const QString &messageId);
+    void onUserChunk(const QString &text, const QString &messageId);
+    void onThoughtChunk(const QString &text);
+    void onToolCall(const QString &title, const QString &detail, const QString &toolCallId);
+    void onToolCallUpdate(const QString &toolCallId, const QString &status,
+                          const QString &output, bool live);
+    void onChartToolCall(const QString &title, const QString &toolCallId, const QString &chartSpec);
+    void onMcpAppToolCall(const QString &title, const QString &toolCallId, const QString &appKey,
+                          const QString &appUri, const QString &appExt, const QString &appInput);
+    void onAppResource(const QString &appKey, const QString &html);
+    void onReady(const QString &sessionId);
+    void onSessions(const QVariantList &sessions);
+    void onProjects(const QVariantList &projects);
+    void onRecipes(const QVariantList &recipes);
+    void onSchedules(const QVariantList &schedules);
+    void onConfig(const QVariantList &config);
+    void onTools(const QVariantList &tools);
+    void onExtensions(const QVariantList &extensions);
+    void onSessionExtensions(const QStringList &names);
+    void onPermission(const QString &toolCallId, const QString &title,
+                      const QString &detail, const QVariantList &options);
+    void onError(const QString &text, bool background);
+    void onSkills(const QVariantList &skills);
+    void onServerConfigValue(const QString &key, const QString &value);
+    void onSupportedModels(const QString &providerId, const QStringList &models);
+    void onExportResult(const QString &data);
+    void onCompactionStatus(const QString &message);
+    void onMessageUsage(const QVariantMap &usage);
+    void onCommands(const QStringList &commands);
+    void onModeChanged(const QString &modeId);
+    void onActiveRunChanged(const QString &sessionId, const QString &runId);
+    void onUsage(int used, int size, double cost, const QString &currency);
+    QString formatUsage(const QVariantMap &usage) const;
 
     // queued-send / steering
     struct PendingSend { QString text; QVariantList images; };
-    void dispatchSend(const QString &text, const QVariantList &images);
+    void dispatchSend(const QString &text, const QVariantList &blocks);
     void enqueue(const PendingSend &p);
     void flushQueue();
-    void maybeReconnect();
     /** Turn local file paths into ACP prompt content blocks (image vs embedded resource). */
     QVariantList buildAttachmentBlocks(const QVariantList &paths);
-    QString formatUsage(const QVariantMap &usage) const;
+    /** Coalesce messagesChanged emissions while a turn streams (see m_updateTimer). */
+    void requestMessagesUpdate();
+    QString activeSessionId() const;
+    /** Build the ServerConfig JSON `grouse_connect` consumes (consumes m_pendingRecipeId). */
+    QString serverConfigJson();
+    /** Build the serde Prompt JSON `grouse_send_prompt` consumes from text + ACP blocks. */
+    QString promptJson(const QString &text, const QVariantList &blocks) const;
+    /** Persist tool/extension catalog state for a session (best-effort UI mirror). */
+    void saveToolCache(const QString &sessionId) const;
 
     // streaming bubble tracker
     QString m_streamRole;
@@ -268,27 +317,15 @@ private:
     int m_currentIndex = -1;
 
     QSettings m_store;
-    AcpClient *m_client = nullptr;
-    QList<RoamPeer> m_roamPeers;
-    QString m_activePeerLabel;      // empty = main client owns the active session
+    CoreBridge *m_bridge = nullptr;
+    QString m_activePeerLabel;      // empty = main connection owns the active session
     RoamListModel *m_roamModel = nullptr;
-    // Remote-change resync: session_info_update touches debounce into a probe;
-    // a moved probe replays the active session, then re-probes a few times to
-    // catch a turn that is still streaming on the prompting client.
-    QTimer *m_touchDebounce = nullptr;
-    QString m_lastTouchedSid;
-    AcpClient *m_lastTouchedClient = nullptr;
-    QString m_syncStamp;            // last synced session (updatedAt, messageCount)
-    int m_syncCount = -1;
-    int m_resyncTicks = 0;          // follow-up probes left in the current cycle
     SessionListModel *m_sessionsModel = nullptr;
     MessageListModel *m_messageModel = nullptr;
 
-    // Throwaway probe used by testConnection(); never touches the live client.
-    QWebSocket *m_testWs = nullptr;
-    QTimer *m_testTimer = nullptr;
-    bool m_testFinished = false;
-    void finishTest(bool ok, const QString &message);
+    // testConnection state (core-driven; never touches the live chat's models)
+    bool m_testPending = false;
+    QString m_testSid;
 
     QString m_status = QStringLiteral("not connected");
     bool m_online = false;
@@ -298,11 +335,15 @@ private:
     QVariantList m_projects;
     QVariantList m_recipes;
     QVariantList m_schedules;
-    bool m_recipeRefreshPending = false;
     QVariantList m_config;    /// Tool names active in the current session (`extension__tool`, per-conversation).
     QStringList m_tools;
     /// projectId to file the next freshly-created session into (newChatInProject).
     QString m_pendingProjectFiling;
+    /// Recipe id for the next fresh session (runRecipe); consumed by newChat().
+    QString m_pendingRecipeId;
+    /// Monotonic id counter for locally-created bubbles (the core supplies its
+    /// own ids for committed transcript rows; these are for UI-only rows).
+    int m_seq = 0;
     /// Name of the extension whose full tool catalog is currently being discovered.
     QString m_discoveringExt;
 
@@ -331,23 +372,8 @@ private:
     bool m_landing = true;
     /// cwd of the freshly-opened chat, remembered so auto-connect can resume it.
     QString m_lastCwd;
-    /// While true, streamed replay chunks are ignored (we already hold a fresh
-    /// cached transcript and don't want to rebuild/scroll from a full replay).
-    bool m_suppressReplay = false;
-    /// Build a first-time session/load transcript without refreshing the ListView
-    /// for every streamed chunk; publish once when sessionReady arrives.
-    bool m_deferMessageUpdates = false;
-    /// sessionId -> updatedAt as last seen in session/list, used to validate the cache.
-    QHash<QString, QString> m_sessionUpdatedAt;
-    QString m_cachedUpdatedAt;
-    quint64 m_seq = 0;
-    /// Debounces messagesChanged while chunks stream: each chunk used to republish
-    /// the whole QVariantList, forcing a full ListView reset per token. Now the
-    /// signal fires at most every 50ms so the UI relayouts at a bounded rate.
+    /// Coalesces messagesChanged while chunks stream (see requestMessagesUpdate).
     QTimer *m_updateTimer = nullptr;
-    /// Set when the transcript changed since the last cache write; gates saveCache
-    /// so session/list replies don't re-serialize an unchanged transcript.
-    bool m_cacheDirty = false;
 
     // chat parity state
     QList<PendingSend> m_pendingQueue;      // sends that must wait for the current turn / a session
@@ -358,46 +384,10 @@ private:
     QVariantMap m_serverConfig;             // global config.yaml values (providers)
     QVariantList m_supportedModels;
     QVariantList m_skills;
-    QString m_pendingExportPath;            // where to write the next session/export reply    // reconnect
-    QTimer *m_reconnectTimer = nullptr;
-    int m_reconnectAttempts = 0;
-    bool m_userDisconnect = false;          // explicit disconnect() — never auto-reconnect
+    QString m_pendingExportPath;            // where to write the next session/export reply
 
     // pending permission request
     QString m_permToolCallId;
     QString m_permTitle;
     QVariantList m_permOptions;
-
-private slots:
-    void onAgentChunk(const QString &text, const QString &messageId);
-    void onUserChunk(const QString &text, const QString &messageId);
-    void onThoughtChunk(const QString &text);
-    void onToolCall(const QString &title, const QString &detail, const QString &toolCallId);
-    void onToolCallUpdate(const QString &toolCallId, const QString &status, const QString &output, bool live);
-    void onChartToolCall(const QString &title, const QString &toolCallId, const QString &chartSpec);
-    void onMcpAppToolCall(const QString &title, const QString &toolCallId, const QString &appKey,
-                          const QString &appUri, const QString &appExt, const QString &appInput);
-    void onAppResource(const QString &appKey, const QString &html);
-    void onReady(const QString &sessionId);
-    void onSessions(const QVariantList &sessions);
-    void onProjects(const QVariantList &projects);
-    void onRecipes(const QVariantList &recipes);
-    void onSchedules(const QVariantList &schedules);
-    void onConfig(const QVariantList &config);
-    void onTools(const QVariantList &tools);
-    void onExtensions(const QVariantList &extensions);
-    void onSessionExtensions(const QStringList &names);
-    void onPermission(const QString &toolCallId, const QString &title,
-                      const QString &detail, const QVariantList &options);
-    void onError(const QString &text, bool background);
-    void onSkills(const QVariantList &skills);
-    void onServerConfigValue(const QString &key, const QString &value);
-    void onSupportedModels(const QString &providerId, const QStringList &models);
-    void onExportResult(const QString &data);
-    void onCompactionStatus(const QString &message);
-    void onMessageUsage(const QVariantMap &usage);
-    void onCommands(const QStringList &commands);
-    void onModeChanged(const QString &modeId);
-    void onActiveRunChanged(const QString &sessionId, const QString &runId);
-    void onUsage(int used, int size, double cost, const QString &currency);
 };

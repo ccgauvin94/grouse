@@ -32,16 +32,16 @@ echo "== Building KRunner plugin =="
 mkdir -p krunner-prebuild
 cp build-krunner-host/krunner/kf6/krunner/grouserunner.so krunner-prebuild/grouserunner.so
 
-# Stage the roam transport: the native iroh library RoamTransport dlopens,
-# bundled into /app/lib (the flatpak SDK has no Rust toolchain). It is a member
-# of this repo's cargo workspace now — this used to clone grouse-roam-core from
-# GitHub and check out a pinned SHA that lived on no branch.
-echo "== Building grouse-roam-core =="
+# Stage the core: the whole thin-client engine the app dlopens (transport,
+# session state machine, and roam all live in libgrouse_core.so), bundled into
+# /app/lib (the flatpak SDK has no Rust toolchain). It is a member of this
+# repo's cargo workspace, so we build the in-tree crate.
+echo "== Building grouse-core =="
 CORE_MANIFEST="../../core/Cargo.toml"
 distrobox enter kde-build -- bash -lc \
-    "cd '$PWD' && cargo build --release --manifest-path '${CORE_MANIFEST}' -p grouse-roam-core"
-mkdir -p roam-prebuild
-cp ../../core/target/release/libgrouse_roam_core.so roam-prebuild/
+    "cd '$PWD' && cargo build --release --manifest-path '${CORE_MANIFEST}' -p grouse-core"
+mkdir -p grouse-core-prebuild
+cp ../../core/target/release/libgrouse_core.so grouse-core-prebuild/
 
 echo "== Building $APP_ID =="
 flatpak-builder \

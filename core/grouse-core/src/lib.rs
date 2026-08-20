@@ -34,6 +34,7 @@ use crate::transcript::TranscriptStore;
 uniffi::setup_scaffolding!();
 
 pub mod cache;
+pub mod capi;
 pub mod roam;
 pub mod spine;
 pub mod transcript;
@@ -48,7 +49,7 @@ pub use unstable::GrouseUnstable;
 // ---------------------------------------------------------------------------
 
 /// Connection and configuration for a goosed ACP server (CONTRACT §2).
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ServerConfig {
     /// Hostname or IP, no scheme.
     pub host: String,
@@ -75,7 +76,7 @@ pub struct ServerConfig {
 }
 
 /// Connection lifecycle (CONTRACT §3.3).
-#[derive(uniffi::Enum, Clone, Debug, PartialEq, Default)]
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ConnectionStatus {
     #[default]
     Disconnected,
@@ -86,7 +87,7 @@ pub enum ConnectionStatus {
 }
 
 /// A session list entry (CONTRACT §3.2/§3.3).
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SessionSummary {
     pub id: String,
     pub title: String,
@@ -113,7 +114,7 @@ pub struct SessionSummary {
 }
 
 /// One accumulated transcript bubble (CONTRACT §3.3/§4.3).
-#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+#[derive(uniffi::Record, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     /// Bubble key (`message_id`); empty for live bubbles without an id.
     pub id: String,
@@ -130,7 +131,7 @@ pub struct Message {
 }
 
 /// Transcript mutation carried by `CoreListener::on_transcript` (CONTRACT §3.2).
-#[derive(uniffi::Enum, Clone, Debug)]
+#[derive(uniffi::Enum, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum TranscriptEvent {
     Append { message: Message },
     Update { message: Message },
@@ -138,7 +139,7 @@ pub enum TranscriptEvent {
 }
 
 /// The flat stream event `CoreListener::on_stream` carries (CONTRACT §3.4).
-#[derive(uniffi::Enum, Clone, Debug)]
+#[derive(uniffi::Enum, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum StreamEvent {
     AgentChunk { text: String, message_id: String },
     UserChunk { text: String, message_id: String },
@@ -150,7 +151,7 @@ pub enum StreamEvent {
 }
 
 /// Collapses the desktop's toolgroup/chart/mcpapp split (CONTRACT §3.4).
-#[derive(uniffi::Enum, Clone, Debug)]
+#[derive(uniffi::Enum, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ToolCallKind {
     Plain,
     Chart { spec: String },
@@ -158,7 +159,7 @@ pub enum ToolCallKind {
 }
 
 /// A config entry (`provider` | `model` | `mode` | `thinking_effort`).
-#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+#[derive(uniffi::Record, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConfigOption {
     pub id: String,
     pub value: String,
@@ -171,14 +172,14 @@ pub struct ConfigOption {
 }
 
 /// One selectable config choice ({value, name} from the raw reply).
-#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+#[derive(uniffi::Record, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConfigChoice {
     pub value: String,
     pub name: String,
 }
 
 /// One permission option (CONTRACT §5 / inventory §3).
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PermissionOption {
     pub option_id: String,
     pub name: String,
@@ -186,7 +187,7 @@ pub struct PermissionOption {
 }
 
 /// A server permission request surfaced to the UI (CONTRACT §3.2/§5).
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PermissionRequest {
     pub tool_call_id: String,
     pub title: String,
@@ -195,14 +196,14 @@ pub struct PermissionRequest {
 }
 
 /// The UI's answer to a permission request (CONTRACT §5).
-#[derive(uniffi::Enum, Clone, Debug)]
+#[derive(uniffi::Enum, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PermissionOutcome {
     Selected { option_id: String },
     Cancelled,
 }
 
 /// A project/skill summary from `sources/list` (CONTRACT §5).
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ProjectSummary {
     pub path: String,
     pub name: String,
@@ -210,13 +211,13 @@ pub struct ProjectSummary {
 }
 
 /// A prompt to send (CONTRACT §3.1). One or more content blocks.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Prompt {
     pub blocks: Vec<PromptBlock>,
 }
 
 /// A prompt content block: text / image / resource (CONTRACT §3.4).
-#[derive(uniffi::Enum, Clone, Debug)]
+#[derive(uniffi::Enum, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PromptBlock {
     Text { text: String },
     /// `data` is base64; `mime_type` e.g. `image/png`.
@@ -229,7 +230,7 @@ pub enum PromptBlock {
 ///
 /// A mismatch means the UI is showing a different chat than the socket is bound
 /// to; the core rejects the send instead of mis-routing it.
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SendExpect {
     pub session_id: String,
 }

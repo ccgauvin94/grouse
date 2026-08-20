@@ -11,7 +11,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Quick Qml QuickControls2 WebSockets Widgets DBus)
+find_package(Qt6 REQUIRED COMPONENTS Quick Qml QuickControls2 Widgets DBus)
 find_package(ECM REQUIRED NO_MODULE)
 set(CMAKE_MODULE_PATH ${ECM_MODULE_PATH})
 find_package(KF6 REQUIRED COMPONENTS Kirigami CoreAddons)
@@ -23,18 +23,10 @@ qt_add_executable(grouse-desktop
     src/main.cpp
     src/dbusadapter.h
     src/dbusadapter.cpp
-    src/acptransport.h
-    src/acptransport.cpp
-    src/websockettransport.h
-    src/websockettransport.cpp
-    src/roamframecodec.h
-    src/roamframecodec.cpp
-    src/roamtransport.h
-    src/roamtransport.cpp
+    src/corebridge.h
+    src/corebridge.cpp
     src/roamlistmodel.h
     src/roamlistmodel.cpp
-    src/acpclient.h
-    src/acpclient.cpp
     src/manager.h
     src/manager.cpp
     src/messagelistmodel.h
@@ -51,7 +43,6 @@ target_link_libraries(grouse-desktop PRIVATE
     Qt6::Quick
     Qt6::Qml
     Qt6::QuickControls2
-    Qt6::WebSockets
     Qt6::Widgets
     Qt6::DBus
     KF6::Kirigami
@@ -63,6 +54,7 @@ qt_add_resources(grouse-desktop "app"
     BASE "${CMAKE_CURRENT_SOURCE_DIR}/ui"
     FILES
         ui/main.qml
+        ui/GrouseTheme.qml
         ui/ChatPage.qml
         ui/ChartBubble.qml
         ui/ConnectDialog.qml
