@@ -34,8 +34,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.*
@@ -150,8 +151,7 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
 }
 
 @Composable
-private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked: Boolean) {    // Ask for notification permission so backgrounded turns can alert (API 33+). Gated on
-    // unlocked so the dialog doesn't compete with the biometric prompt at cold start.
+private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked: Boolean) {    // Ask for notification permission so backgrounded turns can alert (API 33+). Gated on    // unlocked so the dialog doesn't compete with the biometric prompt at cold start.
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         val notifPerm = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission()) {}
@@ -210,16 +210,24 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                 LaunchedEffect(drawerState.isOpen) { if (drawerState.isOpen) cm.refreshSidebar() }
                 Column(Modifier.fillMaxHeight().padding(vertical = 12.dp)) {
                     // Main | Roam — the chats world vs. peer management. Roam replaces the old
-                    // standalone RoamScreen route entirely.
+                    // standalone RoamScreen route entirely. Native Material 3 segmented control.
                     var drawerTab by rememberSaveable { mutableStateOf("main") }
-                    TabRow(selectedTabIndex = if (drawerTab == "roam") 1 else 0,
-                        modifier = Modifier.padding(horizontal = 12.dp)) {
-                        Tab(selected = drawerTab == "main",
+                    SingleChoiceSegmentedButtonRow(
+                        modifier = Modifier.fillMaxWidth()
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 8.dp)) {
+                        SegmentedButton(
+                            selected = drawerTab == "main",
                             onClick = { drawerTab = "main" },
-                            text = { Text("Main") })
-                        Tab(selected = drawerTab == "roam",
+                            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Main") }
+                        SegmentedButton(
+                            selected = drawerTab == "roam",
                             onClick = { drawerTab = "roam" },
-                            text = { Text("Roam") })
+                            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Roam") }
                     }
                     if (drawerTab == "main") {
                         if (cm.assistantEnabled.value) {
@@ -300,6 +308,10 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
             }
             composable("settings") { SettingsScreen(cm, nav, onOpenDrawer = ::openDrawer) }
             composable("roam_add") { RoamAddConnectionScreen(cm, nav) }
+            composable("roam_endpoint/{label}") { back ->
+                val label = Uri.decode(back.arguments?.getString("label") ?: "")
+                RoamEndpointScreen(cm, nav, label)
+            }
             composable("qrscan") {
                 QrScanScreen(
                     onResult = { card ->

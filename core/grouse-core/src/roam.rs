@@ -1265,9 +1265,17 @@ impl RoamPeer {
             // transcript and swallowed thinking blocks).
             let msg = target.last_mut().filter(|m| m.role == role && m.id.is_empty());
             match msg {
-                // Live chunks append unconditionally (serve parity). Only a
-                // replay (load re-delivering promoted/cached content) dedupes.
-                Some(m) if !replaying || !m.content.contains(text) => {
+                // Live chunks normally append unconditionally (serve parity).
+                // But when a live stream stalls and the server re-delivers the
+                // already-shown tail from its checkpoint, appending it again
+                // restarts the paragraph ("stops mid-paragraph, starts over
+                // beneath it"). Skip that by treating a full-suffix re-delivery
+                // as already-on-screen — it only fires for an EXACT tail match,
+                // never for a legitimate mid-paragraph repeat.
+                Some(m)
+                    if (replaying && m.content.contains(text))
+                        || (!replaying && m.content.ends_with(text) && m.content != text) => None,
+                Some(m) => {
                     m.content.push_str(text);
                     Some(TranscriptEvent::Update {
                         message: Message {

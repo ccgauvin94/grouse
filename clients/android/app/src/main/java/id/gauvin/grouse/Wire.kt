@@ -39,6 +39,15 @@ internal fun SessionSummary.toInfo(): SessionInfo = SessionInfo(
     archived = archived,
 )
 
+/** RFC3339/ISO8601 `updatedAt` -> epoch millis for chronological sorting. The server's
+ *  timestamps can vary in shape (fractional seconds, offsets, Z), so string comparison is
+ *  unreliable (recent sessions would mis-sort). Parse when possible; fall back to 0. */
+private fun chronoEpoch(ts: String): Long =
+    try { java.time.OffsetDateTime.parse(ts).toInstant().toEpochMilli() }
+    catch (_: Exception) { try { java.time.Instant.parse(ts).toEpochMilli() } catch (_: Exception) { 0L } }
+
+internal fun SessionInfo.updatedEpoch(): Long = chronoEpoch(updatedAt)
+
 internal fun CoreConfigOption.toApp(): ConfigOption = ConfigOption(
     id = id,
     name = name,

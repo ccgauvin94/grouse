@@ -224,32 +224,55 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
                 val inProject = byProjectId[proj.id].orEmpty()
                 val open = proj.id in expanded
                 item(key = "project:" + proj.id) {
-                    // Name -> the project page; the chevron alone toggles the inline dropdown.
-                    Row(Modifier.fillMaxWidth().padding(start = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Row(Modifier.weight(1f).clickable { onOpenProject(p) }.padding(vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Folder, contentDescription = null,
-                                modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
-                            Spacer(Modifier.width(10.dp))
-                            Text(p, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f),
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (inProject.isNotEmpty()) Text("${inProject.size}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.outline)
-                        }
-                        IconButton(onClick = { expanded = if (open) expanded - proj.id else expanded + proj.id }) {
-                            Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                                contentDescription = if (open) "collapse" else "expand",
-                                tint = MaterialTheme.colorScheme.outline)
+                    // Project card: Folder icon + name + session count + new-chat button.
+                    // Click ANYWHERE toggles the inline session list; LONG-PRESS opens
+                    // the project page (options: rename/description/instructions/delete).
+                    // No chevron — expansion is driven by tapping the card itself.
+                    Card(
+                        modifier = Modifier.fillMaxWidth()
+                            .padding(start = 10.dp, end = 10.dp, bottom = 6.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                .copy(alpha = 0.5f))
+                    ) {
+                        Column {
+                            Row(Modifier.fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .combinedClickable(
+                                    onClick = { expanded = if (open) expanded - proj.id else expanded + proj.id },
+                                    onLongClick = { onOpenProject(p) })
+                                .padding(start = 14.dp, end = 4.dp).padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.Folder, contentDescription = null,
+                                    modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                                Spacer(Modifier.width(10.dp))
+                                Text(p, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f),
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (inProject.isNotEmpty()) Text("${inProject.size}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.outline)
+                                // New chat filed under this project, like roam's Add on the card.
+                                Box(Modifier.size(24.dp).clickable {
+                                    cm.newChatInProject(proj.id); onOpen()
+                                }, contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Filled.Add,
+                                        contentDescription = "new chat in $p",
+                                        tint = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                            // Sessions live INSIDE the expanded card, like the roam
+                            // endpoint cards. Divider under the header, then each chat.
+                            if (open && inProject.isNotEmpty()) {
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant,
+                                    modifier = Modifier.padding(horizontal = 10.dp))
+                                inProject.forEach { s ->
+                                    ProjectSessionRow(s, onOpen = { cm.openSession(s.sessionId); onOpen() },
+                                        onLongPress = { actionsFor = s })
+                                }
+                            }
                         }
                     }
-                }
-                if (open) {
-                    item(key = "project:" + proj.id + ":new") {
-                        addRow("New chat", indent = true) { cm.newChatInProject(proj.id); onOpen() }
-                    }
-                    items(inProject, key = { "s:" + it.sessionId }) { s -> sessionRow(s, indent = true) }
                 }
             }
             item { addRow("New project", indent = false) { showNewProject = true } }
@@ -270,6 +293,35 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
                     modifier = Modifier.padding(start = 10.dp, top = 16.dp, bottom = 2.dp))
             }
             items(archivedChats, key = { "a:" + it.sessionId }) { s -> sessionRow(s, indent = false) }
+        }
+    }
+}
+
+/** Indented session row used inside an expanded project card (a plain Column, so it
+ *  cannot reuse the LazyColumn-scoped `sessionRow`). Tap opens the chat; long-press
+ *  opens the session actions dialog. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ProjectSessionRow(s: SessionInfo, onOpen: () -> Unit, onLongPress: () -> Unit) {
+    Row(Modifier.fillMaxWidth()
+        .combinedClickable(onClick = onOpen, onLongClick = onLongPress)
+        .padding(start = 30.dp, end = 12.dp).padding(vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (s.snippet.isNotBlank())
+                Text(s.snippet, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            else Text(listOf("${s.messageCount} msgs", relativeTime(s.updatedAt))
+                .filter { it.isNotBlank() }.joinToString("  ·  "),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline, maxLines = 1)
+        }
+        if (s.hasNew) {
+            Spacer(Modifier.width(10.dp))
+            Box(Modifier.size(10.dp).background(MaterialTheme.statusColors.online, CircleShape))
         }
     }
 }

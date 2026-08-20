@@ -106,9 +106,15 @@ import kotlinx.serialization.json.contentOrNull
 
 /** Browse view (DEFAULT): saved endpoints as collapsible groups like projects, each
  *  listing its sessions. Live status shown inline; only ready peers carry sessions. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
     var expanded by rememberSaveable { mutableStateOf(listOf<String>()) }
+    var roamActionsFor by remember { mutableStateOf<SessionInfo?>(null) }
+    // Long-press actions dialog for roam sessions = the same as main chats.
+    roamActionsFor?.let { s ->
+        SessionActionsDialog(cm, s) { roamActionsFor = null }
+    }
     // Populate the peer list from the persisted store (cards survive restart).
     LaunchedEffect(Unit) { cm.loadRoamPeers() }
     val peers = cm.roamPeers
@@ -147,50 +153,94 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
                 // sessions, and a toggle that expands/collapses the chats below.
                 // Clicking the NAME (not a caret) drops it down / slides it up.
                 // Status is the dot's color — the textual "ready/connecting" label
-                // is gone.
+                // is gone. When expanded, the session rows render INSIDE the card.
                 Card(
                     modifier = Modifier.fillMaxWidth()
-                        .padding(start = 10.dp, end = 10.dp, bottom = 6.dp)
-                        .clickable { expanded = if (open) expanded - peerKey else expanded + peerKey },
+                        .padding(start = 10.dp, end = 10.dp, bottom = 6.dp),
                     shape = RoundedCornerShape(14.dp),
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.surfaceVariant
                             .copy(alpha = 0.5f))
                 ) {
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        // Status dot: online/connecting/error, no text.
-                        Box(Modifier.size(10.dp)
-                            .background(
-                                when {
-                                    ready -> MaterialTheme.statusColors.online
-                                    st?.startsWith("connecting") == true -> MaterialTheme.statusColors.connecting
-                                    st?.startsWith("error") == true -> MaterialTheme.colorScheme.error
-                                    else -> MaterialTheme.colorScheme.outline
-                                },
-                                CircleShape))
-                        Spacer(Modifier.width(10.dp))
-                        Icon(Icons.Filled.Public, contentDescription = null,
-                            modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.width(8.dp))
-                        Text(peer.name, style = MaterialTheme.typography.bodyLarge,
-                            modifier = Modifier.weight(1f),
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (sessions.isNotEmpty()) Text("${sessions.size}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.outline)
-                        // New chat ON this peer (session/new on its connection).
-                        if (ready) {
-                            IconButton(onClick = {
-                                cm.newRoamSession(peer.name)
-                                // Leave the browse slide: the chat opens on the
-                                // peer's on_peer_new_session, and this state change
-                                // (currentSession.next) drives the ChatScreen.
-                                onOpen()
-                            }) {
-                                Icon(Icons.Filled.Add,
-                                    contentDescription = "new chat on ${peer.name}",
-                                    tint = MaterialTheme.colorScheme.primary)
+                    Column {
+                        Row(Modifier.fillMaxWidth()
+                            .combinedClickable(
+                                onClick = { expanded = if (open) expanded - peerKey else expanded + peerKey },
+                                onLongClick = {
+                                    nav.navigate("roam_endpoint/" + Uri.encode(peer.name)) { launchSingleTop = true }
+                                })
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            // Status dot: online/connecting/error, no text.
+                            Box(Modifier.size(10.dp)
+                                .background(
+                                    when {
+                                        ready -> MaterialTheme.statusColors.online
+                                        st?.startsWith("connecting") == true -> MaterialTheme.statusColors.connecting
+                                        st?.startsWith("error") == true -> MaterialTheme.colorScheme.error
+                                        else -> MaterialTheme.colorScheme.outline
+                                    },
+                                    CircleShape))
+                            Spacer(Modifier.width(10.dp))
+                            Icon(Icons.Filled.Public, contentDescription = null,
+                                modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(8.dp))
+                            Text(peer.name, style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (sessions.isNotEmpty()) Text("${sessions.size}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline)
+                            // New chat ON this peer (session/new on its connection).
+                            // Small clickable Add (not IconButton — that forces a 48dp
+                            // min touch target, making the collapsed card tall).
+                            if (ready) {
+                                Box(Modifier.size(24.dp).clickable {
+                                    cm.newRoamSession(peer.name)
+                                    // Leave the browse slide: the chat opens on the
+                                    // peer's on_peer_new_session, and this state change
+                                    // (currentSession.next) drives the ChatScreen.
+                                    onOpen()
+                                }, contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Filled.Add,
+                                        contentDescription = "new chat on ${peer.name}",
+                                        tint = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                        }
+                        // Sessions live INSIDE the expanded card, with a separator
+                        // under the header. Stable per-session keys + deterministic
+                        // sort (updatedAt desc, then id) so a session/load bumping
+                        // updatedAt can't swallow the tap mid-gesture.
+                        if (open && sessions.isNotEmpty()) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant,
+                                modifier = Modifier.padding(horizontal = 14.dp))
+                            sessions.sortedWith(
+                                compareByDescending<SessionInfo> { it.updatedEpoch() }
+                                    .thenBy { it.sessionId }
+                            ).forEach { s ->
+                                Row(Modifier.fillMaxWidth()
+                                    .combinedClickable(
+                                        onClick = { cm.openSession(s.sessionId); onOpen() },
+                                        onLongClick = { roamActionsFor = s })
+                                    .padding(start = 30.dp, end = 12.dp).padding(vertical = 9.dp),
+                                    verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(s.title.ifBlank { "Untitled chat" },
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        if (s.snippet.isNotBlank())
+                                            Text(s.snippet, style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.outline,
+                                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                    // Green dot: backgrounded content arrived for a
+                                    // chat that's not on screen (roam staging).
+                                    if (s.hasNew) {
+                                        Spacer(Modifier.width(10.dp))
+                                        Box(Modifier.size(10.dp).background(MaterialTheme.statusColors.online, CircleShape))
+                                    }
+                                }
                             }
                         }
                     }
@@ -201,39 +251,6 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
                     Text(detail, style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.padding(start = 40.dp, end = 10.dp, bottom = 8.dp))
-                }
-            }
-            if (open && sessions.isNotEmpty()) {
-                // Stable per-session keys + a deterministic tiebreak (updatedAt desc, then id):
-                // a session/load on tap bumps that session's updatedAt, which re-sorts the
-                // list mid-gesture; without a stable key the tapped Row is replaced and the
-                // click's navigation is swallowed (the classic "click twice to open").
-                sessions.sortedWith(
-                    compareByDescending<SessionInfo> { it.updatedAt }
-                        .thenBy { it.sessionId }
-                ).forEach { s ->
-                    item(key = "roam-sess:${s.sessionId}") {
-                        Row(Modifier.fillMaxWidth()
-                            .clickable { cm.openSession(s.sessionId); onOpen() }
-                            .padding(start = 34.dp, end = 8.dp).padding(vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text(s.title.ifBlank { "Untitled chat" },
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                if (s.snippet.isNotBlank())
-                                    Text(s.snippet, style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.outline,
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                            // Green dot: backgrounded content arrived for a
-                            // chat that's not on screen (roam staging).
-                            if (s.hasNew) {
-                                Spacer(Modifier.width(10.dp))
-                                Box(Modifier.size(10.dp).background(MaterialTheme.statusColors.online, CircleShape))
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -374,6 +391,108 @@ fun RoamAddConnectionScreen(cm: ConnectionManager, nav: NavController) {
                 }
             }
             Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+/** Endpoint settings page for a specific roam peer (long-press an endpoint card in the
+ *  drawer Roam tab). Mirrors ProjectScreen: title = endpoint name, a status section, its
+ *  sessions (tap opens, long-press = same actions as main chats), and Disconnect/Remove. */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+fun RoamEndpointScreen(cm: ConnectionManager, nav: NavController, label: String) {
+    var actionsFor by remember { mutableStateOf<SessionInfo?>(null) }
+    var confirmRemove by remember { mutableStateOf(false) }
+    actionsFor?.let { s -> SessionActionsDialog(cm, s) { actionsFor = null } }
+    if (confirmRemove) AlertDialog(
+        onDismissRequest = { confirmRemove = false },
+        title = { Text("Remove endpoint?") },
+        text = { Text("This removes the saved connection card for '$label'. The host keeps "
+            + "running; you can re-add it anytime.") },
+        confirmButton = {
+            TextButton(onClick = { cm.removeRoamPeer(label); nav.popBackStack() }) {
+                Text(stringResource(R.string.delete))
+            }
+        },
+        dismissButton = { TextButton(onClick = { confirmRemove = false }) { Text(stringResource(R.string.cancel)) } },
+    )
+    val st = cm.roamStatus[label]
+    val ready = st == "ready"
+    val statusColor = when {
+        ready -> MaterialTheme.statusColors.online
+        st?.startsWith("connecting") == true -> MaterialTheme.statusColors.connecting
+        st?.startsWith("error") == true -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.outline
+    }
+    val sessions = cm.sessions.value
+        .filter { ConnectionManager.roamPeer(it.sessionId) == label }
+
+    Scaffold(topBar = {
+        TopAppBar(
+            title = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            navigationIcon = {
+                IconButton(onClick = { nav.popBackStack() }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
+                }
+            }
+        )
+    }) { pad ->
+        LazyColumn(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
+            item {
+                SettingsSection("Endpoint") {
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                        Box(Modifier.size(10.dp).background(statusColor, CircleShape))
+                        Spacer(Modifier.width(8.dp))
+                        Text(ConnectionManager.roamStatusShort(st),
+                            style = MaterialTheme.typography.bodyMedium, color = statusColor)
+                        Spacer(Modifier.weight(1f))
+                        if (ready) {
+                            TextButton(onClick = { cm.disconnectRoam(label) }) { Text(stringResource(R.string.disconnect)) }
+                        } else {
+                            Button(onClick = { cm.connectRoam(label) }) { Text(stringResource(R.string.connect)) }
+                        }
+                        IconButton(onClick = { confirmRemove = true }) {
+                            Icon(Icons.Filled.Delete, contentDescription = "remove $label")
+                        }
+                    }
+                }
+            }
+            item {
+                Text(stringResource(R.string.chats), style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = 6.dp, top = 12.dp, bottom = 4.dp))
+            }
+            if (sessions.isEmpty()) {
+                item { SettingCaption("No chats on this endpoint yet.") }
+            } else {
+                sessions.sortedWith(
+                    compareByDescending<SessionInfo> { it.updatedEpoch() }.thenBy { it.sessionId }
+                ).forEach { s ->
+                    item(key = "peersess:${s.sessionId}") {
+                        Row(Modifier.fillMaxWidth()
+                            .combinedClickable(
+                                onClick = { cm.openSession(s.sessionId); nav.navigate("chat") { launchSingleTop = true } },
+                                onLongClick = { actionsFor = s })
+                            .padding(vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(s.title.ifBlank { "Untitled chat" },
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (s.snippet.isNotBlank())
+                                    Text(s.snippet, style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.outline,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            if (s.hasNew) {
+                                Spacer(Modifier.width(10.dp))
+                                Box(Modifier.size(10.dp).background(MaterialTheme.statusColors.online, CircleShape))
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
