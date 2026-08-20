@@ -1658,9 +1658,26 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun onCoreActiveRun(sessionId: String, runId: String) {
         // Steer only targets the session on screen; a peer's or background
-        // session's run is irrelevant here. Empty runId = the run ended.
-        if (sessionId == currentSession.value) {
-            activeRunId = runId.ifEmpty { null }
+        // session's non-empty run id is irrelevant here. BUT an EMPTY run id
+        // (the run ended) must always clear the key: if we only cleared it for
+        // the on-screen session, a roam turn that finished while its session was
+        // NOT on screen would leave a stale dead run id behind — the next send
+        // anywhere would try to steer it ("no turn found to steer") and the
+        // busy/turnInFlight state would stay stuck until Stop.
+        if (runId.isEmpty()) {
+            activeRunId = null
+            // A cleared run id is also a turn-end fallback: hosts (e.g. a roam
+            // peer running go/opencode) may not emit a RunEnded stream event,
+            // which would otherwise leave busy/turnInFlight wedged so the user
+            // has to hit Stop. Only clear the busy state if we're actually mid
+            // turn — if we're already idle, a peer's background turn ending
+            // must not spuriously clear unrelated state.
+            if (turnInFlight or busy.value) {
+                turnInFlight = false
+                busy.value = false
+            }
+        } else if (sessionId == currentSession.value) {
+            activeRunId = runId
         }
     }
 
