@@ -80,6 +80,19 @@ class ConnectionManager private constructor(context: Context) {
     // True between sendPrompt and RunEnded. `busy` is UI state and is also set while merely
     // queued, so it cannot answer "is the wire busy" -- this can.
     private var turnInFlight = false
+    // Which session owns the in-flight turn. A run belongs to ONE session/connection;
+    // a global gate here let a different session's send steer into a dead run (no RunEnded
+    // on its own connection) and wedge the whole app. Keep the owner so we only steer/block
+    // the session that actually holds the turn.
+    @Volatile private var turnInFlightSession: String? = null
+
+    /** A turn belongs to the session that started it. Moving to another session must not
+     *  steer into or block on the old one — clear the stale routing so the next send in the
+     *  new session starts its own run. Call on every session switch (open/new/peer-created). */
+    private fun resetTurnRouting() {
+        activeRunId = null
+        turnInFlightSession = null
+    }
 
 
     // --- grouse-core (the wire is the core's; these are the only handles we hold) ----------
@@ -657,6 +670,16 @@ class ConnectionManager private constructor(context: Context) {
         core.roamNewSession(name)
     }
 
+    /** Start a fresh chat on a roam peer in a caller-chosen working dir. goose
+     *  natively honors the cwd on session/new (a `serve --roam` host defaults
+     *  to $HOME otherwise); blank falls back to the config cwd. */
+    fun newRoamSessionIn(name: String, cwd: String) {
+        core.roamNewSessionIn(name, cwd)
+    }
+
+    /** The configured global working dir (prefills a roam cwd prompt). */
+    fun workingDir(): String = store.workingDir
+
     /** Make the core's roam dial present THE identity the host accepted.
      *
      *  The core keeps its own `roam_identity` file ({cacheDir}/roam_identity) and generates a
@@ -829,6 +852,10 @@ class ConnectionManager private constructor(context: Context) {
         // session and that choice wins.
         pendingOpenAssistant = false
         pendingAssistantRename = false
+        // A turn belongs to the session that started it. Switching chats — roaming bypasses
+        // `open` entirely — must clear stale run routing: a dead run id left behind would make
+        // the next send steer into nothing and wedge the app.
+        resetTurnRouting()
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
         // Clearing the dot: opening the session consumes its staged content.
         sessions.value = sessions.value.map { if (it.sessionId == sessionId) it.copy(hasNew = false) else it }
@@ -1115,29 +1142,38 @@ class ConnectionManager private constructor(context: Context) {
         // bound session — a send in that window used to ERROR ("not ready — no session")
         // instead of queueing, which was the visible "app must reconnect" failure. Queue;
         // the Ready handler flushes.
-        if (live && core.ready() && !turnInFlight) {
-            turnInFlight = true
-            lastSessionId?.let { store.pendingPushSessionId = it }
-            sendPromptBlocks(text, images, files, expect = currentSession.value)
-        } else if (live) {
-            // A turn is already running. Steer into it when the core surfaced
-            // the run id (the server validates expected_run_id, so a run that
-            // ended between typing and sending fails loudly instead of
-            // starting a stray turn); otherwise queue for RunEnded — a second
-            // sendPrompt would interleave in the transcript and the reply
-            // would be attributed to the wrong question.
+        val targetSid = currentSession.value
+        if (live && core.ready()) {
+            // A run is a per-session/connection thing. Only a follow-up send in the SAME
+            // session that owns the in-flight turn may steer into it; a send in a DIFFERENT
+            // session (or none) starts its own run there — it must not block on or steer a
+            // turn that lives on another connection and will never RunEnded on this one.
+            val sameTurn = turnInFlight && turnInFlightSession == targetSid
+            if (!sameTurn) {
+                turnInFlight = true
+                turnInFlightSession = targetSid
+                if (currentSession.value != null) store.pendingPushSessionId = currentSession.value
+                sendPromptBlocks(text, images, files, expect = targetSid)
+                return
+            }
+            // Same session's turn is running. Steer into it when the core surfaced the
+            // run id (the server validates expected_run_id, so a run that ended between
+            // typing and sending fails loudly instead of starting a stray turn); otherwise
+            // queue for RunEnded — a second sendPrompt would interleave in the transcript
+            // and the reply would be attributed to the wrong question.
             val run = activeRunId
             if (run != null) {
                 turnInFlight = true
+                turnInFlightSession = targetSid
                 io { unstable.steer(text, run) }
             } else {
                 enqueue(PendingSend(text, images, files))
             }
         } else {
-            // Not connected yet (initial connect / silent reconnect window): queue and let the
-            // core's own reconnect deliver the flush. The resume's replay wipes the local
-            // transcript (including this just-added bubble); Ready re-adds the queued bubbles on
-            // top of the rebuilt history.
+            // Not live / not ready (initial connect or silent reconnect window): queue and
+            // let the core's own reconnect deliver the flush. The resume's replay wipes the
+            // local transcript (including this just-added bubble); Ready re-adds the queued
+            // bubbles on top of the rebuilt history.
             enqueue(PendingSend(text, images, files))
         }
     }
@@ -1149,14 +1185,14 @@ class ConnectionManager private constructor(context: Context) {
         if (expect != null && expect != bound) {
             messages.add(ChatMessage("error",
                 "not sent — this chat isn't loaded yet (showing $expect, socket on $bound). Try again."))
-            busy.value = false; turnInFlight = false
+            busy.value = false; turnInFlight = false; turnInFlightSession = null
             return
         }
         val blocks = mutableListOf<PromptBlock>()
         if (text.isNotBlank()) blocks.add(PromptBlock.Text(text))
         images.forEach { img -> blocks.add(PromptBlock.Image(img.mimeType, img.dataB64)) }
         files.forEach { f -> blocks.add(PromptBlock.Resource(f.name, f.mimeType, f.text, f.blobB64)) }
-        if (blocks.isEmpty()) { busy.value = false; turnInFlight = false; return }
+        if (blocks.isEmpty()) { busy.value = false; turnInFlight = false; turnInFlightSession = null; return }
         core.sendPrompt(Prompt(blocks), expect?.let { SendExpect(it) })
     }
 
@@ -1218,6 +1254,7 @@ class ConnectionManager private constructor(context: Context) {
         core.cancel()
         busy.value = false
         turnInFlight = false   // wire is free again; without this the queue never drains
+        turnInFlightSession = null
         clearQueue()           // Stop means stop: don't let queued prompts fire after a cancel
     }
 
@@ -1348,6 +1385,7 @@ class ConnectionManager private constructor(context: Context) {
         dequeue()?.let { p ->
             store.pendingPushSessionId = sid
             turnInFlight = true
+            turnInFlightSession = currentSession.value
             busy.value = true
             sendPromptBlocks(p.text, p.images, expect = currentSession.value)
         }
@@ -1514,6 +1552,7 @@ class ConnectionManager private constructor(context: Context) {
     private fun onRunEnded(stopReason: String) {
         compacting.value = false
         turnInFlight = false
+        turnInFlightSession = null
         // The run is over: drop any stale run id so the next send doesn't try to
         // steer a dead turn ("no turn exists to steer"). activeRunId is app-global,
         // so an un-cleared value would infect every chat, not just the one that ran.
@@ -1531,6 +1570,7 @@ class ConnectionManager private constructor(context: Context) {
             // Send the queued prompt now that the wire is free. Service stays up (we are
             // still busy), so backgrounding between the two turns is safe.
             turnInFlight = true
+            turnInFlightSession = currentSession.value
             lastSessionId?.let { store.pendingPushSessionId = it }
             sendPromptBlocks(queued.text, queued.images, expect = currentSession.value)
         } else if (!store.persistentConnection) stopService()
@@ -1674,6 +1714,7 @@ class ConnectionManager private constructor(context: Context) {
             // must not spuriously clear unrelated state.
             if (turnInFlight or busy.value) {
                 turnInFlight = false
+                turnInFlightSession = null
                 busy.value = false
             }
         } else if (sessionId == currentSession.value) {
@@ -1901,6 +1942,7 @@ class ConnectionManager private constructor(context: Context) {
         // inherits a stuck "goose is thinking…" with nothing sent. Same logic for compacting.
         busy.value = false; compacting.value = false
         turnInFlight = false
+        resetTurnRouting()
         live = false; connecting = true; online.value = false
         liveModelsFetchedFor = null   // re-fetch supported models fresh on every new connection
         desiredApplied = false

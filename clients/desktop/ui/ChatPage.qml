@@ -268,27 +268,15 @@ Kirigami.Page {
                     }
                 }
 
-                // Per-conversation tool indicator: a wrench pill that slides the
-                // tools panel out from the right of the chat area.
+                // Per-conversation tool indicator: toggles the tools panel open
+                // from the right of the chat area. A plain native Button (no
+                // custom background) so the label/icon render with theme colors
+                // and it behaves like a standard control.
                 Controls.Button {
                     id: toolsPill
                     visible: Mgr.online
-                    implicitWidth: Kirigami.Units.gridUnit * 5
-                    implicitHeight: Kirigami.Units.gridUnit * 1.5
-                    // Breeze's `tools` icon is a toolbox; `configure` is the
-                    // actual wrench glyph requested for this control.
-                    icon.name: "settings-configure"
                     text: Mgr.tools.length === 0 ? qsTr("Tools") : qsTr("Tools") + " " + Mgr.tools.length
-                    display: Controls.AbstractButton.TextBesideIcon
-                    leftPadding: Kirigami.Units.smallSpacing * 2
-                    rightPadding: Kirigami.Units.smallSpacing * 2
-                    background: Rectangle {
-                        radius: height / 2
-                        color: toolsPill.hovered ? Kirigami.Theme.highlightColor : Kirigami.Theme.backgroundColor
-                        border.color: Kirigami.Theme.separatorColor
-                        border.width: 1
-                        opacity: toolsPill.hovered ? 0.82 : 1
-                    }
+                    icon.name: "settings-configure"
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Configure tools for this chat")
                     onClicked: page.toolsOpenRequested()

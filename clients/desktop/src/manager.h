@@ -108,6 +108,11 @@ public:
      *  for chat (prompt/tools/extensions route to it until a Main session is
      *  opened). */
     Q_INVOKABLE void openRoamSession(const QString &label, const QString &sessionId, const QString &cwd);
+    /** Create a new chat on a roam peer (uses the config working dir). */
+    Q_INVOKABLE void newRoamSession(const QString &label);
+    /** Create a new chat on a roam peer in a caller-chosen dir; blank falls
+     *  back to the config working dir. */
+    Q_INVOKABLE void newRoamSessionIn(const QString &label, const QString &cwd);
     Q_INVOKABLE void toggleRoamPeer(const QString &label);
     /** The device's iroh identity (base64 secret), generated + persisted. */
     Q_INVOKABLE QString roamIdentity();

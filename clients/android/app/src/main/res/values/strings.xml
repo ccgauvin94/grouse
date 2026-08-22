@@ -18,6 +18,9 @@
     <string name="secret_key">Secret key</string>
     <string name="working_directory">Working directory</string>
     <string name="workdir_hint">Absolute path on the server, e.g. /home/you/projects</string>
+    <string name="new_chat_on_peer">New chat on peer</string>
+    <string name="working_directory_prompt">Working directory for the new chat (absolute path):</string>
+    <string name="cwd_placeholder">e.g. /home/you/projects/foo</string>
     <string name="verify_server_certificate">Verify server certificate</string>
     <string name="cert_note">On by default; disable only for a self-signed tailnet host.</string>
     <string name="ca_certificate">CA certificate (PEM, optional)</string>

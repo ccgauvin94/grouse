@@ -1135,11 +1135,26 @@ pub(crate) fn parse_sessions(result: &Value) -> (Vec<SessionSummary>, Vec<(Strin
                 .and_then(|m| m.get("hasRecipe"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let updated = obj
-                .get("updatedAt")
+            // Ordering/freshness must track MESSAGE activity, not open/select
+            // touch: goose bumps updatedAt whenever a session is loaded (i.e.
+            // merely clicking it in the sidebar), but only a real message moves
+            // _meta.lastMessageAt. Surface lastMessageAt (falling back to
+            // updatedAt) so selecting a chat never reorders the sidebar; a bare
+            // touch also carries no new content, so it must not invalidate
+            // caches or trip the resync replay.
+            let last_message = meta
+                .and_then(|m| m.get("lastMessageAt"))
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let updated = if last_message.is_empty() {
+                obj.get("updatedAt")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                last_message
+            };
             let cwd = obj
                 .get("cwd")
                 .and_then(Value::as_str)
@@ -1333,5 +1348,41 @@ pub(crate) fn permission_option_kind_str(kind: &PermissionOptionKind) -> &'stati
         PermissionOptionKind::RejectOnce => "reject_once",
         PermissionOptionKind::RejectAlways => "reject_always",
         _ => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Ordering/freshness must track MESSAGE activity (_meta.lastMessageAt),
+    /// not open/select touch (updatedAt) — selecting a session must never
+    /// reorder the sidebar.
+    #[test]
+    fn sessions_order_by_message_activity_not_touch() {
+        let reply = json!({"sessions": [
+            {
+                "sessionId": "a",
+                "title": "recently messaged",
+                "cwd": "/x",
+                "updatedAt": "2026-08-22T12:00:00+00:00", // later: opened, not messaged
+                "_meta": { "lastMessageAt": "2026-08-22T06:00:00Z" }
+            },
+            {
+                "sessionId": "b",
+                "title": "no message time yet (fallback)",
+                "cwd": "/y",
+                "updatedAt": "2026-08-22T11:00:00+00:00",
+                "_meta": {}
+            }
+        ]});
+        let (sessions, _, updated) = parse_sessions(&reply);
+        assert_eq!(sessions[0].updated_at, "2026-08-22T06:00:00Z");
+        // The bump-on-open updatedAt must NOT leak into the ordering key.
+        assert_ne!(sessions[0].updated_at, "2026-08-22T12:00:00+00:00");
+        // No message time -> fall back to updatedAt (unchanged previous behavior).
+        assert_eq!(sessions[1].updated_at, "2026-08-22T11:00:00+00:00");
+        assert_eq!(updated.len(), 2);
     }
 }

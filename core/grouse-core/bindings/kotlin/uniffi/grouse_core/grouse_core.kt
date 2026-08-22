@@ -933,6 +933,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_roam_new_session(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_roam_new_session_in(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_roam_open_session(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_send_prompt(
@@ -1146,6 +1148,8 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_method_core_roam_disconnect(`ptr`: Long,`label`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_roam_new_session(`ptr`: Long,`label`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_core_roam_new_session_in(`ptr`: Long,`label`: RustBuffer.ByValue,`cwd`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_roam_open_session(`ptr`: Long,`label`: RustBuffer.ByValue,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1412,6 +1416,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_roam_new_session() != 41163) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_core_roam_new_session_in() != 18714) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_roam_open_session() != 26278) {
@@ -2217,6 +2224,15 @@ public interface CoreInterface {
     fun `roamNewSession`(`label`: kotlin.String)
     
     /**
+     * Create a fresh session on a roam peer in a caller-chosen working dir.
+     * goose natively honors the cwd on `session/new` (a `serve --roam` host
+     * otherwise defaults to $HOME); the UI long-presses the new-chat button
+     * on a roam endpoint to supply it. Blank/whitespace falls back to the
+     * same config cwd `roam_new_session` uses.
+     */
+    fun `roamNewSessionIn`(`label`: kotlin.String, `cwd`: kotlin.String)
+    
+    /**
      * Open a session on a roam peer; the peer becomes the chat owner until a
      * Main session is opened. Its transcript is peer-owned (never cached).
      */
@@ -2683,6 +2699,27 @@ open class Core: Disposable, AutoCloseable, CoreInterface
         it,
         
         FfiConverterString.lower(`label`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Create a fresh session on a roam peer in a caller-chosen working dir.
+     * goose natively honors the cwd on `session/new` (a `serve --roam` host
+     * otherwise defaults to $HOME); the UI long-presses the new-chat button
+     * on a roam endpoint to supply it. Blank/whitespace falls back to the
+     * same config cwd `roam_new_session` uses.
+     */override fun `roamNewSessionIn`(`label`: kotlin.String, `cwd`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_roam_new_session_in(
+        it,
+        
+        FfiConverterString.lower(`label`),
+        FfiConverterString.lower(`cwd`),_status)
 }
     }
     

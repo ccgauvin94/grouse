@@ -794,6 +794,36 @@ impl Core {
         peer.new_session(cwd);
     }
 
+    /// Create a fresh session on a roam peer in a caller-chosen working dir.
+    /// goose natively honors the cwd on `session/new` (a `serve --roam` host
+    /// otherwise defaults to $HOME); the UI long-presses the new-chat button
+    /// on a roam endpoint to supply it. Blank/whitespace falls back to the
+    /// same config cwd `roam_new_session` uses.
+    pub fn roam_new_session_in(&self, label: String, cwd: String) {
+        let peer = self
+            .inner
+            .peers
+            .lock()
+            .iter()
+            .find(|peer| peer.label() == label)
+            .cloned();
+        let Some(peer) = peer else { return };
+        *self.inner.active_peer_label.write() = Some(label);
+        let trimmed = cwd.trim();
+        let cwd = if trimmed.is_empty() {
+            self.inner
+                .state
+                .lock()
+                .last_config
+                .as_ref()
+                .map(|config| config.cwd.clone())
+                .unwrap_or_default()
+        } else {
+            trimmed.to_string()
+        };
+        peer.new_session(cwd);
+    }
+
     /// Answer a permission request (CONTRACT §5); routes to the active peer
     /// when one owns the chat.
     pub fn respond_permission(&self, tool_call_id: String, outcome: PermissionOutcome) {

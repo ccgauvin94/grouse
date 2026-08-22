@@ -60,17 +60,20 @@ Controls.ApplicationWindow {
         return -1
     }
 
-    RowLayout {
+    Controls.SplitView {
         anchors.fill: parent
-        spacing: 0
+        orientation: Qt.Horizontal
 
         // ----- left sidebar: controls + session list -----
+        // SplitView renders a native resize handle on the shared edge and sizes
+        // this panel, so no manual border/separator (that drew a hard black
+        // outline and sat off-alignment in non-native themes).
         Rectangle {
-            Layout.preferredWidth: 300
-            Layout.fillHeight: true
+            SplitView.preferredWidth: 320
+            SplitView.minimumWidth: 240
+            SplitView.maximumWidth: 520
+            SplitView.fillHeight: true
             color: Kirigami.Theme.alternateBackgroundColor
-            border.color: Kirigami.Theme.separatorColor
-            border.width: 1
 
             ColumnLayout {
                 anchors.fill: parent
@@ -82,14 +85,6 @@ Controls.ApplicationWindow {
                 // usual panel padding.
                 anchors.bottomMargin: 0
                 spacing: Kirigami.Units.smallSpacing * 1.25
-
-                Kirigami.Heading {
-                    text: qsTr("Grouse")
-                    level: 2
-                    Layout.fillWidth: true
-                    Layout.topMargin: Kirigami.Units.smallSpacing
-                    font.weight: Font.DemiBold
-                }
 
                 RowLayout {
                     Layout.fillWidth: true
@@ -122,7 +117,12 @@ Controls.ApplicationWindow {
                     Layout.fillHeight: true
                     visible: root.sidebarTab === "main"
 
+                // Pinned sidebar chrome, not part of the list: because the
+                // ListView below overlays the rail (overlay ScrollBar), this
+                // row must sit above the list so the New-project button never
+                // slides under the scrollbar when the list overflows.
                 RowLayout {
+                    id: sessionsHeader
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.top: parent.top
@@ -146,28 +146,43 @@ Controls.ApplicationWindow {
 
                 ListView {
                     id: sessionList
-                    anchors.fill: parent
+                    // Start below the pinned Sessions header instead of
+                    // overlaying the rail, so the vertical ScrollBar (which
+                    // overlays the viewport) spans only the list and cannot
+                    // clip the New-project button above it.
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: sessionsHeader.bottom
                     anchors.topMargin: Kirigami.Units.smallSpacing * 2
+                    anchors.bottom: parent.bottom
                     clip: true
                     model: Mgr.sessionsModel
                     spacing: Kirigami.Units.smallSpacing
-                    // The model emits one header row per group (project / Chats
-                    // / remote peer) followed by its sessions, so a single
-                    // delegate branches on model.header.
+                    // The model emits a flat tree: a top-level "Projects" section
+                    // wrapping each project group, then "Chats", then remote
+                    // peers, each collapsible group followed by its sessions. A
+                    // single delegate branches on model.header and nest depth.
                     delegate: Item {
                         id: del
                         width: ListView.view.width
                         readonly property bool isHeader: header
                         readonly property bool isProject: isHeader && String(section).startsWith("proj:")
                         readonly property bool isPeer: isHeader && String(section).startsWith("peer:")
+                        readonly property bool isProjects: isHeader && String(section) === "projects"
                         readonly property bool sel: !isHeader && sessionid === Mgr.currentSessionId
                         // The vertical ScrollBar overlays the viewport (same as the
                         // transcript's scrollbarReserve); the highlight must stop
                         // before it, or hover/selection paint underneath the bar.
                         readonly property bool scrollbarShown: sessionList.ScrollBar.vertical.visible
-                        // Sessions under a project or remote-peer header are
-                        // indented so the grouping reads as a tree.
-                        readonly property bool grouped: !isHeader && (String(section).startsWith("proj:") || String(section).startsWith("peer:"))
+                        // The sidebar is a tree: "Projects" wraps each project, which
+                        // wraps its sessions. `nest` is this row's depth under a
+                        // collapsible group (0 = top level): project headers and
+                        // peer/filed sessions sit one step in, project sessions two.
+                        // Driven here (not in the model) so the row keeps its roles.
+                        readonly property int nest: isHeader
+                            ? (isProject ? 1 : 0)
+                            : (String(section).startsWith("proj:") ? 2
+                               : String(section).startsWith("peer:") ? 1 : 0)
                         height: isHeader ? headerRect.implicitHeight
                                          : Math.max(50, col.implicitHeight + Kirigami.Units.smallSpacing * 2.5)
 
@@ -178,14 +193,25 @@ Controls.ApplicationWindow {
                             width: parent.width
                             implicitHeight: Kirigami.Units.gridUnit * 2
                             radius: Kirigami.Units.smallSpacing
-                            color: del.isProject ? Qt.rgba(Kirigami.Theme.highlightColor.r,
-                                                           Kirigami.Theme.highlightColor.g,
-                                                           Kirigami.Theme.highlightColor.b, 0.12)
-                                                  : "transparent"
+                            color: "transparent"
+                            // The project highlight must never run under the overlay
+                            // ScrollBar. Reserve the same gutter the row content
+                            // already does (unconditionally — the scrollbar reserves
+                            // this inset whether or not it is currently shown), so
+                            // the highlight always stops short of the bar.
+                            Rectangle {
+                                anchors.fill: parent
+                                anchors.rightMargin: Kirigami.Units.smallSpacing + Kirigami.Units.gridUnit * 1.75
+                                radius: Kirigami.Units.smallSpacing
+                                color: del.isProject ? Qt.rgba(Kirigami.Theme.highlightColor.r,
+                                                               Kirigami.Theme.highlightColor.g,
+                                                               Kirigami.Theme.highlightColor.b, 0.12)
+                                                      : "transparent"
+                            }
                             RowLayout {
                                 anchors.fill: parent
-                                anchors.leftMargin: Kirigami.Units.smallSpacing
-                                anchors.rightMargin: Kirigami.Units.smallSpacing + Kirigami.Units.gridUnit * 1.5
+                                anchors.leftMargin: Kirigami.Units.smallSpacing + del.nest * Kirigami.Units.gridUnit * 0.5
+                                anchors.rightMargin: Kirigami.Units.smallSpacing + Kirigami.Units.gridUnit * 2.0
                                 spacing: Kirigami.Units.smallSpacing
 
                                 // Caret toggles the group open/collapsed.
@@ -254,7 +280,7 @@ Controls.ApplicationWindow {
 
                         // ---------- session row ----------
                         Rectangle {
-                            visible: !del.isHeader && del.grouped
+                            visible: !del.isHeader && del.nest > 0
                             anchors.left: parent.left
                             anchors.right: parent.right
                             anchors.top: parent.top
@@ -268,7 +294,7 @@ Controls.ApplicationWindow {
 
                         // Continuous guide for sessions nested under a group.
                         Rectangle {
-                            visible: !del.isHeader && del.grouped
+                            visible: !del.isHeader && del.nest > 0
                             width: 2
                             radius: 1
                             anchors.left: parent.left
@@ -306,7 +332,7 @@ Controls.ApplicationWindow {
                             anchors.left: parent.left
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
-                            anchors.leftMargin: Kirigami.Units.smallSpacing + (del.grouped ? Kirigami.Units.gridUnit * 0.5 : 0)
+                            anchors.leftMargin: Kirigami.Units.smallSpacing + del.nest * Kirigami.Units.gridUnit * 0.5
                             anchors.rightMargin: Kirigami.Units.smallSpacing + Kirigami.Units.gridUnit * 1.5
                             spacing: 3
                             Controls.Label {
@@ -486,6 +512,32 @@ Controls.ApplicationWindow {
                                             renderType: Text.NativeRendering
                                         }
                                         Controls.ToolButton {
+                                            text: qsTr("New chat")
+                                            display: Controls.AbstractButton.TextBesideIcon
+                                            icon.name: "document-new"
+                                            font.pixelSize: root.sidebarSmallTextSize
+                                            ToolTip.visible: hovered
+                                            ToolTip.text: qsTr("New chat on this peer — long-press to choose a working directory")
+                                            // Long-press opens the cwd dialog; the
+                                            // hold timer guards the trailing click
+                                            // so a hold never also starts a chat.
+                                            property bool held: false
+                                            Timer {
+                                                id: holdTimer
+                                                interval: 500
+                                                onTriggered: {
+                                                    parent.held = true
+                                                    roamNewChatDialog.targetLabel = label
+                                                    roamNewChatDialog.suggestedCwd = Mgr.workingDir
+                                                    roamNewChatDialog.open()
+                                                }
+                                            }
+                                            onPressed: { held = false; holdTimer.restart() }
+                                            onReleased: holdTimer.stop()
+                                            onCanceled: holdTimer.stop()
+                                            onClicked: { if (!held) Mgr.newRoamSession(label) }
+                                        }
+                                        Controls.ToolButton {
                                             text: qsTr("Remove")
                                             display: Controls.AbstractButton.IconOnly
                                             icon.name: "edit-delete"
@@ -604,13 +656,11 @@ Controls.ApplicationWindow {
             }
         }
 
-        Kirigami.Separator { Layout.fillHeight: true }
-
         // ----- chat area -----
         Item {
             id: chatArea
-            Layout.fillWidth: true
-            Layout.fillHeight: true
+            SplitView.fillWidth: true
+            SplitView.fillHeight: true
             clip: true
             ChatPage {
                 id: chatPage
@@ -991,6 +1041,34 @@ Controls.ApplicationWindow {
                 id: projectNameField
                 Layout.fillWidth: true
                 placeholderText: qsTr("e.g. cooking")
+            }
+        }
+    }
+
+    // New chat on a roam peer in a chosen working dir (long-press on that
+    // peer's "+ New chat"). goose natively honors the cwd on session/new; a
+    // blank entry falls back to the config working dir.
+    Controls.Dialog {
+        id: roamNewChatDialog
+        title: qsTr("New chat on peer")
+        modal: true
+        standardButtons: Controls.Dialog.Ok | Controls.Dialog.Cancel
+        property string targetLabel: ""
+        property string suggestedCwd: ""
+        onAccepted: Mgr.newRoamSessionIn(targetLabel, roamCwdField.text)
+        onOpened: {
+            roamCwdField.text = suggestedCwd
+            roamCwdField.selectAll()
+            roamCwdField.forceActiveFocus()
+        }
+        contentItem: ColumnLayout {
+            spacing: Kirigami.Units.smallSpacing
+            Controls.Label { text: qsTr("Working directory (absolute path):") }
+            Controls.TextField {
+                id: roamCwdField
+                Layout.fillWidth: true
+                placeholderText: qsTr("e.g. /home/colin/projects/foo")
+                onAccepted: roamNewChatDialog.accept()
             }
         }
     }

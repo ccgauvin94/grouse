@@ -122,42 +122,69 @@ void SessionListModel::rebuild()
                          });
     }
 
-    // Section ordering: projects alphabetically (projectRank), then "chats",
-    // then remote peers alphabetically.
-    auto sectionRank = [&](const QString &key) -> int {
-        if (key.startsWith(QLatin1String("proj:")))
-            return projectRank(key.mid(5));
-        if (key.startsWith(QLatin1String("peer:")))
-            return m_projectOrder.size() + 1;
-        return m_projectOrder.size();   // "chats"
-    };
-    QStringList keys = groups.keys();
-    std::sort(keys.begin(), keys.end(), [&](const QString &a, const QString &b) {
-        const int ra = sectionRank(a), rb = sectionRank(b);
-        if (ra != rb)
-            return ra < rb;
-        return a < b;   // alpha within the same rank (peers)
-    });
+    // The sidebar is a tree of collapsible sections, emitted as a flat list:
+    // a top-level "Projects" section (always above "Chats") wraps each
+    // individual — likewise collapsible — project, which wraps its sessions.
+    QStringList projectSections;
+    for (auto it = groups.constBegin(); it != groups.constEnd(); ++it)
+        if (it.key().startsWith(QLatin1String("proj:")))
+            projectSections << it.key();
+    std::stable_sort(projectSections.begin(), projectSections.end(),
+                     [&](const QString &a, const QString &b) {
+                         return projectRank(a.mid(5)) < projectRank(b.mid(5));
+                     });
 
-    for (const auto &key : keys) {
-        const QList<QVariant> &sess = groups.value(key);
-        const bool collapsed = m_collapsed.contains(key);
-        QString title;
-        if (key.startsWith(QLatin1String("proj:"))) {
-            const QString id = key.mid(5);
-            title = m_projectNames.value(id, id);
-        } else if (key.startsWith(QLatin1String("peer:"))) {
-            title = key.mid(5);
-        } else {
-            title = QStringLiteral("Chats");
+    if (!projectSections.isEmpty()) {
+        int projectTotal = 0;
+        for (const QString &k : std::as_const(projectSections))
+            projectTotal += groups.value(k).size();
+        const bool projectsCollapsed = m_collapsed.contains(QStringLiteral("projects"));
+        m_rows << QVariantMap{{"header", true}, {"section", QStringLiteral("projects")},
+                              {"title", QStringLiteral("Projects")}, {"count", projectTotal},
+                              {"collapsed", projectsCollapsed}};
+        // Collapsing "Projects" hides every project group and its sessions.
+        if (!projectsCollapsed) {
+            for (const QString &key : std::as_const(projectSections)) {
+                const QList<QVariant> &sess = groups.value(key);
+                const bool collapsed = m_collapsed.contains(key);
+                const QString id = key.mid(5);
+                m_rows << QVariantMap{{"header", true}, {"section", key},
+                                      {"title", m_projectNames.value(id, id)},
+                                      {"count", sess.size()}, {"collapsed", collapsed}};
+                if (collapsed)
+                    continue;
+                for (const auto &s : sess)
+                    m_rows << s.toMap();
+            }
         }
-        m_rows << QVariantMap{{"header", true}, {"section", key}, {"title", title},
-                              {"count", sess.size()}, {"collapsed", collapsed}};
-        if (collapsed)
-            continue;
-        for (const auto &s : sess)
-            m_rows << s.toMap();
     }
+
+    auto emitSection = [this](const QString &key, const QString &title,
+                              const QList<QVariant> &sessions) {
+        const bool collapsed = m_collapsed.contains(key);
+        m_rows << QVariantMap{{"header", true}, {"section", key}, {"title", title},
+                              {"count", sessions.size()}, {"collapsed", collapsed}};
+        if (collapsed)
+            return;
+        for (const auto &s : sessions)
+            m_rows << s.toMap();
+    };
+
+    // Unfiled "Chats", then remote peers alphabetically.
+    if (groups.contains(QStringLiteral("chats")))
+        emitSection(QStringLiteral("chats"), QStringLiteral("Chats"),
+                    groups.value(QStringLiteral("chats")));
+
+    QStringList peerSections = groups.keys();
+    peerSections.erase(std::remove_if(peerSections.begin(), peerSections.end(),
+                                      [](const QString &k) {
+                                          return !k.startsWith(QLatin1String("peer:"));
+                                      }),
+                       peerSections.end());
+    std::sort(peerSections.begin(), peerSections.end());
+    for (const QString &key : peerSections)
+        emitSection(key, key.mid(5), groups.value(key));
+
     endResetModel();
 }
 

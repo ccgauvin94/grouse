@@ -283,6 +283,61 @@ void Manager::openRoamSession(const QString &label, const QString &sessionId, co
     }
 }
 
+void Manager::newRoamSession(const QString &label)
+{
+    m_activePeerLabel = label;
+    m_pendingQueue.clear();
+    emit queuedChanged();
+    m_landing = false;
+    emit landingChanged();
+    m_currentSessionId.clear();
+    m_currentSessionTitle.clear();
+    m_tools.clear();
+    m_extDefs.clear();
+    m_sessionExts.clear();
+    m_toolCatalog.clear();
+    publishToolGroups();
+    m_messageModel->clear();
+    m_currentIndex = -1;
+    emit currentSessionChanged();
+    emit toolsChanged();
+    emit messagesChanged();
+    setStatus(QStringLiteral("connecting…"));
+    if (m_bridge && m_bridge->isAvailable()) {
+        const QByteArray l = label.toUtf8();
+        m_bridge->api().grouse_roam_new_session(m_bridge->handle(), l.constData());
+    }
+}
+
+void Manager::newRoamSessionIn(const QString &label, const QString &cwd)
+{
+    m_activePeerLabel = label;
+    m_pendingQueue.clear();
+    emit queuedChanged();
+    m_landing = false;
+    emit landingChanged();
+    m_currentSessionId.clear();
+    m_currentSessionTitle.clear();
+    m_tools.clear();
+    m_extDefs.clear();
+    m_sessionExts.clear();
+    m_toolCatalog.clear();
+    publishToolGroups();
+    m_messageModel->clear();
+    m_currentIndex = -1;
+    emit currentSessionChanged();
+    emit toolsChanged();
+    emit messagesChanged();
+    setStatus(QStringLiteral("connecting…"));
+    if (m_bridge && m_bridge->isAvailable()) {
+        const QByteArray l = label.toUtf8();
+        const QString t = cwd.trimmed();
+        const QByteArray c = t.toUtf8();
+        m_bridge->api().grouse_roam_new_session_cwd(
+            m_bridge->handle(), l.constData(), t.isEmpty() ? nullptr : c.constData());
+    }
+}
+
 void Manager::toggleRoamPeer(const QString &label)
 {
     m_roamModel->togglePeer(label);
@@ -1374,10 +1429,18 @@ void Manager::coreOnSessionExtensions(const QString &sid, const QString &json)
     Q_UNUSED(sid);
     QStringList names;
     for (const auto &el : parseArr(json)) {
-        if (el.isObject())
-            names << el.toObject().value("name").toString();
-        else
+        if (el.isObject()) {
+            const QVariantMap m = el.toObject().toVariantMap();
+            QString nm = m.value("name").toString();
+            // mcp/server-backed extensions omit top-level name (it lives in
+            // server.name); resolve it so enabled groups keep the same id the
+            // add/remove path uses — otherwise the toggle always reverts.
+            if (nm.isEmpty())
+                nm = m.value("server").toMap().value("name").toString();
+            names << nm;
+        } else {
             names << el.toString();
+        }
     }
     onSessionExtensions(names);
 }
@@ -1712,12 +1775,39 @@ void Manager::onExtensions(const QVariantList &extensions)
     m_extDefs.clear();
     for (const auto &v : extensions) {
         const QVariantMap m = v.toMap();
+        // The server nests the definition: {"extension": {...}, "enabled": bool,
+        // "configKey": "..."}. Read the nested object (with a flat fallback) so
+        // names/types aren't blank — the old code read the top level, where
+        // those fields don't exist, producing empty-named groups that all
+        // shared one enabled state.
+        QVariantMap e = m.value("extension").toMap();
+        if (e.isEmpty())
+            e = m;
+        // Server-backed/custom extensions (mcp, bundled:false) carry their
+        // identifier in configKey / server.name, not extension.name — only
+        // bundled platform/builtin ones expose `name`. Resolve in that order so
+        // the panel isn't full of empty-named groups that share one state.
+        QString extName = e.value("name").toString();
+        if (extName.isEmpty())
+            extName = m.value("configKey").toString();
+        if (extName.isEmpty())
+            extName = e.value("server").toMap().value("name").toString();
         ExtDef d;
-        d.name = m.value("name").toString();
-        d.type = m.value("type").toString();
-        d.attrib = m.value("attrib").toBool();
-        d.enabled = m.value("enabled").toBool();
-        d.raw = m.value("raw").value<QJsonObject>();
+        d.name = extName;
+        d.type = e.value("type").toString();
+        // mcp-backed extensions namespace their tools; mark them addable so the
+        // panel offers the per-tool toggle the server's add/remove expects.
+        d.attrib = e.value("attrib").toBool() || d.type == QLatin1String("mcp");
+        d.enabled = m.contains("enabled")
+            ? m.value("enabled").toBool()
+            : e.value("enabled").toBool();
+        d.raw = QJsonObject::fromVariantMap(e);
+        // session/extensions/add needs a top-level `name` to identify the
+        // extension; server-backed (mcp) defs carry it only in server.name, so
+        // inject the resolved id — otherwise the server silently ignores the
+        // add and the session-extensions re-list reverts the toggle.
+        if (d.raw.value("name").toString().isEmpty() && !d.name.isEmpty())
+            d.raw.insert(QStringLiteral("name"), d.name);
         const QVariantList at = m.value("availableTools").toList();
         for (const auto &a : at)
             d.availableTools << a.toString();

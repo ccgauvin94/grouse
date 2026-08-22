@@ -71,6 +71,7 @@ public:
         void (*grouse_roam_disconnect)(void *h, const char *label);
         void (*grouse_roam_open_session)(void *h, const char *label, const char *session_id);
         void (*grouse_roam_new_session)(void *h, const char *label);
+        void (*grouse_roam_new_session_cwd)(void *h, const char *label, const char *cwd);
         char *(*grouse_identity_generate)(void);
         char *(*grouse_identity_public_key)(const char *secret, char **out_err);
         char *(*grouse_card_fingerprint)(const char *card, char **out_err);

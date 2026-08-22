@@ -111,9 +111,14 @@ import kotlinx.serialization.json.contentOrNull
 fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
     var expanded by rememberSaveable { mutableStateOf(listOf<String>()) }
     var roamActionsFor by remember { mutableStateOf<SessionInfo?>(null) }
+    // Long-press the peer "new chat" + to choose a working dir for that chat.
+    var cwdFor by remember { mutableStateOf<String?>(null) }
     // Long-press actions dialog for roam sessions = the same as main chats.
     roamActionsFor?.let { s ->
         SessionActionsDialog(cm, s) { roamActionsFor = null }
+    }
+    cwdFor?.let { name ->
+        RoamNewChatDialog(cm, name) { cwdFor = null }
     }
     // Populate the peer list from the persisted store (cards survive restart).
     LaunchedEffect(Unit) { cm.loadRoamPeers() }
@@ -195,13 +200,16 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
                             // Small clickable Add (not IconButton — that forces a 48dp
                             // min touch target, making the collapsed card tall).
                             if (ready) {
-                                Box(Modifier.size(24.dp).clickable {
-                                    cm.newRoamSession(peer.name)
-                                    // Leave the browse slide: the chat opens on the
-                                    // peer's on_peer_new_session, and this state change
-                                    // (currentSession.next) drives the ChatScreen.
-                                    onOpen()
-                                }, contentAlignment = Alignment.Center) {
+                                Box(Modifier.size(24.dp).combinedClickable(
+                                    onClick = {
+                                        cm.newRoamSession(peer.name)
+                                        // Leave the browse slide: the chat opens on the
+                                        // peer's on_peer_new_session, and this state change
+                                        // (currentSession.next) drives the ChatScreen.
+                                        onOpen()
+                                    },
+                                    onLongClick = { cwdFor = peer.name }
+                                ), contentAlignment = Alignment.Center) {
                                     Icon(Icons.Filled.Add,
                                         contentDescription = "new chat on ${peer.name}",
                                         tint = MaterialTheme.colorScheme.primary)
@@ -261,14 +269,17 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
  *  QR), add-host form, and per-host connect/disconnect. Opened from the drawer's
  *  "New connection" item. Full-screen on purpose — the camera card scanner must not sit
  *  under the drawer scrim. */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun RoamAddConnectionScreen(cm: ConnectionManager, nav: NavController) {
     var name by remember { mutableStateOf("") }
     var card by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+    // Long-press the header "New chat" to pick a working dir for that chat.
+    var roamCwdFor by remember { mutableStateOf<String?>(null) }
     val peers = cm.roamPeers
     val status = cm.roamStatus
+    roamCwdFor?.let { peerName -> RoamNewChatDialog(cm, peerName) { roamCwdFor = null } }
 
     // A scanned card arrives back via the qrscan route's savedStateHandle.
     LaunchedEffect(nav.currentBackStackEntry) {
@@ -372,15 +383,23 @@ fun RoamAddConnectionScreen(cm: ConnectionManager, nav: NavController) {
                         if (ready) {
                             TextButton(onClick = { cm.disconnectRoam(peer.name) }) { Text(stringResource(R.string.disconnect)) }
                             // New chat ON the peer: session/new on its connection.
-                            TextButton(onClick = {
-                                cm.newRoamSession(peer.name)
-                                // Jump to the chat surface: the session opens on
-                                // the peer's on_peer_new_session once created.
-                                nav.navigate("chat") {
-                                    launchSingleTop = true
-                                    popUpTo("chat") { inclusive = true }
-                                }
-                            }) { Text(stringResource(R.string.new_chat)) }
+                            // Long-press = choose a working dir for the new chat.
+                            Box(Modifier.clip(RoundedCornerShape(20.dp)).combinedClickable(
+                                onClick = {
+                                    cm.newRoamSession(peer.name)
+                                    // Jump to the chat surface: the session opens on
+                                    // the peer's on_peer_new_session once created.
+                                    nav.navigate("chat") {
+                                        launchSingleTop = true
+                                        popUpTo("chat") { inclusive = true }
+                                    }
+                                },
+                                onLongClick = { roamCwdFor = peer.name }
+                            ).padding(horizontal = 8.dp, vertical = 6.dp)) {
+                                Text(stringResource(R.string.new_chat),
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.primary)
+                            }
                         } else {
                             Button(onClick = { cm.connectRoam(peer.name) }) { Text(stringResource(R.string.connect)) }
                         }
@@ -495,4 +514,33 @@ fun RoamEndpointScreen(cm: ConnectionManager, nav: NavController, label: String)
             }
         }
     }
+}
+
+/** Prompt for a working dir to create a new chat on a roam peer. goose natively
+ *  honors the cwd on session/new (a `serve --roam` host defaults to $HOME
+ *  otherwise); blank falls back to the config cwd in the core. */
+@Composable
+private fun RoamNewChatDialog(cm: ConnectionManager, peerName: String, onDone: () -> Unit) {
+    var cwd by rememberSaveable { mutableStateOf(cm.workingDir()) }
+    AlertDialog(
+        onDismissRequest = onDone,
+        title = { Text(stringResource(R.string.new_chat_on_peer)) },
+        text = {
+            Column {
+                Text(stringResource(R.string.working_directory_prompt),
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(cwd, { cwd = it }, singleLine = true,
+                    placeholder = { Text(stringResource(R.string.cwd_placeholder)) },
+                    modifier = Modifier.fillMaxWidth())
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                cm.newRoamSessionIn(peerName, cwd.trim())
+                onDone()
+            }) { Text(stringResource(R.string.create)) }
+        },
+        dismissButton = { TextButton(onClick = onDone) { Text(stringResource(R.string.cancel)) } },
+    )
 }

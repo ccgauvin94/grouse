@@ -735,6 +735,23 @@ pub extern "C" fn grouse_roam_new_session(h: *mut c_void, label: *const c_char) 
     catch_unwind(AssertUnwindSafe(|| handle(h).core.roam_new_session(label))).ok();
 }
 
+/// New chat on a roam peer in a caller-chosen working dir (long-press on the
+/// new-chat button). NULL/empty `cwd` falls back to the config cwd.
+#[no_mangle]
+pub extern "C" fn grouse_roam_new_session_cwd(
+    h: *mut c_void,
+    label: *const c_char,
+    cwd: *const c_char,
+) {
+    let (Some(label), cwd) = (
+        (unsafe { c_param(label) }).map(str::to_owned),
+        (unsafe { c_param(cwd) }).map(str::to_owned).unwrap_or_default(),
+    ) else {
+        return;
+    };
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.roam_new_session_in(label, cwd))).ok();
+}
+
 // ---------------------------------------------------------------------------
 // Roam identity helpers (grouse-roam-core, bundled inside this cdylib)
 // ---------------------------------------------------------------------------

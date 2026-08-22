@@ -17,6 +17,8 @@ private slots:
     void groupsProjectsThenChats();
     void sortsByRecencyWithinGroup();
     void collapseHidesSessions();
+    void collapseProjectsWrapperHidesProjects();
+    void projectCollapseHidesOnlyItsSessions();
     void cwdForFindsCwd();
     void unknownProjectSortsLastAndFallsBackToId();
     void peerSessionsGroupLast();
@@ -77,22 +79,76 @@ void TstSessionListModel::groupsProjectsThenChats()
     });
     model.setProjects(QVariantList{project(QStringLiteral("p1"), QStringLiteral("Alpha"))});
 
-    // p1 (alphabetical projects first), then "Chats".
-    QCOMPARE(model.rowCount(), 5);
+    // Top-level "Projects" wrapper (above Chats), then the project below it,
+    // then "Chats". Projects must default to sitting above Chats.
+    QCOMPARE(model.rowCount(), 6);
     const QVariantMap h0 = rowAt(model, 0);
     QCOMPARE(h0.value("header").toBool(), true);
-    QCOMPARE(h0.value("section").toString(), QStringLiteral("proj:p1"));
-    QCOMPARE(h0.value("title").toString(), QStringLiteral("Alpha"));
+    QCOMPARE(h0.value("section").toString(), QStringLiteral("projects"));
+    QCOMPARE(h0.value("title").toString(), QStringLiteral("Projects"));
     QCOMPARE(h0.value("count").toInt(), 1);
-    QCOMPARE(rowAt(model, 1).value("sessionId").toString(), QStringLiteral("s-proj-1"));
 
-    const QVariantMap h2 = rowAt(model, 2);
-    QCOMPARE(h2.value("section").toString(), QStringLiteral("chats"));
-    QCOMPARE(h2.value("title").toString(), QStringLiteral("Chats"));
-    QCOMPARE(h2.value("count").toInt(), 2);
+    // The project group nestles under the Projects wrapper.
+    const QVariantMap h1 = rowAt(model, 1);
+    QCOMPARE(h1.value("header").toBool(), true);
+    QCOMPARE(h1.value("section").toString(), QStringLiteral("proj:p1"));
+    QCOMPARE(h1.value("title").toString(), QStringLiteral("Alpha"));
+    QCOMPARE(h1.value("count").toInt(), 1);
+    QCOMPARE(rowAt(model, 2).value("sessionId").toString(), QStringLiteral("s-proj-1"));
+
+    const QVariantMap h3 = rowAt(model, 3);
+    QCOMPARE(h3.value("section").toString(), QStringLiteral("chats"));
+    QCOMPARE(h3.value("title").toString(), QStringLiteral("Chats"));
+    QCOMPARE(h3.value("count").toInt(), 2);
     // Recency-sorted within the group: newest (08-03) first.
-    QCOMPARE(rowAt(model, 3).value("sessionId").toString(), QStringLiteral("s-chat-2"));
-    QCOMPARE(rowAt(model, 4).value("sessionId").toString(), QStringLiteral("s-chat-1"));
+    QCOMPARE(rowAt(model, 4).value("sessionId").toString(), QStringLiteral("s-chat-2"));
+    QCOMPARE(rowAt(model, 5).value("sessionId").toString(), QStringLiteral("s-chat-1"));
+}
+
+void TstSessionListModel::collapseProjectsWrapperHidesProjects()
+{
+    SessionListModel model;
+    model.setSessions(QVariantList{
+        session(QStringLiteral("s-proj-1"), QStringLiteral("In project"), QStringLiteral("2026-08-02"),
+                QStringLiteral("p1")),
+        session(QStringLiteral("s-chat-1"), QStringLiteral("Chat one"), QStringLiteral("2026-08-01")),
+    });
+    model.setProjects(QVariantList{project(QStringLiteral("p1"), QStringLiteral("Alpha"))});
+
+    QCOMPARE(model.rowCount(), 5);   // Projects + p1 + s-proj-1 + Chats + s-chat-1
+    model.toggleSection(QStringLiteral("projects"));
+    // Collapsing "Projects" hides the whole project group; Chats remains.
+    QCOMPARE(model.rowCount(), 3);
+    QCOMPARE(rowAt(model, 0).value("header").toBool(), true);
+    QCOMPARE(rowAt(model, 0).value("section").toString(), QStringLiteral("projects"));
+    QCOMPARE(rowAt(model, 0).value("collapsed").toBool(), true);
+    QCOMPARE(rowAt(model, 1).value("section").toString(), QStringLiteral("chats"));
+    QCOMPARE(rowAt(model, 2).value("sessionId").toString(), QStringLiteral("s-chat-1"));
+
+    // Expanding restores the project group.
+    model.toggleSection(QStringLiteral("projects"));
+    QCOMPARE(model.rowCount(), 5);
+}
+
+void TstSessionListModel::projectCollapseHidesOnlyItsSessions()
+{
+    SessionListModel model;
+    model.setSessions(QVariantList{
+        session(QStringLiteral("s-a1"), QStringLiteral("A1"), QStringLiteral("2026-08-02"),
+                QStringLiteral("pa")),
+        session(QStringLiteral("s-b1"), QStringLiteral("B1"), QStringLiteral("2026-08-01"),
+                QStringLiteral("pb")),
+    });
+    model.setProjects(QVariantList{project(QStringLiteral("pa"), QStringLiteral("A")),
+                                   project(QStringLiteral("pb"), QStringLiteral("B"))});
+
+    QCOMPARE(model.rowCount(), 5);   // Projects + A + s-a1 + B + s-b1
+    model.toggleSection(QStringLiteral("proj:pa"));
+    // Collapsing one project leaves the Projects wrapper and the other project.
+    QCOMPARE(model.rowCount(), 4);
+    QCOMPARE(rowAt(model, 1).value("section").toString(), QStringLiteral("proj:pa"));
+    QCOMPARE(rowAt(model, 1).value("collapsed").toBool(), true);
+    QCOMPARE(rowAt(model, 2).value("section").toString(), QStringLiteral("proj:pb"));
 }
 
 void TstSessionListModel::sortsByRecencyWithinGroup()
@@ -144,13 +200,15 @@ void TstSessionListModel::unknownProjectSortsLastAndFallsBackToId()
                 QStringLiteral("no-such-project")),
     });
     model.setProjects(QVariantList{project(QStringLiteral("p1"), QStringLiteral("Alpha"))});
-    // Known project group first; the unknown id sorts after it, titled by its id.
-    QCOMPARE(model.rowCount(), 4);
-    QCOMPARE(rowAt(model, 0).value("section").toString(), QStringLiteral("proj:p1"));
-    QCOMPARE(rowAt(model, 1).value("sessionId").toString(), QStringLiteral("s-known"));
-    QCOMPARE(rowAt(model, 2).value("section").toString(), QStringLiteral("proj:no-such-project"));
-    QCOMPARE(rowAt(model, 2).value("title").toString(), QStringLiteral("no-such-project"));
-    QCOMPARE(rowAt(model, 3).value("sessionId").toString(), QStringLiteral("s-mystery"));
+    // Both groups sit under the Projects wrapper; the known project first, the
+    // unknown id after it, titled by its id.
+    QCOMPARE(model.rowCount(), 5);
+    QCOMPARE(rowAt(model, 0).value("section").toString(), QStringLiteral("projects"));
+    QCOMPARE(rowAt(model, 1).value("section").toString(), QStringLiteral("proj:p1"));
+    QCOMPARE(rowAt(model, 2).value("sessionId").toString(), QStringLiteral("s-known"));
+    QCOMPARE(rowAt(model, 3).value("section").toString(), QStringLiteral("proj:no-such-project"));
+    QCOMPARE(rowAt(model, 3).value("title").toString(), QStringLiteral("no-such-project"));
+    QCOMPARE(rowAt(model, 4).value("sessionId").toString(), QStringLiteral("s-mystery"));
 }
 
 void TstSessionListModel::peerSessionsGroupLast()
