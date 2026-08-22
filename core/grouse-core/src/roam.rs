@@ -272,6 +272,7 @@ impl ConnectTo<Client> for RoamTransport {
 enum PeerCommand {
     OpenSession { session_id: String, cwd: String },
     NewSession { cwd: String },
+    Relist,
     Close,
 }
 
@@ -574,6 +575,15 @@ impl RoamPeer {
     }
 
     /// Disconnect the peer: FIN + cancel the stream (unblocks the reader),
+    /// Re-fetch this peer's session list (after a session mutation such as
+    /// rename/archive/delete). The remote goose does not reliably notify us of
+    /// our own mutation, so the peer re-lists explicitly to keep its drawer
+    /// accurate. Fire-and-forget into the command loop.
+    pub fn relist(&self) {
+        let _ = self.cmd_tx.send(PeerCommand::Relist);
+    }
+
+    /// Disconnect the peer: FIN + cancel the stream (unblocks the reader),
     /// shut down the command loop, and report the terminal status.
     pub fn close(&self) {
         // Before tearing anything down: an explicit disconnect is an exit from
@@ -639,20 +649,12 @@ impl RoamPeer {
         // S-RC-6: a hung remote goose must not pin the calling thread forever.
         // The request task is detached; if we time out, its eventual reply is
         // simply dropped.
-        let result = rx
-            .recv_timeout(Self::RPC_TIMEOUT)
-            .map_err(|e| {
-                let detail = match e {
-                    std::sync::mpsc::RecvTimeoutError::Timeout => "roam rpc timed out",
-                    std::sync::mpsc::RecvTimeoutError::Disconnected => "roam rpc task failed",
-                };
-                AcpError::internal_error().data(detail)
-            })?;
-        // End-of-turn fan-out, shared by both the success and failure arms:
-        // the turn's completion rides the session/prompt REPLACE (the reply's
-        // stopReason) — the main connection surfaces it via store.run_ended;
-        // the peer has no store, so emit RunEnded straight to the listener so
-        // the app clears its in-flight/turnInFlight state and drains the queue.
+        // End-of-turn fan-out, shared by the success, failure, and timeout
+        // arms: the turn's completion rides the session/prompt REPLACE (the
+        // reply's stopReason) — the main connection surfaces it via
+        // store.run_ended; the peer has no store, so emit RunEnded straight
+        // to the listener so the app clears its in-flight/turnInFlight state
+        // and drains the queue.
         let end_turn = |stop: &str| {
             // Emit RunEnded UNCONDITIONALLY, not just when this peer owns the
             // screen. The turn has ended regardless of what the user is viewing;
@@ -667,6 +669,24 @@ impl RoamPeer {
             // The peer's turn bookkeeping mirrors the spine: a live run id is
             // now over, whether or not the server sent an activeRunId update.
             self.inner.lock().active_run = None;
+        };
+        let result = match rx.recv_timeout(Self::RPC_TIMEOUT) {
+            Ok(inner) => inner,
+            Err(e) => {
+                let detail = match e {
+                    std::sync::mpsc::RecvTimeoutError::Timeout => "roam rpc timed out",
+                    std::sync::mpsc::RecvTimeoutError::Disconnected => "roam rpc task failed",
+                };
+                let error = AcpError::internal_error().data(detail);
+                // A prompt that times out (the peer vanished mid-turn without a
+                // clean FIN, so send_request hangs and never errors) must still
+                // end the turn — the app clears its in-flight state only on
+                // RunEnded, so skipping this left it busy forever.
+                if method == "session/prompt" {
+                    end_turn("error");
+                }
+                return Err(error);
+            }
         };
         let result = match result {
             Ok(reply) => reply,
@@ -870,6 +890,19 @@ impl RoamPeer {
                         Err(error) => {
                             self.fail(format!("roam session/new: {error}"));
                         }
+                    }
+                }
+                PeerCommand::Relist => {
+                    // A session mutation (rename/archive/delete) landed on this
+                    // peer; re-fetch its list so the drawer reflects it. The
+                    // remote goose does not reliably notify us of our own
+                    // mutation, so we re-list explicitly.
+                    let list = cx
+                        .send_request(ListSessionsRequest::new().meta(session_list_meta()))
+                        .block_task()
+                        .await;
+                    if let Ok(list) = list {
+                        self.apply_sessions(&list);
                     }
                 }
                 PeerCommand::Close => break,
@@ -2086,6 +2119,21 @@ mod tests {
     }
 
     #[test]
+    fn relist_queues_relist_command() {
+        // Regression guard for the roam session-mutation fix: after a
+        // rename/archive/delete lands on a peer, the core re-lists that peer's
+        // sessions so its drawer reflects the change. `relist()` must queue the
+        // Relist command (the command loop re-fetches + applies the list).
+        let listener = test_listener();
+        let (peer, mut cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        peer.relist();
+        match cmd_rx.try_recv() {
+            Ok(PeerCommand::Relist) => {}
+            other => panic!("expected Relist command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn new_session_ignored_before_ready() {
         let listener = test_listener();
         let (peer, _) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
@@ -2345,5 +2393,62 @@ mod tests {
         assert_eq!(crate::spine::permission_option_kind_str(&PermissionOptionKind::AllowAlways), "allow_always");
         assert_eq!(crate::spine::permission_option_kind_str(&PermissionOptionKind::RejectOnce), "reject_once");
         assert_eq!(crate::spine::permission_option_kind_str(&PermissionOptionKind::RejectAlways), "reject_always");
+    }
+
+    #[test]
+    fn prompt_timeout_emits_run_ended() {
+        // Regression: a session/prompt whose reply never arrives (the peer
+        // vanished mid-turn without a clean FIN, so send_request hangs and
+        // never errors) must still end the turn. Before the fix, the `?` on
+        // recv_timeout returned before end_turn ran, so the app never received
+        // RunEnded and stayed busy forever.
+        let listener = test_listener();
+        let (peer, _cmd_rx) = offline_peer(
+            "laptop",
+            listener.clone(),
+            gate(Arc::new(AtomicBool::new(true))),
+        );
+
+        // A ConnectionTo<Agent> over a Channel whose counterpart never replies:
+        // send_request hangs, so the 30s RPC_TIMEOUT fires.
+        let (transport, _silent) = Channel::duplex();
+        let cx_holder: Arc<Mutex<Option<agent_client_protocol::ConnectionTo<Agent>>>> =
+            Arc::new(Mutex::new(None));
+        let (ready_tx, ready_rx) = std_mpsc::channel();
+        let (_keep_alive_tx, keep_alive_rx) = tokio::sync::oneshot::channel::<()>();
+        let cx_holder2 = cx_holder.clone();
+        let ready_tx2 = ready_tx.clone();
+        runtime().spawn(async move {
+            let _ = Client.builder()
+                .name("grouse")
+                .connect_with(
+                    transport,
+                    async move |cx: agent_client_protocol::ConnectionTo<Agent>| {
+                        *cx_holder2.lock() = Some(cx);
+                        let _ = ready_tx2.send(());
+                        // Never return: keeps the connection (and the transport)
+                        // alive so send_request keeps waiting for a reply.
+                        let _ = keep_alive_rx.await;
+                        Ok(())
+                    },
+                )
+                .await;
+        });
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("connection not established");
+        peer.inner.lock().conn = cx_holder.lock().take();
+
+        // The prompt never gets a reply; the turn must still end.
+        let result = peer.rpc("session/prompt", json!({ "sessionId": "roam:laptop:s1" }));
+        assert!(result.is_err(), "expected the rpc to time out");
+
+        let events = listener.events.lock();
+        assert!(
+            events.iter().any(|e| e == "stream RunEnded"),
+            "expected RunEnded to be emitted, got: {events:?}"
+        );
+        // The peer's run bookkeeping is cleared too.
+        assert!(peer.inner.lock().active_run.is_none());
     }
 }

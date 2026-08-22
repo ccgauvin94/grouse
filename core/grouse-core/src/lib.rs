@@ -1350,6 +1350,25 @@ impl Core {
     }
 
     fn mutate_session(&self, method: &str, params: Value) {
+        let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        // Route session-bound mutations to the owning roam peer
+        // (`roam:<label>:<id>` sessions live on the peer's connection, not the
+        // main one). Before this, roam mutations went to the main connection,
+        // which doesn't own the session — the remote never saw them, so the
+        // change reverted on the next session/list (the app only showed it
+        // optimistically).
+        if session_id.starts_with("roam:") {
+            let Some(peer) = self.peer_for_session(session_id) else { return };
+            let method = method.to_string();
+            crate::roam::runtime().spawn_blocking(move || {
+                if peer.rpc(&method, params).is_ok() {
+                    // Re-list the peer's sessions so its drawer reflects the
+                    // mutation (the peer owns its own list).
+                    peer.relist();
+                }
+            });
+            return;
+        }
         let Some(conn) = self.inner.conn.lock().clone() else { return };
         let core = self.clone();
         let method = method.to_string();
@@ -1360,6 +1379,18 @@ impl Core {
                 core.list_sessions();
             }
         });
+    }
+
+    /// Resolve the roam peer owning a `roam:<label>:<id>` session, if any.
+    fn peer_for_session(&self, session_id: &str) -> Option<Arc<crate::roam::RoamPeer>> {
+        let rest = session_id.strip_prefix("roam:")?;
+        let label = rest.split(':').next()?;
+        self.inner
+            .peers
+            .lock()
+            .iter()
+            .find(|peer| peer.label() == label)
+            .cloned()
     }
 
     // -- remote-change resync (CONTRACT §4) -----------------------------------

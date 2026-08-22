@@ -8,7 +8,7 @@ build/
 # Kotlin compiler scratch — build artifacts, and its crash logs embed absolute paths
 .kotlin/
 
-# Release signing. The keystore and its passwords live in ~/.android/ and in repo secrets,
+# Release signing. The keystore and its passwords live in ~/services/grouse/signing/ and in repo secrets,
 # never here — losing the keystore means no installed user can ever be updated.
 *.jks
 *.keystore
