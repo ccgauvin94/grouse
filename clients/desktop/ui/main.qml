@@ -510,6 +510,11 @@ Controls.ApplicationWindow {
                                             Layout.maximumWidth: 130
                                             elide: Text.ElideRight
                                             renderType: Text.NativeRendering
+                                            // The row is narrow, so the raw dial error is
+                                            // elided — hover to read the FULL status (the
+                                            // only place the real failure cause is visible).
+                                            ToolTip.visible: hovered && status.length > 0
+                                            ToolTip.text: status
                                         }
                                         Controls.ToolButton {
                                             text: qsTr("New chat")

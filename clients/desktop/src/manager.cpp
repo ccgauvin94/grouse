@@ -1306,6 +1306,10 @@ void Manager::coreOnRoamPeerStatus(const QString &label, const QString &status)
 {
     const bool down = status == QStringLiteral("disconnected") || status.startsWith(QStringLiteral("error:"));
     m_roamModel->setPeerStatus(label, status, !down);
+    // The roam row elides the status at 130px, hiding the actual dial failure.
+    // Surface errors in the main status bar so the real cause is readable.
+    if (status.startsWith(QStringLiteral("error:")))
+        setStatus(status);
 }
 
 void Manager::coreOnRoamSessions(const QString &label, const QString &json)
