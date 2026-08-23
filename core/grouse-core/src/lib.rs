@@ -394,8 +394,10 @@ fn dial_roam_peer(inner: &Arc<CoreInner>, card: String, label: String, generatio
     let hook_inner = Arc::downgrade(inner);
     let hook_label = label.clone();
     let on_lifecycle: crate::roam::LifecycleHook = Arc::new(move |event| {
-        let Some(inner) = hook_inner.upgrade() else { return };
-        on_roam_lifecycle(&inner, &hook_label, generation, event);
+        let Some(inner) = hook_inner.upgrade() else {
+            return crate::roam::LifecycleOutcome::Final;
+        };
+        on_roam_lifecycle(&inner, &hook_label, generation, event)
     });
     let peer = RoamPeer::connect(
         secret,
@@ -419,13 +421,15 @@ fn on_roam_lifecycle(
     label: &str,
     generation: u64,
     event: crate::roam::PeerLifecycle,
-) {
-    use crate::roam::PeerLifecycle;
+) -> crate::roam::LifecycleOutcome {
+    use crate::roam::{LifecycleOutcome, PeerLifecycle};
     let action = {
         let mut intents = inner.roam_intents.lock();
-        let Some(intent) = intents.get_mut(label) else { return };
+        let Some(intent) = intents.get_mut(label) else {
+            return LifecycleOutcome::Final;
+        };
         if intent.generation != generation {
-            return;
+            return LifecycleOutcome::Final;
         }
         match event {
             PeerLifecycle::Ready => {
@@ -467,13 +471,14 @@ fn on_roam_lifecycle(
         },
     }
     match action {
-        None => {}
+        None => LifecycleOutcome::Final,
         Some(Action::Reopen(session_id)) => {
             let core = Core { inner: inner.clone() };
             let label = label.to_string();
             if *inner.active_peer_label.read() == Some(label.clone()) {
                 core.roam_open_session(label, session_id);
             }
+            LifecycleOutcome::Final
         }
         Some(Action::Redial {
             card,
@@ -495,6 +500,7 @@ fn on_roam_lifecycle(
                     dial_roam_peer(&inner, card, label, generation);
                 }
             });
+            LifecycleOutcome::Reconnecting
         }
     }
 }

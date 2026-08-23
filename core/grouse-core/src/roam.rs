@@ -380,7 +380,17 @@ pub enum PeerLifecycle {
     Ended { was_ready: bool },
 }
 
-pub type LifecycleHook = Arc<dyn Fn(PeerLifecycle) + Send + Sync>;
+/// What the owner decided about an [`PeerLifecycle::Ended`] event. Drives the
+/// status the peer emits: a reconnect-in-progress must not surface as a
+/// terminal "disconnected"/"error" (the app tears the chat down on those).
+pub enum LifecycleOutcome {
+    /// No reconnect: emit the terminal status as before.
+    Final,
+    /// The owner scheduled a redial; emit "reconnecting" instead.
+    Reconnecting,
+}
+
+pub type LifecycleHook = Arc<dyn Fn(PeerLifecycle) -> LifecycleOutcome + Send + Sync>;
 
 impl RoamPeer {
     /// Hard ceiling on a single post-handshake RPC (S-RC-6). A hung remote
@@ -425,13 +435,11 @@ impl RoamPeer {
             let stream = match dialed {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {
-                    task.fail(format!("roam connect: {error}"));
-                    task.notify_ended();
+                    task.ended_with(format!("roam connect: {error}"));
                     return;
                 }
                 Err(error) => {
-                    task.fail(format!("roam dial task panicked: {error}"));
-                    task.notify_ended();
+                    task.ended_with(format!("roam dial task panicked: {error}"));
                     return;
                 }
             };
@@ -1085,24 +1093,35 @@ impl RoamPeer {
         }
         inner.status = ConnectionStatus::Disconnected;
         drop(inner);
-        match result {
-            Ok(()) => self.emit_status("disconnected"),
-            Err(error) => self.emit_status(&format!("error: {error}")),
-        }
-        self.notify_ended();
+        let status = match result {
+            Ok(()) => "disconnected".to_string(),
+            Err(error) => format!("error: {error}"),
+        };
+        self.ended_with(status);
     }
 
     /// Tell the owner the connection is gone (unless it was a deliberate
-    /// close). Fired from `connection_ended` and the dial-failure returns —
-    /// NOT from `fail()`, which is also used for post-ready RPC errors that
-    /// leave the connection alive.
-    fn notify_ended(&self) {
+    /// close) and emit the matching status: the owner's terminal status when
+    /// no reconnect is coming, "reconnecting" when one is. Fired from
+    /// `connection_ended` and the dial-failure returns — NOT from `fail()`,
+    /// which is also used for post-ready RPC errors that leave the connection
+    /// alive.
+    fn ended_with(&self, terminal_status: String) {
         let (closing, was_ready) = {
-            let inner = self.inner.lock();
+            let mut inner = self.inner.lock();
+            if !matches!(inner.status, ConnectionStatus::Disconnected) {
+                inner.status = ConnectionStatus::Error {
+                    message: terminal_status.clone(),
+                };
+            }
             (inner.closing, inner.reached_ready)
         };
-        if !closing {
-            (self.on_lifecycle)(PeerLifecycle::Ended { was_ready });
+        if closing {
+            return;
+        }
+        match (self.on_lifecycle)(PeerLifecycle::Ended { was_ready }) {
+            LifecycleOutcome::Final => self.emit_status(&terminal_status),
+            LifecycleOutcome::Reconnecting => self.emit_status("reconnecting"),
         }
     }
 
@@ -1940,7 +1959,7 @@ mod tests {
                 std::process::id(),
                 TEST_PEER_SEQ.fetch_add(1, Ordering::SeqCst)
             )))),
-            on_lifecycle: Arc::new(|_| {}),
+            on_lifecycle: Arc::new(|_| LifecycleOutcome::Final),
         });
         (peer, cmd_rx)
     }

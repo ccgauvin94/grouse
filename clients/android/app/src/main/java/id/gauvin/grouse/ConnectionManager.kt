@@ -862,6 +862,10 @@ class ConnectionManager private constructor(context: Context) {
         // Roam: the session lives on the peer -- the core routes the chat to it.
         val peer = roamPeer(sessionId)
         if (peer != null) {
+            // Same as open(): a reopened peer session can't receive a dead
+            // turn's RunEnded, so a stale busy=true would suppress every send.
+            busy.value = false; compacting.value = false
+            turnInFlight = false
             currentRoamPeer = peer
             // Loading indicator: the header shows "Loading… N" while the
             // peer's transcript paints (cached snapshot) or replays (wire).
@@ -1647,9 +1651,23 @@ class ConnectionManager private constructor(context: Context) {
                 // reply, so they are staged and open() paints them in one go. This is
                 // the peer's equivalent of onCoreReady clearing the main connection's
                 // indicator — it replaced a 900ms "no chunks lately" guess.
-                if (currentRoamPeer == label && replayActive.value) {
-                    replayActive.value = false
-                    replayDoneTick.value++      // ChatScreen: snap to bottom, as main does
+                if (currentRoamPeer == label) {
+                    // A fresh connection (auto-reconnect included) can't deliver a
+                    // prior turn's RunEnded; drop any stale busy latch so sends work.
+                    busy.value = false; compacting.value = false
+                    turnInFlight = false
+                    if (replayActive.value) {
+                        replayActive.value = false
+                        replayDoneTick.value++  // ChatScreen: snap to bottom, as main does
+                    }
+                }
+            }
+            st == "reconnecting" -> {
+                // The core is re-dialing on its own: keep the chat, the peer and the
+                // session list intact — tearing down here is what turned every blip
+                // into a manual reconnect. A terminal status follows if it gives up.
+                if (currentRoamPeer == label) {
+                    status.value = "roam: $label — reconnecting…"
                 }
             }
             st == "disconnected" -> {
