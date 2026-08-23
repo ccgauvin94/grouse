@@ -1653,9 +1653,12 @@ class ConnectionManager private constructor(context: Context) {
                 // indicator — it replaced a 900ms "no chunks lately" guess.
                 if (currentRoamPeer == label) {
                     // A fresh connection (auto-reconnect included) can't deliver a
-                    // prior turn's RunEnded; drop any stale busy latch so sends work.
+                    // prior turn's RunEnded; drop the stale busy latch AND the run
+                    // routing, or the next send steers into the dead run instead of
+                    // starting a new prompt.
                     busy.value = false; compacting.value = false
                     turnInFlight = false
+                    resetTurnRouting()
                     if (replayActive.value) {
                         replayActive.value = false
                         replayDoneTick.value++  // ChatScreen: snap to bottom, as main does
