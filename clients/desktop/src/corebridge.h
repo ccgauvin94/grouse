@@ -75,6 +75,7 @@ public:
         char *(*grouse_identity_generate)(void);
         char *(*grouse_identity_public_key)(const char *secret, char **out_err);
         char *(*grouse_card_fingerprint)(const char *card, char **out_err);
+        void (*grouse_set_roam_identity)(void *h, const char *secret);
         // unstable intents
         void (*grouse_unstable_steer)(void *h, const char *text, const char *expected_run_id);
         void (*grouse_unstable_export_session)(void *h, const char *session_id);

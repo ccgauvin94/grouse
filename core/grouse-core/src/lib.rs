@@ -1620,6 +1620,23 @@ impl Core {
         crate::cache::make_private(&path);
         secret
     }
+
+    /// Override the persisted roam identity so the wire dials with the SAME key
+    /// the UI advertises. The platform (desktop QSettings) holds the identity the
+    /// user shows a host as a card; without this sync the core would generate and
+    /// dial with its own separate secret, which the host never accepted
+    /// (not_allowlisted). Blank/unset leaves the core's own identity in place.
+    pub fn set_roam_identity(&self, secret: String) {
+        let s = secret.trim();
+        if s.is_empty() {
+            return;
+        }
+        let dir = self.inner.cache.dir();
+        let path = dir.join("roam_identity");
+        let _ = crate::cache::atomic_write(&path, s.as_bytes());
+        #[cfg(unix)]
+        crate::cache::make_private(&path);
+    }
 }
 
 // ---------------------------------------------------------------------------

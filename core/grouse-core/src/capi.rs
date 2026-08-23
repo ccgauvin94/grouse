@@ -763,6 +763,14 @@ pub extern "C" fn grouse_identity_generate() -> *mut c_char {
         .unwrap_or(std::ptr::null_mut())
 }
 
+/// Set the persisted roam identity so wire dials use the key the UI advertises.
+/// Blank/null leaves the core's own identity in place.
+#[no_mangle]
+pub extern "C" fn grouse_set_roam_identity(h: *mut c_void, secret: *const c_char) {
+    let s = (unsafe { c_param(secret) }).map(str::to_owned).unwrap_or_default();
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.set_roam_identity(s))).ok();
+}
+
 /// Hex public key for a secret key. NULL on error (`out_err` set).
 #[no_mangle]
 pub extern "C" fn grouse_identity_public_key(secret: *const c_char, out_err: *mut *mut c_char) -> *mut c_char {

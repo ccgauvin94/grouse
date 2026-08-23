@@ -485,9 +485,21 @@ Controls.ApplicationWindow {
                                     visible: rdel.isHeader
                                     anchors.fill: parent
                                     radius: Kirigami.Units.smallSpacing
-                                    color: mouse.containsMouse
-                                        ? Kirigami.Theme.highlightColor : "transparent"
-                                    opacity: mouse.containsMouse ? 0.3 : 1
+                                    // Never an opaque background: a broken binding
+                                    // here once left the header solid white. Keep the
+                                    // base transparent; hover tints like the main
+                                    // list's own headers.
+                                    color: "transparent"
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        anchors.rightMargin: Kirigami.Units.smallSpacing + Kirigami.Units.gridUnit * 1.75
+                                        radius: Kirigami.Units.smallSpacing
+                                        color: rhmouse.containsMouse
+                                            ? Qt.rgba(Kirigami.Theme.highlightColor.r,
+                                                      Kirigami.Theme.highlightColor.g,
+                                                      Kirigami.Theme.highlightColor.b, 0.12)
+                                            : "transparent"
+                                    }
                                     MouseArea {
                                         id: rhmouse
                                         anchors.fill: parent
@@ -499,6 +511,18 @@ Controls.ApplicationWindow {
                                         anchors.leftMargin: Kirigami.Units.smallSpacing
                                         anchors.rightMargin: Kirigami.Units.smallSpacing
                                         spacing: Kirigami.Units.smallSpacing
+                                        // Caret mirrors the Projects/Chats headers;
+                                        // rhmouse handles the click that toggles.
+                                        Item {
+                                            Layout.preferredWidth: 18
+                                            Layout.preferredHeight: 18
+                                            Kirigami.Icon {
+                                                anchors.centerIn: parent
+                                                source: expanded ? "arrow-down" : "arrow-right"
+                                                implicitWidth: 12
+                                                implicitHeight: 12
+                                            }
+                                        }
                                         Controls.Label {
                                             text: label
                                             font.weight: Font.DemiBold
@@ -510,9 +534,7 @@ Controls.ApplicationWindow {
                                         Rectangle {
                                             width: 8; height: 8; radius: 4
                                             color: connected
-                                                ? (Kirigami.Theme.colorScheme === Kirigami.Theme.ColorScheme.Dark
-                                                   ? Theme.semantic.dark.status.online
-                                                   : Theme.semantic.light.status.online)
+                                                ? Kirigami.Theme.positiveTextColor
                                                 : Kirigami.Theme.negativeTextColor
                                             Layout.alignment: Qt.AlignVCenter
                                         }
@@ -526,7 +548,7 @@ Controls.ApplicationWindow {
                                             // The row is narrow, so the raw dial error is
                                             // elided — hover to read the FULL status (the
                                             // only place the real failure cause is visible).
-                                            ToolTip.visible: hovered && status.length > 0
+                                            ToolTip.visible: rhmouse.containsMouse && status.length > 0
                                             ToolTip.text: status
                                         }
                                         Controls.ToolButton {
@@ -582,6 +604,7 @@ Controls.ApplicationWindow {
                                         onClicked: Mgr.openRoamSession(label, sessionId, cwd)
                                     }
                                     Column {
+                                        id: rcol
                                         anchors.left: parent.left
                                         anchors.right: parent.right
                                         anchors.verticalCenter: parent.verticalCenter

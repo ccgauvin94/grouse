@@ -108,6 +108,8 @@ public:
     void restoreRoamPeers();
     void persistRoamCard(const QString &label, const QString &card);
     void forgetRoamCard(const QString &label);
+    /** Push the advertised (QSettings) identity into the core so dials use the accepted key. */
+    void syncRoamIdentityToCore();
     /** Open a session on a roam peer; the peer becomes the active connection
      *  for chat (prompt/tools/extensions route to it until a Main session is
      *  opened). */

@@ -108,6 +108,7 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_identity_generate);
     RESOLVE(grouse_identity_public_key);
     RESOLVE(grouse_card_fingerprint);
+    RESOLVE(grouse_set_roam_identity);
     RESOLVE(grouse_unstable_steer);
     RESOLVE(grouse_unstable_export_session);
     RESOLVE(grouse_unstable_session_info);

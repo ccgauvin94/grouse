@@ -237,10 +237,7 @@ void Manager::disconnect()
 
 void Manager::connectRoam(const QString &card, const QString &label)
 {
-    if (label.isEmpty()) {
-        setStatus(QStringLiteral("roam: label required"));
-        return;
-    }
+    syncRoamIdentityToCore();
     if (m_bridge && m_bridge->isAvailable()) {
         const QByteArray c = card.toUtf8();
         const QByteArray l = label.toUtf8();
@@ -248,6 +245,20 @@ void Manager::connectRoam(const QString &card, const QString &label)
         m_roamModel->addPeer(label);
         persistRoamCard(label, card);
     }
+}
+
+/// Push the identity this app advertises (QSettings) into the core so the wire
+/// dials with the SAME key the host was asked to accept. The core otherwise
+/// keeps a separately-generated secret and every dial lands "not_allowlisted".
+void Manager::syncRoamIdentityToCore()
+{
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const QString secret = m_store.value("roam_identity").toString().trimmed();
+    if (secret.isEmpty())
+        return;
+    const QByteArray s = secret.toUtf8();
+    m_bridge->api().grouse_set_roam_identity(m_bridge->handle(), s.constData());
 }
 
 void Manager::disconnectRoam(const QString &label)
@@ -1183,10 +1194,9 @@ void Manager::coreOnStatus(const QString &json)
         // is the safe point to re-arm dials for persisted roam peers (once).
         if (!m_roamRestored) {
             m_roamRestored = true;
+            syncRoamIdentityToCore();
             restoreRoamPeers();
         }
-        flushQueue();
-        refreshSessions();
         flushQueue();
         refreshSessions();
         refreshProjects();
