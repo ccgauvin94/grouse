@@ -1442,10 +1442,16 @@ impl RoamPeer {
                         && !m.content.is_empty()
                         && (text.contains(m.content.as_str()) || m.content.contains(text))
                 }) {
+                // The bubble deliberately KEEPS its empty id: empty-id is the
+                // "open stream" marker live chunks append to. Stamping the
+                // replay's id here orphaned the stream — every later live
+                // chunk missed the bubble and rendered as its own fragment.
+                Some(m) if m.content.contains(text) => Acc::Skip,
                 Some(m) => {
-                    m.id = message_id.to_string();
-                    if !m.content.contains(text) {
+                    if text.contains(m.content.as_str()) {
                         m.content = text.to_string();
+                    } else {
+                        m.content.push_str(text);
                     }
                     update_of(m)
                 }
