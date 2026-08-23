@@ -124,6 +124,17 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
         )
     }
 
+    // Foreground recovery: redial a dead roam peer and drop its stale turn
+    // latch (see ConnectionManager.onAppResumed).
+    val resumeOwner = LocalLifecycleOwner.current
+    DisposableEffect(resumeOwner) {
+        val obs = LifecycleEventObserver { _, e ->
+            if (e == Lifecycle.Event.ON_RESUME) cm.onAppResumed()
+        }
+        resumeOwner.lifecycle.addObserver(obs)
+        onDispose { resumeOwner.lifecycle.removeObserver(obs) }
+    }
+
     // Re-lock when backgrounded; (re)prompt when foregrounded while locked. On observer
     // registration the Lifecycle replays up to the current state, so this fires the initial
     // cold-start prompt too.

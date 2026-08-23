@@ -599,7 +599,8 @@ class ConnectionManager private constructor(context: Context) {
         // into — a manual Connect each launch is redundant. Runs once per call
         // (RoamBrowse calls loadRoamPeers once on first composition).
         roamPeers.forEach { peer ->
-            if (roamStatus[peer.name] != "ready" && roamStatus[peer.name] != "connecting") {
+            val st = roamStatus[peer.name]
+            if (st != "ready" && st != "reconnecting" && st?.startsWith("connecting") != true) {
                 connectRoam(peer.name)
             }
         }
@@ -717,6 +718,23 @@ class ConnectionManager private constructor(context: Context) {
         // with OUR accepted secret first (see seedRoamIdentity) so the dial key matches.
         seedRoamIdentity()
         core.roamConnect(peer.card, name)
+    }
+
+    /** Foreground recovery. The core's reconnect backoff only runs while the
+     *  process is awake, so hours of dozing can exhaust the budget with the
+     *  network down; the peer then stays dead and the interrupted turn's busy
+     *  latch makes the composer queue forever ("thinking" hours later). On
+     *  resume: if the chat's peer is dead, drop the stale turn state and
+     *  redial with a fresh budget. */
+    fun onAppResumed() {
+        if (roamPeers.isEmpty()) loadRoamPeers()
+        val peer = currentRoamPeer ?: return
+        val st = roamStatus[peer]
+        if (st == "ready" || st == "reconnecting" || st?.startsWith("connecting") == true) return
+        busy.value = false; compacting.value = false
+        turnInFlight = false
+        resetTurnRouting()
+        connectRoam(peer)
     }
 
     // Reconnection is core-owned for peers too now: a peer connection that reached
@@ -1675,6 +1693,11 @@ class ConnectionManager private constructor(context: Context) {
             }
             st == "disconnected" -> {
                 if (currentRoamPeer == label) {
+                    // The dead connection's turn can never end; its latch must
+                    // not outlive it (composer stuck "thinking", sends queued).
+                    busy.value = false; compacting.value = false
+                    turnInFlight = false
+                    resetTurnRouting()
                     currentRoamPeer = null
                     replayActive.value = false   // no wire = nothing more to load
                     if (roamPeer(currentSession.value) == label) {
@@ -1686,6 +1709,9 @@ class ConnectionManager private constructor(context: Context) {
             }
             st.startsWith("error") -> {
                 if (currentRoamPeer == label) {
+                    busy.value = false; compacting.value = false
+                    turnInFlight = false
+                    resetTurnRouting()
                     currentRoamPeer = null
                     replayActive.value = false
                 }
