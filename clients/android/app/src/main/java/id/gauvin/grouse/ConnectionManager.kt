@@ -719,10 +719,10 @@ class ConnectionManager private constructor(context: Context) {
         core.roamConnect(peer.card, name)
     }
 
-    // No automatic reconnection: an unexpected drop stays dropped until the user acts.
-    // The core reconnects the MAIN connection on its own (backoff, resume) — an app-side
-    // nudge here was the wedged loop that re-dialed the roam peer forever (peers must be
-    // explicitly connected by the user; they never auto-reconnect).
+    // Reconnection is core-owned for peers too now: a peer connection that reached
+    // ready and then dropped is re-dialed under capped backoff (and the open session
+    // reopened), until the user disconnects it. Manual dial failures still stay
+    // dropped — that is what keeps the historical forever-redial wedge impossible.
 
     // connectHome() re-enters composition every time the lock screen (or any recreation) swaps
     // AppRoot back in; only the FIRST call per process should land on the Assistant. Later calls

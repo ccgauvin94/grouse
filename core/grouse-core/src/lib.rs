@@ -367,7 +367,156 @@ struct CoreInner {
     /// session's owner.
     peers: Mutex<Vec<Arc<RoamPeer>>>,
     active_peer_label: Arc<RwLock<Option<String>>>,
+    /// Reconnect policy state per peer label. Present while the user wants the
+    /// peer connected (set by `roam_connect`, cleared by `roam_disconnect`).
+    roam_intents: Mutex<HashMap<String, RoamIntent>>,
 }
+
+/// Replace-and-dial the peer for `label`. Shared by `roam_connect` and the
+/// reconnect path; `generation` must already be recorded in the intent so
+/// lifecycle events from superseded peers are ignored.
+fn dial_roam_peer(inner: &Arc<CoreInner>, card: String, label: String, generation: u64) {
+    let mut peers = inner.peers.lock();
+    peers.retain(|peer| {
+        if peer.label() == label {
+            peer.close();
+            false
+        } else {
+            true
+        }
+    });
+    let secret = Core { inner: inner.clone() }.roam_identity();
+    let active = inner.active_peer_label.clone();
+    let gate_label = label.clone();
+    let is_active: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
+        *active.read() == Some(gate_label.clone())
+    });
+    let hook_inner = Arc::downgrade(inner);
+    let hook_label = label.clone();
+    let on_lifecycle: crate::roam::LifecycleHook = Arc::new(move |event| {
+        let Some(inner) = hook_inner.upgrade() else { return };
+        on_roam_lifecycle(&inner, &hook_label, generation, event);
+    });
+    let peer = RoamPeer::connect(
+        secret,
+        card,
+        label,
+        inner.listener.clone(),
+        is_active,
+        inner.cache.clone(),
+        on_lifecycle,
+    );
+    peers.push(peer);
+}
+
+/// The reconnect policy. Ready resets the budget (and reopens the session
+/// a reconnect interrupted); an unexpected drop of a ready connection
+/// enters reconnect mode; further failures retry until the backoff table
+/// is exhausted. Manual dial failures (never ready, not reconnecting)
+/// stay manual — that is what keeps an unauthorized peer from looping.
+fn on_roam_lifecycle(
+    inner: &Arc<CoreInner>,
+    label: &str,
+    generation: u64,
+    event: crate::roam::PeerLifecycle,
+) {
+    use crate::roam::PeerLifecycle;
+    let action = {
+        let mut intents = inner.roam_intents.lock();
+        let Some(intent) = intents.get_mut(label) else { return };
+        if intent.generation != generation {
+            return;
+        }
+        match event {
+            PeerLifecycle::Ready => {
+                let was_reconnecting = intent.reconnecting;
+                intent.reconnecting = false;
+                intent.attempts = 0;
+                if was_reconnecting {
+                    intent.last_open_session.clone().map(Action::Reopen)
+                } else {
+                    None
+                }
+            }
+            PeerLifecycle::Ended { was_ready } => {
+                if !was_ready && !intent.reconnecting {
+                    None
+                } else if (intent.attempts as usize) >= ROAM_RECONNECT_BACKOFF_SECS.len() {
+                    intent.reconnecting = false;
+                    None
+                } else {
+                    intent.reconnecting = true;
+                    let delay = ROAM_RECONNECT_BACKOFF_SECS[intent.attempts as usize];
+                    intent.attempts += 1;
+                    intent.generation += 1;
+                    Some(Action::Redial {
+                        card: intent.card.clone(),
+                        generation: intent.generation,
+                        delay,
+                    })
+                }
+            }
+        }
+    };
+    enum Action {
+        Reopen(String),
+        Redial {
+            card: String,
+            generation: u64,
+            delay: u64,
+        },
+    }
+    match action {
+        None => {}
+        Some(Action::Reopen(session_id)) => {
+            let core = Core { inner: inner.clone() };
+            let label = label.to_string();
+            if *inner.active_peer_label.read() == Some(label.clone()) {
+                core.roam_open_session(label, session_id);
+            }
+        }
+        Some(Action::Redial {
+            card,
+            generation,
+            delay,
+        }) => {
+            let inner = inner.clone();
+            let label = label.to_string();
+            crate::roam::runtime().spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                let still_wanted = inner
+                    .roam_intents
+                    .lock()
+                    .get(&label)
+                    .is_some_and(|intent| {
+                        intent.reconnecting && intent.generation == generation
+                    });
+                if still_wanted {
+                    dial_roam_peer(&inner, card, label, generation);
+                }
+            });
+        }
+    }
+}
+
+
+/// Auto-reconnect state for one roam peer. A connection that reached ready and
+/// then dropped is re-dialed under capped backoff; dial/handshake failures
+/// outside reconnect mode stay manual, so an unauthorized or misconfigured
+/// peer can never redial in a loop (the historical wedge).
+struct RoamIntent {
+    card: String,
+    /// Bumped on every (re)dial; stale peer lifecycle events are ignored.
+    generation: u64,
+    attempts: u32,
+    reconnecting: bool,
+    /// Reopened automatically once a reconnect reaches ready.
+    last_open_session: Option<String>,
+}
+
+/// Backoff schedule for roam reconnects; after the last entry the peer stays
+/// disconnected until the user acts (the peer's own error status is showing).
+const ROAM_RECONNECT_BACKOFF_SECS: [u64; 8] = [1, 2, 4, 8, 15, 30, 30, 30];
 
 /// The stable interface (CONTRACT §3).
 #[derive(uniffi::Object, Clone)]
@@ -405,6 +554,7 @@ impl Core {
                 conn_task: Mutex::new(None),
                 peers: Mutex::new(Vec::new()),
                 active_peer_label: Arc::new(RwLock::new(None)),
+                roam_intents: Mutex::new(HashMap::new()),
             }),
         });
         // Seed the session directory from cache: the drawer renders the
@@ -698,37 +848,32 @@ impl Core {
     }
 
     /// Connect a roam peer in browse mode (CONTRACT §6). The peer's identity
-    /// is generated + persisted on first use.
+    /// is generated + persisted on first use. Once a connection reaches ready,
+    /// an unexpected drop re-dials under [`ROAM_RECONNECT_BACKOFF_SECS`] until
+    /// `roam_disconnect` clears the intent.
     pub fn roam_connect(&self, card: String, label: String) {
-        let mut peers = self.inner.peers.lock();
-        peers.retain(|peer| {
-            if peer.label() == label {
-                peer.close();
-                false
-            } else {
-                true
-            }
-        });
-        let secret = self.roam_identity();
-        let active = self.inner.active_peer_label.clone();
-        let gate_label = label.clone();
-        let is_active: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
-            *active.read() == Some(gate_label.clone())
-        });
-        let peer = RoamPeer::connect(
-            secret,
-            card,
-            label,
-            self.inner.listener.clone(),
-            is_active,
-            self.inner.cache.clone(),
-        );
-        peers.push(peer);
+        let generation = {
+            let mut intents = self.inner.roam_intents.lock();
+            let entry = intents.entry(label.clone()).or_insert(RoamIntent {
+                card: card.clone(),
+                generation: 0,
+                attempts: 0,
+                reconnecting: false,
+                last_open_session: None,
+            });
+            entry.card = card.clone();
+            entry.generation += 1;
+            entry.attempts = 0;
+            entry.reconnecting = false;
+            entry.generation
+        };
+        dial_roam_peer(&self.inner, card, label, generation);
     }
 
     /// Disconnect a roam peer (parallel peers stay live; only the named one
     /// is closed).
     pub fn roam_disconnect(&self, label: String) {
+        self.inner.roam_intents.lock().remove(&label);
         let mut peers = self.inner.peers.lock();
         peers.retain(|peer| {
             if peer.label() == label {
@@ -755,6 +900,9 @@ impl Core {
             .find(|peer| peer.label() == label)
             .cloned();
         let Some(peer) = peer else { return };
+        if let Some(intent) = self.inner.roam_intents.lock().get_mut(&label) {
+            intent.last_open_session = Some(session_id.clone());
+        }
         *self.inner.active_peer_label.write() = Some(label);
         // Peer sessions are not in the main session list; the working dir is
         // the only known-good cwd (session/load rewrites working_dir when the

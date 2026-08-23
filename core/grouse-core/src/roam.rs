@@ -295,6 +295,8 @@ pub struct RoamPeer {
     /// so opening a seen chat paints instantly instead of re-replaying the
     /// whole history over the wire.
     cache: Arc<CacheStore>,
+    /// Owner reconnect-policy hook; see [`PeerLifecycle`].
+    on_lifecycle: LifecycleHook,
 }
 
 struct PeerInner {
@@ -331,6 +333,8 @@ struct PeerInner {
     /// Set by [`RoamPeer::close`] so a teardown that races the dial or a
     /// transport error is not reported as a failure.
     closing: bool,
+    /// The connection reached ready at least once (drives `PeerLifecycle`).
+    reached_ready: bool,
     /// Backgrounded content for sessions that are NOT currently open, keyed by
     /// raw session id (dispatch routes by `notif.session_id`). Chunks keep
     /// accumulating here while the user sits in another chat; opening the
@@ -359,10 +363,24 @@ impl PeerInner {
             pending_permission: None,
             stream: None,
             closing: false,
+            reached_ready: false,
             staging: HashMap::new(),
         }
     }
 }
+
+/// Owner-facing lifecycle events. The peer itself never retries; the owner
+/// (`Core`) uses these to drive its reconnect policy.
+pub enum PeerLifecycle {
+    /// The connection reached ready (initialize + session list done).
+    Ready,
+    /// The connection ended without a deliberate `close()`. `was_ready`
+    /// distinguishes an established connection dropping from a dial or
+    /// handshake that never succeeded.
+    Ended { was_ready: bool },
+}
+
+pub type LifecycleHook = Arc<dyn Fn(PeerLifecycle) + Send + Sync>;
 
 impl RoamPeer {
     /// Hard ceiling on a single post-handshake RPC (S-RC-6). A hung remote
@@ -381,6 +399,7 @@ impl RoamPeer {
         listener: Arc<dyn CoreListener>,
         is_active: Arc<dyn Fn() -> bool + Send + Sync>,
         cache: Arc<CacheStore>,
+        on_lifecycle: LifecycleHook,
     ) -> Arc<Self> {
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel();
         let peer = Arc::new(Self {
@@ -390,6 +409,7 @@ impl RoamPeer {
             listener,
             is_active,
             cache,
+            on_lifecycle,
         });
         let task = peer.clone();
         runtime().spawn(async move {
@@ -406,10 +426,12 @@ impl RoamPeer {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {
                     task.fail(format!("roam connect: {error}"));
+                    task.notify_ended();
                     return;
                 }
                 Err(error) => {
                     task.fail(format!("roam dial task panicked: {error}"));
+                    task.notify_ended();
                     return;
                 }
             };
@@ -1067,6 +1089,21 @@ impl RoamPeer {
             Ok(()) => self.emit_status("disconnected"),
             Err(error) => self.emit_status(&format!("error: {error}")),
         }
+        self.notify_ended();
+    }
+
+    /// Tell the owner the connection is gone (unless it was a deliberate
+    /// close). Fired from `connection_ended` and the dial-failure returns —
+    /// NOT from `fail()`, which is also used for post-ready RPC errors that
+    /// leave the connection alive.
+    fn notify_ended(&self) {
+        let (closing, was_ready) = {
+            let inner = self.inner.lock();
+            (inner.closing, inner.reached_ready)
+        };
+        if !closing {
+            (self.on_lifecycle)(PeerLifecycle::Ended { was_ready });
+        }
     }
 
     /// Set an error status and surface it (used by dial/handshake failures).
@@ -1547,6 +1584,17 @@ impl RoamPeer {
     }
 
     fn emit_status(&self, status: &str) {
+        if status == "ready" {
+            let first = {
+                let mut inner = self.inner.lock();
+                let first = !inner.reached_ready;
+                inner.reached_ready = true;
+                first
+            };
+            if first {
+                (self.on_lifecycle)(PeerLifecycle::Ready);
+            }
+        }
         self.listener
             .on_roam_peer_status(self.label.clone(), status.to_string());
     }
@@ -1892,6 +1940,7 @@ mod tests {
                 std::process::id(),
                 TEST_PEER_SEQ.fetch_add(1, Ordering::SeqCst)
             )))),
+            on_lifecycle: Arc::new(|_| {}),
         });
         (peer, cmd_rx)
     }
