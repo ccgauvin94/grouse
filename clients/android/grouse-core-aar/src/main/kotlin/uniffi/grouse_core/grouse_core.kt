@@ -1409,7 +1409,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_grouse_core_checksum_method_core_respond_permission() != 49597) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_roam_connect() != 53647) {
+    if (lib.uniffi_grouse_core_checksum_method_core_roam_connect() != 24305) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_roam_disconnect() != 55425) {
@@ -2206,7 +2206,9 @@ public interface CoreInterface {
     
     /**
      * Connect a roam peer in browse mode (CONTRACT §6). The peer's identity
-     * is generated + persisted on first use.
+     * is generated + persisted on first use. Once a connection reaches ready,
+     * an unexpected drop re-dials under [`ROAM_RECONNECT_BACKOFF_SECS`] until
+     * `roam_disconnect` clears the intent.
      */
     fun `roamConnect`(`card`: kotlin.String, `label`: kotlin.String)
     
@@ -2654,7 +2656,9 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     
     /**
      * Connect a roam peer in browse mode (CONTRACT §6). The peer's identity
-     * is generated + persisted on first use.
+     * is generated + persisted on first use. Once a connection reaches ready,
+     * an unexpected drop re-dials under [`ROAM_RECONNECT_BACKOFF_SECS`] until
+     * `roam_disconnect` clears the intent.
      */override fun `roamConnect`(`card`: kotlin.String, `label`: kotlin.String)
         = 
     callWithHandle {
