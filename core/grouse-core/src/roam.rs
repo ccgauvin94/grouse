@@ -1346,7 +1346,26 @@ impl RoamPeer {
             st.has_new = true;
             &mut st.messages
         };
-        let event = if message_id.is_empty() {
+        // Three-way outcome: Emit (mutation to send), Skip (dedup — already on
+        // screen, emit NOTHING and, critically, do NOT fall through to a new
+        // bubble: that fallthrough is what duplicated every deduped chunk as a
+        // fresh bubble), Miss (no bubble matched — append a new one).
+        enum Acc {
+            Emit(TranscriptEvent),
+            Skip,
+            Miss,
+        }
+        fn update_of(m: &Message) -> Acc {
+            Acc::Emit(TranscriptEvent::Update {
+                message: Message {
+                    id: m.id.clone(),
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                    output: String::new(),
+                },
+            })
+        }
+        let acc = if message_id.is_empty() {
             // Live text chunks have no stable id. Serve keeps a tracked stream
             // bubble; roam mirrors that by appending to the LAST message ONLY
             // when it is still the open stream for this role — i.e. it is this
@@ -1365,19 +1384,27 @@ impl RoamPeer {
                 // never for a legitimate mid-paragraph repeat.
                 Some(m)
                     if (replaying && m.content.contains(text))
-                        || (!replaying && m.content.ends_with(text) && m.content != text) => None,
+                        || (!replaying && m.content.ends_with(text) && m.content != text) =>
+                {
+                    Acc::Skip
+                }
+                // Replay onto a cached PARTIAL of this bubble (the connection
+                // died mid-stream; the cache holds a prefix): the replayed
+                // block supersedes it — replace, don't append a second copy.
+                Some(m)
+                    if replaying
+                        && !m.content.is_empty()
+                        && m.content.len() < text.len()
+                        && text.contains(m.content.as_str()) =>
+                {
+                    m.content = text.to_string();
+                    update_of(m)
+                }
                 Some(m) => {
                     m.content.push_str(text);
-                    Some(TranscriptEvent::Update {
-                        message: Message {
-                            id: m.id.clone(),
-                            role: m.role.clone(),
-                            content: m.content.clone(),
-                            output: String::new(),
-                        },
-                    })
+                    update_of(m)
                 }
-                _ => None,
+                _ => Acc::Miss,
             }
         } else if let Some(msg) = target
             .iter_mut()
@@ -1386,39 +1413,68 @@ impl RoamPeer {
             // Replay dedupe: a staged message being re-sent by session/load
             // is identical — appending it again would double the text. Live
             // chunks (replaying==false) never dedupe.
-            if !replaying || !msg.content.contains(text) {
-                msg.content.push_str(text);
-                Some(TranscriptEvent::Update {
-                    message: Message {
-                        id: msg.id.clone(),
-                        role: msg.role.clone(),
-                        content: msg.content.clone(),
-                        output: String::new(),
-                    },
-                })
+            if replaying && msg.content.contains(text) {
+                Acc::Skip
+            } else if replaying
+                && !msg.content.is_empty()
+                && msg.content.len() < text.len()
+                && text.contains(msg.content.as_str())
+            {
+                // Same partial-prefix case as above, id-matched.
+                msg.content = text.to_string();
+                update_of(msg)
             } else {
-                None
+                msg.content.push_str(text);
+                update_of(msg)
+            }
+        } else if replaying && !message_id.is_empty() {
+            // Replay carries real message ids; the live stream's bubble was
+            // accumulated with an EMPTY id. Without this, the replayed copy of
+            // an already-streamed bubble misses the id lookup and lands as a
+            // duplicate bubble. Adopt the live bubble: give it the replay's id
+            // and the replay's (complete) content.
+            match target
+                .iter_mut()
+                .rev()
+                .find(|m| {
+                    m.role == role
+                        && m.id.is_empty()
+                        && !m.content.is_empty()
+                        && (text.contains(m.content.as_str()) || m.content.contains(text))
+                }) {
+                Some(m) => {
+                    m.id = message_id.to_string();
+                    if !m.content.contains(text) {
+                        m.content = text.to_string();
+                    }
+                    update_of(m)
+                }
+                None => Acc::Miss,
             }
         } else {
-            None
+            Acc::Miss
         };
-        let event = event.or_else(|| {
-            // No open stream bubble matched (empty id, or a new stream after a tool/
-            // thought/other role, or a fresh id): start a new bubble.
-            let msg = Message {
-                id: message_id.to_string(),
-                role: role.to_string(),
-                content: text.to_string(),
-                output: String::new(),
-            };
-            target.push(Message {
-                id: msg.id.clone(),
-                role: msg.role.clone(),
-                content: msg.content.clone(),
-                output: String::new(),
-            });
-            Some(TranscriptEvent::Append { message: msg })
-        });
+        let event = match acc {
+            Acc::Emit(event) => Some(event),
+            Acc::Skip => None,
+            Acc::Miss => {
+                // No bubble matched (a new stream after a tool/thought/other
+                // role, or a fresh id): start a new bubble.
+                let msg = Message {
+                    id: message_id.to_string(),
+                    role: role.to_string(),
+                    content: text.to_string(),
+                    output: String::new(),
+                };
+                target.push(Message {
+                    id: msg.id.clone(),
+                    role: msg.role.clone(),
+                    content: msg.content.clone(),
+                    output: String::new(),
+                });
+                Some(TranscriptEvent::Append { message: msg })
+            }
+        };
         cap_messages(target);
         drop(inner);
         if !mine && staged_new {
