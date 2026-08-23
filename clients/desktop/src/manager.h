@@ -165,8 +165,14 @@ public:
     Q_INVOKABLE void deleteSession(const QString &sessionId);
     // --- projects -------------------------------------------------------------
     Q_INVOKABLE void refreshProjects();
-    Q_INVOKABLE void createProject(const QString &name);
+    Q_INVOKABLE void createProject(const QString &name, const QString &description = {});
     Q_INVOKABLE void deleteProject(const QString &nameOrPath);
+    // Rename a project and/or set its description/summary content: whole-source
+    // replace via sources/update keyed on the immutable path (filed sessions
+    // keep working). Content MUST be the current markdown when only renaming —
+    // update replaces the whole source.
+    Q_INVOKABLE void updateProject(const QString &path, const QString &name,
+                                   const QString &description, const QString &content = {});
     Q_INVOKABLE void moveSessionToProject(const QString &sessionId, const QString &projectId);
     Q_INVOKABLE void newChatInProject(const QString &projectId);
     // --- recipes & schedules --------------------------------------------------

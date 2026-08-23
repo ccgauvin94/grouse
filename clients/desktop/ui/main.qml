@@ -1034,11 +1034,62 @@ Controls.ApplicationWindow {
             icon.name: "document-new"
             onTriggered: Mgr.newChatInProject(projectMenu.targetId)
         }
+        MenuItem {
+            text: qsTr("Rename / edit description…")
+            icon.name: "edit-rename"
+            onTriggered: {
+                for (var i = 0; i < Mgr.projects.length; i++) {
+                    if (Mgr.projects[i].id === projectMenu.targetId) {
+                        editProjectDialog.openFor(Mgr.projects[i])
+                        break
+                    }
+                }
+            }
+        }
         MenuSeparator {}
         MenuItem {
             text: qsTr("Delete project…")
             icon.name: "edit-delete"
             onTriggered: deleteProjectConfirm.dialogOpen()
+        }
+    }
+
+    // Rename a project and/or set its description. sources/update is a
+    // whole-source replace, so the existing summary content is stashed here and
+    // passed back untouched — editing the content lives in ProjectDialog.
+    Controls.Dialog {
+        id: editProjectDialog
+        title: qsTr("Edit project")
+        modal: true
+        standardButtons: Controls.Dialog.Ok | Controls.Dialog.Cancel
+        property string targetPath: ""
+        property string targetContent: ""
+        function openFor(project) {
+            targetPath = project.id
+            targetContent = project.content || ""
+            editProjectNameField.text = project.name
+            editProjectDescField.text = project.description || ""
+            editProjectNameField.selectAll()
+            editProjectNameField.forceActiveFocus()
+            open()
+        }
+        onAccepted: Mgr.updateProject(targetPath, editProjectNameField.text,
+                                      editProjectDescField.text, targetContent)
+        contentItem: ColumnLayout {
+            spacing: Kirigami.Units.smallSpacing
+            Controls.Label { text: qsTr("Name (lowercase letters, digits, hyphens):") }
+            Controls.TextField {
+                id: editProjectNameField
+                Layout.fillWidth: true
+                onAccepted: editProjectDialog.accept()
+            }
+            Controls.Label { text: qsTr("Description:") }
+            Controls.TextField {
+                id: editProjectDescField
+                Layout.fillWidth: true
+                placeholderText: qsTr("What is this project for?")
+                onAccepted: editProjectDialog.accept()
+            }
         }
     }
 
@@ -1074,7 +1125,11 @@ Controls.ApplicationWindow {
         title: qsTr("New project")
         modal: true
         standardButtons: Controls.Dialog.Ok | Controls.Dialog.Cancel
-        onAccepted: Mgr.createProject(projectNameField.text)
+        onAccepted: Mgr.createProject(projectNameField.text, projectDescField.text)
+        onOpened: {
+            projectDescField.text = ""
+            projectNameField.forceActiveFocus()
+        }
         contentItem: ColumnLayout {
             spacing: Kirigami.Units.smallSpacing
             Controls.Label { text: qsTr("Name (lowercase letters, digits, hyphens):") }
@@ -1082,6 +1137,13 @@ Controls.ApplicationWindow {
                 id: projectNameField
                 Layout.fillWidth: true
                 placeholderText: qsTr("e.g. cooking")
+            }
+            Controls.Label { text: qsTr("Description (optional):") }
+            Controls.TextField {
+                id: projectDescField
+                Layout.fillWidth: true
+                placeholderText: qsTr("What is this project for?")
+                onAccepted: newProjectDialog.accept()
             }
         }
     }

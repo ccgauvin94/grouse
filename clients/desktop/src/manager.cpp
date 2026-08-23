@@ -738,7 +738,7 @@ void Manager::refreshProjects()
         m_bridge->api().grouse_unstable_sources_list(m_bridge->handle(), "project");
 }
 
-void Manager::createProject(const QString &name)
+void Manager::createProject(const QString &name, const QString &description)
 {
     QString n = name.trimmed();
     if (n.isEmpty() || n.size() > 64)
@@ -751,9 +751,35 @@ void Manager::createProject(const QString &name)
         return;
     const QByteArray type = QByteArrayLiteral("project");
     const QByteArray nm = n.toUtf8();
+    const QByteArray d = description.trimmed().toUtf8();
     const QByteArray empty = QByteArray();
     m_bridge->api().grouse_unstable_sources_create(m_bridge->handle(), type.constData(),
-                                                   nm.constData(), empty.constData(), empty.constData());
+                                                   nm.constData(), d.constData(), empty.constData());
+}
+
+// Rename / re-describe / re-write a project's summary content. sources/update
+// is a whole-source replace keyed on the immutable path, and the core relists
+// projects afterwards — so the sidebar refreshes without a manual poll.
+void Manager::updateProject(const QString &path, const QString &name,
+                            const QString &description, const QString &content)
+{
+    QString n = name.trimmed();
+    if (path.isEmpty() || n.isEmpty() || n.size() > 64)
+        return;
+    for (const QChar &c : n) {
+        if (!c.isLower() && !c.isDigit() && c != QLatin1Char('-'))
+            return;
+    }
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const QByteArray type = QByteArrayLiteral("project");
+    const QByteArray p = path.toUtf8();
+    const QByteArray nm = n.toUtf8();
+    const QByteArray d = description.trimmed().toUtf8();
+    const QByteArray c = content.toUtf8();
+    m_bridge->api().grouse_unstable_sources_update(m_bridge->handle(), type.constData(),
+                                                   p.constData(), nm.constData(),
+                                                   d.constData(), c.constData());
 }
 
 void Manager::deleteProject(const QString &nameOrPath)
@@ -1431,10 +1457,23 @@ void Manager::coreOnProjects(const QString &json)
     const QJsonArray arr = parseArr(json);
     for (const auto &el : arr) {
         const QJsonObject o = el.toObject();
+        // `content` is the project's own markdown source (summary + optional
+        // "root: <dir>" first line); ProjectDialog edits it via sources/update.
+        QString root;
+        const QStringList lines = o.value("content").toString().split(QLatin1Char('\n'));
+        for (const QString &line : lines) {
+            const QString t = line.trimmed();
+            if (t.startsWith(QStringLiteral("root:"))) {
+                root = t.mid(5).trimmed();
+                break;
+            }
+        }
         projects << QVariantMap{{"id", o.value("path").toString()},
                                 {"name", o.value("name").toString()},
                                 {"path", o.value("path").toString()},
-                                {"description", o.value("description").toString()}};
+                                {"description", o.value("description").toString()},
+                                {"content", o.value("content").toString()},
+                                {"root", root}};
     }
     onProjects(projects);
 }
