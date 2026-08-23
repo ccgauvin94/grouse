@@ -321,6 +321,13 @@ void Manager::openRoamSession(const QString &label, const QString &sessionId, co
     m_sessionExts.clear();
     m_toolCatalog.clear();
     publishToolGroups();
+    // Switching chats must drop the previous transcript: the loading gate in
+    // ChatPage requires an empty model, and a stale transcript otherwise mixes
+    // two chats on screen. Same contract as the main-path openSession.
+    m_messageModel->clear();
+    m_currentIndex = -1;
+    m_roamToolGroupOpen = false;
+    emit messagesChanged();
     emit currentSessionChanged();
     emit toolsChanged();
     setStatus(QStringLiteral("loading…"));
@@ -1301,68 +1308,11 @@ void Manager::coreOnTranscript(const QString &json)
     const QString output = message.value(QStringLiteral("output")).toString();
     const QString messageId = message.value(QStringLiteral("id")).toString();
 
-    // Tool rows: the roam transcript projects each call with the tool NAME in
-    // `content` and its result in `output`. Group CONSECUTIVE calls into one
-    // "toolgroup" chip instead of a wall of individual rows (desktop-side
-    // shaping mirroring Android's client-side grouping; the ChatPage group
-    // starts collapsed and stays closed until the user expands it). The group
-    // only admits the next call while no intervening non-tool row was painted.
-    if (role == QStringLiteral("tool")) {
-        QVariantMap call{{"title", content}, {"output", output},
-                         {"status", QString()}, {"toolCallId", messageId}};
-        if (tag == QStringLiteral("Append")) {
-            const int last = m_messageModel->count() - 1;
-            if (m_roamToolGroupOpen && last >= 0) {
-                QVariantMap grp = m_messageModel->row(last);
-                if (grp.value("role").toString() == QStringLiteral("toolgroup")) {
-                    QVariantList calls = grp.value("calls").toList();
-                    calls.append(call);
-                    grp["calls"] = calls;
-                    m_messageModel->update(last, grp);
-                    m_currentIndex = last;
-                    requestMessagesUpdate();
-                    return;
-                }
-            }
-            const QVariantList calls{call};
-            m_messageModel->append(QVariantMap{
-                {"id", QStringLiteral("toolgroup-") + messageId},
-                {"role", "toolgroup"},
-                {"calls", calls},
-            });
-            m_roamToolGroupOpen = true;
-            m_currentIndex = m_messageModel->count() - 1;
-            requestMessagesUpdate();
-            return;
-        }
-        // Update (streaming output / completion): refresh the matching call in
-        // whichever trailing group carries it.
-        for (int i = m_messageModel->count() - 1; i >= 0; --i) {
-            QVariantMap grp = m_messageModel->row(i);
-            if (grp.value("role").toString() != QStringLiteral("toolgroup"))
-                continue;
-            QVariantList calls = grp.value("calls").toList();
-            bool touched = false;
-            for (int c = 0; c < calls.size(); ++c) {
-                QVariantMap cm = calls.at(c).toMap();
-                if (cm.value("toolCallId").toString() == messageId) {
-                    cm["title"] = content;
-                    cm["output"] = output;
-                    calls[c] = cm;
-                    touched = true;
-                    break;
-                }
-            }
-            if (touched) {
-                grp["calls"] = calls;
-                m_messageModel->update(i, grp);
-                m_currentIndex = i;
-                requestMessagesUpdate();
-                return;
-            }
-        }
+    // Tool rows render from the STREAM path (onToolCall), which carries the
+    // rich title/detail/status/live-output — and roam emits tool events on
+    // BOTH paths, so building them here too would duplicate every call.
+    if (role == QStringLiteral("tool"))
         return;
-    }
 
     QVariantMap row;
     row["id"] = messageId;
@@ -1740,6 +1690,34 @@ void Manager::onThoughtChunk(const QString &text)
 
 void Manager::onToolCall(const QString &title, const QString &detail, const QString &toolCallId)
 {
+    // Roam chats stream a tool call per step and a busy agent produces a wall
+    // of them: collapse CONSECUTIVE calls into one collapsed "toolgroup" chip
+    // (ChatPage expands it per call). Main-connection chats keep the
+    // individual chip they have always rendered.
+    if (!m_activePeerLabel.isEmpty()) {
+        QVariantMap call{{"title", title}, {"detail", detail}, {"output", QString()},
+                         {"status", "in_progress"}, {"toolCallId", toolCallId}};
+        const int last = m_messageModel->count() - 1;
+        if (m_roamToolGroupOpen && last >= 0) {
+            QVariantMap grp = m_messageModel->row(last);
+            if (grp.value("role").toString() == QStringLiteral("toolgroup")) {
+                QVariantList calls = grp.value("calls").toList();
+                calls.append(call);
+                grp["calls"] = calls;
+                m_messageModel->update(last, grp);
+                m_currentIndex = last;
+                requestMessagesUpdate();
+                return;
+            }
+        }
+        const QVariantList calls{call};
+        m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", "toolgroup"},
+                                           {"text", ""}, {"html", ""}, {"calls", calls}});
+        m_roamToolGroupOpen = true;
+        m_currentIndex = m_messageModel->count() - 1;
+        requestMessagesUpdate();
+        return;
+    }
     m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", "tool"}, {"text", ""}, {"html", ""},
                                        {"title", title}, {"detail", detail}, {"output", ""},
                                        {"status", "in_progress"}, {"toolCallId", toolCallId}});
@@ -1760,6 +1738,27 @@ void Manager::onToolCallUpdate(const QString &toolCallId, const QString &status,
                 m["output"] = (live ? m.value("output").toString() : QString()) + output;
             m_messageModel->update(i, m);
             break;
+        }
+        // Grouped roam calls live inside a toolgroup row's calls array.
+        if (role == "toolgroup") {
+            QVariantList calls = m.value("calls").toList();
+            bool touched = false;
+            for (int c = 0; c < calls.size(); ++c) {
+                QVariantMap cm = calls.at(c).toMap();
+                if (cm.value("toolCallId").toString() != toolCallId)
+                    continue;
+                cm["status"] = status;
+                if (!output.isEmpty())
+                    cm["output"] = (live ? cm.value("output").toString() : QString()) + output;
+                calls[c] = cm;
+                touched = true;
+                break;
+            }
+            if (touched) {
+                m["calls"] = calls;
+                m_messageModel->update(i, m);
+                break;
+            }
         }
     }
     requestMessagesUpdate();

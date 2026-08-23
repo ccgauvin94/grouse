@@ -272,6 +272,10 @@ impl ConnectTo<Client> for RoamTransport {
 enum PeerCommand {
     OpenSession { session_id: String, cwd: String },
     NewSession { cwd: String },
+    /// Record the locally-sent user prompt in the transcript. ACP peers never
+    /// echo the user's own message back as a transcript event, so without this
+    /// the bubble never shows live and the cache/replay loses it on reload.
+    RecordUser { session_id: String, text: String },
     Relist,
     Close,
 }
@@ -613,6 +617,12 @@ impl RoamPeer {
         let _ = self.cmd_tx.send(PeerCommand::Relist);
     }
 
+    /// Record the locally-sent user prompt in this peer's transcript. See
+    /// [`PeerCommand::RecordUser`]. Fire-and-forget into the command loop.
+    pub fn record_user_prompt(&self, session_id: String, text: String) {
+        let _ = self.cmd_tx.send(PeerCommand::RecordUser { session_id, text });
+    }
+
     /// Disconnect the peer: FIN + cancel the stream (unblocks the reader),
     /// shut down the command loop, and report the terminal status.
     pub fn close(&self) {
@@ -920,6 +930,21 @@ impl RoamPeer {
                         Err(error) => {
                             self.fail(format!("roam session/new: {error}"));
                         }
+                    }
+                }
+                PeerCommand::RecordUser { session_id, text } => {
+                    // Unique bubble id: consecutive prompts share the "user"
+                    // role and the accumulator merges same-(role, id) chunks —
+                    // a shared id would fuse distinct prompts into one bubble.
+                    let id = format!(
+                        "local-user-{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0)
+                    );
+                    if let Some(event) = self.accumulate(&session_id, "user", &text, &id) {
+                        self.emit(event);
                     }
                 }
                 PeerCommand::Relist => {

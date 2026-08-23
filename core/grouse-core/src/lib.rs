@@ -768,10 +768,23 @@ impl Core {
     /// session. Routes to the active roam peer when one owns the chat.
     pub fn send_prompt(&self, prompt: Prompt, expect: Option<SendExpect>) {
         if let Some(peer) = self.active_peer() {
-            let params = prompt_params(
-                &prompt,
-                &peer.active_session_id().unwrap_or_default(),
-            );
+            let session_id = peer.active_session_id().unwrap_or_default();
+            let params = prompt_params(&prompt, &session_id);
+            // The peer never echoes the user's own prompt back as a transcript
+            // event — record it here so the bubble shows live and survives the
+            // cache/replay on reopen.
+            let text = prompt
+                .blocks
+                .iter()
+                .filter_map(|b| match b {
+                    PromptBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !text.is_empty() {
+                peer.record_user_prompt(session_id, text);
+            }
             crate::roam::runtime().spawn_blocking(move || {
                 let _ = peer.rpc("session/prompt", params);
             });
