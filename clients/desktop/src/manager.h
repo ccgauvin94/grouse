@@ -361,6 +361,9 @@ private:
     /// Monotonic id counter for locally-created bubbles (the core supplies its
     /// own ids for committed transcript rows; these are for UI-only rows).
     int m_seq = 0;
+    // Roam transcript shaping: true while the trailing toolgroup is accepting
+    // the next consecutive tool call (desktop-side grouping, mirrors Android).
+    bool m_roamToolGroupOpen = false;
     /// Name of the extension whose full tool catalog is currently being discovered.
     QString m_discoveringExt;
 

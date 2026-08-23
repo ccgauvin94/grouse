@@ -1261,6 +1261,7 @@ void Manager::coreOnTranscript(const QString &json)
     if (root.contains(QStringLiteral("Clear"))) {
         m_messageModel->clear();
         m_currentIndex = -1;
+        m_roamToolGroupOpen = false;
         requestMessagesUpdate();
         return;
     }
@@ -1270,13 +1271,72 @@ void Manager::coreOnTranscript(const QString &json)
         return;
     const QJsonObject message = root.value(tag).toObject().value(QStringLiteral("message")).toObject();
     const QString role = message.value(QStringLiteral("role")).toString();
-    // Tool rows are rendered from on_stream (rich title/output/status); the
-    // transcript's tool projection (title-only) would duplicate them.
-    if (role == QStringLiteral("tool"))
-        return;
     const QString content = message.value(QStringLiteral("content")).toString();
     const QString output = message.value(QStringLiteral("output")).toString();
     const QString messageId = message.value(QStringLiteral("id")).toString();
+
+    // Tool rows: the roam transcript projects each call with the tool NAME in
+    // `content` and its result in `output`. Group CONSECUTIVE calls into one
+    // "toolgroup" chip instead of a wall of individual rows (desktop-side
+    // shaping mirroring Android's client-side grouping; the ChatPage group
+    // starts collapsed and stays closed until the user expands it). The group
+    // only admits the next call while no intervening non-tool row was painted.
+    if (role == QStringLiteral("tool")) {
+        QVariantMap call{{"title", content}, {"output", output},
+                         {"status", QString()}, {"toolCallId", messageId}};
+        if (tag == QStringLiteral("Append")) {
+            const int last = m_messageModel->count() - 1;
+            if (m_roamToolGroupOpen && last >= 0) {
+                QVariantMap grp = m_messageModel->row(last);
+                if (grp.value("role").toString() == QStringLiteral("toolgroup")) {
+                    QVariantList calls = grp.value("calls").toList();
+                    calls.append(call);
+                    grp["calls"] = calls;
+                    m_messageModel->update(last, grp);
+                    m_currentIndex = last;
+                    requestMessagesUpdate();
+                    return;
+                }
+            }
+            const QVariantList calls{call};
+            m_messageModel->append(QVariantMap{
+                {"id", QStringLiteral("toolgroup-") + messageId},
+                {"role", "toolgroup"},
+                {"calls", calls},
+            });
+            m_roamToolGroupOpen = true;
+            m_currentIndex = m_messageModel->count() - 1;
+            requestMessagesUpdate();
+            return;
+        }
+        // Update (streaming output / completion): refresh the matching call in
+        // whichever trailing group carries it.
+        for (int i = m_messageModel->count() - 1; i >= 0; --i) {
+            QVariantMap grp = m_messageModel->row(i);
+            if (grp.value("role").toString() != QStringLiteral("toolgroup"))
+                continue;
+            QVariantList calls = grp.value("calls").toList();
+            bool touched = false;
+            for (int c = 0; c < calls.size(); ++c) {
+                QVariantMap cm = calls.at(c).toMap();
+                if (cm.value("toolCallId").toString() == messageId) {
+                    cm["title"] = content;
+                    cm["output"] = output;
+                    calls[c] = cm;
+                    touched = true;
+                    break;
+                }
+            }
+            if (touched) {
+                grp["calls"] = calls;
+                m_messageModel->update(i, grp);
+                m_currentIndex = i;
+                requestMessagesUpdate();
+                return;
+            }
+        }
+        return;
+    }
 
     QVariantMap row;
     row["id"] = messageId;
@@ -1302,6 +1362,8 @@ void Manager::coreOnTranscript(const QString &json)
     if (tag == QStringLiteral("Append")) {
         if (idx < 0) {
             m_messageModel->append(row);
+            // Any real content boundary ends the running tool group.
+            m_roamToolGroupOpen = false;
         } else {
             m_messageModel->update(idx, row);
         }
