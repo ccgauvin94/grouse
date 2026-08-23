@@ -38,6 +38,7 @@ import uniffi.grouse_core.SessionSummary
 import uniffi.grouse_core.StreamEvent
 import uniffi.grouse_core.ToolCallKind
 import uniffi.grouse_core.TranscriptEvent
+import uniffi.grouse_core.TurnState
 import uniffi.grouse_roam_core.cardFingerprint
 import uniffi.grouse_roam_core.identityGenerate
 import uniffi.grouse_roam_core.identityPublicKey
@@ -66,33 +67,15 @@ class ConnectionManager private constructor(context: Context) {
     private var serviceRunning = false
     // Sends that must wait for (re)connect — a queue, not one slot, so a second reply while
     // still connecting can't clobber the first. The user bubble is added when queued (in send()).
-    private data class PendingSend(val text: String, val images: List<ImageBlock>, val files: List<FileBlock> = emptyList())
-    private val pendingSends = ArrayDeque<PendingSend>()
+
 
     /** How many prompts are waiting behind the running turn. Drives the "N queued" chip -- without
      *  it a queued message is indistinguishable from a dropped one, since its bubble looks exactly
      *  like a sent one. Mutate the deque ONLY through enqueue/dequeue/clearQueue so this can't drift. */
     val queuedCount = mutableStateOf(0)
-    private fun enqueue(p: PendingSend) { pendingSends.add(p); queuedCount.value = pendingSends.size }
-    private fun dequeue(): PendingSend? =
-        (if (pendingSends.isEmpty()) null else pendingSends.removeFirst()).also { queuedCount.value = pendingSends.size }
-    private fun clearQueue() { pendingSends.clear(); queuedCount.value = 0 }
-    // True between sendPrompt and RunEnded. `busy` is UI state and is also set while merely
-    // queued, so it cannot answer "is the wire busy" -- this can.
-    private var turnInFlight = false
-    // Which session owns the in-flight turn. A run belongs to ONE session/connection;
-    // a global gate here let a different session's send steer into a dead run (no RunEnded
-    // on its own connection) and wedge the whole app. Keep the owner so we only steer/block
-    // the session that actually holds the turn.
-    @Volatile private var turnInFlightSession: String? = null
-
-    /** A turn belongs to the session that started it. Moving to another session must not
-     *  steer into or block on the old one — clear the stale routing so the next send in the
-     *  new session starts its own run. Call on every session switch (open/new/peer-created). */
-    private fun resetTurnRouting() {
-        activeRunId = null
-        turnInFlightSession = null
-    }
+    // Turn state (busy, run id, queue) is CORE-OWNED (design/turn-state-in-core.md):
+    // the core clears it in the same paths that run its reconnect policy, so a turn
+    // can never outlive the connection that started it. The app only mirrors it.
 
 
     // --- grouse-core (the wire is the core's; these are the only handles we hold) ----------
@@ -113,6 +96,7 @@ class ConnectionManager private constructor(context: Context) {
             main.post { onCoreSessionTouched(sessionId, title, updatedAt) }
         }
         override fun onProjects(projects: List<ProjectSummary>) { main.post { onCoreProjects(projects) } }
+        override fun onTurn(state: TurnState) { main.post { onCoreTurn(state) } }
         override fun onRoamPeerStatus(label: String, status: String) {
             // `this@ConnectionManager.` is load-bearing: unqualified, the name resolves to
             // THIS override (same signature) and the posted runnable re-enters it — one
@@ -521,7 +505,6 @@ class ConnectionManager private constructor(context: Context) {
     private var lastSessionId: String? = null
     // True when a Clear wiped `messages` while prompts were still queued (their bubbles are
     // not in the server history); the Ready handler re-adds them.
-    private var replayWiped = false
     // Replay scroll-pinning: while the core rebuilds the transcript (Clear → chunks), the UI
     // pins unconditionally; the tick fires one final snap when Ready completes the rebuild.
     val replayActive = mutableStateOf(false)
@@ -727,14 +710,11 @@ class ConnectionManager private constructor(context: Context) {
      *  resume: if the chat's peer is dead, drop the stale turn state and
      *  redial with a fresh budget. */
     fun onAppResumed() {
+        // Cold start: the core has no dial intents yet — the saved-peer sweep
+        // provides them. Warm resume: the core redials dead intents with a
+        // fresh budget and drops any turn latch a dead connection stranded.
         if (roamPeers.isEmpty()) loadRoamPeers()
-        val peer = currentRoamPeer ?: return
-        val st = roamStatus[peer]
-        if (st == "ready" || st == "reconnecting" || st?.startsWith("connecting") == true) return
-        busy.value = false; compacting.value = false
-        turnInFlight = false
-        resetTurnRouting()
-        connectRoam(peer)
+        io { core.onForeground() }
     }
 
     // Reconnection is core-owned for peers too now: a peer connection that reached
@@ -870,20 +850,13 @@ class ConnectionManager private constructor(context: Context) {
         // session and that choice wins.
         pendingOpenAssistant = false
         pendingAssistantRename = false
-        // A turn belongs to the session that started it. Switching chats — roaming bypasses
-        // `open` entirely — must clear stale run routing: a dead run id left behind would make
-        // the next send steer into nothing and wedge the app.
-        resetTurnRouting()
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
         // Clearing the dot: opening the session consumes its staged content.
         sessions.value = sessions.value.map { if (it.sessionId == sessionId) it.copy(hasNew = false) else it }
         // Roam: the session lives on the peer -- the core routes the chat to it.
         val peer = roamPeer(sessionId)
         if (peer != null) {
-            // Same as open(): a reopened peer session can't receive a dead
-            // turn's RunEnded, so a stale busy=true would suppress every send.
-            busy.value = false; compacting.value = false
-            turnInFlight = false
+            compacting.value = false   // turn latches are core-owned now
             currentRoamPeer = peer
             // Loading indicator: the header shows "Loading… N" while the
             // peer's transcript paints (cached snapshot) or replays (wire).
@@ -1153,51 +1126,18 @@ class ConnectionManager private constructor(context: Context) {
         // Keep the images ON the message so the bubble renders the actual thumbnail(s), not a
         // "[📎 N]" placeholder. (Live-session only — a session reloaded from the server replays
         // text; images aren't reconstructed from the replayed content blocks.)
-        messages.add(ChatMessage("user", text, images, files)); busy.value = true
+        messages.add(ChatMessage("user", text, images, files))
+        busy.value = true   // optimistic; the core's on_turn is authoritative
         lastMessageUsage.value = null   // stale stats from the previous turn shouldn't linger
         startService()   // keep the socket alive if the user backgrounds mid-turn
-        dispatch(text, images, files)
-    }
-
-    private fun dispatch(text: String, images: List<ImageBlock>, files: List<FileBlock> = emptyList()) {
-        // `ready` gate: between reconnect and replay-complete the socket is live but has no
-        // bound session — a send in that window used to ERROR ("not ready — no session")
-        // instead of queueing, which was the visible "app must reconnect" failure. Queue;
-        // the Ready handler flushes.
-        val targetSid = currentSession.value
-        if (live && core.ready()) {
-            // A run is a per-session/connection thing. Only a follow-up send in the SAME
-            // session that owns the in-flight turn may steer into it; a send in a DIFFERENT
-            // session (or none) starts its own run there — it must not block on or steer a
-            // turn that lives on another connection and will never RunEnded on this one.
-            val sameTurn = turnInFlight && turnInFlightSession == targetSid
-            if (!sameTurn) {
-                turnInFlight = true
-                turnInFlightSession = targetSid
-                if (currentSession.value != null) store.pendingPushSessionId = currentSession.value
-                sendPromptBlocks(text, images, files, expect = targetSid)
-                return
-            }
-            // Same session's turn is running. Steer into it when the core surfaced the
-            // run id (the server validates expected_run_id, so a run that ended between
-            // typing and sending fails loudly instead of starting a stray turn); otherwise
-            // queue for RunEnded — a second sendPrompt would interleave in the transcript
-            // and the reply would be attributed to the wrong question.
-            val run = activeRunId
-            if (run != null) {
-                turnInFlight = true
-                turnInFlightSession = targetSid
-                io { unstable.steer(text, run) }
-            } else {
-                enqueue(PendingSend(text, images, files))
-            }
-        } else {
-            // Not live / not ready (initial connect or silent reconnect window): queue and
-            // let the core's own reconnect deliver the flush. The resume's replay wipes the
-            // local transcript (including this just-added bubble); Ready re-adds the queued
-            // bubbles on top of the rebuilt history.
-            enqueue(PendingSend(text, images, files))
-        }
+        if (currentSession.value != null) store.pendingPushSessionId = currentSession.value
+        // Prompt vs steer vs queue is the CORE's call (design/turn-state-in-core.md).
+        val blocks = mutableListOf<PromptBlock>()
+        if (text.isNotBlank()) blocks.add(PromptBlock.Text(text))
+        images.forEach { img -> blocks.add(PromptBlock.Image(img.mimeType, img.dataB64)) }
+        files.forEach { f -> blocks.add(PromptBlock.Resource(f.name, f.mimeType, f.text, f.blobB64)) }
+        if (blocks.isEmpty()) { busy.value = false; return }
+        io { core.send(Prompt(blocks)) }
     }
 
     /** Build a Prompt and hand it to the core. The core rejects a send whose `expect` session
@@ -1207,14 +1147,14 @@ class ConnectionManager private constructor(context: Context) {
         if (expect != null && expect != bound) {
             messages.add(ChatMessage("error",
                 "not sent — this chat isn't loaded yet (showing $expect, socket on $bound). Try again."))
-            busy.value = false; turnInFlight = false; turnInFlightSession = null
+            busy.value = false
             return
         }
         val blocks = mutableListOf<PromptBlock>()
         if (text.isNotBlank()) blocks.add(PromptBlock.Text(text))
         images.forEach { img -> blocks.add(PromptBlock.Image(img.mimeType, img.dataB64)) }
         files.forEach { f -> blocks.add(PromptBlock.Resource(f.name, f.mimeType, f.text, f.blobB64)) }
-        if (blocks.isEmpty()) { busy.value = false; turnInFlight = false; turnInFlightSession = null; return }
+        if (blocks.isEmpty()) { busy.value = false; return }
         core.sendPrompt(Prompt(blocks), expect?.let { SendExpect(it) })
     }
 
@@ -1273,11 +1213,10 @@ class ConnectionManager private constructor(context: Context) {
     /** Stop the running turn. The core sends the ACP cancel; the server ends the turn and the
      *  queue drains on RunEnded. Stop means stop: queued prompts are dropped, not deferred. */
     fun cancel() {
+        // The core drops its queue and latch ("stop means stop") and emits the
+        // idle turn state; the local write just makes the button feel instant.
         core.cancel()
         busy.value = false
-        turnInFlight = false   // wire is free again; without this the queue never drains
-        turnInFlightSession = null
-        clearQueue()           // Stop means stop: don't let queued prompts fire after a cancel
     }
 
     /** Compact the conversation history to reclaim context (goose /compact command). */
@@ -1394,23 +1333,8 @@ class ConnectionManager private constructor(context: Context) {
             replayActive.value = false
             replayDoneTick.value++   // ChatScreen: new content -> snap to bottom
         }
-        // Prompts still waiting in the queue aren't in the server history (they haven't
-        // been sent). Re-add their bubbles on top, in queue order, so the user's unsent
-        // messages don't vanish from the screen (the rebuild wiped them).
-        if (replayWiped) {
-            replayWiped = false
-            pendingSends.forEach { messages.add(ChatMessage("user", it.text, it.images, it.files)) }
-        }
-        // Send ONE queued prompt (bubbles were already added when queued); RunEnded drains
-        // the rest. Firing the whole deque at once would interleave the prompts in the
-        // transcript and misattribute each reply — the exact failure the queue exists to prevent.
-        dequeue()?.let { p ->
-            store.pendingPushSessionId = sid
-            turnInFlight = true
-            turnInFlightSession = currentSession.value
-            busy.value = true
-            sendPromptBlocks(p.text, p.images, expect = currentSession.value)
-        }
+        // Queued prompts (and re-rendering their wiped bubbles) are flushed by
+        // the CORE on ready (design/turn-state-in-core.md).
     }
 
     private fun onCoreSessions(list: List<SessionSummary>) {
@@ -1446,7 +1370,6 @@ class ConnectionManager private constructor(context: Context) {
                 messages.clear()
                 coreKeyToAppId.clear()
                 pendingToolStash.clear()
-                if (pendingSends.isNotEmpty()) replayWiped = true
                 val snap = core.transcript()
                 snap.forEach { appendFromMessage(it) }
                 // Empty snapshot = a rebuild is about to stream (show "Loading… N"); a
@@ -1573,29 +1496,13 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun onRunEnded(stopReason: String) {
         compacting.value = false
-        turnInFlight = false
-        turnInFlightSession = null
-        // The run is over: drop any stale run id so the next send doesn't try to
-        // steer a dead turn ("no turn exists to steer"). activeRunId is app-global,
-        // so an un-cleared value would infect every chat, not just the one that ran.
-        activeRunId = null
-        // We got the authoritative completion straight from our own socket -- stop waiting
-        // on the Stop-hook push for this turn so a later turn from another client in the
-        // same (possibly shared) session doesn't spuriously match the stale flag.
+        // Latches, run ids and the queue flush are core-owned; the core's
+        // on_turn (emitted BEFORE this event reaches us) already reflects
+        // whether a queued prompt took over — busy stays true through a
+        // queue-to-turn handoff, so the UI never flickers idle between them.
         store.pendingPushSessionId = null
-        // Drain one queued prompt, if any: send it and STAY busy, so the UI never flickers
-        // idle between a queue and its turn.
-        val queued = dequeue()
-        busy.value = queued != null
         if (!appForeground) notifier.postReply(lastAssistantText())
-        if (queued != null) {
-            // Send the queued prompt now that the wire is free. Service stays up (we are
-            // still busy), so backgrounding between the two turns is safe.
-            turnInFlight = true
-            turnInFlightSession = currentSession.value
-            lastSessionId?.let { store.pendingPushSessionId = it }
-            sendPromptBlocks(queued.text, queued.images, expect = currentSession.value)
-        } else if (!store.persistentConnection) stopService()
+        if (queuedCount.value == 0 && !busy.value && !store.persistentConnection) stopService()
     }
 
     private fun onCoreConfig(options: List<CoreConfigOption>) {
@@ -1670,13 +1577,7 @@ class ConnectionManager private constructor(context: Context) {
                 // the peer's equivalent of onCoreReady clearing the main connection's
                 // indicator — it replaced a 900ms "no chunks lately" guess.
                 if (currentRoamPeer == label) {
-                    // A fresh connection (auto-reconnect included) can't deliver a
-                    // prior turn's RunEnded; drop the stale busy latch AND the run
-                    // routing, or the next send steers into the dead run instead of
-                    // starting a new prompt.
-                    busy.value = false; compacting.value = false
-                    turnInFlight = false
-                    resetTurnRouting()
+                    compacting.value = false   // turn latches are core-owned now
                     if (replayActive.value) {
                         replayActive.value = false
                         replayDoneTick.value++  // ChatScreen: snap to bottom, as main does
@@ -1693,11 +1594,7 @@ class ConnectionManager private constructor(context: Context) {
             }
             st == "disconnected" -> {
                 if (currentRoamPeer == label) {
-                    // The dead connection's turn can never end; its latch must
-                    // not outlive it (composer stuck "thinking", sends queued).
-                    busy.value = false; compacting.value = false
-                    turnInFlight = false
-                    resetTurnRouting()
+                    compacting.value = false   // turn latches are core-owned now
                     currentRoamPeer = null
                     replayActive.value = false   // no wire = nothing more to load
                     if (roamPeer(currentSession.value) == label) {
@@ -1709,9 +1606,7 @@ class ConnectionManager private constructor(context: Context) {
             }
             st.startsWith("error") -> {
                 if (currentRoamPeer == label) {
-                    busy.value = false; compacting.value = false
-                    turnInFlight = false
-                    resetTurnRouting()
+                    compacting.value = false   // turn latches are core-owned now
                     currentRoamPeer = null
                     replayActive.value = false
                 }
@@ -1741,32 +1636,17 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     /** The running turn's run id (steer key), or null when no turn is live. */
-    @Volatile private var activeRunId: String? = null
+
+    /** Core-owned turn state mirror (design/turn-state-in-core.md): busy and
+     *  the queue depth render from here and nowhere else. */
+    private fun onCoreTurn(state: TurnState) {
+        busy.value = state.busy
+        queuedCount.value = state.queued.toInt()
+    }
 
     private fun onCoreActiveRun(sessionId: String, runId: String) {
-        // Steer only targets the session on screen; a peer's or background
-        // session's non-empty run id is irrelevant here. BUT an EMPTY run id
-        // (the run ended) must always clear the key: if we only cleared it for
-        // the on-screen session, a roam turn that finished while its session was
-        // NOT on screen would leave a stale dead run id behind — the next send
-        // anywhere would try to steer it ("no turn found to steer") and the
-        // busy/turnInFlight state would stay stuck until Stop.
-        if (runId.isEmpty()) {
-            activeRunId = null
-            // A cleared run id is also a turn-end fallback: hosts (e.g. a roam
-            // peer running go/opencode) may not emit a RunEnded stream event,
-            // which would otherwise leave busy/turnInFlight wedged so the user
-            // has to hit Stop. Only clear the busy state if we're actually mid
-            // turn — if we're already idle, a peer's background turn ending
-            // must not spuriously clear unrelated state.
-            if (turnInFlight or busy.value) {
-                turnInFlight = false
-                turnInFlightSession = null
-                busy.value = false
-            }
-        } else if (sessionId == currentSession.value) {
-            activeRunId = runId
-        }
+        // Run-id bookkeeping (steer routing, turn-end fallback) is core-owned
+        // now; the raw event stays exposed for logging/UI only.
     }
 
     // ---------------------------------------------------------------------------
@@ -1984,12 +1864,9 @@ class ConnectionManager private constructor(context: Context) {
         // it, abandon it so a later unrelated Ready can't complete a stale rename. (Explicit
         // newSession/openSession already clear the flag; this is the belt-and-suspenders.)
         if (pendingAssistantRename && resume != null) pendingAssistantRename = false
-        // A new client can't receive the old turn's RunEnded, so clear turn state here.
-        // Otherwise a hung/dropped turn leaves busy=true and every new chat + reconnect
-        // inherits a stuck "goose is thinking…" with nothing sent. Same logic for compacting.
+        // Turn latches are core-owned now; this is only the optimistic UI reset
+        // so a fresh connect never opens under a spinner.
         busy.value = false; compacting.value = false
-        turnInFlight = false
-        resetTurnRouting()
         live = false; connecting = true; online.value = false
         liveModelsFetchedFor = null   // re-fetch supported models fresh on every new connection
         desiredApplied = false
@@ -1997,7 +1874,7 @@ class ConnectionManager private constructor(context: Context) {
         // not from whenever the core's first event happens to land. onCoreTranscript
         // turns it straight back off if a cached snapshot paints (content on screen
         // needs no spinner); a new chat is empty by definition and never loads.
-        replayActive.value = resume != null; replayProgress.value = 0; replayWiped = false
+        replayActive.value = resume != null; replayProgress.value = 0
         val base = currentServerConfig()
         // A fresh config (first connect of the process, or host/port/key/cwd changed) needs a
         // real `connect()` — the core's new/open intents reuse the LAST config only. connect()

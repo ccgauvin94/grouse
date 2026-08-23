@@ -538,6 +538,7 @@ mod tests {
     }
 
     impl CoreListener for TestListener {
+        fn on_turn(&self, _state: crate::TurnState) {}
         fn on_status(&self, _status: ConnectionStatus) {}
         fn on_sessions(&self, _sessions: Vec<SessionSummary>) {}
         fn on_transcript(&self, event: TranscriptEvent) {

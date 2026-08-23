@@ -60,6 +60,7 @@ impl RecordingListener {
 }
 
 impl CoreListener for RecordingListener {
+    fn on_turn(&self, _state: grouse_core::TurnState) {}
     fn on_status(&self, status: ConnectionStatus) {
         let _ = self.tx.send(Ev::Status(status));
     }

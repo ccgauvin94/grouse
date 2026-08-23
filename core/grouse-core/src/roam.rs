@@ -1943,6 +1943,7 @@ mod tests {
     }
 
     impl CoreListener for RecordingListener {
+        fn on_turn(&self, _state: crate::TurnState) {}
         fn on_status(&self, status: ConnectionStatus) {
             self.events
                 .lock()

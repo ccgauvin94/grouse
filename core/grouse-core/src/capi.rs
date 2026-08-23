@@ -36,6 +36,7 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use crate::unstable::GrouseUnstable;
+use crate::TurnState;
 use crate::{
     ConfigOption, ConnectionStatus, Core, CoreListener, GrouseUnstableListener,
     PermissionOutcome, PermissionRequest, ProjectSummary, Prompt, SendExpect, ServerConfig,
@@ -130,6 +131,10 @@ pub struct GrouseCoreListener {
     pub on_active_run: Option<extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
     /// `commands` serialized as a JSON array of strings.
     pub on_commands: Option<extern "C" fn(*mut c_void, *const c_char)>,
+    /// TurnState as JSON (design/turn-state-in-core.md). New field at the END
+    /// of the table: rebuilding the desktop against this header is required
+    /// before it can receive turn events; an old table simply never gets them.
+    pub on_turn: Option<extern "C" fn(*mut c_void, *const c_char)>,
     // -- unstable raw-JSON families (CONTRACT §5) --
     pub on_export: Option<extern "C" fn(*mut c_void, *const c_char)>,
     pub on_recipe_params: Option<extern "C" fn(*mut c_void, *const c_char)>,
@@ -378,6 +383,16 @@ impl CoreListener for CoreCallbackForwarder {
     }
     fn on_active_run(&self, session_id: String, run_id: String) {
         unsafe { cb_str2(table_fn!(self, on_active_run), self.user_data, &session_id, &run_id) };
+    }
+    fn on_turn(&self, state: TurnState) {
+        let p = c_json(&state);
+        unsafe {
+            let table = &*self.table;
+            if let Some(f) = table.on_turn {
+                f(self.user_data, p);
+            }
+            grouse_string_free(p);
+        }
     }
     fn on_commands(&self, commands: Vec<String>) {
         let p = c_json(&commands);

@@ -262,6 +262,24 @@ pub trait CoreListener: Send + Sync {
     fn on_active_run(&self, session_id: String, run_id: String);
     /// Slash commands the server can execute right now (gap 2: autocomplete).
     fn on_commands(&self, commands: Vec<String>);
+    /// The active chat's turn state (design/turn-state-in-core.md). Emitted on
+    /// every transition; `busy == false` with `queued > 0` means prompts are
+    /// waiting on a reconnect. A turn never survives its connection: the core
+    /// clears this in the same paths that run the reconnect policy.
+    fn on_turn(&self, state: TurnState);
+}
+
+/// The core-owned turn state for one chat owner (CONTRACT §3.2 `on_turn`).
+#[derive(uniffi::Record, Clone, Debug, serde::Serialize)]
+pub struct TurnState {
+    /// The session owning the turn (prefixed `roam:<label>:<id>` for peers).
+    pub session_id: String,
+    /// The live run id once the server surfaced it (the steer key), else "".
+    pub run_id: String,
+    /// A turn is in flight on the owning connection.
+    pub busy: bool,
+    /// Prompts queued behind the turn or behind a reconnect.
+    pub queued: u32,
 }
 
 /// Unstable events (CONTRACT §5). Retiring with `grouse-unstable`.
@@ -298,6 +316,327 @@ pub trait GrouseUnstableListener: Send + Sync {
     fn on_session_probe(&self, session_id: String, updated_at: String, message_count: i64);
     fn on_tool_result(&self, text: String, is_error: bool);
     fn on_error(&self, method: String, message: String);
+}
+
+// ---------------------------------------------------------------------------
+// Turn state (design/turn-state-in-core.md)
+// ---------------------------------------------------------------------------
+
+/// Wraps the app listener so every core emission drives the turn tracker
+/// before it forwards: run ids, run ends, peer lifecycle and readiness all
+/// pass through here, so the tracker cannot miss a transition the core knows
+/// about — the class of client-side latch bug this design removes.
+struct TurnProxy {
+    app: Arc<dyn CoreListener>,
+    core: Mutex<std::sync::Weak<CoreInner>>,
+}
+
+impl TurnProxy {
+    fn with_core(&self, f: impl FnOnce(&Arc<CoreInner>)) {
+        if let Some(inner) = self.core.lock().upgrade() {
+            f(&inner);
+        }
+    }
+}
+
+impl CoreListener for TurnProxy {
+    fn on_status(&self, status: ConnectionStatus) {
+        self.with_core(|inner| match &status {
+            ConnectionStatus::Ready => turn_owner_ready(inner, None),
+            ConnectionStatus::Disconnected | ConnectionStatus::Error { .. } => {
+                turn_owner_suspended(inner, None)
+            }
+            _ => {}
+        });
+        self.app.on_status(status);
+    }
+    fn on_sessions(&self, sessions: Vec<SessionSummary>) {
+        self.app.on_sessions(sessions)
+    }
+    fn on_transcript(&self, event: TranscriptEvent) {
+        self.app.on_transcript(event)
+    }
+    fn on_stream(&self, event: StreamEvent) {
+        if matches!(event, StreamEvent::RunEnded { .. }) {
+            self.with_core(turn_run_ended);
+        }
+        self.app.on_stream(event)
+    }
+    fn on_config(&self, options: Vec<ConfigOption>) {
+        self.app.on_config(options)
+    }
+    fn on_permission_request(&self, request: PermissionRequest) {
+        self.app.on_permission_request(request)
+    }
+    fn on_session_touched(&self, session_id: String, title: String, updated_at: String) {
+        self.app.on_session_touched(session_id, title, updated_at)
+    }
+    fn on_projects(&self, projects: Vec<ProjectSummary>) {
+        self.app.on_projects(projects)
+    }
+    fn on_roam_peer_status(&self, label: String, status: String) {
+        self.with_core(|inner| {
+            if status == "ready" {
+                turn_owner_ready(inner, Some(label.clone()));
+            } else if status == "reconnecting"
+                || status == "disconnected"
+                || status.starts_with("error")
+            {
+                turn_owner_suspended(inner, Some(label.clone()));
+            }
+        });
+        self.app.on_roam_peer_status(label, status)
+    }
+    fn on_roam_sessions(&self, label: String, sessions: Vec<SessionSummary>) {
+        self.app.on_roam_sessions(label, sessions)
+    }
+    fn on_peer_new_session(&self, label: String, session_id: String) {
+        self.app.on_peer_new_session(label, session_id)
+    }
+    fn on_active_run(&self, session_id: String, run_id: String) {
+        self.with_core(|inner| turn_active_run(inner, &session_id, &run_id));
+        self.app.on_active_run(session_id, run_id)
+    }
+    fn on_commands(&self, commands: Vec<String>) {
+        self.app.on_commands(commands)
+    }
+    fn on_turn(&self, state: TurnState) {
+        self.app.on_turn(state)
+    }
+}
+
+/// Prompts queued behind a turn / a reconnect, per owner. Bounded so an
+/// unreachable host can't grow it without limit; overflow drops the OLDEST
+/// (the newest send is the one the user still means).
+const TURN_QUEUE_CAP: usize = 16;
+
+fn turn_owner_key(inner: &Arc<CoreInner>) -> Option<String> {
+    inner.active_peer_label.read().clone()
+}
+
+fn emit_turn(inner: &Arc<CoreInner>, key: &Option<String>) {
+    let state = {
+        let turns = inner.turns.lock();
+        let Some(t) = turns.get(key) else { return };
+        TurnState {
+            session_id: t.session_id.clone(),
+            run_id: t.run_id.clone().unwrap_or_default(),
+            busy: t.busy,
+            queued: t.queue.len() as u32,
+        }
+    };
+    inner.listener.on_turn(state);
+}
+
+/// The owner's connection can no longer end its turn (drop, error, or a
+/// reconnect in progress): the latch dies with the connection. The queue is
+/// kept — it flushes when the owner is ready again.
+fn turn_owner_suspended(inner: &Arc<CoreInner>, key: Option<String>) {
+    let changed = {
+        let mut turns = inner.turns.lock();
+        match turns.get_mut(&key) {
+            Some(t) if t.busy || t.run_id.is_some() => {
+                t.busy = false;
+                t.run_id = None;
+                t.requeued = !t.queue.is_empty();
+                true
+            }
+            _ => false,
+        }
+    };
+    if changed {
+        emit_turn(inner, &key);
+    }
+}
+
+/// The owner (re)connected: a fresh connection can't deliver a prior turn's
+/// RunEnded, so drop any stale latch, then flush one queued prompt.
+fn turn_owner_ready(inner: &Arc<CoreInner>, key: Option<String>) {
+    {
+        let mut turns = inner.turns.lock();
+        if let Some(t) = turns.get_mut(&key) {
+            t.busy = false;
+            t.run_id = None;
+        }
+    }
+    turn_flush(inner, key);
+}
+
+fn turn_run_ended(inner: &Arc<CoreInner>) {
+    let key = turn_owner_key(inner);
+    {
+        let mut turns = inner.turns.lock();
+        if let Some(t) = turns.get_mut(&key) {
+            t.busy = false;
+            t.run_id = None;
+        }
+    }
+    turn_flush(inner, key);
+}
+
+fn turn_active_run(inner: &Arc<CoreInner>, session_id: &str, run_id: &str) {
+    let key = turn_owner_key(inner);
+    if run_id.is_empty() {
+        // Turn-end fallback: some hosts never emit a RunEnded stream event;
+        // the cleared run id is the only end signal. Only act when a turn is
+        // actually in flight so a background peer's turn ending can't clear
+        // unrelated state.
+        let mid_turn = {
+            let mut turns = inner.turns.lock();
+            match turns.get_mut(&key) {
+                Some(t) if t.busy || t.run_id.is_some() => {
+                    t.busy = false;
+                    t.run_id = None;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if mid_turn {
+            turn_flush(inner, key);
+        }
+        return;
+    }
+    let changed = {
+        let mut turns = inner.turns.lock();
+        match turns.get_mut(&key) {
+            Some(t)
+                if t.session_id == session_id
+                    || t.session_id.ends_with(&format!(":{session_id}")) =>
+            {
+                t.run_id = Some(run_id.to_string());
+                true
+            }
+            _ => false,
+        }
+    };
+    if changed {
+        emit_turn(inner, &key);
+    }
+}
+
+/// Send the next queued prompt if the owner is idle. Pops at most one — the
+/// rest wait for that turn's RunEnded, preserving reply attribution.
+fn turn_flush(inner: &Arc<CoreInner>, key: Option<String>) {
+    let popped = {
+        let mut turns = inner.turns.lock();
+        let Some(t) = turns.get_mut(&key) else { return };
+        if t.busy {
+            None
+        } else {
+            match t.queue.pop_front() {
+                Some(p) => {
+                    t.busy = true;
+                    let requeued = t.requeued;
+                    t.requeued = false;
+                    Some((p, requeued))
+                }
+                None => None,
+            }
+        }
+    };
+    emit_turn(inner, &key);
+    if let Some((prompt, requeued)) = popped {
+        turn_dispatch(inner, key, prompt, requeued);
+    }
+}
+
+/// Fire a prompt at its owner. Bubbles were recorded at intake; the one
+/// exception is a MAIN prompt whose optimistic bubble a reconnect replay
+/// wiped (`requeued`) — re-render it as a user chunk first.
+fn turn_dispatch(inner: &Arc<CoreInner>, key: Option<String>, prompt: Prompt, requeued: bool) {
+    match key {
+        Some(label) => {
+            let peer = {
+                let peers = inner.peers.lock();
+                peers.iter().find(|p| p.label() == label).cloned()
+            };
+            let Some(peer) = peer else {
+                // Owner vanished between queue and flush: put it back.
+                let mut turns = inner.turns.lock();
+                if let Some(t) = turns.get_mut(&Some(label.clone())) {
+                    t.busy = false;
+                    t.queue.push_front(prompt);
+                }
+                drop(turns);
+                emit_turn(inner, &Some(label));
+                return;
+            };
+            let session_id = peer.active_session_id().unwrap_or_default();
+            let params = prompt_params(&prompt, &session_id);
+            crate::roam::runtime().spawn_blocking(move || {
+                let _ = peer.rpc("session/prompt", params);
+            });
+        }
+        None => {
+            if requeued {
+                let text = prompt_text(&prompt);
+                if !text.is_empty() {
+                    inner.listener.on_stream(StreamEvent::UserChunk {
+                        text,
+                        message_id: String::new(),
+                    });
+                }
+            }
+            let core = Core {
+                inner: inner.clone(),
+            };
+            if let Err((prompt, _)) = core.try_send_prompt(prompt, None) {
+                let mut turns = inner.turns.lock();
+                if let Some(t) = turns.get_mut(&None) {
+                    t.busy = false;
+                    t.queue.push_front(prompt);
+                }
+                drop(turns);
+                emit_turn(inner, &None);
+            }
+        }
+    }
+}
+
+/// Steer `text` into the owner's live run (`expected_run_id` server-checked).
+fn turn_steer(inner: &Arc<CoreInner>, key: Option<String>, text: String, run_id: String) {
+    let params_for = |sid: &str| {
+        json!({
+            "sessionId": sid,
+            "prompt": [{"type": "text", "text": text}],
+            "expectedRunId": run_id,
+        })
+    };
+    match key {
+        Some(label) => {
+            let peer = {
+                let peers = inner.peers.lock();
+                peers.iter().find(|p| p.label() == label).cloned()
+            };
+            let Some(peer) = peer else { return };
+            let sid = peer.active_session_id().unwrap_or_default();
+            let params = params_for(&sid);
+            crate::roam::runtime().spawn_blocking(move || {
+                let _ = peer.rpc("_goose/unstable/session/steer", params);
+            });
+        }
+        None => {
+            let Some(conn) = spine::current_conn() else { return };
+            let Some(sid) = conn.active_session_id() else { return };
+            let params = params_for(&sid);
+            crate::roam::runtime().spawn_blocking(move || {
+                let _ = conn.rpc("_goose/unstable/session/steer", params);
+            });
+        }
+    }
+}
+
+fn prompt_text(prompt: &Prompt) -> String {
+    prompt
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            PromptBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +709,22 @@ struct CoreInner {
     /// Reconnect policy state per peer label. Present while the user wants the
     /// peer connected (set by `roam_connect`, cleared by `roam_disconnect`).
     roam_intents: Mutex<HashMap<String, RoamIntent>>,
+    /// Turn state per chat owner: `None` = the main connection, `Some(label)`
+    /// = a roam peer. Owner-keyed (not peer-object-keyed) so the queue and
+    /// latches survive the reconnect machinery replacing peer objects.
+    turns: Mutex<HashMap<Option<String>, OwnerTurn>>,
+}
+
+/// One owner's in-flight turn + waiting prompts (design/turn-state-in-core.md).
+#[derive(Default)]
+struct OwnerTurn {
+    session_id: String,
+    run_id: Option<String>,
+    busy: bool,
+    queue: VecDeque<Prompt>,
+    /// The queue survived a reconnect: the replay wiped optimistic bubbles, so
+    /// the next main-connection flush re-emits the user bubble as a chunk.
+    requeued: bool,
 }
 
 /// Replace-and-dial the peer for `label`. Shared by `roam_connect` and the
@@ -539,7 +894,12 @@ impl Core {
     /// UI must pass a real absolute dir (context.filesDir).
     #[uniffi::constructor]
     pub fn new(listener: Box<dyn CoreListener>, cache_dir: String) -> Arc<Self> {
-        let listener: Arc<dyn CoreListener> = Arc::from(listener);
+        let app_listener: Arc<dyn CoreListener> = Arc::from(listener);
+        let proxy = Arc::new(TurnProxy {
+            app: app_listener,
+            core: parking_lot::Mutex::new(std::sync::Weak::new()),
+        });
+        let listener: Arc<dyn CoreListener> = proxy.clone();
         // The store shares one listener with the rest of the core; a tiny
         // forwarder adapts the Box the store's seam asks for.
         let store = Arc::new(TranscriptStore::new(Box::new(CoreListenerForwarder(
@@ -561,8 +921,10 @@ impl Core {
                 peers: Mutex::new(Vec::new()),
                 active_peer_label: Arc::new(RwLock::new(None)),
                 roam_intents: Mutex::new(HashMap::new()),
+                turns: Mutex::new(HashMap::new()),
             }),
         });
+        *proxy.core.lock() = Arc::downgrade(&core.inner);
         // Seed the session directory from cache: the drawer renders the
         // names immediately (before the first session/list round trip), the
         // updatedAt table makes a cold-start resume's freshness check match
@@ -798,8 +1160,158 @@ impl Core {
         }
     }
 
-    /// `session/cancel` (a notification; never waits for a reply).
+    /// Turn-aware send (design/turn-state-in-core.md): prompts, steers, or
+    /// queues based on the owner's core-tracked turn state. Peer user bubbles
+    /// are recorded at intake so they show immediately and survive replay.
+    pub fn send(&self, prompt: Prompt) {
+        let key = turn_owner_key(&self.inner);
+        let (session_id, ready) = match &key {
+            Some(label) => {
+                let peer = {
+                    let peers = self.inner.peers.lock();
+                    peers.iter().find(|p| p.label() == *label).cloned()
+                };
+                match peer {
+                    Some(p) => {
+                        let raw = p.active_session_id().unwrap_or_default();
+                        let text = prompt_text(&prompt);
+                        if !text.is_empty() && !raw.is_empty() {
+                            p.record_user_prompt(raw.clone(), text);
+                        }
+                        let ready = matches!(p.status(), ConnectionStatus::Ready)
+                            && !raw.is_empty();
+                        (format!("roam:{label}:{raw}"), ready)
+                    }
+                    None => (String::new(), false),
+                }
+            }
+            None => {
+                let sid = self
+                    .inner
+                    .conn
+                    .lock()
+                    .as_ref()
+                    .and_then(|c| c.active_session_id())
+                    .unwrap_or_default();
+                let ready = self.ready() && !sid.is_empty();
+                (sid, ready)
+            }
+        };
+        enum Route {
+            Prompt,
+            Steer(String),
+            Queue,
+        }
+        let route = {
+            let mut turns = self.inner.turns.lock();
+            let t = turns.entry(key.clone()).or_default();
+            if !ready {
+                t.session_id = session_id;
+                Route::Queue
+            } else if t.busy && t.session_id == session_id {
+                match &t.run_id {
+                    Some(run) => Route::Steer(run.clone()),
+                    None => Route::Queue,
+                }
+            } else {
+                t.busy = true;
+                t.run_id = None;
+                t.session_id = session_id;
+                Route::Prompt
+            }
+        };
+        match route {
+            Route::Prompt => {
+                emit_turn(&self.inner, &key);
+                turn_dispatch(&self.inner, key, prompt, false);
+            }
+            Route::Steer(run) => {
+                emit_turn(&self.inner, &key);
+                turn_steer(&self.inner, key, prompt_text(&prompt), run);
+            }
+            Route::Queue => {
+                {
+                    let mut turns = self.inner.turns.lock();
+                    if let Some(t) = turns.get_mut(&key) {
+                        t.queue.push_back(prompt);
+                        while t.queue.len() > TURN_QUEUE_CAP {
+                            t.queue.pop_front();
+                        }
+                    }
+                }
+                emit_turn(&self.inner, &key);
+            }
+        }
+    }
+
+    /// Platform resume hook (design/turn-state-in-core.md): the reconnect
+    /// backoff only burns while the process is awake, so a dozing phone can
+    /// exhaust it against a temporarily unreachable network. Redial dead roam
+    /// intents with a fresh budget and re-kick a given-up main reconnect.
+    /// Idempotent; never dials an owner that is ready, dialing, or already
+    /// mid-reconnect.
+    pub fn on_foreground(&self) {
+        let redials: Vec<(String, String, u64)> = {
+            let peers = self.inner.peers.lock();
+            let mut intents = self.inner.roam_intents.lock();
+            intents
+                .iter_mut()
+                .filter_map(|(label, intent)| {
+                    let dead = match peers.iter().find(|p| p.label() == *label) {
+                        None => true,
+                        Some(p) => matches!(
+                            p.status(),
+                            ConnectionStatus::Disconnected | ConnectionStatus::Error { .. }
+                        ),
+                    };
+                    if dead && !intent.reconnecting {
+                        intent.attempts = 0;
+                        intent.reconnecting = true;
+                        intent.generation += 1;
+                        Some((label.clone(), intent.card.clone(), intent.generation))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        for (label, card, generation) in redials {
+            dial_roam_peer(&self.inner, card, label, generation);
+        }
+
+        let main_down = matches!(
+            self.status(),
+            ConnectionStatus::Disconnected | ConnectionStatus::Error { .. }
+        );
+        let resume_session = self.active_session_id();
+        let main_resume = {
+            let mut state = self.inner.state.lock();
+            if state.user_disconnect || !main_down {
+                None
+            } else {
+                state.reconnect_attempts = 0;
+                resume_session
+            }
+        };
+        if let Some(resume) = main_resume {
+            self.schedule_reconnect(resume);
+        }
+    }
+
+    /// `session/cancel` (a notification; never waits for a reply). Stop means
+    /// stop: the owner's queued prompts are dropped, not deferred.
     pub fn cancel(&self) {
+        let key = turn_owner_key(&self.inner);
+        {
+            let mut turns = self.inner.turns.lock();
+            if let Some(t) = turns.get_mut(&key) {
+                t.busy = false;
+                t.run_id = None;
+                t.queue.clear();
+                t.requeued = false;
+            }
+        }
+        emit_turn(&self.inner, &key);
         if let Some(peer) = self.active_peer() {
             let params = json!({ "sessionId": peer.active_session_id().unwrap_or_default() });
             crate::roam::runtime().spawn_blocking(move || {
@@ -1856,6 +2368,9 @@ struct CoreListenerForwarder(Arc<dyn CoreListener>);
 impl CoreListener for CoreListenerForwarder {
     fn on_status(&self, status: ConnectionStatus) {
         self.0.on_status(status);
+    }
+    fn on_turn(&self, state: TurnState) {
+        self.0.on_turn(state);
     }
     fn on_sessions(&self, sessions: Vec<SessionSummary>) {
         self.0.on_sessions(sessions);

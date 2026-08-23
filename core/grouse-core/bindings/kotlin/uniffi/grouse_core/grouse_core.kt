@@ -689,6 +689,9 @@ internal interface UniffiCallbackInterfaceCoreListenerMethod11 : com.sun.jna.Cal
 internal interface UniffiCallbackInterfaceCoreListenerMethod12 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`commands`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfaceCoreListenerMethod13 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`state`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`data`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
@@ -746,7 +749,7 @@ internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod17 : com.s
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod18 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`method`: RustBuffer.ByValue,`message`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "onStatus", "onSessions", "onTranscript", "onStream", "onConfig", "onPermissionRequest", "onSessionTouched", "onProjects", "onRoamPeerStatus", "onRoamSessions", "onPeerNewSession", "onActiveRun", "onCommands")
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onStatus", "onSessions", "onTranscript", "onStream", "onConfig", "onPermissionRequest", "onSessionTouched", "onProjects", "onRoamPeerStatus", "onRoamSessions", "onPeerNewSession", "onActiveRun", "onCommands", "onTurn")
 internal open class UniffiVTableCallbackInterfaceCoreListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
     @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
@@ -763,6 +766,7 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
     @JvmField internal var `onPeerNewSession`: UniffiCallbackInterfaceCoreListenerMethod10? = null,
     @JvmField internal var `onActiveRun`: UniffiCallbackInterfaceCoreListenerMethod11? = null,
     @JvmField internal var `onCommands`: UniffiCallbackInterfaceCoreListenerMethod12? = null,
+    @JvmField internal var `onTurn`: UniffiCallbackInterfaceCoreListenerMethod13? = null,
 ) : Structure() {
     class UniffiByValue(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -780,7 +784,8 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
         `onPeerNewSession`: UniffiCallbackInterfaceCoreListenerMethod10? = null,
         `onActiveRun`: UniffiCallbackInterfaceCoreListenerMethod11? = null,
         `onCommands`: UniffiCallbackInterfaceCoreListenerMethod12? = null,
-    ): UniffiVTableCallbackInterfaceCoreListener(`uniffiFree`,`uniffiClone`,`onStatus`,`onSessions`,`onTranscript`,`onStream`,`onConfig`,`onPermissionRequest`,`onSessionTouched`,`onProjects`,`onRoamPeerStatus`,`onRoamSessions`,`onPeerNewSession`,`onActiveRun`,`onCommands`,), Structure.ByValue
+        `onTurn`: UniffiCallbackInterfaceCoreListenerMethod13? = null,
+    ): UniffiVTableCallbackInterfaceCoreListener(`uniffiFree`,`uniffiClone`,`onStatus`,`onSessions`,`onTranscript`,`onStream`,`onConfig`,`onPermissionRequest`,`onSessionTouched`,`onProjects`,`onRoamPeerStatus`,`onRoamSessions`,`onPeerNewSession`,`onActiveRun`,`onCommands`,`onTurn`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceCoreListener) {
         `uniffiFree` = other.`uniffiFree`
@@ -798,6 +803,7 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
         `onPeerNewSession` = other.`onPeerNewSession`
         `onActiveRun` = other.`onActiveRun`
         `onCommands` = other.`onCommands`
+        `onTurn` = other.`onTurn`
     }
 
 }
@@ -919,6 +925,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_new_session(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_on_foreground(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_open_session(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_ready(
@@ -936,6 +944,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_grouse_core_checksum_method_core_roam_new_session_in(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_roam_open_session(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_core_send(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_send_prompt(
     ): Int
@@ -1049,6 +1059,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_corelistener_on_commands(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_corelistener_on_turn(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstablelistener_on_recipe_params(
@@ -1135,6 +1147,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_new_session(`ptr`: Long,`recipeId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_core_on_foreground(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_grouse_core_fn_method_core_open_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_ready(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1152,6 +1166,8 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_method_core_roam_new_session_in(`ptr`: Long,`label`: RustBuffer.ByValue,`cwd`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_roam_open_session(`ptr`: Long,`label`: RustBuffer.ByValue,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_core_send(`ptr`: Long,`prompt`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_send_prompt(`ptr`: Long,`prompt`: RustBuffer.ByValue,`expect`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1370,7 +1386,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_grouse_core_checksum_method_core_archive_session() != 46828) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_cancel() != 53904) {
+    if (lib.uniffi_grouse_core_checksum_method_core_cancel() != 35526) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_config() != 53322) {
@@ -1395,6 +1411,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_new_session() != 54951) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_core_on_foreground() != 7151) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_open_session() != 21069) {
@@ -1422,6 +1441,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_roam_open_session() != 26278) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_core_send() != 43364) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_send_prompt() != 38382) {
@@ -1590,6 +1612,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_corelistener_on_commands() != 60486) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_turn() != 53371) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export() != 3482) {
@@ -1867,6 +1892,29 @@ public object FfiConverterUShort: FfiConverter<UShort, Short> {
 /**
  * @suppress
  */
+public object FfiConverterUInt: FfiConverter<UInt, Int> {
+    override fun lift(value: Int): UInt {
+        return value.toUInt()
+    }
+
+    override fun read(buf: ByteBuffer): UInt {
+        return lift(buf.getInt())
+    }
+
+    override fun lower(value: UInt): Int {
+        return value.toInt()
+    }
+
+    override fun allocationSize(value: UInt) = 4UL
+
+    override fun write(value: UInt, buf: ByteBuffer) {
+        buf.putInt(value.toInt())
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterULong: FfiConverter<ULong, Long> {
     override fun lift(value: Long): ULong {
         return value.toULong()
@@ -2126,7 +2174,8 @@ public interface CoreInterface {
     fun `archiveSession`(`sessionId`: kotlin.String)
     
     /**
-     * `session/cancel` (a notification; never waits for a reply).
+     * `session/cancel` (a notification; never waits for a reply). Stop means
+     * stop: the owner's queued prompts are dropped, not deferred.
      */
     fun `cancel`()
     
@@ -2180,6 +2229,16 @@ public interface CoreInterface {
      * `session/new` with `_meta.client` + cwd; replaces the current wire.
      */
     fun `newSession`(`recipeId`: kotlin.String?)
+    
+    /**
+     * Platform resume hook (design/turn-state-in-core.md): the reconnect
+     * backoff only burns while the process is awake, so a dozing phone can
+     * exhaust it against a temporarily unreachable network. Redial dead roam
+     * intents with a fresh budget and re-kick a given-up main reconnect.
+     * Idempotent; never dials an owner that is ready, dialing, or already
+     * mid-reconnect.
+     */
+    fun `onForeground`()
     
     /**
      * `session/load` with the session's real cwd (resolved: cache → probe →
@@ -2239,6 +2298,13 @@ public interface CoreInterface {
      * Main session is opened. Its transcript is peer-owned (never cached).
      */
     fun `roamOpenSession`(`label`: kotlin.String, `sessionId`: kotlin.String)
+    
+    /**
+     * Turn-aware send (design/turn-state-in-core.md): prompts, steers, or
+     * queues based on the owner's core-tracked turn state. Peer user bubbles
+     * are recorded at intake so they show immediately and survive replay.
+     */
+    fun `send`(`prompt`: Prompt)
     
     /**
      * Send a prompt (text/image/resource blocks). Queues until the socket is
@@ -2435,7 +2501,8 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
-     * `session/cancel` (a notification; never waits for a reply).
+     * `session/cancel` (a notification; never waits for a reply). Stop means
+     * stop: the owner's queued prompts are dropped, not deferred.
      */override fun `cancel`()
         = 
     callWithHandle {
@@ -2579,6 +2646,26 @@ open class Core: Disposable, AutoCloseable, CoreInterface
         it,
         
         FfiConverterOptionalString.lower(`recipeId`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Platform resume hook (design/turn-state-in-core.md): the reconnect
+     * backoff only burns while the process is awake, so a dozing phone can
+     * exhaust it against a temporarily unreachable network. Redial dead roam
+     * intents with a fresh budget and re-kick a given-up main reconnect.
+     * Idempotent; never dials an owner that is ready, dialing, or already
+     * mid-reconnect.
+     */override fun `onForeground`()
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_on_foreground(
+        it,
+        _status)
 }
     }
     
@@ -2742,6 +2829,24 @@ open class Core: Disposable, AutoCloseable, CoreInterface
         
         FfiConverterString.lower(`label`),
         FfiConverterString.lower(`sessionId`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Turn-aware send (design/turn-state-in-core.md): prompts, steers, or
+     * queues based on the owner's core-tracked turn state. Peer user bubbles
+     * are recorded at intake so they show immediately and survive replay.
+     */override fun `send`(`prompt`: Prompt)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_send(
+        it,
+        
+        FfiConverterTypePrompt.lower(`prompt`),_status)
 }
     }
     
@@ -4550,6 +4655,69 @@ public object FfiConverterTypeSessionSummary: FfiConverterRustBuffer<SessionSumm
 
 
 /**
+ * The core-owned turn state for one chat owner (CONTRACT §3.2 `on_turn`).
+ */
+data class TurnState (
+    /**
+     * The session owning the turn (prefixed `roam:<label>:<id>` for peers).
+     */
+    var `sessionId`: kotlin.String
+    , 
+    /**
+     * The live run id once the server surfaced it (the steer key), else "".
+     */
+    var `runId`: kotlin.String
+    , 
+    /**
+     * A turn is in flight on the owning connection.
+     */
+    var `busy`: kotlin.Boolean
+    , 
+    /**
+     * Prompts queued behind the turn or behind a reconnect.
+     */
+    var `queued`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTurnState: FfiConverterRustBuffer<TurnState> {
+    override fun read(buf: ByteBuffer): TurnState {
+        return TurnState(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TurnState) = (
+            FfiConverterString.allocationSize(value.`sessionId`) +
+            FfiConverterString.allocationSize(value.`runId`) +
+            FfiConverterBoolean.allocationSize(value.`busy`) +
+            FfiConverterUInt.allocationSize(value.`queued`)
+    )
+
+    override fun write(value: TurnState, buf: ByteBuffer) {
+            FfiConverterString.write(value.`sessionId`, buf)
+            FfiConverterString.write(value.`runId`, buf)
+            FfiConverterBoolean.write(value.`busy`, buf)
+            FfiConverterUInt.write(value.`queued`, buf)
+    }
+}
+
+
+
+/**
  * Connection lifecycle (CONTRACT §3.3).
  */
 sealed class ConnectionStatus {
@@ -5387,6 +5555,14 @@ public interface CoreListener {
      */
     fun `onCommands`(`commands`: List<kotlin.String>)
     
+    /**
+     * The active chat's turn state (design/turn-state-in-core.md). Emitted on
+     * every transition; `busy == false` with `queued > 0` means prompts are
+     * waiting on a reconnect. A turn never survives its connection: the core
+     * clears this in the same paths that run the reconnect policy.
+     */
+    fun `onTurn`(`state`: TurnState)
+    
     companion object
 }
 
@@ -5556,6 +5732,18 @@ internal object uniffiCallbackInterfaceCoreListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
+    internal object `onTurn`: UniffiCallbackInterfaceCoreListenerMethod13 {
+        override fun callback(`uniffiHandle`: Long,`state`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onTurn`(
+                    FfiConverterTypeTurnState.lift(`state`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
 
     internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
@@ -5585,6 +5773,7 @@ internal object uniffiCallbackInterfaceCoreListener {
         `onPeerNewSession`,
         `onActiveRun`,
         `onCommands`,
+        `onTurn`,
     )
 
     // Registers the foreign callback with the Rust side.

@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 struct L(Arc<std::sync::Mutex<Vec<String>>>);
 impl CoreListener for L {
+    fn on_turn(&self, _state: grouse_core::TurnState) {}
     fn on_status(&self, s: ConnectionStatus) {
         println!("status: {s:?}");
         self.0.lock().unwrap().push(format!("{s:?}"));
