@@ -12,6 +12,8 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QGuiApplication>
+#include <QClipboard>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -244,6 +246,7 @@ void Manager::connectRoam(const QString &card, const QString &label)
         const QByteArray l = label.toUtf8();
         m_bridge->api().grouse_roam_connect(m_bridge->handle(), c.constData(), l.constData());
         m_roamModel->addPeer(label);
+        persistRoamCard(label, card);
     }
 }
 
@@ -256,6 +259,41 @@ void Manager::disconnectRoam(const QString &label)
         m_bridge->api().grouse_roam_disconnect(m_bridge->handle(), l.constData());
     }
     m_roamModel->removePeer(label);
+    forgetRoamCard(label);
+}
+
+void Manager::persistRoamCard(const QString &label, const QString &card)
+{
+    QVariantMap cards = m_store.value(QStringLiteral("roam_cards")).toMap();
+    cards.insert(label, card);
+    m_store.setValue(QStringLiteral("roam_cards"), cards);
+}
+
+void Manager::forgetRoamCard(const QString &label)
+{
+    QVariantMap cards = m_store.value(QStringLiteral("roam_cards")).toMap();
+    if (cards.remove(label))
+        m_store.setValue(QStringLiteral("roam_cards"), cards);
+}
+
+/// Re-dial + re-list every persisted roam peer so stored connections survive a
+/// restart (the wires are the core's; this only re-arms them).
+void Manager::restoreRoamPeers()
+{
+    const QVariantMap cards = m_store.value(QStringLiteral("roam_cards")).toMap();
+    if (cards.isEmpty())
+        return;
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    for (auto it = cards.constBegin(); it != cards.constEnd(); ++it) {
+        const QString card = it.value().toString();
+        if (card.isEmpty())
+            continue;
+        m_roamModel->addPeer(it.key());
+        const QByteArray c = card.toUtf8();
+        const QByteArray l = it.key().toUtf8();
+        m_bridge->api().grouse_roam_connect(m_bridge->handle(), c.constData(), l.constData());
+    }
 }
 
 void Manager::openRoamSession(const QString &label, const QString &sessionId, const QString &cwd)
@@ -374,6 +412,29 @@ QString Manager::roamPublicKey() const
         return QString();
     }
     return key;
+}
+
+QString Manager::roamCard() const
+{
+    // Matches the Android client's card exactly: base64url (no padding) of
+    // {"version":1,"endpoint_id":"<hex key>","relay_urls":[]}. The card decoder
+    // accepts empty relay URLs (LAN-direct); the host reaches this device by its
+    // public endpoint_id, so only the key goes in.
+    const QString key = roamPublicKey();
+    if (key.isEmpty())
+        return QString();
+    const QByteArray json =
+        QStringLiteral("{\"version\":1,\"endpoint_id\":\"%1\",\"relay_urls\":[]}")
+            .arg(key)
+            .toUtf8();
+    const QByteArray b64 = json.toBase64(
+        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+    return QStringLiteral("goose+roam://") + QString::fromLatin1(b64);
+}
+
+void Manager::copyToClipboard(const QString &s)
+{
+    QGuiApplication::clipboard()->setText(s);
 }
 
 QObject *Manager::roamModel() const { return m_roamModel; }
@@ -1118,10 +1179,14 @@ void Manager::coreOnStatus(const QString &json)
         setStatus(QStringLiteral("ready"));
         m_prompting = false;
         emit promptingChanged();
-        if (m_testPending) {
-            m_testPending = false;
-            emit connectionTested(true, QStringLiteral("Connection OK — the server responded."));
+        // The core bridge resolves lazily; by Ready it is definitely live, so this
+        // is the safe point to re-arm dials for persisted roam peers (once).
+        if (!m_roamRestored) {
+            m_roamRestored = true;
+            restoreRoamPeers();
         }
+        flushQueue();
+        refreshSessions();
         flushQueue();
         refreshSessions();
         refreshProjects();

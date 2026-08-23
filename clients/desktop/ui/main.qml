@@ -436,18 +436,31 @@ Controls.ApplicationWindow {
                             Layout.fillWidth: true
                             onClicked: parent.roamConnectClicked()
                         }
-                        Controls.Label {
-                            // Generating the identity on first reference makes
-                            // the key visible before any connect (the host needs
-                            // it for `roam peers accept`).
-                            readonly property string myKey: { Mgr.roamIdentity(); return Mgr.roamPublicKey() }
-                            text: qsTr("This device: %1").arg(myKey)
-                            color: Kirigami.Theme.disabledTextColor
-                            font.pixelSize: root.sidebarSmallTextSize
-                            wrapMode: Text.Wrap
+                        // Shareable roam connection card. A host pastes the FULL
+                        // card (`goose+roam://…`) into `roam peers accept`, not the
+                        // public key — make it one-click copyable.
+                        RowLayout {
                             Layout.fillWidth: true
-                            visible: myKey.length > 0
-                            renderType: Text.NativeRendering
+                            visible: cardField.text.length > 0
+                            spacing: Kirigami.Units.smallSpacing
+                            Controls.TextField {
+                                id: cardField
+                                Layout.fillWidth: true
+                                readonly property string fullCard: { Mgr.roamIdentity(); return Mgr.roamCard() }
+                                text: fullCard
+                                font.pixelSize: root.sidebarSmallTextSize
+                                wrapMode: Text.NoWrap
+                                leftPadding: 8
+                                rightPadding: 8
+                            }
+                            Controls.ToolButton {
+                                text: qsTr("Copy card")
+                                display: Controls.AbstractButton.IconOnly
+                                icon.name: "edit-copy"
+                                onClicked: Mgr.copyToClipboard(cardField.fullCard)
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("Copy this device's roam card")
+                            }
                         }
 
                         ListView {

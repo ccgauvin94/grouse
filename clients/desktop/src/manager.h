@@ -104,6 +104,10 @@ public:
      *  under the peer's label in the Roam sidebar tab. */
     Q_INVOKABLE void connectRoam(const QString &card, const QString &label);
     Q_INVOKABLE void disconnectRoam(const QString &label);
+    /** Re-dial + re-list every persisted roam peer (stored cards survive restart). */
+    void restoreRoamPeers();
+    void persistRoamCard(const QString &label, const QString &card);
+    void forgetRoamCard(const QString &label);
     /** Open a session on a roam peer; the peer becomes the active connection
      *  for chat (prompt/tools/extensions route to it until a Main session is
      *  opened). */
@@ -118,8 +122,14 @@ public:
     Q_INVOKABLE QString roamIdentity();
     /** Hex public key of the stored identity — what a host sees in peers list. */
     Q_INVOKABLE QString roamPublicKey() const;
+    /** This device's shareable roam connection card (`goose+roam://` + base64url
+     *  JSON: version 1, endpoint = this public key, no relay URLs — LAN-direct).
+     *  A host pastes this to `roam peers accept` to reach and dial this device. */
+    Q_INVOKABLE QString roamCard() const;
     /** True when the active session lives on a roam peer. */
     Q_INVOKABLE bool onRoamSession() const { return !m_activePeerLabel.isEmpty(); }
+    /** Copy text to the system clipboard (QML has no OS clipboard access). */
+    Q_INVOKABLE void copyToClipboard(const QString &s);
     Q_INVOKABLE void setActiveTab(const QString &tab);
     /** Sidebar model for the Roam tab (endpoint headers + sessions). */
     QObject *roamModel() const;
@@ -375,6 +385,7 @@ private:
     QString m_currentSessionTitle;
     /// True while the chat area shows the landing page (no conversation committed).
     bool m_landing = true;
+    bool m_roamRestored = false;   // persisted roam peers re-armed only once (at Ready)
     /// cwd of the freshly-opened chat, remembered so auto-connect can resume it.
     QString m_lastCwd;
     /// Coalesces messagesChanged while chunks stream (see requestMessagesUpdate).

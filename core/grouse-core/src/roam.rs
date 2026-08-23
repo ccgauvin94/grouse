@@ -1071,6 +1071,8 @@ impl RoamPeer {
 
     /// Set an error status and surface it (used by dial/handshake failures).
     fn fail(&self, message: String) {
+        // The UI elides roam status, so also log the raw failure for diagnosis.
+        eprintln!("grouse-core: roam peer '{}' failed: {message}", self.label);
         let mut inner = self.inner.lock();
         if inner.closing {
             return;
