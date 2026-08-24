@@ -1642,6 +1642,10 @@ class ConnectionManager private constructor(context: Context) {
     private fun onCoreTurn(state: TurnState) {
         busy.value = state.busy
         queuedCount.value = state.queued.toInt()
+        if (state.interrupted) {
+            messages.add(ChatMessage("error",
+                "Turn interrupted — the connection dropped mid-reply. Send again to retry."))
+        }
     }
 
     private fun onCoreActiveRun(sessionId: String, runId: String) {

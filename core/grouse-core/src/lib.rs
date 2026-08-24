@@ -280,6 +280,10 @@ pub struct TurnState {
     pub busy: bool,
     /// Prompts queued behind the turn or behind a reconnect.
     pub queued: u32,
+    /// One-shot: THIS emission reports a turn killed by its connection
+    /// dropping mid-flight. The UI should tell the user (the reply is gone;
+    /// resending is the recovery) — silence here reads as a wedge.
+    pub interrupted: bool,
 }
 
 /// Unstable events (CONTRACT §5). Retiring with `grouse-unstable`.
@@ -415,6 +419,10 @@ fn turn_owner_key(inner: &Arc<CoreInner>) -> Option<String> {
 }
 
 fn emit_turn(inner: &Arc<CoreInner>, key: &Option<String>) {
+    emit_turn_with(inner, key, false);
+}
+
+fn emit_turn_with(inner: &Arc<CoreInner>, key: &Option<String>, interrupted: bool) {
     let state = {
         let turns = inner.turns.lock();
         let Some(t) = turns.get(key) else { return };
@@ -423,6 +431,7 @@ fn emit_turn(inner: &Arc<CoreInner>, key: &Option<String>) {
             run_id: t.run_id.clone().unwrap_or_default(),
             busy: t.busy,
             queued: t.queue.len() as u32,
+            interrupted,
         }
     };
     inner.listener.on_turn(state);
@@ -432,20 +441,21 @@ fn emit_turn(inner: &Arc<CoreInner>, key: &Option<String>) {
 /// reconnect in progress): the latch dies with the connection. The queue is
 /// kept — it flushes when the owner is ready again.
 fn turn_owner_suspended(inner: &Arc<CoreInner>, key: Option<String>) {
-    let changed = {
+    let killed_turn = {
         let mut turns = inner.turns.lock();
         match turns.get_mut(&key) {
             Some(t) if t.busy || t.run_id.is_some() => {
+                let killed = t.busy;
                 t.busy = false;
                 t.run_id = None;
                 t.requeued = !t.queue.is_empty();
-                true
+                Some(killed)
             }
-            _ => false,
+            _ => None,
         }
     };
-    if changed {
-        emit_turn(inner, &key);
+    if let Some(killed) = killed_turn {
+        emit_turn_with(inner, &key, killed);
     }
 }
 
