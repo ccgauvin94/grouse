@@ -574,8 +574,22 @@ fn turn_dispatch(inner: &Arc<CoreInner>, key: Option<String>, prompt: Prompt, re
             };
             let session_id = peer.active_session_id().unwrap_or_default();
             let params = prompt_params(&prompt, &session_id);
+            let inner = inner.clone();
+            let key = Some(label);
             crate::roam::runtime().spawn_blocking(move || {
-                let _ = peer.rpc("session/prompt", params);
+                if peer.rpc("session/prompt", params).is_err() {
+                    // A dying socket ate the prompt (io error mid-reconnect).
+                    // Re-queue it: the reconnect's ready flush retries as a
+                    // fresh prompt instead of the message silently vanishing.
+                    {
+                        let mut turns = inner.turns.lock();
+                        if let Some(t) = turns.get_mut(&key) {
+                            t.busy = false;
+                            t.queue.push_front(prompt);
+                        }
+                    }
+                    emit_turn(&inner, &key);
+                }
             });
         }
         None => {
@@ -604,8 +618,12 @@ fn turn_dispatch(inner: &Arc<CoreInner>, key: Option<String>, prompt: Prompt, re
     }
 }
 
-/// Steer `text` into the owner's live run (`expected_run_id` server-checked).
-fn turn_steer(inner: &Arc<CoreInner>, key: Option<String>, text: String, run_id: String) {
+/// Steer the prompt's text into the owner's live run (`expected_run_id`
+/// server-checked). A failed steer re-queues the whole prompt — the run it
+/// targeted is dying or dead, and the reconnect/run-end flush retries it as a
+/// fresh prompt instead of the message silently vanishing.
+fn turn_steer(inner: &Arc<CoreInner>, key: Option<String>, prompt: Prompt, run_id: String) {
+    let text = prompt_text(&prompt);
     let params_for = |sid: &str| {
         json!({
             "sessionId": sid,
@@ -613,25 +631,51 @@ fn turn_steer(inner: &Arc<CoreInner>, key: Option<String>, text: String, run_id:
             "expectedRunId": run_id,
         })
     };
+    let requeue = {
+        let inner = inner.clone();
+        let key = key.clone();
+        move |prompt: Prompt| {
+            {
+                let mut turns = inner.turns.lock();
+                if let Some(t) = turns.get_mut(&key) {
+                    t.queue.push_back(prompt);
+                }
+            }
+            emit_turn(&inner, &key);
+        }
+    };
     match key {
-        Some(label) => {
+        Some(ref label) => {
             let peer = {
                 let peers = inner.peers.lock();
-                peers.iter().find(|p| p.label() == label).cloned()
+                peers.iter().find(|p| p.label() == *label).cloned()
             };
-            let Some(peer) = peer else { return };
+            let Some(peer) = peer else {
+                requeue(prompt);
+                return;
+            };
             let sid = peer.active_session_id().unwrap_or_default();
             let params = params_for(&sid);
             crate::roam::runtime().spawn_blocking(move || {
-                let _ = peer.rpc("_goose/unstable/session/steer", params);
+                if peer.rpc("_goose/unstable/session/steer", params).is_err() {
+                    requeue(prompt);
+                }
             });
         }
         None => {
-            let Some(conn) = spine::current_conn() else { return };
-            let Some(sid) = conn.active_session_id() else { return };
+            let Some(conn) = spine::current_conn() else {
+                requeue(prompt);
+                return;
+            };
+            let Some(sid) = conn.active_session_id() else {
+                requeue(prompt);
+                return;
+            };
             let params = params_for(&sid);
             crate::roam::runtime().spawn_blocking(move || {
-                let _ = conn.rpc("_goose/unstable/session/steer", params);
+                if conn.rpc("_goose/unstable/session/steer", params).is_err() {
+                    requeue(prompt);
+                }
             });
         }
     }
@@ -1186,7 +1230,10 @@ impl Core {
                         let raw = p.active_session_id().unwrap_or_default();
                         let text = prompt_text(&prompt);
                         if !text.is_empty() && !raw.is_empty() {
-                            p.record_user_prompt(raw.clone(), text);
+                            // Silent: the UI renders its own optimistic bubble;
+                            // this records for the cache/replay only (emitting
+                            // too doubled every roam send on screen).
+                            p.record_user_prompt_silent(raw.clone(), text);
                         }
                         let ready = matches!(p.status(), ConnectionStatus::Ready)
                             && !raw.is_empty();
@@ -1237,7 +1284,7 @@ impl Core {
             }
             Route::Steer(run) => {
                 emit_turn(&self.inner, &key);
-                turn_steer(&self.inner, key, prompt_text(&prompt), run);
+                turn_steer(&self.inner, key, prompt, run);
             }
             Route::Queue => {
                 {

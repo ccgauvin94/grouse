@@ -275,7 +275,7 @@ enum PeerCommand {
     /// Record the locally-sent user prompt in the transcript. ACP peers never
     /// echo the user's own message back as a transcript event, so without this
     /// the bubble never shows live and the cache/replay loses it on reload.
-    RecordUser { session_id: String, text: String },
+    RecordUser { session_id: String, text: String, silent: bool },
     Relist,
     Close,
 }
@@ -620,7 +620,22 @@ impl RoamPeer {
     /// Record the locally-sent user prompt in this peer's transcript. See
     /// [`PeerCommand::RecordUser`]. Fire-and-forget into the command loop.
     pub fn record_user_prompt(&self, session_id: String, text: String) {
-        let _ = self.cmd_tx.send(PeerCommand::RecordUser { session_id, text });
+        let _ = self.cmd_tx.send(PeerCommand::RecordUser {
+            session_id,
+            text,
+            silent: false,
+        });
+    }
+
+    /// Record the prompt into the transcript (cache/replay) WITHOUT emitting a
+    /// live event: the UI already rendered its own optimistic bubble, and
+    /// emitting here doubled every roam send on screen.
+    pub fn record_user_prompt_silent(&self, session_id: String, text: String) {
+        let _ = self.cmd_tx.send(PeerCommand::RecordUser {
+            session_id,
+            text,
+            silent: true,
+        });
     }
 
     /// Disconnect the peer: FIN + cancel the stream (unblocks the reader),
@@ -932,7 +947,7 @@ impl RoamPeer {
                         }
                     }
                 }
-                PeerCommand::RecordUser { session_id, text } => {
+                PeerCommand::RecordUser { session_id, text, silent } => {
                     // Unique bubble id: consecutive prompts share the "user"
                     // role and the accumulator merges same-(role, id) chunks —
                     // a shared id would fuse distinct prompts into one bubble.
@@ -944,7 +959,9 @@ impl RoamPeer {
                             .unwrap_or(0)
                     );
                     if let Some(event) = self.accumulate(&session_id, "user", &text, &id) {
-                        self.emit(event);
+                        if !silent {
+                            self.emit(event);
+                        }
                     }
                 }
                 PeerCommand::Relist => {
