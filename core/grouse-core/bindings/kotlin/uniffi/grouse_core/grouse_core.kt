@@ -4677,6 +4677,13 @@ data class TurnState (
      * Prompts queued behind the turn or behind a reconnect.
      */
     var `queued`: kotlin.UInt
+    , 
+    /**
+     * One-shot: THIS emission reports a turn killed by its connection
+     * dropping mid-flight. The UI should tell the user (the reply is gone;
+     * resending is the recovery) — silence here reads as a wedge.
+     */
+    var `interrupted`: kotlin.Boolean
     
 ){
     
@@ -4697,6 +4704,7 @@ public object FfiConverterTypeTurnState: FfiConverterRustBuffer<TurnState> {
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -4704,7 +4712,8 @@ public object FfiConverterTypeTurnState: FfiConverterRustBuffer<TurnState> {
             FfiConverterString.allocationSize(value.`sessionId`) +
             FfiConverterString.allocationSize(value.`runId`) +
             FfiConverterBoolean.allocationSize(value.`busy`) +
-            FfiConverterUInt.allocationSize(value.`queued`)
+            FfiConverterUInt.allocationSize(value.`queued`) +
+            FfiConverterBoolean.allocationSize(value.`interrupted`)
     )
 
     override fun write(value: TurnState, buf: ByteBuffer) {
@@ -4712,6 +4721,7 @@ public object FfiConverterTypeTurnState: FfiConverterRustBuffer<TurnState> {
             FfiConverterString.write(value.`runId`, buf)
             FfiConverterBoolean.write(value.`busy`, buf)
             FfiConverterUInt.write(value.`queued`, buf)
+            FfiConverterBoolean.write(value.`interrupted`, buf)
     }
 }
 
