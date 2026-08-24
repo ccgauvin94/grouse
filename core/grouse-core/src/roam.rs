@@ -683,6 +683,31 @@ impl RoamPeer {
         self.cache.save_transcript(&key, &transcript, &updated);
     }
 
+    /// How many trailing messages `session/load` should replay for this
+    /// session, or `None` for a full replay.
+    ///
+    /// A tail is requested only when the cached transcript provably covers
+    /// the session's current state: the `updatedAt` stamped into the cache at
+    /// save time equals the session's `updatedAt` from `session/list`. On any
+    /// mismatch — the session moved while we were away, no cache, no stamp —
+    /// the full replay runs, because a tail with an unknown gap behind it
+    /// would leave missing middle messages in the transcript forever (the
+    /// merge dedupes overlap; it cannot detect absence). Servers without
+    /// `replayTail` support ignore the meta and replay in full.
+    fn replay_tail(&self, raw_session_id: &str) -> Option<usize> {
+        let listed = {
+            let inner = self.inner.lock();
+            let suffix = format!(":{raw_session_id}");
+            inner
+                .sessions
+                .iter()
+                .find(|s| s.id.ends_with(&suffix))
+                .map(|s| s.updated_at.clone())
+        }?;
+        let (_, cached_at) = self.cache.load_transcript(&self.cache_key(raw_session_id))?;
+        replay_tail_decision(&cached_at, &listed)
+    }
+
     /// Send a raw JSON-RPC request over this peer's connection — the
     /// peer-side mirror of the spine's `Conn::rpc`. Synchronous: the request
     /// is spawned onto the core runtime and this call blocks on the reply.
@@ -911,11 +936,12 @@ impl RoamPeer {
                     // session id on the fallback path.
                     // mcpServers is REQUIRED by the remote deserializer (same
                     // strictness as session/new — missing field = hard error).
+                    let mut params = json!({ "sessionId": raw, "cwd": cwd, "mcpServers": [] });
+                    if let Some(tail) = self.replay_tail(&raw) {
+                        params["_meta"] = json!({ "replayTail": tail });
+                    }
                     let load = cx
-                        .send_request(UntypedMessage::new(
-                            "session/load",
-                            json!({ "sessionId": raw, "cwd": cwd, "mcpServers": [] }),
-                        )?)
+                        .send_request(UntypedMessage::new("session/load", params)?)
                         .block_task()
                         .await;
                     match load {
@@ -1339,6 +1365,24 @@ impl RoamPeer {
                     .value()
                     .map(|t| t.to_string())
                     .unwrap_or_default();
+                // Keep this peer's own session list current: session/list only
+                // runs on connect and relist, so without this the stored
+                // updatedAt goes stale the moment a turn runs — and
+                // save_open_transcript stamps the cache from here, which is
+                // what lets replay_tail prove the cache is current on the
+                // next open.
+                if !title.is_empty() || !updated_at.is_empty() {
+                    let mut inner = self.inner.lock();
+                    let suffix = format!(":{session_id}");
+                    if let Some(s) = inner.sessions.iter_mut().find(|s| s.id.ends_with(&suffix)) {
+                        if !title.is_empty() {
+                            s.title = title.clone();
+                        }
+                        if !updated_at.is_empty() {
+                            s.updated_at = updated_at.clone();
+                        }
+                    }
+                }
                 if active && (!title.is_empty() || !updated_at.is_empty()) {
                     self.listener
                         .on_session_touched(session_id, title, updated_at);
@@ -1892,6 +1936,19 @@ pub fn active_peer<'a>(
 /// updates are bounded by this cap, the per-update cost cannot scale with
 /// unbounded history. Evicts the OLDEST messages in bulk to a watermark
 /// (amortized O(1) per append).
+/// Trailing messages requested from `session/load` when the cache is current
+/// (see `replay_tail`). Counted in server-side messages (tool requests and
+/// responses included), so this covers a few heavy agentic turns; the server
+/// widens to the nearest turn boundary. Large enough that the replayed window
+/// always overlaps the cached tail it dedupes against.
+const REPLAY_TAIL: usize = 100;
+
+/// The stamp comparison behind `replay_tail`, separated for testing: a tail
+/// only when both stamps exist and agree.
+fn replay_tail_decision(cached_at: &str, listed_at: &str) -> Option<usize> {
+    (!cached_at.is_empty() && cached_at == listed_at).then_some(REPLAY_TAIL)
+}
+
 fn cap_messages(messages: &mut Vec<Message>) {
     const MAX: usize = 2000;
     if messages.len() <= MAX {
@@ -1910,7 +1967,8 @@ fn cap_messages(messages: &mut Vec<Message>) {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        ConfigOptionUpdate, ContentBlock, ContentChunk, TextContent, ToolCall, ToolCallId,
+        ConfigOptionUpdate, ContentBlock, ContentChunk, SessionInfoUpdate, TextContent, ToolCall,
+        ToolCallId,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -2625,5 +2683,52 @@ mod tests {
         );
         // The peer's run bookkeeping is cleared too.
         assert!(peer.inner.lock().active_run.is_none());
+    }
+
+    #[test]
+    fn replay_tail_only_when_stamps_agree() {
+        assert_eq!(replay_tail_decision("2026-08-23T10:00:00Z", "2026-08-23T10:00:00Z"), Some(REPLAY_TAIL));
+        // The session moved while we were away — a tail could hide a gap.
+        assert_eq!(replay_tail_decision("2026-08-23T10:00:00Z", "2026-08-23T11:00:00Z"), None);
+        // No stamp on either side proves nothing.
+        assert_eq!(replay_tail_decision("", ""), None);
+        assert_eq!(replay_tail_decision("", "2026-08-23T10:00:00Z"), None);
+    }
+
+    #[test]
+    fn session_info_update_refreshes_the_session_list() {
+        let listener = test_listener();
+        let (peer, _cmd_rx) = offline_peer(
+            "laptop",
+            listener,
+            gate(Arc::new(AtomicBool::new(false))),
+        );
+        peer.inner.lock().sessions.push(SessionSummary {
+            id: "roam:laptop:s1".to_string(),
+            title: "old title".to_string(),
+            updated_at: "2026-08-23T10:00:00Z".to_string(),
+            last_message_snippet: None,
+            project_id: None,
+            message_count: 0,
+            model: String::new(),
+            has_recipe: false,
+            has_new: false,
+            archived: false,
+        });
+
+        peer.dispatch(SessionNotification::new(
+            "s1",
+            SessionUpdate::SessionInfoUpdate(
+                SessionInfoUpdate::new()
+                    .title("new title".to_string())
+                    .updated_at("2026-08-23T11:00:00Z".to_string()),
+            ),
+        ));
+
+        // The stored summary tracks the live update even while the session is
+        // not active — save_open_transcript stamps the cache from here.
+        let inner = peer.inner.lock();
+        assert_eq!(inner.sessions[0].title, "new title");
+        assert_eq!(inner.sessions[0].updated_at, "2026-08-23T11:00:00Z");
     }
 }
