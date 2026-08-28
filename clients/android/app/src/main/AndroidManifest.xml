@@ -8,7 +8,12 @@
          process (and its WebSocket) unfrozen in the background. User-granted via the
          Instance settings row; the OS shows its own consent dialog. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- The type that actually holds a background socket on Android 14+: a
+         dataSync foreground service is capped at ~10 min per run (6h/day) by
+         the OS — that cap alone drops a "persistent" connection in the
+         background. specialUse has no such cap; it is declared with the
+         subtype property below. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- QR pairing for roam hosts; optional so the app still sideloads on
          camera-less devices (paste-a-card remains a fallback). -->
     <uses-permission android:name="android.permission.CAMERA" />
@@ -67,7 +72,11 @@
         <service
             android:name=".ConnectionService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Holds the WebSocket/iroh connection to the user's self-hosted goose server alive while the chat app is in the background" />
+        </service>
 
         <receiver
             android:name=".ReplyReceiver"

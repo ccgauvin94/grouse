@@ -142,8 +142,9 @@ fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
 
             SettingsSection("Notifications & background") {
                 SettingsSwitchRow("Keep connection alive", persistent) { persistent = it; cm.setPersistent(it) }
-                SettingCaption("On: stay connected in the background (persistent notification, more battery). " +
-                    "Off: connect while active; you still get a finished-turn notification.")
+                SettingCaption("On: stay connected in the background even when idle (persistent notification, more battery). " +
+                    "Off: the connection is still held while one is live or re-dialing — but an idle " +
+                    "app releases it. Either way you get a finished-turn notification.")
                 HorizontalDivider(Modifier.padding(vertical = 6.dp))
                 // The no-notification middle ground: a battery-optimization exemption keeps the
                 // process (and its socket) unfrozen in the background WITHOUT a foreground

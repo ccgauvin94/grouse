@@ -564,19 +564,28 @@ class ConnectionManager private constructor(context: Context) {
     val roamStatus = mutableStateMapOf<String, String>()
     /** The core's iroh dial + ACP handshake have their own timeouts now, but keep a belt-and-
      *  suspenders watchdog so a peer stuck in ANY connecting phase flips to an explicit error
-     *  instead of hanging forever. Cancelled on any terminal event. The per-phase status the
-     *  core emits ("connecting: dialing/handshake/listing sessions") stays visible until the
-     *  flip, so the user can see exactly where it stalled. */
+     *  instead of hanging forever. Cancelled on any terminal event AND the moment the core
+     *  starts its supervised reconnect ("connecting: reconnect N") — from there the core's
+     *  supervisor owns the retry window (minutes, with its own terminal error), and the
+     *  watchdog must not false-error a peer that is legitimately re-dialing. The per-phase
+     *  status the core emits ("connecting: dialing/handshake/listing sessions") stays visible
+     *  until the flip, so the user can see exactly where it stalled. */
     private val roamDialTimeoutMs = 25_000L
     private val roamWatchdogs = HashMap<String, Runnable>()
+    /** Peers the user explicitly disconnected — never re-dialed behind their back. */
+    private val explicitRoamOff = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private fun cancelRoamWatchdog(name: String) {
         roamWatchdogs.remove(name)?.let { main.removeCallbacks(it) }
     }
     private fun armRoamWatchdog(name: String) {
         cancelRoamWatchdog(name)
         val r = Runnable {
-            // Flipped to a hard error only if the peer is STILL in a connecting phase.
-            if (roamStatus[name]?.startsWith("connecting") == true) {
+            // Flipped to a hard error only if the peer is STILL in a connecting phase —
+            // but NOT the core's supervised reconnect ("connecting: reconnect N"): once
+            // the supervisor starts retrying, it owns the window (minutes, its own
+            // terminal error) and a false "no reply" here would mask real recovery.
+            val st = roamStatus[name]
+            if (st?.startsWith("connecting") == true && !st.startsWith("connecting: reconnect")) {
                 roamStatus[name] = "error: no reply from host — check the host accepted this device and its relay is reachable"
                 if (currentRoamPeer == name) {
                     status.value = "roam: $name — no reply from host — check acceptance and relay reachability"
@@ -597,9 +606,12 @@ class ConnectionManager private constructor(context: Context) {
         }
         // Auto-connect saved peers so chats are pre-warmed and ready to switch
         // into — a manual Connect each launch is redundant. Runs once per call
-        // (RoamBrowse calls loadRoamPeers once on first composition).
+        // (RoamBrowse calls loadRoamPeers once on first composition). An
+        // error-state peer is re-dialed too: it may be a stale first attempt,
+        // and entering this screen is a user action on peers.
         roamPeers.forEach { peer ->
-            if (roamStatus[peer.name] != "ready" && roamStatus[peer.name] != "connecting") {
+            val st = roamStatus[peer.name]
+            if (peer.name !in explicitRoamOff && st != "ready" && st?.startsWith("connecting") != true) {
                 connectRoam(peer.name)
             }
         }
@@ -650,9 +662,13 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Disconnect the named peer. Simultaneous-connection aware: the chat is cleared ONLY if the
      *  named peer is the one owning the current session — disconnecting a non-owning peer must not
-     *  tear down a chat live on another endpoint. */
+     *  tear down a chat live on another endpoint.
+     *
+     *  This is a user action, so the peer is marked explicitly-off: the core's supervisor stops
+     *  re-dialing and the app's foreground re-poke must not silently undo the choice. */
     fun disconnectRoam(name: String) {
         val peer = name
+        explicitRoamOff.add(peer)
         cancelRoamWatchdog(peer)
         if (currentRoamPeer == peer) currentRoamPeer = null
         core.roamDisconnect(peer)
@@ -711,6 +727,9 @@ class ConnectionManager private constructor(context: Context) {
      *  got repointed, tools never listed, sessions never re-listed. Dialing is not owning. */
     fun connectRoam(name: String) {
         val peer = roamPeers.firstOrNull { it.name == name } ?: return
+        // A manual connect IS the user reconnecting: lift the explicit-off mark
+        // so future drops get supervised re-dials again.
+        explicitRoamOff.remove(name)
         roamStatus[name] = "connecting"
         armRoamWatchdog(name)
         // The core generates + persists the device identity itself; browse-mode dial. Seed it
@@ -719,10 +738,13 @@ class ConnectionManager private constructor(context: Context) {
         core.roamConnect(peer.card, name)
     }
 
-    // No automatic reconnection: an unexpected drop stays dropped until the user acts.
-    // The core reconnects the MAIN connection on its own (backoff, resume) — an app-side
-    // nudge here was the wedged loop that re-dialed the roam peer forever (peers must be
-    // explicitly connected by the user; they never auto-reconnect).
+    // THE MODEL (parity with the main connection): the CORE's supervisor re-dials
+    // a dropped peer while the process lives (backoff + resume, CONTRACT §6), so
+    // the app never nudges a mid-retry peer — that nudge was the old wedged loop.
+    // The app only acts where the core cannot: after a process death/refreeze the
+    // budget may be spent, so the foreground return (setForeground) and the
+    // START_STICKY service restart re-poke dead wires, and a peer the user
+    // explicitly disconnected (explicitRoamOff) is left alone.
 
     // connectHome() re-enters composition every time the lock screen (or any recreation) swaps
     // AppRoot back in; only the FIRST call per process should land on the Assistant. Later calls
@@ -1203,14 +1225,18 @@ class ConnectionManager private constructor(context: Context) {
         appForeground = fg
         if (fg) {
             notifier.cancelAlert()
-            // The core owns reconnect + remote-change resync, so nothing to nudge beyond a
-            // live re-ask of the server's model list (models renamed/added server-side stay
-            // invisible until then — cheap, one /v1/models round trip through goose).
+            // The core owns reconnect + remote-change resync while the PROCESS
+            // is alive — but a backgrounded Android froze or killed us first,
+            // and the core's backoff budget can be spent by the time we're
+            // thawed. Foreground return is the one moment that can always act,
+            // so it is the last-resort re-poke: main socket and roam peers.
             if (live) {
                 config.value.firstOrNull { it.id == "provider" }?.currentValue
                     ?.takeIf { it.isNotBlank() }
                     ?.let { model -> io { unstable.supportedModels(model) } }
             }
+            pokeMainConnection()
+            redialFallenRoamPeers()
             if (!store.persistentConnection && !busy.value) stopService()
         } else {
             // Leaving the foreground is the last reliable moment before Android
@@ -1219,13 +1245,59 @@ class ConnectionManager private constructor(context: Context) {
             // or switches — a chat simply left open was never written at all,
             // which is why roam transcripts looked uncached after a restart.
             io { core.flushCaches() }
-            if (store.persistentConnection) startService()
+            // Hold the process up for ANY live wire, not just the explicit
+            // persistent option: a peer mid-reconnect-dial dies without it, and
+            // "persistent connection" (now specialUse, past the dataSync cap)
+            // holds it across idle stretches too.
+            if (store.persistentConnection || live || connectionHeld()) startService()
+        }
+    }
+
+    /** Any wire worth holding the process for: a live main connection or a
+     *  roam peer that is connected or being (re-)dialed. */
+    private fun roamHeld(): Boolean =
+        roamStatus.values.any { it == "ready" || it.startsWith("connecting") }
+    private fun connectionHeld(): Boolean = live || roamHeld()
+
+    /** Bring the main connection back if it is dead and was connected before.
+     *  open() → core.openSession() IS a fresh connect (the core resets its
+     *  reconnect budget on every new connect), so this is the recovery from a
+     *  spent backoff budget; while the core is mid-retry (`connecting`) it does
+     *  nothing and lets the core's own sequence finish. */
+    private fun pokeMainConnection() {
+        if (!store.hasKey() || live || connecting) return
+        val sid = lastSessionId ?: store.lastSessionId
+        if (sid == null || sid.startsWith("roam:")) return
+        open(resume = sid)
+    }
+
+    /** The START_STICKY restart path (see ConnectionService): the process was
+     *  reclaimed with the service still holding it, and no Activity lifecycle
+     *  will run — this is the only thing that brings the wires back. Same
+     *  re-pokes the foreground return does, no-ops when already live. */
+    fun rekindleOnServiceStart() {
+        main.post {
+            pokeMainConnection()
+            redialFallenRoamPeers()
+        }
+    }
+
+    /** Re-dial peers whose supervisor gave up (terminal error). An explicit
+     *  user disconnect is recorded and respected — only the retry budget
+     *  running out is the app's cue to try again. */
+    private fun redialFallenRoamPeers() {
+        for (peer in roamPeers.toList()) {
+            val st = roamStatus[peer.name]
+            if (st?.startsWith("error") == true && peer.name !in explicitRoamOff) {
+                connectRoam(peer.name)
+            }
         }
     }
 
     fun setPersistent(on: Boolean) {
         store.persistentConnection = on
-        if (on) startService() else if (!busy.value && appForeground) stopService()
+        if (on) startService()
+        else if (!busy.value && !live && !connectionHeld() && appForeground) stopService()
     }
 
     val persistent: Boolean get() = store.persistentConnection
@@ -1573,7 +1645,13 @@ class ConnectionManager private constructor(context: Context) {
             turnInFlightSession = currentSession.value
             lastSessionId?.let { store.pendingPushSessionId = it }
             sendPromptBlocks(queued.text, queued.images, expect = currentSession.value)
-        } else if (!store.persistentConnection) stopService()
+        } else if (store.persistentConnection || (!appForeground && connectionHeld())) {
+            // Backgrounded with a wire still live (or being re-dialed): the hold
+            // setForeground(false) established stays — releasing it here is what
+            // dropped idle background connections. In the foreground the process
+            // is safe anyway, so only the explicit persistent option holds.
+            startService()
+        } else stopService()
     }
 
     private fun onCoreConfig(options: List<CoreConfigOption>) {
@@ -1639,7 +1717,9 @@ class ConnectionManager private constructor(context: Context) {
     private fun onRoamPeerStatus(label: String, st: String) {
         roamStatus[label] = st
         // A terminal event means the dial/pair settled; the timeout watchdog (if armed) is moot.
-        if (st == "ready" || st == "disconnected" || st.startsWith("error")) cancelRoamWatchdog(label)
+        // So is the core's supervised reconnect — the supervisor owns that retry window.
+        if (st == "ready" || st == "disconnected" || st.startsWith("error") ||
+            st.startsWith("connecting: reconnect")) cancelRoamWatchdog(label)
         when {
             st == "ready" -> {
                 // Peer connected, or a session/load on it finished. Either way the
