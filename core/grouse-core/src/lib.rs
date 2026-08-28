@@ -1090,7 +1090,7 @@ impl Core {
             });
             return;
         }
-        let delay_ms = 500u64 * (1u64 << state.reconnect_attempts.min(5)).min(15000 / 500);
+        let delay_ms = crate::spine::reconnect_delay_ms(state.reconnect_attempts);
         state.reconnect_gen += 1;
         let gen = state.reconnect_gen;
         drop(state);

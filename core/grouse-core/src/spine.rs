@@ -569,11 +569,19 @@ impl Conn {
                 // gateway test does), and the session-membership gate must not
                 // drop them. start_new_session overwrites this if load fails.
                 *self.inner.session_id.lock() = Some(session_id.clone());
-                let params = json!({
+                let mut params = json!({
                     "sessionId": session_id,
                     "cwd": cwd,
                     "mcpServers": [],
                 });
+                // A fresh-cache open drops every replayed row client-side
+                // (suppress_replay), so ask the server to skip the history it
+                // can — the minimum tail still exercises the load path.
+                // Servers without replayTail support ignore the meta and
+                // replay in full, which suppression absorbs as before.
+                if self.inner.suppress_replay.load(Ordering::SeqCst) {
+                    params["_meta"] = json!({ "replayTail": 1 });
+                }
                 match cx
                     .send_request(UntypedMessage::new("session/load", params)?)
                     .block_task()
@@ -977,6 +985,14 @@ impl RpcConn for Conn {
     fn active_session_id(&self) -> Option<String> {
         Conn::active_session_id(self)
     }
+}
+
+/// The core's exponential reconnect backoff curve: 500ms·2^n capped at 15s.
+/// Shared by the main connection (`Core::schedule_reconnect`) and the roam
+/// peer supervisor (`roam::RoamPeer::connect`) so both retry on the same
+/// rhythm; only their attempt budgets differ.
+pub(crate) fn reconnect_delay_ms(attempt: u32) -> u64 {
+    500u64 * (1u64 << attempt.min(5)).min(15000 / 500)
 }
 
 // ---------------------------------------------------------------------------

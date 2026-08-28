@@ -31,6 +31,12 @@
 //! Peer transcripts are peer-owned (a `Vec<Message>` here) and are never
 //! cached: the cache is keyed by session id, which could collide across
 //! machines, so the desktop replays peer sessions every time.
+//!
+//! Like the main connection, a peer whose link drops unexpectedly re-dials
+//! itself: the [`RoamPeer::connect`] task is a supervisor that retries with
+//! the core's backoff (500ms·2^n, cap 15s) and, once the handshake lands,
+//! resumes the session that was open. Only an explicit [`RoamPeer::close`]
+//! (or [`Core::roam_disconnect`]) ends a peer for good.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, mpsc as std_mpsc};
@@ -266,7 +272,6 @@ impl ConnectTo<Client> for RoamTransport {
 // ---------------------------------------------------------------------------
 // The peer registry entry
 // ---------------------------------------------------------------------------
-
 /// Commands the spine's intents enqueue for the peer's connection task.
 #[derive(Debug)]
 enum PeerCommand {
@@ -274,6 +279,15 @@ enum PeerCommand {
     NewSession { cwd: String },
     Relist,
     Close,
+}
+
+/// Why [`RoamPeer::handshake_and_serve`] returned. The supervisor in
+/// [`RoamPeer::connect`] turns these into loop/stop decisions.
+enum Outcome {
+    /// An explicit `Close` command: the peer is done, `connection_ended` ran.
+    Closed,
+    /// The dial or handshake failed: re-dial under the backoff budget.
+    Retry(String),
 }
 
 /// One active roam endpoint: a direct iroh peer running its own goose (the
@@ -286,6 +300,13 @@ pub struct RoamPeer {
     inner: Mutex<PeerInner>,
     /// Command queue into the peer's `connect_with` foreground task.
     cmd_tx: tokio_mpsc::UnboundedSender<PeerCommand>,
+    /// The receiving half, held in a shared slot so the supervisor can hand
+    /// it to each attempt's command loop and reclaim it when the link dies:
+    /// the SDK's `connect_with` foreground is `'static` and would otherwise
+    /// own the receiver forever, and intents keep queueing commands into
+    /// `cmd_tx` across reconnections (each is answered by the NEXT live link,
+    /// never lost).
+    cmd_rx: Arc<tokio::sync::Mutex<tokio_mpsc::UnboundedReceiver<PeerCommand>>>,
     listener: Arc<dyn CoreListener>,
     /// Gate supplied by the spine: true while this peer owns the active
     /// session. Chat-scoped events forward only under this gate.
@@ -309,6 +330,11 @@ struct PeerInner {
     /// own cwd — the main connection's `last_config` cwd is empty on a
     /// roam-only client and `session/load` hard-fails on a blank cwd).
     session_cwds: HashMap<String, String>,
+    /// A dropped link with a session open sets this: once the re-dial's
+    /// handshake lands and `session/list` arrives, the peer re-opens the same
+    /// session (the equivalent of the main connection's resume-after-
+    /// reconnect). Consumed by `handshake_and_serve`.
+    resume_pending: Option<String>,
     /// The live turn's run id (`_meta.goose.activeRunId`); None when no turn
     /// is running. Mirrors the spine's active_run_id.
     active_run: Option<String>,
@@ -331,6 +357,13 @@ struct PeerInner {
     /// Set by [`RoamPeer::close`] so a teardown that races the dial or a
     /// transport error is not reported as a failure.
     closing: bool,
+    /// True once the CURRENT attempt's handshake reached Ready
+    /// (`apply_sessions`). The supervisor uses it to decide the retry
+    /// posture: a peer that was live and then dropped earns a fresh budget
+    /// for the outage; one that has NEVER connected gives up on the main
+    /// connection's short cold-start budget. Reset at the top of each
+    /// attempt.
+    ever_ready: bool,
     /// Backgrounded content for sessions that are NOT currently open, keyed by
     /// raw session id (dispatch routes by `notif.session_id`). Chunks keep
     /// accumulating here while the user sits in another chat; opening the
@@ -351,6 +384,7 @@ impl PeerInner {
             status: ConnectionStatus::Connecting,
             sessions: Vec::new(),
             open_session_id: None,
+            resume_pending: None,
             session_cwds: HashMap::new(),
             active_run: None,
             conn: None,
@@ -359,6 +393,7 @@ impl PeerInner {
             pending_permission: None,
             stream: None,
             closing: false,
+            ever_ready: false,
             staging: HashMap::new(),
         }
     }
@@ -369,11 +404,25 @@ impl RoamPeer {
     /// goose must not pin a UI/intent thread forever blocking on a reply.
     const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-    /// Connect to a roam peer in browse mode. The dial (blocking, seconds) and
-    /// the ACP handshake run on the core runtime; this returns immediately
-    /// with a peer in `Connecting` state. `is_active` is the spine's routing
-    /// gate (see the module docs). One peer per label: the caller replaces an
-    /// existing peer with the same label before connecting again.
+    /// Re-dial budget: the main connection's shape (500ms·2^n, 15s cap — see
+    /// [`crate::Core`]'s `schedule_reconnect`), but where main gives up after
+    /// 6 tries, a peer keeps trying far longer. A roam host is a laptop that
+    /// was simply closed when the phone slept: the drop can last hours, and
+    /// the moment the path exists again the user's chats must work without a
+    /// visit to the endpoints screen. ~25 attempts ≈ 6 minutes of retrying at
+    /// the cap before the peer surfaces a terminal error.
+    const RECONNECT_MAX: u32 = 25;
+
+    /// Connect to a roam peer in browse mode, supervised. The dial (blocking,
+    /// seconds) and the ACP handshake run on the core runtime; this returns
+    /// immediately with a peer in `Connecting` state. `is_active` is the
+    /// spine's routing gate (see the module docs). One peer per label: the
+    /// caller replaces an existing peer with the same label before connecting
+    /// again.
+    ///
+    /// The task loops: dial → handshake → serve commands. An unexpected
+    /// transport end re-dials with exponential backoff and resumes the open
+    /// session; an explicit `Close` (or `close()` mid-dial) ends the task.
     pub fn connect(
         secret: String,
         card: String,
@@ -387,75 +436,161 @@ impl RoamPeer {
             label: label.clone(),
             inner: Mutex::new(PeerInner::new()),
             cmd_tx,
+            cmd_rx: Arc::new(tokio::sync::Mutex::new(cmd_rx)),
             listener,
             is_active,
             cache,
         });
         let task = peer.clone();
         runtime().spawn(async move {
-            // 1. Dial (blocking, seconds) off the runtime.
-            task.emit_status("connecting: dialing");
-            let dialed = tokio::task::spawn_blocking({
-                let secret = secret.clone();
-                let card = card.clone();
-                let label = label.clone();
-                move || grouse_roam_core::roam_connect(&secret, &card, Some(label))
-            })
-            .await;
-            let stream = match dialed {
-                Ok(Ok(stream)) => stream,
-                Ok(Err(error)) => {
-                    task.fail(format!("roam connect: {error}"));
+            let mut attempts: u32 = 0;
+            let mut ever_connected = false;
+            loop {
+                // Closed while dialing or sleeping between attempts: the
+                // terminal status was already emitted by close().
+                if task.inner.lock().closing {
                     return;
                 }
-                Err(error) => {
-                    task.fail(format!("roam dial task panicked: {error}"));
-                    return;
+                match task.attempt(&secret, &card, &label).await {
+                    Outcome::Closed => return,
+                    Outcome::Retry(reason) => {
+                        if task.inner.lock().closing {
+                            return;
+                        }
+                        let ready_last = task.inner.lock().ever_ready;
+                        ever_connected |= ready_last;
+                        // A link that reached ready and then dropped starts a
+                        // fresh outage budget (the main connection's "reset
+                        // on Ready"); attempts only accumulates across
+                        // consecutive failures of one outage.
+                        if ready_last {
+                            attempts = 0;
+                        }
+                        // A peer that has NEVER connected gives up on the
+                        // main connection's short 6-try budget — a bad card
+                        // or a gone-forever host should say so in ~90s, not
+                        // after five minutes of retries.
+                        let budget = if ever_connected { Self::RECONNECT_MAX } else { 6 };
+                        if attempts >= budget {
+                            task.fail(format!(
+                                "{reason} — giving up after {attempts} reconnect attempts"
+                            ));
+                            return;
+                        }
+                        let delay = crate::spine::reconnect_delay_ms(attempts);
+                        attempts += 1;
+                        // Connecting again: a tap on a peer session while the
+                        // re-dial is in flight must queue, not vanish (the
+                        // open_session/new_session Ready gate).
+                        task.inner.lock().status = ConnectionStatus::Connecting;
+                        // "connecting:"-prefixed on purpose: the UI treats any
+                        // connecting phase as in-flight, and the app's dial
+                        // watchdog re-arms on each attempt rather than firing
+                        // across the retry sleep. The line is kept short — it
+                        // renders beside the peer name on one row.
+                        task.emit_status(&format!("connecting: reconnect {attempts}"));
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    }
                 }
-            };
-            // Closed while dialing? Hand the stream back immediately.
-            if task.inner.lock().closing {
-                stream.shutdown();
-                stream.cancel();
-                return;
             }
-            task.inner.lock().stream = Some(stream.clone());
-
-            // 2. The SDK client: notifications + server requests dispatched to
-            //    the listener; requests answered via the peer.
-            let notif_peer = task.clone();
-            let req_peer = task.clone();
-            let builder = Client.builder()
-                .name("grouse")
-                .on_receive_notification(
-                    async move |notif: SessionNotification, _cx| {
-                        notif_peer.dispatch(notif);
-                        Ok(())
-                    },
-                    on_receive_notification!(),
-                )
-                .on_receive_request(
-                    async move |req: RequestPermissionRequest, responder, _cx| {
-                        req_peer.on_permission_request(req, responder);
-                        Ok(())
-                    },
-                    on_receive_request!(),
-                );
-
-            // 3. Connect: initialize -> session/list (browse), then serve
-            //    commands until close.
-            let main_task = task.clone();
-            let result = builder
-                .connect_with(
-                    RoamTransport::new(stream),
-                    async move |cx: agent_client_protocol::ConnectionTo<Agent>| {
-                        main_task.connected(cx, cmd_rx).await
-                    },
-                )
-                .await;
-            task.connection_ended(result);
         });
         peer
+    }
+
+    /// One supervised cycle: dial, SDK client, handshake, command loop.
+    /// Returns only when the link is done — `Closed` after an explicit
+    /// Close/disconnect, `Retry` after any transport end or dial/handshake
+    /// failure (the open session was recorded for resume by
+    /// [`Self::connection_ended`]).
+    async fn attempt(self: &Arc<Self>, secret: &str, card: &str, label: &str) -> Outcome {
+        // Fresh readiness bookkeeping per link.
+        self.inner.lock().ever_ready = false;
+        // 1. Dial (blocking, seconds) off the runtime.
+        self.emit_status("connecting: dialing");
+        let dialed = tokio::task::spawn_blocking({
+            let secret = secret.to_string();
+            let card = card.to_string();
+            let label = label.to_string();
+            move || grouse_roam_core::roam_connect(&secret, &card, Some(label))
+        })
+        .await;
+        let stream = match dialed {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => return Outcome::Retry(format!("roam connect: {error}")),
+            Err(error) => {
+                return Outcome::Retry(format!("roam dial task panicked: {error}"))
+            }
+        };
+        // Closed while dialing? Hand the stream back immediately.
+        if self.inner.lock().closing {
+            stream.shutdown();
+            stream.cancel();
+            return Outcome::Closed;
+        }
+        self.inner.lock().stream = Some(stream.clone());
+
+        // 2. The SDK client: notifications + server requests dispatched to
+        //    the listener; requests answered via the peer.
+        let notif_peer = self.clone();
+        let req_peer = self.clone();
+        let builder = Client.builder()
+            .name("grouse")
+            .on_receive_notification(
+                async move |notif: SessionNotification, _cx| {
+                    notif_peer.dispatch(notif);
+                    Ok(())
+                },
+                on_receive_notification!(),
+            )
+            .on_receive_request(
+                async move |req: RequestPermissionRequest, responder, _cx| {
+                    req_peer.on_permission_request(req, responder);
+                    Ok(())
+                },
+                on_receive_request!(),
+            );
+
+        // 3. Connect: initialize -> session/list (browse) -> resume-if-owed,
+        //    then serve commands until close.
+        let main_task = self.clone();
+        let transport_stream = stream.clone();
+        let result = builder
+            .connect_with(
+                RoamTransport::new(stream),
+                async move |cx: agent_client_protocol::ConnectionTo<Agent>| {
+                    main_task.handshake_and_serve(cx).await
+                },
+            )
+            .await;
+        match result {
+            // The command loop broke on Close (or the peer's receiver was
+            // dropped): terminal. Route through the same teardown seam as a
+            // drop; `closing` was already set by close() for the explicit
+            // path, so this only lands as "disconnected" for the stray case.
+            Ok(()) => {
+                self.connection_ended(Ok(()));
+                Outcome::Closed
+            }
+            // Transport end or handshake failure: record the loss and let the
+            // supervisor decide (retry vs give up). `connection_ended` stays
+            // the single teardown seam the tests and close paths use.
+            Err(error) => {
+                let reason = error.to_string();
+                self.connection_ended(Err(error));
+                // `transport_stream` is our clone of the same dialed stream:
+                // a handshake that FAILED on an otherwise-healthy byte stream
+                // parked in `read()` forever — one leaked blocking-pool thread
+                // plus one live QUIC connection per retry. FIN + cancel wakes
+                // it; on a transport that already errored this is a no-op.
+                let s = transport_stream.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    s.shutdown();
+                    s.cancel();
+                })
+                .await;
+                Outcome::Retry(reason)
+            }
+        }
     }
 
     /// The peer's stable label (the routing key).
@@ -541,9 +676,16 @@ impl RoamPeer {
     /// when it differs). Fire-and-forget into the peer's command loop, like
     /// the desktop's `openRoamSession`. The raw id is derived by stripping the
     /// `roam:<label>:` prefix when the caller passed a prefixed id.
+    ///
+    /// The Ready gate also accepts Connecting: the supervised reconnect keeps
+    /// the command channel alive, so a tap landing in the re-dial window is
+    /// answered by the next live link instead of vanishing. A truly dead peer
+    /// (Disconnected/Error after the supervisor gives up) must NOT accept
+    /// them — nothing will ever drain the queue.
     pub fn open_session(&self, session_id: String, cwd: String) {
-        if !matches!(self.status(), ConnectionStatus::Ready) {
-            return; // browse peers only open sessions once connected
+        match self.status() {
+            ConnectionStatus::Ready | ConnectionStatus::Connecting => {}
+            _ => return,
         }
         // The raw id is derived by stripping the prefix when the caller passed
         // a prefixed id.
@@ -567,9 +709,11 @@ impl RoamPeer {
     /// cwd, so one is required (like `session/new` on the main connection);
     /// the caller resolves it the same way `open_session` does. Fire-and-forget
     /// into the peer's command loop, like the desktop's `openRoamSession`.
+    /// Same Ready-or-Connecting gate: queued commands ride the reconnect.
     pub fn new_session(&self, cwd: String) {
-        if !matches!(self.status(), ConnectionStatus::Ready) {
-            return; // browse peers only open sessions once connected
+        match self.status() {
+            ConnectionStatus::Ready | ConnectionStatus::Connecting => {}
+            _ => return,
         }
         let _ = self.cmd_tx.send(PeerCommand::NewSession { cwd });
     }
@@ -626,6 +770,31 @@ impl RoamPeer {
             .unwrap_or_default();
         drop(inner);
         self.cache.save_transcript(&key, &transcript, &updated);
+    }
+
+    /// How many trailing messages `session/load` should replay for this
+    /// session, or `None` for a full replay.
+    ///
+    /// A tail is requested only when the cached transcript provably covers
+    /// the session's current state: the `updatedAt` stamped into the cache at
+    /// save time equals the session's `updatedAt` from `session/list`. On any
+    /// mismatch — the session moved while we were away, no cache, no stamp —
+    /// the full replay runs, because a tail with an unknown gap behind it
+    /// would leave missing middle messages in the transcript forever (the
+    /// merge dedupes overlap; it cannot detect absence). Servers without
+    /// `replayTail` support ignore the meta and replay in full.
+    fn replay_tail(&self, raw_session_id: &str) -> Option<usize> {
+        let listed = {
+            let inner = self.inner.lock();
+            let suffix = format!(":{raw_session_id}");
+            inner
+                .sessions
+                .iter()
+                .find(|s| s.id.ends_with(&suffix))
+                .map(|s| s.updated_at.clone())
+        }?;
+        let (_, cached_at) = self.cache.load_transcript(&self.cache_key(raw_session_id))?;
+        replay_tail_decision(&cached_at, &listed)
     }
 
     /// Send a raw JSON-RPC request over this peer's connection — the
@@ -780,14 +949,16 @@ impl RoamPeer {
 
     // -- internals (all run on the core runtime) ------------------------------
 
-    /// The browse-mode handshake, run inside `connect_with`'s foreground:
-    /// initialize → `session/list`, NO auto-open. Then serve commands until
-    /// close. This is the desktop's `connectRoam` + `setBrowseOnly(true)`
-    /// flow, minus the reconnect (peers never auto-reconnect).
-    async fn connected(
-        &self,
+    /// The browse-mode handshake + command loop, run inside `connect_with`'s
+    /// foreground: initialize → `session/list` → resume the session that was
+    /// open when the link last dropped, if any. Then serve commands until
+    /// `Close`. Handshake failures log and return `Err` WITHOUT surfacing an
+    /// error status — during supervised reconnect the supervisor owns the
+    /// status line ("reconnecting: …"); only a final give-up or an explicit
+    /// close surfaces a terminal status.
+    async fn handshake_and_serve(
+        self: &Arc<Self>,
         cx: agent_client_protocol::ConnectionTo<Agent>,
-        mut cmd_rx: tokio_mpsc::UnboundedReceiver<PeerCommand>,
     ) -> Result<(), AcpError> {
         self.inner.lock().conn = Some(cx.clone());
 
@@ -803,20 +974,23 @@ impl RoamPeer {
             cx.send_request(initialize_request()).block_task(),
         )
         .await;
-        let _init = match init {
-            Ok(Ok(reply)) => reply,
+        match init {
+            Ok(Ok(_reply)) => {}
             Ok(Err(error)) => {
-                self.fail(format!("roam initialize: {error}"));
+                eprintln!("grouse-core: roam peer '{}' initialize: {error}", self.label);
                 return Err(AcpError::internal_error()
                     .data(format!("roam initialize: {error}")));
             }
             Err(_) => {
-                self.fail("handshake timed out waiting for initialize reply".into());
+                eprintln!(
+                    "grouse-core: roam peer '{}' handshake timed out",
+                    self.label
+                );
                 return Err(AcpError::internal_error().data(
                     "handshake timed out waiting for initialize reply",
                 ));
             }
-        };
+        }
 
         self.emit_status("connecting: listing sessions");
         let list = tokio::time::timeout(
@@ -828,12 +1002,15 @@ impl RoamPeer {
         let list: ListSessionsResponse = match list {
             Ok(Ok(reply)) => reply,
             Ok(Err(error)) => {
-                self.fail(format!("roam session/list: {error}"));
+                eprintln!("grouse-core: roam peer '{}' session/list: {error}", self.label);
                 return Err(AcpError::internal_error()
                     .data(format!("roam session/list: {error}")));
             }
             Err(_) => {
-                self.fail("handshake timed out waiting for session/list reply".into());
+                eprintln!(
+                    "grouse-core: roam peer '{}' session/list timed out",
+                    self.label
+                );
                 return Err(AcpError::internal_error().data(
                     "handshake timed out waiting for session/list reply",
                 ));
@@ -841,47 +1018,36 @@ impl RoamPeer {
         };
         self.apply_sessions(&list);
 
+        // Resume owed from a supervised reconnect: re-open the session that
+        // was live when the link died (the peer mirror of the main
+        // connection's resume-after-reconnect). Consumed BEFORE loading so a
+        // session that can't be re-opened can't wedge every later reconnect;
+        // `load_session`'s stale-session fallback keeps the chat working.
+        let resume = self.inner.lock().resume_pending.take();
+        if let Some(raw) = resume {
+            let cwd = self
+                .inner
+                .lock()
+                .session_cwds
+                .get(&raw)
+                .cloned()
+                .unwrap_or_default();
+            if let Err(error) = self.load_session(&cx, raw, cwd).await {
+                self.fail(format!("roam resume: {error}"));
+            }
+        }
+
+        // The command queue lives on the PEER, not in this future: when the
+        // transport dies the SDK drops this future mid-`recv`, and a receiver
+        // owned here would die with it. Intents keep buffering in `cmd_tx`
+        // across the outage; the next attempt picks the queue back up here.
+        let mut cmd_rx = self.cmd_rx.lock().await;
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
                 PeerCommand::OpenSession { session_id, cwd } => {
                     let raw = self.strip_prefix(&session_id);
-                    // A stale/archived session can't be resumed — fall back to
-                    // a fresh session rather than leaving the chat wedged on
-                    // the failed load (desktop `response()` behavior).
-                    //
-                    // Untyped sends: the raw reply `Value` is needed both to
-                    // surface the peer's own {provider, model, effort} config
-                    // (the app's model picker for this peer comes from here,
-                    // not from the main connection) and to derive the new
-                    // session id on the fallback path.
-                    // mcpServers is REQUIRED by the remote deserializer (same
-                    // strictness as session/new — missing field = hard error).
-                    let load = cx
-                        .send_request(UntypedMessage::new(
-                            "session/load",
-                            json!({ "sessionId": raw, "cwd": cwd, "mcpServers": [] }),
-                        )?)
-                        .block_task()
-                        .await;
-                    match load {
-                        Ok(reply) => {
-                            self.open(raw);
-                            self.emit_status("ready");
-                            self.emit_config(&reply);
-                        }
-                        Err(error) => {
-                            // Fallback: the tapped session is stale/archived —
-                            // a fresh session is better than a wedged chat.
-                            // NO on_peer_new_session here: that event opens the
-                            // app's UI, and the user asked for THIS session
-                            // (the fallback silently serves a proxy).
-                            match self.create_session(&cx, &cwd, false).await {
-                                Ok(()) => {}
-                                Err(_) => {
-                                    self.fail(format!("roam session/load: {error}"));
-                                }
-                            }
-                        }
+                    if let Err(error) = self.load_session(&cx, raw, cwd).await {
+                        self.fail(format!("roam session/open: {error}"));
                     }
                 }
                 PeerCommand::NewSession { cwd } => {
@@ -906,6 +1072,62 @@ impl RoamPeer {
                     }
                 }
                 PeerCommand::Close => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// `session/load` a (raw) session id on this live connection and make it
+    /// the open chat. A stale/archived session can't be resumed — fall back
+    /// to a fresh session rather than leaving the chat wedged on the failed
+    /// load (desktop `response()` behavior). Shared by the user's tap (the
+    /// OpenSession command) and the reconnect resume.
+    ///
+    /// Untyped sends: the raw reply `Value` is needed both to surface the
+    /// peer's own {provider, model, effort} config (the app's model picker
+    /// for this peer comes from here, not from the main connection) and to
+    /// derive the new session id on the fallback path. mcpServers is REQUIRED
+    /// by the remote deserializer (same strictness as session/new — missing
+    /// field = hard error).
+    /// The `Result` carries only the JSON-RPC envelope construction; every
+    /// wire-level load failure is handled (or surfaced) internally.
+    async fn load_session(
+        &self,
+        cx: &agent_client_protocol::ConnectionTo<Agent>,
+        raw: String,
+        cwd: String,
+    ) -> Result<(), AcpError> {
+        let mut params = json!({ "sessionId": raw, "cwd": cwd, "mcpServers": [] });
+        // Bounded replay when the cache is current (see `replay_tail`). This
+        // covers BOTH paths that reach load_session: a user tap (OpenSession)
+        // and a reconnect resume — the resume dedupes the tail against the
+        // transcript the peer kept across the drop, same as the tap does
+        // against the cache.
+        if let Some(tail) = self.replay_tail(&raw) {
+            params["_meta"] = json!({ "replayTail": tail });
+        }
+        let load = cx
+            .send_request(UntypedMessage::new("session/load", params)?)
+            .block_task()
+            .await;
+        match load {
+            Ok(reply) => {
+                self.open(raw);
+                self.emit_status("ready");
+                self.emit_config(&reply);
+            }
+            Err(error) => {
+                // Fallback: the tapped session is stale/archived — a fresh
+                // session is better than a wedged chat. NO
+                // on_peer_new_session here: that event opens the app's UI,
+                // and the user asked for THIS session (the fallback silently
+                // serves a proxy).
+                match self.create_session(cx, &cwd, false).await {
+                    Ok(()) => {}
+                    Err(_) => {
+                        self.fail(format!("roam session/load: {error}"));
+                    }
+                }
             }
         }
         Ok(())
@@ -1002,6 +1224,9 @@ impl RoamPeer {
             inner.sessions = sessions;
             inner.session_cwds = cwds;
             inner.status = ConnectionStatus::Ready;
+            // The supervisor's outage posture keys on this: a link that has
+            // been live earns the long budget and a fresh one per outage.
+            inner.ever_ready = true;
         }
         self.emit_sessions(self.sessions());
         self.emit_status("ready");
@@ -1048,9 +1273,12 @@ impl RoamPeer {
         self.emit(TranscriptEvent::Clear);
     }
 
-    /// The connection task ended. `Ok` = clean (close command). `Err` = the
-    /// transport dropped — only report it as a failure if the peer wasn't
-    /// closed deliberately.
+    /// The link ended. `Ok` = clean (close command, or the peer was torn
+    /// down). `Err` = the transport dropped: the supervisor in
+    /// [`Self::connect`] decides whether to re-dial, so this records the
+    /// teardown (transcript save, conn drop, resume owed, dead run cleared)
+    /// and stays SILENT on a drop — the supervisor owns the status line from
+    /// here ("connecting: reconnecting…" or the final give-up).
     fn connection_ended(&self, result: Result<(), AcpError>) {
         // A dropped link loses the session as surely as closing it does; if
         // close() already ran this is a cheap no-op rewrite of the same rows.
@@ -1062,11 +1290,25 @@ impl RoamPeer {
             return;
         }
         inner.status = ConnectionStatus::Disconnected;
-        drop(inner);
-        match result {
-            Ok(()) => self.emit_status("disconnected"),
-            Err(error) => self.emit_status(&format!("error: {error}")),
+        if result.is_err() {
+            // Resume owed: remember the open chat so the re-dial re-opens it
+            // (the peer mirror of the main connection's resume-after-
+            // reconnect). A run in flight died with the link: clear it and
+            // emit the empty run id so the app frees busy/steer state.
+            inner.resume_pending = inner.open_session_id.clone();
+            let dead_run = inner.active_run.take().is_some();
+            let open = inner.open_session_id.clone();
+            drop(inner);
+            if dead_run {
+                if let Some(raw) = open {
+                    self.listener
+                        .on_active_run(format!("roam:{}:{raw}", self.label), String::new());
+                }
+            }
+            return;
         }
+        drop(inner);
+        self.emit_status("disconnected");
     }
 
     /// Set an error status and surface it (used by dial/handshake failures).
@@ -1241,6 +1483,24 @@ impl RoamPeer {
                     .value()
                     .map(|t| t.to_string())
                     .unwrap_or_default();
+                // Keep this peer's own session list current: session/list only
+                // runs on connect and relist, so without this the stored
+                // updatedAt goes stale the moment a turn runs — and
+                // save_open_transcript stamps the cache from here, which is
+                // what lets replay_tail prove the cache is current on the
+                // next open.
+                if !title.is_empty() || !updated_at.is_empty() {
+                    let mut inner = self.inner.lock();
+                    let suffix = format!(":{session_id}");
+                    if let Some(s) = inner.sessions.iter_mut().find(|s| s.id.ends_with(&suffix)) {
+                        if !title.is_empty() {
+                            s.title = title.clone();
+                        }
+                        if !updated_at.is_empty() {
+                            s.updated_at = updated_at.clone();
+                        }
+                    }
+                }
                 if active && (!title.is_empty() || !updated_at.is_empty()) {
                     self.listener
                         .on_session_touched(session_id, title, updated_at);
@@ -1716,6 +1976,19 @@ pub fn active_peer<'a>(
     peers.iter().find(|peer| &peer.label == label)
 }
 
+/// Trailing messages requested from `session/load` when the cache is current
+/// (see [`RoamPeer::replay_tail`]). Counted in server-side messages (tool
+/// requests and responses included), so this covers a few heavy agentic turns;
+/// the server widens to the nearest turn boundary. Large enough that the
+/// replayed window always overlaps the cached tail it dedupes against.
+const REPLAY_TAIL: usize = 100;
+
+/// The stamp comparison behind [`RoamPeer::replay_tail`], separated for
+/// testing: a tail only when both stamps exist and agree.
+fn replay_tail_decision(cached_at: &str, listed_at: &str) -> Option<usize> {
+    (!cached_at.is_empty() && cached_at == listed_at).then_some(REPLAY_TAIL)
+}
+
 /// Cap a roam-side message list (S-RC-4) so a pathological session cannot grow
 /// memory without bound — and, because the backward `.find()` scans for tool
 /// updates are bounded by this cap, the per-update cost cannot scale with
@@ -1739,7 +2012,8 @@ fn cap_messages(messages: &mut Vec<Message>) {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        ConfigOptionUpdate, ContentBlock, ContentChunk, TextContent, ToolCall, ToolCallId,
+        ConfigOptionUpdate, ContentBlock, ContentChunk, SessionInfoUpdate, TextContent, ToolCall,
+        ToolCallId,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1767,7 +2041,6 @@ mod tests {
             TranscriptEvent::Clear => "Clear",
         }
     }
-
     fn stream_name(event: &StreamEvent) -> &'static str {
         match event {
             StreamEvent::AgentChunk { .. } => "AgentChunk",
@@ -1853,7 +2126,11 @@ mod tests {
                 .push(format!("peer_new_session {label} {session_id}"));
         }
 
-        fn on_active_run(&self, _session_id: String, _run_id: String) {}
+        fn on_active_run(&self, session_id: String, run_id: String) {
+            self.events
+                .lock()
+                .push(format!("active_run {session_id} {run_id}"));
+        }
 
         fn on_commands(&self, _commands: Vec<String>) {}
     }
@@ -1877,10 +2154,15 @@ mod tests {
         is_active: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> (Arc<RoamPeer>, tokio_mpsc::UnboundedReceiver<PeerCommand>) {
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel();
+        // The supervisor slot gets its own (unused) channel: these tests drive
+        // the state machine directly and assert on `cmd_rx` returned below,
+        // never through a live command loop.
+        let (_slot_tx, slot_rx) = tokio_mpsc::unbounded_channel();
         let peer = Arc::new(RoamPeer {
             label: label.to_string(),
             inner: Mutex::new(PeerInner::new()),
             cmd_tx,
+            cmd_rx: Arc::new(tokio::sync::Mutex::new(slot_rx)),
             listener,
             is_active,
             // A dir per PEER, not per label: `open` reads the transcript cache
@@ -1993,12 +2275,24 @@ mod tests {
     }
 
     #[test]
-    fn open_session_ignored_before_ready() {
+    fn open_session_queues_while_connecting() {
+        // Parity with the main connection: a tap during the supervised
+        // reconnect window must queue, not vanish — the next live link drains
+        // the command channel. Only a DEAD peer (after the supervisor gave
+        // up) drops opens.
         let listener = test_listener();
         let (peer, mut cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
         assert!(matches!(peer.status(), ConnectionStatus::Connecting));
         peer.open_session("s1".to_string(), "/home/user".to_string());
-        assert!(cmd_rx.try_recv().is_err());
+        match cmd_rx.try_recv() {
+            Ok(PeerCommand::OpenSession { session_id, .. }) => assert_eq!(session_id, "s1"),
+            other => panic!("expected OpenSession queued while connecting, got {other:?}"),
+        }
+        // Dead peer: nothing will drain the queue, so the intent is rejected.
+        peer.connection_ended(Ok(()));
+        assert!(matches!(peer.status(), ConnectionStatus::Disconnected));
+        peer.open_session("s2".to_string(), "/home/user".to_string());
+        assert!(cmd_rx.try_recv().is_err(), "a disconnected peer must not accept opens");
     }
 
     #[test]
@@ -2109,6 +2403,75 @@ mod tests {
     }
 
     #[test]
+    fn unexpected_drop_records_resume_and_stays_silent() {
+        // The supervisor owns the status line while it re-dials: a drop must
+        // NOT surface "disconnected"/"error" (that was the old terminal
+        // behavior that made peers look dead), only record the resume and
+        // free the app's turn state.
+        let listener = test_listener();
+        let (peer, _cmd_rx) = offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
+        peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
+        peer.open("s1".to_string());
+        peer.inner.lock().active_run = Some("run-9".to_string());
+
+        peer.connection_ended(Err(agent_client_protocol::Error::internal_error()
+            .data("roam stream ended")));
+
+        assert!(matches!(peer.status(), ConnectionStatus::Disconnected));
+        assert_eq!(
+            peer.inner.lock().resume_pending.as_deref(),
+            Some("s1"),
+            "the open session must be owed to the next live link"
+        );
+        let events = listener.events.lock();
+        assert!(
+            !events.iter().any(|e| e.starts_with("peer_status laptop disconnected")
+                || e.starts_with("peer_status laptop error")),
+            "a supervised drop emits no terminal status: {events:?}"
+        );
+        // The run died with the link: the empty run id frees the app's busy state.
+        assert!(
+            events
+                .iter()
+                .any(|e| e == "active_run roam:laptop:s1 "),
+            "the dead run id must be cleared for the app: {events:?}"
+        );
+        assert!(peer.inner.lock().active_run.is_none());
+    }
+
+    #[test]
+    fn clean_end_is_terminal_and_owes_nothing() {
+        let listener = test_listener();
+        let (peer, _cmd_rx) = offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
+        peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
+        peer.open("s1".to_string());
+
+        peer.connection_ended(Ok(()));
+
+        assert_eq!(
+            peer.inner.lock().resume_pending,
+            None,
+            "a deliberate close owes no resume"
+        );
+        let events = listener.events.lock();
+        assert!(
+            events.iter().any(|e| e == "peer_status laptop disconnected"),
+            "a clean end surfaces disconnected: {events:?}"
+        );
+    }
+
+    #[test]
+    fn reconnect_delay_curve() {
+        // The shared curve both the main connection and the peer supervisor
+        // use: 500ms·2^n capped at 15s.
+        assert_eq!(crate::spine::reconnect_delay_ms(0), 500);
+        assert_eq!(crate::spine::reconnect_delay_ms(1), 1000);
+        assert_eq!(crate::spine::reconnect_delay_ms(4), 8000);
+        assert_eq!(crate::spine::reconnect_delay_ms(5), 15000);
+        assert_eq!(crate::spine::reconnect_delay_ms(9), 15000);
+    }
+
+    #[test]
     fn new_session_queues_create_with_cwd() {
         let listener = test_listener();
         let (peer, mut cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
@@ -2136,11 +2499,17 @@ mod tests {
     }
 
     #[test]
-    fn new_session_ignored_before_ready() {
+    fn new_session_queues_while_connecting_rejects_dead() {
         let listener = test_listener();
-        let (peer, _) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let (peer, mut cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
         peer.new_session("/home/user".to_string());
-        // No Ready, no command queued (peer still Connecting).
+        match cmd_rx.try_recv() {
+            Ok(PeerCommand::NewSession { cwd }) => assert_eq!(cwd, "/home/user"),
+            other => panic!("expected NewSession queued while connecting, got {other:?}"),
+        }
+        peer.connection_ended(Ok(()));
+        peer.new_session("/home/user".to_string());
+        assert!(cmd_rx.try_recv().is_err(), "a disconnected peer must not accept creates");
     }
 
     #[test]
@@ -2452,5 +2821,58 @@ mod tests {
         );
         // The peer's run bookkeeping is cleared too.
         assert!(peer.inner.lock().active_run.is_none());
+    }
+
+    #[test]
+    fn replay_tail_only_when_stamps_agree() {
+        assert_eq!(
+            replay_tail_decision("2026-08-23T10:00:00Z", "2026-08-23T10:00:00Z"),
+            Some(REPLAY_TAIL)
+        );
+        // The session moved while we were away — a tail could hide a gap.
+        assert_eq!(
+            replay_tail_decision("2026-08-23T10:00:00Z", "2026-08-23T11:00:00Z"),
+            None
+        );
+        // No stamp on either side proves nothing.
+        assert_eq!(replay_tail_decision("", ""), None);
+        assert_eq!(replay_tail_decision("", "2026-08-23T10:00:00Z"), None);
+    }
+
+    #[test]
+    fn session_info_update_refreshes_the_session_list() {
+        let listener = test_listener();
+        let (peer, _cmd_rx) = offline_peer(
+            "laptop",
+            listener,
+            gate(Arc::new(AtomicBool::new(false))),
+        );
+        peer.inner.lock().sessions.push(SessionSummary {
+            id: "roam:laptop:s1".to_string(),
+            title: "old title".to_string(),
+            updated_at: "2026-08-23T10:00:00Z".to_string(),
+            last_message_snippet: None,
+            project_id: None,
+            message_count: 0,
+            model: String::new(),
+            has_recipe: false,
+            has_new: false,
+            archived: false,
+        });
+
+        peer.dispatch(SessionNotification::new(
+            "s1",
+            SessionUpdate::SessionInfoUpdate(
+                SessionInfoUpdate::new()
+                    .title("new title".to_string())
+                    .updated_at("2026-08-23T11:00:00Z".to_string()),
+            ),
+        ));
+
+        // The stored summary tracks the live update even while the session is
+        // not active — save_open_transcript stamps the cache from here.
+        let inner = peer.inner.lock();
+        assert_eq!(inner.sessions[0].title, "new title");
+        assert_eq!(inner.sessions[0].updated_at, "2026-08-23T11:00:00Z");
     }
 }

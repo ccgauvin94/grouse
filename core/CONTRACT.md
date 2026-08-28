@@ -150,6 +150,13 @@ Usage { used, size, cost, currency } · RunEnded(stop_reason)`
 - Reconnect: exponential backoff (500ms·2^n, cap 15s, 6 attempts) on unexpected
   drop, reset on `Ready`; no reconnect on explicit `disconnect()`. Owned here,
   surfaced only via `on_status`.
+- Keepalive: the WebSocket transport pings an idle connection (ping after 30s
+  of silence, checked every 5s; no reply within 15s ⇒ the connection is
+  declared dropped and the reconnect above fires). Traffic suppresses pings
+  entirely — any inbound byte rebases the idle timer, so a streaming turn
+  never pays for one. This is what turns a silently reaped NAT/proxy path into
+  a visible reconnect instead of a hung socket; UIs must not add their own
+  ping/idle probes.
 - Remote-change resync: `session_info_update` debounced → probe → in-place
   `session/load` replay, re-probed a few times at 8s for a still-streaming turn.
   This replaces BOTH the desktop's `sessionTouched` resync and Android's
@@ -210,7 +217,12 @@ Custom notifications (gated on `customNotifications`): `status_message` →
 
 The core owns the peer registry (the desktop's `m_roamPeers`). Peers are
 parallel connections in browse mode; chat routes to whichever session was last
-opened. Surfaced as:
+opened. A peer's connection is supervised: an unexpected drop re-dials with the
+core's backoff curve and resumes the session that was open (a peer that was
+never live gives up after the main connection's 6-try budget; one that dropped
+after reaching ready retries far longer — see `RoamPeer::RECONNECT_MAX`).
+Intents (`open_session`, `new_session`) also queue during the reconnect window
+the same way they queue on the main connection. Surfaced as:
 
 - intents: `roam_connect(card, label)`, `roam_disconnect(label)`,
   `roam_open_session(label, session_id)`
