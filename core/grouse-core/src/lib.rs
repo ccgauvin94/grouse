@@ -525,6 +525,15 @@ impl Core {
     pub fn open_session(&self, session_id: String) {
         *self.inner.active_peer_label.write() = None;
         self.reset_chat_state();
+        // Move the chat-event gate BEFORE anything that can block. Everything
+        // below this line runs before the connection rebinds the gate itself, and
+        // `resolve_cwd` is the expensive part of "everything below" — so without
+        // this the previous chat keeps winning the gate for the duration of a
+        // round trip and its streaming lands in the chat the user just opened.
+        // See spine::RpcConn::prebind_session.
+        if let Some(conn) = self.inner.conn.lock().clone() {
+            conn.prebind_session(&session_id);
+        }
         let cwd = self.resolve_cwd(&session_id);
         let (suppress, cached) = match self.inner.cache.load_transcript(&session_id) {
             Some((messages, cached_at)) => {

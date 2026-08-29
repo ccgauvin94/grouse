@@ -69,6 +69,13 @@ pub trait RpcConn: Send + Sync {
     fn rpc(&self, method: &str, params: Value) -> Result<Value, AcpError>;
     /// The session bound by `session/new` or `session/load`, if any.
     fn active_session_id(&self) -> Option<String>;
+
+    /// Move the chat-event gate to `session_id` ahead of the load that confirms it.
+    ///
+    /// Only the spine has a gate to move; a roam peer opens through its command
+    /// loop, so peers keep the no-op. See [`Conn::prebind_session`] for why the
+    /// gate must not wait for the load.
+    fn prebind_session(&self, _session_id: &str) {}
 }
 
 static CURRENT_CONN: Mutex<Option<Weak<dyn RpcConn>>> = Mutex::new(None);
@@ -363,6 +370,28 @@ impl Conn {
     /// The session bound by `session/new` / `session/load`, if any.
     pub fn active_session_id(&self) -> Option<String> {
         self.inner.session_id.lock().clone()
+    }
+
+    /// Bind the chat-event gate to `session_id` NOW rather than when the load
+    /// that confirms it lands.
+    ///
+    /// `session_id` is what the dispatch gate compares against: a chat event for
+    /// any other session is treated as a backgrounded turn and dropped. The
+    /// handshake assigns it on the runtime thread, but only *after*
+    /// `Core::open_session` has resolved the session's cwd (cache → probe →
+    /// `session/list`, i.e. a round trip) and spawned the connect. Meanwhile the
+    /// app clears its transcript synchronously the moment it asks to switch. In
+    /// that gap the gate still names the PREVIOUS chat, so that chat's in-flight
+    /// chunks keep passing the gate and paint into the conversation now on
+    /// screen. Pre-binding collapses a round trip of exposure to none: the gate
+    /// moves in the same call the UI switches in.
+    ///
+    /// Safe against the load failing: the Resume handshake re-assigns this same
+    /// value, and a failed load falls through to `start_new_session`, which
+    /// overwrites it — the ordering the handshake's own pre-load assignment
+    /// already relies on.
+    pub fn prebind_session(&self, session_id: &str) {
+        *self.inner.session_id.lock() = Some(session_id.to_string());
     }
 
     /// The run id of the live turn (`session_info_update` `_meta.goose
@@ -984,6 +1013,10 @@ impl RpcConn for Conn {
 
     fn active_session_id(&self) -> Option<String> {
         Conn::active_session_id(self)
+    }
+
+    fn prebind_session(&self, session_id: &str) {
+        Conn::prebind_session(self, session_id)
     }
 }
 
