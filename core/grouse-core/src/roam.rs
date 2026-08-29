@@ -1550,6 +1550,13 @@ impl RoamPeer {
             st.has_new = true;
             &mut st.messages
         };
+        // Whether this chunk belongs to an ALREADY-OPEN bubble. Distinct from
+        // `event`: a chunk can be consumed by an open bubble and still produce no
+        // event (it was already on screen). Both were encoded as `None`, and the
+        // `or_else` below could not tell them apart — so an already-shown chunk was
+        // re-emitted as a brand-new bubble. Callers must never conflate "nothing to
+        // emit" with "nothing to append to".
+        let mut consumed = false;
         let event = if message_id.is_empty() {
             // Live text chunks have no stable id. Serve keeps a tracked stream
             // bubble; roam mirrors that by appending to the LAST message ONLY
@@ -1569,7 +1576,11 @@ impl RoamPeer {
                 // never for a legitimate mid-paragraph repeat.
                 Some(m)
                     if (replaying && m.content.contains(text))
-                        || (!replaying && m.content.ends_with(text) && m.content != text) => None,
+                        || (!replaying && m.content.ends_with(text) && m.content != text) => {
+                        // Already on screen. Consumed, so no bubble is opened for it.
+                        consumed = true;
+                        None
+                    }
                 Some(m) => {
                     m.content.push_str(text);
                     Some(TranscriptEvent::Update {
@@ -1601,12 +1612,18 @@ impl RoamPeer {
                     },
                 })
             } else {
+                // Second instance of the same trap: a replay re-sent a staged
+                // message that is already on screen. Consumed — NOT a new bubble.
+                consumed = true;
                 None
             }
         } else {
             None
         };
         let event = event.or_else(|| {
+            if consumed {
+                return None;
+            }
             // No open stream bubble matched (empty id, or a new stream after a tool/
             // thought/other role, or a fresh id): start a new bubble.
             let msg = Message {
@@ -2673,6 +2690,34 @@ mod tests {
         assert_eq!(tr[1].content, "shell");
         assert_eq!(tr[2].role, "agent");
         assert_eq!(tr[2].content, "answer ");
+    }
+
+    /** A live thought chunk that happens to repeat the tail of its own bubble must not
+     *  become a second bubble. The stall guard below returns "nothing to emit" for that
+     *  chunk, and "nothing to emit" used to be encoded as `None` — the same value the
+     *  no-open-bubble case produced — so the fallthrough opened a FRESH thinking bubble
+     *  containing just the repeated text. That is the "new Thinking block starts
+     *  mid-stream" report: it fires wherever the model repeats itself (a doubled word,
+     *  a repeated "\n", an em-dash), which is to say at random. */
+    #[test]
+    fn live_thought_repeating_its_own_tail_never_opens_a_second_bubble() {
+        let listener = test_listener();
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(false))));
+        peer.open("s1".to_string());
+
+        for t in ["thi", "ng about", " the count", " the count"] {
+            peer.dispatch(SessionNotification::new(
+                "s1",
+                SessionUpdate::AgentThoughtChunk(
+                    ContentChunk::new(ContentBlock::Text(TextContent::new(t))),
+                ),
+            ));
+        }
+
+        let tr = peer.transcript();
+        assert_eq!(tr.len(), 1, "one chunk stream must stay one bubble, got {tr:?}");
+        assert_eq!(tr[0].content, "thing about the count");
     }
 
     #[test]
