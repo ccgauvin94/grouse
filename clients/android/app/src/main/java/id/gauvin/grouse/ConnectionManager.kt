@@ -371,6 +371,14 @@ class ConnectionManager private constructor(context: Context) {
      *  namespace their tools, and only namespaced tools can be mapped back to an owner. */
     fun toolsAttributable(e: ExtInfo): Boolean = e.type == "mcp"
 
+    /** Whether the full tool CATALOGUE is observable right now. It only is from inside a live
+     *  session: `discoverTools` reads it by briefly running the extension unfiltered in the
+     *  current chat. Settings edits agent-global defaults and frequently has no chat at all,
+     *  which is why its tool rows sat on "reading tool list…" forever — the discovery bailed
+     *  silently and nothing distinguished "working on it" from "cannot possibly work here". */
+    val canDiscoverTools: Boolean
+        get() = live && core.activeSessionId() != null
+
     /** Ask the server for this session's active tools; lands as onTools. Session-bound
      *  unstable calls route to the owning peer (the core resolves `roam:<label>:` ids per connection),
      *  so this serves both main- and peer-owned sessions. */
@@ -2154,6 +2162,36 @@ class ConnectionManager private constructor(context: Context) {
          *  is special, and it is identified by title. */
         fun sessionKind(s: SessionInfo): SessionKind =
             if (s.title == ASSISTANT_TITLE) SessionKind.ASSISTANT else SessionKind.CHAT
+
+        /** Drawer search (tier 1 — names, not contents). Case-insensitive, and every
+         *  whitespace-separated term must land somewhere, so "feeder cam" still finds
+         *  "bird-feeder cam". A blank query matches everything, which is what lets the
+         *  unfiltered drawer run through here too rather than branching on "searching".
+         *
+         *  Chats pass [chatMatches]; project cards and endpoint cards use this directly so the
+         *  grouping itself is searchable by the same rules as its chats. Message bodies are NOT
+         *  searchable here — that needs a server method (tier 2); the empty-state string says so. */
+        fun queryMatches(query: String, haystacks: List<String?>): Boolean {
+            val q = query.trim().lowercase()
+            if (q.isEmpty()) return true
+            return q.split(' ').filter { it.isNotBlank() }.all { term ->
+                haystacks.any { it?.contains(term, ignoreCase = true) == true }
+            }
+        }
+
+        /** True when a chat should survive the drawer's search field: the title, the
+         *  last-message snippet, and the group it sits under (project name for local chats,
+         *  endpoint name for roam) are the three scents a human actually recalls. */
+        fun chatMatches(query: String, s: SessionInfo, group: String? = null): Boolean =
+            queryMatches(query, listOf(s.title, s.snippet, group))
+
+        /** True when an endpoint card earns its place in a filtered drawer: the endpoint name
+         *  matches, or at least one of its chats does. Rendered empty, a peer card is a
+         *  false-negative magnet — "no results" and "that host is offline" look identical —
+         *  so non-matching peers drop out entirely while a query is live. */
+        fun peerMatches(query: String, peerName: String, sessions: List<SessionInfo>): Boolean =
+            queryMatches(query, listOf(peerName)) ||
+                sessions.any { chatMatches(query, it, peerName) }
 
         /** A session living on a roam peer arrives as `roam:<peer>:<remote id>` (the core's
          *  peer namespace). Local ids never carry the prefix, so it doubles as the

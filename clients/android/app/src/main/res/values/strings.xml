@@ -46,6 +46,11 @@
     <string name="loading">loading…</string>
 
     <!-- Drawer -->
+    <string name="search_chats">Search chats</string>
+    <string name="search_endpoints">Search endpoints</string>
+    <string name="no_matching_chats">Nothing matches “%1$s”</string>
+    <string name="no_matching_chats_note">Grouse searches chat names, previews, projects and endpoints — not message text.</string>
+    <string name="clear_search">Clear search</string>
     <string name="projects">PROJECTS</string>
     <string name="chats">CHATS</string>
     <string name="archived">ARCHIVED</string>

@@ -108,7 +108,8 @@ import kotlinx.serialization.json.contentOrNull
  *  listing its sessions. Live status shown inline; only ready peers carry sessions. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
+fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit,
+    query: String = "", onClearQuery: () -> Unit = {}) {
     var expanded by rememberSaveable { mutableStateOf(listOf<String>()) }
     var roamActionsFor by remember { mutableStateOf<SessionInfo?>(null) }
     // Long-press the peer "new chat" + to choose a working dir for that chat.
@@ -122,16 +123,27 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
     }
     // Populate the peer list from the persisted store (cards survive restart).
     LaunchedEffect(Unit) { cm.loadRoamPeers() }
-    val peers = cm.roamPeers
     val status = cm.roamStatus
+    val searching = query.isNotBlank()
     // Remote session groups listed per peer; only peers currently CONNECTED (ready) are listed.
-    val sessionsByLocalPeer = cm.sessions.value
+    // A peer that isn't connected contributes nothing to a search — its chats are simply not in
+    // the directory the filter runs over, which is why the empty state offers "clear" rather
+    // than claiming the chat doesn't exist.
+    val allByPeer = cm.sessions.value
         .filter { it.sessionId.startsWith("roam:") }
         .mapNotNull { s ->
             val p = ConnectionManager.roamPeer(s.sessionId) ?: return@mapNotNull null
             if (status[p]?.contentEquals("ready") != true) null else p to s
         }
         .groupBy({ it.first }, { it.second })
+    // The endpoint NAME is the group for a roam chat, so searching "laptop" surfaces that
+    // host's chats the way a project name surfaces filed chats on the Main tab.
+    val sessionsByLocalPeer = if (searching)
+        allByPeer.mapValues { (peer, ss) -> ss.filter { ConnectionManager.chatMatches(query, it, peer) } }
+    else allByPeer
+    val peers = if (searching)
+        cm.roamPeers.filter { ConnectionManager.peerMatches(query, it.name, allByPeer[it.name].orEmpty()) }
+    else cm.roamPeers
 
     LazyColumn(Modifier.fillMaxWidth().padding(horizontal = 14.dp)) {
         item {
@@ -140,16 +152,20 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit) {
                 modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 2.dp))
         }
         if (peers.isEmpty()) {
-            item {
-                Text(stringResource(R.string.no_endpoints),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp))
+            if (searching) {
+                item(key = "roam:nomatch") { DrawerNoMatches(query, onClearQuery) }
+            } else {
+                item {
+                    Text(stringResource(R.string.no_endpoints),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp))
+                }
             }
         }
         peers.forEach { peer ->
             val peerKey = "peer:${peer.name}"
-            val open = peerKey in expanded
+            val open = peerKey in expanded || searching
             val st = status[peer.name]
             val ready = st == "ready"
             val sessions = sessionsByLocalPeer[peer.name].orEmpty()

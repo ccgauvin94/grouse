@@ -38,6 +38,7 @@ import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
+import androidx.compose.ui.res.stringResource
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -212,6 +213,9 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                     // Main | Roam — the chats world vs. peer management. Roam replaces the old
                     // standalone RoamScreen route entirely. Native Material 3 segmented control.
                     var drawerTab by rememberSaveable { mutableStateOf("main") }
+                    // Drawer search text. Saveable, and lives ABOVE the tab bodies so it is not
+                    // lost when the other tab's composable leaves composition.
+                    var drawerQuery by rememberSaveable { mutableStateOf("") }
                     SingleChoiceSegmentedButtonRow(
                         modifier = Modifier.fillMaxWidth()
                             .padding(horizontal = 12.dp)
@@ -229,6 +233,16 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                             modifier = Modifier.weight(1f)
                         ) { Text("Roam") }
                     }
+                    // One filter for both tabs, hoisted here so switching Main/Roam keeps what you
+                    // typed. Filtering is client-side over the cached session directory — the
+                    // drawer's own data, no round trip — so results are already on screen as you
+                    // type, and they survive a dropped connection.
+                    DrawerSearchField(
+                        query = drawerQuery,
+                        onQuery = { drawerQuery = it },
+                        placeholder = stringResource(
+                            if (drawerTab == "main") R.string.search_chats else R.string.search_endpoints),
+                    )
                     if (drawerTab == "main") {
                         if (cm.assistantEnabled.value) {
                             NavigationDrawerItem(
@@ -248,12 +262,16 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                         // Settings stays pinned at the bottom.
                         Box(Modifier.weight(1f)) {
                             DrawerChats(cm, onOpen = {
+                                // Opening a chat ends the search: leaving the filter live would
+                                // make the next drawer open show a mystery subset rather than the
+                                // list the user expects to navigate.
+                                drawerQuery = ""
                                 closeDrawer()
                                 nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
                             }, onOpenProject = { p ->
                                 closeDrawer()
                                 nav.navigate("project/" + Uri.encode(p)) { launchSingleTop = true }
-                            })
+                            }, query = drawerQuery, onClearQuery = { drawerQuery = "" })
                         }
                         HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                         // What the agent can be given, and when it runs: skills are the notes it
@@ -275,9 +293,10 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                         Column(Modifier.fillMaxWidth()) {
                             Box(Modifier.weight(1f).fillMaxWidth()) {
                                 RoamBrowse(cm, nav, onOpen = {
+                                    drawerQuery = ""
                                     closeDrawer()
                                     nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
-                                })
+                                }, query = drawerQuery, onClearQuery = { drawerQuery = "" })
                             }
                             HorizontalDivider(Modifier.padding(horizontal = 16.dp))
                             // Add/management is a full-screen page (own route) — it carries the

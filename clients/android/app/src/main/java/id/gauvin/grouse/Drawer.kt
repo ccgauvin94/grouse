@@ -58,6 +58,7 @@ import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -112,7 +113,8 @@ import kotlinx.serialization.json.contentOrNull
  *  everything here is the app's main menu, not a separate screen. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (String) -> Unit) {
+fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (String) -> Unit,
+    query: String = "", onClearQuery: () -> Unit = {}) {
     var showNewProject by remember { mutableStateOf(false) }
     var actionsFor by remember { mutableStateOf<SessionInfo?>(null) }
     var expanded by rememberSaveable { mutableStateOf(listOf<String>()) }
@@ -152,11 +154,31 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     // Filter them out of the drawer explicitly: onCoreSessions keeps roam entries in the
     // shared list for the Roam tab, so without this the Main drawer shows peer chats.
     val localChats = all.filterNot { it.sessionId.startsWith("roam:") }
-    val activeChats = localChats.filterNot { it.archived }
+    val searching = query.isNotBlank()
+    // Project names are part of the haystack, not just a label: "grouse" should find the chats
+    // filed under the grouse project without knowing their titles. Built once per recomposition
+    // from the same list the project cards render from, so the two can't disagree.
+    val projectName = cm.projects.value.associate { it.id to it.name }
+    // `group` is the project NAME (an id would match nothing but its own digits).
+    fun matches(s: SessionInfo) =
+        ConnectionManager.chatMatches(query, s, s.projectId?.let { projectName[it] })
+    val visibleChats = if (searching) localChats.filter(::matches) else localChats
+    val activeChats = visibleChats.filterNot { it.archived }
     val byProjectId = activeChats.groupBy { it.projectId }
     val freeChats = byProjectId[null].orEmpty()
-    val archivedChats = localChats.filter { it.archived }
-    val projects = cm.projects.value
+    val archivedChats = visibleChats.filter { it.archived }
+    // A query hides a project card entirely unless the name itself matches or one of its chats
+    // does. Left standing empty, the card reads "this project has no chats" — a false negative
+    // that pushes you to conclude the chat was deleted.
+    val projects = cm.projects.value.filter { proj ->
+        !searching ||
+            ConnectionManager.queryMatches(query, listOf(proj.name)) ||
+            byProjectId[proj.id]?.isNotEmpty() == true
+    }
+    // Nothing left anywhere: the add-buttons and section headers would be the only rows, which
+    // is worse than saying "no matches" and offering the way out.
+    val nothingFound = searching && activeChats.isEmpty() && freeChats.isEmpty() &&
+        archivedChats.isEmpty() && projects.isEmpty()
 
     @Composable
     fun sessionRow(s: SessionInfo, indent: Boolean) {
@@ -206,23 +228,29 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     }
 
     LazyColumn(Modifier.fillMaxWidth().padding(horizontal = 14.dp)) {
+      // Section chrome disappears under a query; only matches and the empty state remain.
+      if (!nothingFound) {
         item {
-            Row(Modifier.fillMaxWidth().clickable { projectsCollapsed = !projectsCollapsed }
-                .padding(start = 10.dp, top = 10.dp, bottom = 2.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                Text(stringResource(R.string.projects), style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.weight(1f))
-                Icon(if (projectsCollapsed) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                    contentDescription = if (projectsCollapsed) "expand projects" else "collapse projects",
-                    modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.outline)
-            }
+          Row(Modifier.fillMaxWidth().clickable { projectsCollapsed = !projectsCollapsed }
+              .padding(start = 10.dp, top = 10.dp, bottom = 2.dp),
+              verticalAlignment = Alignment.CenterVertically) {
+              Text(stringResource(R.string.projects), style = MaterialTheme.typography.labelMedium,
+                  color = MaterialTheme.colorScheme.primary)
+              Spacer(Modifier.weight(1f))
+              Icon(if (projectsCollapsed) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                  contentDescription = if (projectsCollapsed) "expand projects" else "collapse projects",
+                  modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.outline)
+          }
         }
-        if (!projectsCollapsed) {
+      }
+        if (!projectsCollapsed || searching) {
             projects.forEach { proj ->
                 val p = proj.name
                 val inProject = byProjectId[proj.id].orEmpty()
-                val open = proj.id in expanded
+                // While searching a card is open regardless of the tapped state: a hit you have
+                // to tap to reveal isn't a search result, and the collapsed card is exactly as
+                // misleading as an empty one.
+                val open = proj.id in expanded || searching
                 item(key = "project:" + proj.id) {
                     // Project card: Folder icon + name + session count + new-chat button.
                     // Click ANYWHERE toggles the inline session list; LONG-PRESS opens
@@ -275,16 +303,23 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
                     }
                 }
             }
-            item { addRow("New project", indent = false) { showNewProject = true } }
+            // Creation rows are not results; they drop out of a filtered list so the only thing
+            // on screen is what matched.
+            if (!searching) item { addRow("New project", indent = false) { showNewProject = true } }
         }
-        item {
-            Text(stringResource(R.string.chats), style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(start = 10.dp, top = 16.dp, bottom = 2.dp))
+        if (!nothingFound) {
+            item {
+                Text(stringResource(R.string.chats), style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = 10.dp, top = 16.dp, bottom = 2.dp))
+            }
         }
-        item { addRow("New chat", indent = false) { cm.newSession(); onOpen() } }
+        if (!searching) item { addRow("New chat", indent = false) { cm.newSession(); onOpen() } }
         // Remote (roam peer) sessions no longer render here — the Roam tab owns them.
         items(freeChats, key = { "s:" + it.sessionId }) { s -> sessionRow(s, indent = false) }
+        if (nothingFound) {
+            item(key = "nomatch") { DrawerNoMatches(query, onClearQuery) }
+        }
         // Archived chats stay reachable (restorable via long-press -> Unarchive).
         if (archivedChats.isNotEmpty()) {
             item {
@@ -323,6 +358,77 @@ private fun ProjectSessionRow(s: SessionInfo, onOpen: () -> Unit, onLongPress: (
             Spacer(Modifier.width(10.dp))
             Box(Modifier.size(10.dp).background(MaterialTheme.statusColors.online, CircleShape))
         }
+    }
+}
+
+/** The drawer's search field. Sits under the Main/Roam tab row, above the chat list. Owns no
+ *  state — the query is hoisted to the drawer host so switching tabs keeps what you typed and
+ *  there is ONE filter rather than two that disagree.
+ *
+ *  BasicTextField, not TextField/SearchBar: Material's own container and outline would draw a
+ *  second surface inside this one, and SearchBar wants a full-screen search route that a narrow,
+ *  scrimmed, swipe-to-close drawer sheet cannot host. Same reasoning as the chat composer's. */
+@Composable
+fun DrawerSearchField(query: String, onQuery: (String) -> Unit, placeholder: String) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Row(Modifier.padding(start = 12.dp, end = 6.dp).padding(vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.Search, contentDescription = null,
+                modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.outline)
+            Spacer(Modifier.width(10.dp))
+            Box(Modifier.weight(1f)) {
+                if (query.isEmpty()) {
+                    Text(placeholder, style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.outline,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                BasicTextField(
+                    value = query,
+                    onValueChange = onQuery,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(
+                        color = MaterialTheme.colorScheme.onSurface),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            // The X appears only once there's something to clear: an always-present affordance
+            // inside a swipe-to-close drawer invites a mis-tap that shuts the menu.
+            if (query.isNotEmpty()) {
+                Box(Modifier.size(28.dp).clickable { onQuery("") },
+                    contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.Close, contentDescription = "clear search",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.outline)
+                }
+            }
+        }
+    }
+}
+
+/** The drawer's empty-result row, shared by both tabs so "nothing matched" reads the same
+ *  whether you filtered local chats or endpoints. It NAMES ITS OWN SCOPE: a search that covers
+ *  only titles has to say so, or a miss reads as "that chat is gone". */
+@Composable
+fun DrawerNoMatches(query: String, onClear: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(stringResource(R.string.no_matching_chats, query),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            textAlign = TextAlign.Center)
+        Spacer(Modifier.height(4.dp))
+        Text(stringResource(R.string.no_matching_chats_note),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.outline,
+            textAlign = TextAlign.Center)
+        TextButton(onClick = onClear) { Text(stringResource(R.string.clear_search)) }
     }
 }
 
