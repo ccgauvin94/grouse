@@ -64,19 +64,48 @@ class ConnectionManager private constructor(context: Context) {
     private val notifier = Notifier(context)
     private var appForeground = true
     private var serviceRunning = false
-    // Sends that must wait for (re)connect — a queue, not one slot, so a second reply while
-    // still connecting can't clobber the first. The user bubble is added when queued (in send()).
-    private data class PendingSend(val text: String, val images: List<ImageBlock>, val files: List<FileBlock> = emptyList())
+    // Sends that must wait for (re)connect or for the running turn to end — a queue, not one
+    // slot, so a second reply while still connecting can't clobber the first. The user bubble is
+    // added when queued (in send()).
+    //
+    // A queued prompt belongs to the chat it was TYPED IN. Entries used to carry no session, so
+    // every drain -- this chat's RunEnded, or another chat's Ready -- took the OLDEST entry and
+    // sent it into whichever session happened to be current at that instant. Send into a busy
+    // chat, switch chats, and the reply streamed into the chat you switched to. It reproduced on
+    // roam and ACP alike because the mixer was the queue, not the transport.
+    private data class PendingSend(
+        val text: String,
+        val images: List<ImageBlock>,
+        val files: List<FileBlock> = emptyList(),
+        val sessionId: String?,
+    )
     private val pendingSends = ArrayDeque<PendingSend>()
 
     /** How many prompts are waiting behind the running turn. Drives the "N queued" chip -- without
      *  it a queued message is indistinguishable from a dropped one, since its bubble looks exactly
-     *  like a sent one. Mutate the deque ONLY through enqueue/dequeue/clearQueue so this can't drift. */
+     *  like a sent one. Mutate the deque ONLY through enqueue/dequeueFor/clearQueueFor so
+     *  this can't drift. */
     val queuedCount = mutableStateOf(0)
-    private fun enqueue(p: PendingSend) { pendingSends.add(p); queuedCount.value = pendingSends.size }
-    private fun dequeue(): PendingSend? =
-        (if (pendingSends.isEmpty()) null else pendingSends.removeFirst()).also { queuedCount.value = pendingSends.size }
-    private fun clearQueue() { pendingSends.clear(); queuedCount.value = 0 }
+    /** Depth for ONE chat. The "N queued" chip describes the conversation on screen, so prompts
+     *  parked for a different chat are neither counted nor drained here. */
+    private fun queuedFor(sessionId: String?): Int = pendingSends.count { it.sessionId == sessionId }
+    private fun refreshQueuedCount() { queuedCount.value = queuedFor(currentSession.value) }
+    private fun enqueue(p: PendingSend) { pendingSends.add(p); refreshQueuedCount() }
+    /** Pop the oldest prompt belonging to `sessionId`, leaving other chats' entries queued in
+     *  order. `null` matches the no-session case (a send typed before any chat was bound). */
+    private fun dequeueFor(sessionId: String?): PendingSend? {
+        val i = pendingSends.indexOfFirst { it.sessionId == sessionId }
+        if (i < 0) return null
+        val p = pendingSends.removeAt(i)
+        refreshQueuedCount()
+        return p
+    }
+    /** Drop one chat's parked prompts (Stop). Other chats' queues are untouched -- discarding
+     *  them because you hit Stop in a different conversation loses input you never cancelled. */
+    private fun clearQueueFor(sessionId: String?) {
+        pendingSends.removeAll { it.sessionId == sessionId }
+        refreshQueuedCount()
+    }
     // True between sendPrompt and RunEnded. `busy` is UI state and is also set while merely
     // queued, so it cannot answer "is the wire busy" -- this can.
     private var turnInFlight = false
@@ -92,6 +121,9 @@ class ConnectionManager private constructor(context: Context) {
     private fun resetTurnRouting() {
         activeRunId = null
         turnInFlightSession = null
+        // The chip describes THIS chat's queue, and the queue is now per-chat -- so re-point it
+        // at the session being opened. Prompts parked for the chat you left stay parked there.
+        refreshQueuedCount()
     }
 
 
@@ -1197,14 +1229,14 @@ class ConnectionManager private constructor(context: Context) {
                 turnInFlightSession = targetSid
                 io { unstable.steer(text, run) }
             } else {
-                enqueue(PendingSend(text, images, files))
+                enqueue(PendingSend(text, images, files, targetSid))
             }
         } else {
             // Not live / not ready (initial connect or silent reconnect window): queue and
             // let the core's own reconnect deliver the flush. The resume's replay wipes the
             // local transcript (including this just-added bubble); Ready re-adds the queued
             // bubbles on top of the rebuilt history.
-            enqueue(PendingSend(text, images, files))
+            enqueue(PendingSend(text, images, files, targetSid))
         }
     }
 
@@ -1329,13 +1361,15 @@ class ConnectionManager private constructor(context: Context) {
         messages.lastOrNull { it.role == "assistant" }?.text ?: "Turn finished."
 
     /** Stop the running turn. The core sends the ACP cancel; the server ends the turn and the
-     *  queue drains on RunEnded. Stop means stop: queued prompts are dropped, not deferred. */
+     *  queue drains on RunEnded. Stop means stop -- for THIS chat's queued prompts, which are
+     *  dropped rather than deferred. A parked prompt in another chat is a different turn's
+     *  business and survives. */
     fun cancel() {
         core.cancel()
         busy.value = false
         turnInFlight = false   // wire is free again; without this the queue never drains
         turnInFlightSession = null
-        clearQueue()           // Stop means stop: don't let queued prompts fire after a cancel
+        clearQueueFor(currentSession.value)   // Stop means stop: nothing queued here fires after
     }
 
     /** Compact the conversation history to reclaim context (goose /compact command). */
@@ -1457,17 +1491,19 @@ class ConnectionManager private constructor(context: Context) {
         // messages don't vanish from the screen (the rebuild wiped them).
         if (replayWiped) {
             replayWiped = false
-            pendingSends.forEach { messages.add(ChatMessage("user", it.text, it.images, it.files)) }
+            // Only THIS session's unsent prompts -- the transcript on screen is this chat's.
+            pendingSends.filter { it.sessionId == sid }
+                .forEach { messages.add(ChatMessage("user", it.text, it.images, it.files)) }
         }
         // Send ONE queued prompt (bubbles were already added when queued); RunEnded drains
         // the rest. Firing the whole deque at once would interleave the prompts in the
         // transcript and misattribute each reply — the exact failure the queue exists to prevent.
-        dequeue()?.let { p ->
+        dequeueFor(sid)?.let { p ->
             store.pendingPushSessionId = sid
             turnInFlight = true
-            turnInFlightSession = currentSession.value
+            turnInFlightSession = sid
             busy.value = true
-            sendPromptBlocks(p.text, p.images, expect = currentSession.value)
+            sendPromptBlocks(p.text, p.images, p.files, expect = sid)
         }
     }
 
@@ -1632,6 +1668,10 @@ class ConnectionManager private constructor(context: Context) {
     private fun onRunEnded(stopReason: String) {
         compacting.value = false
         turnInFlight = false
+        // The chat whose run just ended is the one whose queue is now releasable. Fall back to
+        // the visible chat only when no owner was ever recorded; draining the global head into
+        // whatever was on screen is exactly the cross-talk this replaces.
+        val owner = turnInFlightSession ?: currentSession.value
         turnInFlightSession = null
         // The run is over: drop any stale run id so the next send doesn't try to
         // steer a dead turn ("no turn exists to steer"). activeRunId is app-global,
@@ -1643,16 +1683,16 @@ class ConnectionManager private constructor(context: Context) {
         store.pendingPushSessionId = null
         // Drain one queued prompt, if any: send it and STAY busy, so the UI never flickers
         // idle between a queue and its turn.
-        val queued = dequeue()
+        val queued = dequeueFor(owner)
         busy.value = queued != null
         if (!appForeground) notifier.postReply(lastAssistantText())
         if (queued != null) {
             // Send the queued prompt now that the wire is free. Service stays up (we are
             // still busy), so backgrounding between the two turns is safe.
             turnInFlight = true
-            turnInFlightSession = currentSession.value
+            turnInFlightSession = owner
             lastSessionId?.let { store.pendingPushSessionId = it }
-            sendPromptBlocks(queued.text, queued.images, expect = currentSession.value)
+            sendPromptBlocks(queued.text, queued.images, queued.files, expect = owner)
         } else if (store.persistentConnection || (!appForeground && connectionHeld())) {
             // Backgrounded with a wire still live (or being re-dialed): the hold
             // setForeground(false) established stays — releasing it here is what
