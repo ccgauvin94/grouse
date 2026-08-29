@@ -166,8 +166,19 @@ fun ToolList(cm: ConnectionManager, e: ExtInfo, active: Set<String>,
     if (!cm.toolsAttributable(e)) return
     var open by remember { mutableStateOf(false) }
     val catalog = cm.catalogOf(e)
-    // Local echo so a checkbox responds instantly; the server round-trip refreshes it after.
-    var sel by remember(e.name, active) { mutableStateOf(active) }
+    // The echo lives on its OWN key. It used to be `remember(e.name, active)`, which meant any
+    // re-list that recomputed `active` rebuilt the state — so the box you had just unticked was
+    // overwritten by the server's (still stale) copy and appeared to flip itself back. The write
+    // was always landing; the UI was erasing the evidence.
+    var sel by remember(e.name) { mutableStateOf(active) }
+    // What we last asked the server for. While it is set we are waiting for the server to agree,
+    // and a re-list carrying anything else is by definition behind us — adopt only the matching
+    // value, which is the proof the write took effect.
+    var pending by remember(e.name) { mutableStateOf<Set<String>?>(null) }
+    LaunchedEffect(active) {
+        val want = pending
+        if (want == null) sel = active else if (want == active) { pending = null; sel = active }
+    }
 
     Row(Modifier.fillMaxWidth().clickable {
             open = !open
@@ -188,7 +199,15 @@ fun ToolList(cm: ConnectionManager, e: ExtInfo, active: Set<String>,
     }
     if (open) {
         if (catalog.isNullOrEmpty()) {
-            Text(if (catalog == null) "reading tool list…" else "no tools reported",
+            // Three different things used to render as one permanent "reading tool list…":
+            // genuinely fetching, fetched and found nothing, and — the common one in Settings —
+            // discovery that can never run because no chat is open. Say which.
+            Text(
+                when {
+                    catalog != null -> "no tools reported"
+                    !cm.canDiscoverTools -> "open a chat to list this extension's tools"
+                    else -> "reading tool list…"
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline,
                 modifier = Modifier.padding(start = 30.dp, bottom = 6.dp))
@@ -200,6 +219,7 @@ fun ToolList(cm: ConnectionManager, e: ExtInfo, active: Set<String>,
                         Text(t, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                         Checkbox(checked = t in sel, onCheckedChange = { on ->
                             sel = if (on) sel + t else sel - t
+                            pending = sel      // hold the echo until the server confirms it
                             onSave(sel)
                         })
                     }
@@ -373,18 +393,15 @@ fun ExtensionsScreen(cm: ConnectionManager, nav: NavController) {
                             onCheckedChange = { cm.toggleExtension(e, it) })
                     }
                     if (e.enabled) Box(Modifier.padding(horizontal = 16.dp)) {
-                        // Seed the checkboxes from the SAVED global allowlist (e.raw), not from the
-                        // current session's tool state. The session reflects whatever this chat
-                        // happens to be running (and after a catalogue discovery, the FULL set), so
-                        // seeding from it made every box show checked again after a save that had in
-                        // fact persisted -- "my pruning didn't save" when config.yaml said otherwise.
-                        // Empty allowlist means "all tools", so fall back to the catalogue then.
+                        // Seed a GLOBAL default from global state only. The saved allowlist is the
+                        // answer when there is one; goose OMITS the field to mean "all tools", so
+                        // the full catalogue stands in. The old last-resort fallback was the current
+                        // SESSION's tool set -- a different scope entirely, empty for builtin and
+                        // platform extensions (their tools are not `ext__tool` prefixed), so the
+                        // row rendered a session's truth while writing a global default.
                         val saved = (e.raw["available_tools"] as? JsonArray)
                             ?.mapNotNull { it.jsonPrimitive.contentOrNull }?.toSet().orEmpty()
-                        val active = if (saved.isEmpty())
-                            cm.catalogOf(e)?.toSet()
-                                ?: cm.sessionTools.value[e.name].orEmpty().toSet()
-                        else saved
+                        val active = if (saved.isEmpty()) cm.catalogOf(e)?.toSet().orEmpty() else saved
                         ToolList(cm, e, active) {
                             cm.setDefaultTools(e, it)   // config.yaml; applies to new chats
                         }
