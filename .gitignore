@@ -8,6 +8,12 @@ clients/android/build/
 clients/android/app/build/
 clients/android/local.properties
 *.apk
+# Gradle/Android SDK droppings when a build runs with HOME unset (the container builds land
+# here rather than in ~/.gradle). One is a debug.keystore — never want it staged by `git add .`.
+.gradle/
+.android/
+clients/android/.android/
+.kotlin/
 
 # Qt / CMake
 build/
