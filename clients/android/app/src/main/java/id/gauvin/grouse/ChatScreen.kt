@@ -608,8 +608,9 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
             // A queued message's bubble is identical to a sent one, so without this there is no way
             // to tell "waiting its turn" from "silently dropped".
             if (cm.queuedCount.value > 0) {
-                Text("${cm.queuedCount.value} queued — will send when this turn finishes",
-                    style = MaterialTheme.typography.labelSmall,
+                val willSteer = cm.activeRunIdState.value != null
+                Text(if (willSteer) "${cm.queuedCount.value} queued — will steer into current turn"
+                    else "${cm.queuedCount.value} queued — will send when this turn finishes",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(start = 4.dp, top = 2.dp))
             }
@@ -634,8 +635,11 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                     Box(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
                         if (input.isEmpty()) {
                             Text(
-                                if (cm.busy.value) "Queue message…" else "Message Grouse…",
-                                style = MaterialTheme.typography.bodyLarge,
+                                when {
+                                    cm.busy.value && cm.activeRunIdState.value != null -> "Steer current turn…"
+                                    cm.busy.value -> "Queue message…"
+                                    else -> "Message Grouse…"
+                                },
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
@@ -692,7 +696,11 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             Icon(
                                 if (canSend) Icons.Filled.ArrowUpward else Icons.Filled.Stop,
                                 contentDescription = when {
-                                    canSend -> if (cm.busy.value) "queue" else "send"
+                                    canSend -> when {
+                                        cm.busy.value && cm.activeRunIdState.value != null -> "steer"
+                                        cm.busy.value -> "queue"
+                                        else -> "send"
+                                    }
                                     else -> "stop"
                                 },
                                 modifier = Modifier.size(20.dp),

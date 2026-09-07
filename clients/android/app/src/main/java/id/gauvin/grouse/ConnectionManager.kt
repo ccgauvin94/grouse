@@ -120,6 +120,7 @@ class ConnectionManager private constructor(context: Context) {
      *  new session starts its own run. Call on every session switch (open/new/peer-created). */
     private fun resetTurnRouting() {
         activeRunId = null
+        activeRunIdState.value = null
         turnInFlightSession = null
         // The chip describes THIS chat's queue, and the queue is now per-chat -- so re-point it
         // at the session being opened. Prompts parked for the chat you left stay parked there.
@@ -1717,6 +1718,7 @@ class ConnectionManager private constructor(context: Context) {
         // steer a dead turn ("no turn exists to steer"). activeRunId is app-global,
         // so an un-cleared value would infect every chat, not just the one that ran.
         activeRunId = null
+        activeRunIdState.value = null
         // We got the authoritative completion straight from our own socket -- stop waiting
         // on the Stop-hook push for this turn so a later turn from another client in the
         // same (possibly shared) session doesn't spuriously match the stale flag.
@@ -1863,7 +1865,7 @@ class ConnectionManager private constructor(context: Context) {
 
     /** The running turn's run id (steer key), or null when no turn is live. */
     @Volatile private var activeRunId: String? = null
-
+    val activeRunIdState = mutableStateOf<String?>(null)
     private fun onCoreActiveRun(sessionId: String, runId: String) {
         // Steer only targets the session on screen; a peer's or background
         // session's non-empty run id is irrelevant here. BUT an EMPTY run id
@@ -1871,9 +1873,9 @@ class ConnectionManager private constructor(context: Context) {
         // the on-screen session, a roam turn that finished while its session was
         // NOT on screen would leave a stale dead run id behind — the next send
         // anywhere would try to steer it ("no turn found to steer") and the
-        // busy/turnInFlight state would stay stuck until Stop.
         if (runId.isEmpty()) {
             activeRunId = null
+            activeRunIdState.value = null
             // A cleared run id is also a turn-end fallback: hosts (e.g. a roam
             // peer running go/opencode) may not emit a RunEnded stream event,
             // which would otherwise leave busy/turnInFlight wedged so the user
@@ -1887,6 +1889,7 @@ class ConnectionManager private constructor(context: Context) {
             }
         } else if (sessionId == currentSession.value) {
             activeRunId = runId
+            activeRunIdState.value = runId
         }
     }
 
