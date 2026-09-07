@@ -320,7 +320,6 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                     ConnectScreen(cm) { nav.navigate("chat") { popUpTo("connect") { inclusive = true } } }
             }
             composable("chat") { ChatScreen(cm, onOpenDrawer = ::openDrawer) }
-            composable("assistant_settings") { AssistantSettingsScreen(cm, nav) }
             composable("project/{pname}") { back ->
                 val pname = Uri.decode(back.arguments?.getString("pname") ?: "")
                 ProjectScreen(cm, nav, pname)
@@ -343,7 +342,6 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
             }
             composable("extensions") { ExtensionsScreen(cm, nav) }
             composable("instance") { InstanceScreen(cm, nav) }
-            composable("providers") { ProvidersScreen(cm, nav) }
             composable("recipes") {
                 RecipesScreen(cm, nav, onOpenChat = {
                     nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }

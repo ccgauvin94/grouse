@@ -1394,7 +1394,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_grouse_core_checksum_method_core_load_cached_transcript() != 50836) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_new_session() != 54951) {
+    if (lib.uniffi_grouse_core_checksum_method_core_new_session() != 50585) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_open_session() != 21069) {
@@ -2178,6 +2178,9 @@ public interface CoreInterface {
     
     /**
      * `session/new` with `_meta.client` + cwd; replaces the current wire.
+     * When a Ready wire with the same host/port/key already exists, reuse it
+     * live — no `old.shutdown()` race. Only falls back to a full reconnect
+     * when the wire is down or the server identity changed.
      */
     fun `newSession`(`recipeId`: kotlin.String?)
     
@@ -2569,6 +2572,9 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     
     /**
      * `session/new` with `_meta.client` + cwd; replaces the current wire.
+     * When a Ready wire with the same host/port/key already exists, reuse it
+     * live — no `old.shutdown()` race. Only falls back to a full reconnect
+     * when the wire is down or the server identity changed.
      */override fun `newSession`(`recipeId`: kotlin.String?)
         = 
     callWithHandle {

@@ -299,6 +299,10 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Set while a new-chat-in-project is in flight; consumed when Ready delivers the id. */
     private var pendingProjectFiling: String? = null
+    /** Error text of the in-flight `sources/create`, captured by onUnstableError.
+     *  The uniffi call returns Unit — failures surface only through the listener. */
+    @Volatile private var pendingCreateError: String? = null
+
     fun fileSession(sessionId: String, projectId: String?) {
         io { unstable.sessionProject(sessionId, projectId) }
         sessions.value = sessions.value.map {
@@ -1039,9 +1043,24 @@ class ConnectionManager private constructor(context: Context) {
             else -> null
         }
         if (bad != null) { onResult(bad); return }
-        io { unstable.sourcesCreate("project", name, "", "") }
-        // The reply dispatch re-lists projects; report success now so the dialog can close.
-        onResult(null)
+        // sourcesCreate parks on the core runtime until the server's reply — or
+        // the wire dying under it — so only the io-block below knows the
+        // outcome. Report THEN: reporting up front raced `newChatInProject`'s
+        // wire replacement (new_session tears the old connection down) against
+        // the in-flight create, killing it mid-round-trip: "oneshot canceled",
+        // no project, phantom success.
+        pendingCreateError = null
+        io {
+            unstable.sourcesCreate("project", name, "", "")
+            // on_error rides main.post too (CoreListener posts to main) and was
+            // enqueued before this call returned, so reading on main is FIFO-
+            // deterministic: the capture, then this.
+            main.post {
+                val err = pendingCreateError
+                pendingCreateError = null
+                onResult(err)
+            }
+        }
     }
 
     /** Read a project's .goosehints and local memory (goose's memory extension stores its
@@ -1305,7 +1324,7 @@ class ConnectionManager private constructor(context: Context) {
      *  spent backoff budget; while the core is mid-retry (`connecting`) it does
      *  nothing and lets the core's own sequence finish. */
     private fun pokeMainConnection() {
-        if (!store.hasKey() || live || connecting) return
+        if (!store.hasKey() || core.ready() || live || connecting) return
         val sid = lastSessionId ?: store.lastSessionId
         if (sid == null || sid.startsWith("roam:")) return
         open(resume = sid)
@@ -1852,7 +1871,6 @@ class ConnectionManager private constructor(context: Context) {
 
     // ---------------------------------------------------------------------------
     // Unstable event translation
-    // ---------------------------------------------------------------------------
 
     private fun onUnstableError(method: String, message: String) {
         // A failed sidebar/config refresh is not the conversation's problem: no
@@ -1860,6 +1878,9 @@ class ConnectionManager private constructor(context: Context) {
         // sticks: a dead tools/list left `discovering` armed and the NEXT tools reply
         // triggered a spurious allowlist write; a dead extensions/list left the sheet
         // spinning.
+        // The create dialog awaits this (see createProject) — capture before the
+        // quiet/snackbar classification, which only decides SURFACING.
+        if (method == "_goose/unstable/sources/create") pendingCreateError = message
         if (method.startsWith("_goose/unstable/tools/list")) discovering = null
         if (method.startsWith("_goose/unstable/config/extensions/list")) extensionsBusy.value = false
         // Automatic probes (fired at connect / on screen open) are background traffic —
@@ -2060,6 +2081,7 @@ class ConnectionManager private constructor(context: Context) {
     // The core connect entry point (all session opens funnel through here)
     // ---------------------------------------------------------------------------
 
+    @Synchronized
     private fun open(resume: String?, cwd: String? = null, kind: SessionKind? = null) {
         // If a reset/create-assistant is pending but THIS open isn't the one that scheduled
         // it, abandon it so a later unrelated Ready can't complete a stale rename. (Explicit
@@ -2071,15 +2093,26 @@ class ConnectionManager private constructor(context: Context) {
         busy.value = false; compacting.value = false
         turnInFlight = false
         resetTurnRouting()
-        live = false; connecting = true; online.value = false
-        liveModelsFetchedFor = null   // re-fetch supported models fresh on every new connection
-        desiredApplied = false
+        // Live reuse (core already Ready on same host/port/key) must not
+        // flip to `connecting`/`Loading 0` — the wire stays up. Only a true
+        // reconnect (new host/port/key or no wire) shows connecting.
+        val base = currentServerConfig()
+        val canReuseLive = core.ready() && lastConfig != null && lastConfig == base
+        if (!canReuseLive) {
+            live = false; connecting = true; online.value = false
+            liveModelsFetchedFor = null
+            desiredApplied = false
+        } else {
+            // Reuse: keep `live`/`online` as-is; still clear per-chat turn
+            // state so the new chat starts clean.
+            liveModelsFetchedFor = null
+            desiredApplied = false
+        }
         // Resuming means content is on its way — show "Loading…" from the tap,
         // not from whenever the core's first event happens to land. onCoreTranscript
         // turns it straight back off if a cached snapshot paints (content on screen
         // needs no spinner); a new chat is empty by definition and never loads.
         replayActive.value = resume != null; replayProgress.value = 0; replayWiped = false
-        val base = currentServerConfig()
         // A fresh config (first connect of the process, or host/port/key/cwd changed) needs a
         // real `connect()` — the core's new/open intents reuse the LAST config only. connect()
         // is the one blocking core intent (bounded ≤15s), so it runs on a worker thread.

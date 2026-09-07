@@ -484,17 +484,50 @@ impl Core {
     }
 
     /// `session/new` with `_meta.client` + cwd; replaces the current wire.
+    /// When a Ready wire with the same host/port/key already exists, reuse it
+    /// live — no `old.shutdown()` race. Only falls back to a full reconnect
+    /// when the wire is down or the server identity changed.
     pub fn new_session(&self, recipe_id: Option<String>) {
         *self.inner.active_peer_label.write() = None;
         self.reset_chat_state();
         self.inner.store.clear();
         let config = {
             let mut state = self.inner.state.lock();
-            // Unowned until the server hands back an id (claimed at ready).
             state.store_session_id = None;
             state.last_config.clone()
         };
         let Some(config) = config else { return };
+        // Live reuse: same host/port/key, already Ready — session/new on the
+        // existing wire. This is the project-creation path
+        // (createProject → newChatInProject) and every "new chat".
+        if let Some(conn) = self.inner.conn.lock().clone() {
+            if conn.is_ready() && conn.config_matches(&config) {
+                let this = self.clone();
+                let cfg = config.clone();
+                let rid = recipe_id.clone();
+                crate::roam::runtime().spawn(async move {
+                    match conn.live_new_session_async(rid.clone()).await {
+                        Ok(session_id) => {
+                            {
+                                let mut state = this.inner.state.lock();
+                                state.store_session_id = Some(session_id);
+                            }
+                            this.save_cache();
+                            this.probe_stamp_and_save();
+                            // Live reuse doesn't go through the handshake's
+                            // on_ready → on_conn_status(Ready) path, so the UI
+                            // would stay in `connecting`/`Loading 0` forever.
+                            // Emit Ready to drive `live=true`/`connecting=false`.
+                            this.on_conn_status(ConnectionStatus::Ready);
+                        }
+                        Err(_) => {
+                            let _ = this.connect_impl(cfg, ConnectSpec::New { recipe_id: rid }, false, false);
+                        }
+                    }
+                });
+                return;
+            }
+        }
         let (_, _rx) =
             self.connect_impl(config, ConnectSpec::New { recipe_id }, false, false);
     }
@@ -563,6 +596,45 @@ impl Core {
             state.last_config.clone()
         };
         let Some(config) = config else { return };
+        // Live reuse: same host/port/key, already Ready — session/load on the
+        // existing wire. Avoids the `old.shutdown()` churn that made every
+        // session switch a full reconnect.
+        if let Some(conn) = self.inner.conn.lock().clone() {
+            if conn.is_ready() && conn.config_matches(&config) {
+                let this = self.clone();
+                let sid = session_id.clone();
+                let c = cwd.clone();
+                let cfg = config.clone();
+                conn.set_painted_cache(painted);
+                crate::roam::runtime().spawn(async move {
+                    if conn.live_load_session_async(sid.clone(), c.clone(), suppress).await.is_ok() {
+                        this.save_cache();
+                        this.probe_stamp_and_save();
+                        return;
+                    }
+                    // Stale session — try live new session before full reconnect.
+                    let conn2_opt = {
+                        let g = this.inner.conn.lock();
+                        g.clone()
+                    };
+                    if let Some(conn2) = conn2_opt {
+                        if conn2.is_ready() && conn2.config_matches(&cfg) {
+                            if let Ok(new_id) = conn2.live_new_session_async(None).await {
+                                {
+                                    let mut state = this.inner.state.lock();
+                                    state.store_session_id = Some(new_id);
+                                }
+                                this.save_cache();
+                                this.probe_stamp_and_save();
+                                return;
+                            }
+                        }
+                    }
+                    let _ = this.connect_impl(cfg, ConnectSpec::Resume { session_id: sid, cwd: c }, suppress, painted);
+                });
+                return;
+            }
+        }
         let (_, _rx) = self.connect_impl(
             config,
             ConnectSpec::Resume { session_id, cwd },

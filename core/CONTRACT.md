@@ -150,6 +150,11 @@ Usage { used, size, cost, currency } · RunEnded(stop_reason)`
 - Reconnect: exponential backoff (500ms·2^n, cap 15s, 6 attempts) on unexpected
   drop, reset on `Ready`; no reconnect on explicit `disconnect()`. Owned here,
   surfaced only via `on_status`.
+- Deliberate wire replacement emits no terminal `Error`: `new_session`/
+  `open_session`/`disconnect()` shut the previous connection down, and a
+  deliberately closed wire reports nothing — the replacement handshake owns the
+  status story (`Connecting` → `Ready`), or `disconnect()`'s own `Disconnected`
+  does. Only an UNEXPECTED end surfaces `Error(String)`.
 - Keepalive: the WebSocket transport pings an idle connection (ping after 30s
   of silence, checked every 5s; no reply within 15s ⇒ the connection is
   declared dropped and the reconnect above fires). Traffic suppresses pings

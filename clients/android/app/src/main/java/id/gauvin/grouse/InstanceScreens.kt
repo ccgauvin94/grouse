@@ -138,13 +138,14 @@ fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
                     val key = newKey.trim().ifBlank { cm.store.secretKey }
                     cm.connect(host.trim(), port.trim(), key, wdir.trim()); nav.popBackStack()
                 }, modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) { Text(stringResource(R.string.save_and_reconnect)) }
+                OutlinedButton(onClick = {
+                    val key = newKey.trim().ifBlank { cm.store.secretKey }
+                    cm.connect(host.trim(), port.trim(), key, wdir.trim())
+                }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("Test Connection") }
             }
-
             SettingsSection("Notifications & background") {
-                SettingsSwitchRow("Keep connection alive", persistent) { persistent = it; cm.setPersistent(it) }
-                SettingCaption("On: stay connected in the background even when idle (persistent notification, more battery). " +
-                    "Off: the connection is still held while one is live or re-dialing — but an idle " +
-                    "app releases it. Either way you get a finished-turn notification.")
+                SettingsSwitchRow("Keep Connection Alive", persistent) { persistent = it; cm.setPersistent(it) }
+                SettingCaption("Stay connected in the background. Shows a persistent notification.")
                 HorizontalDivider(Modifier.padding(vertical = 6.dp))
                 // The no-notification middle ground: a battery-optimization exemption keeps the
                 // process (and its socket) unfrozen in the background WITHOUT a foreground
@@ -162,7 +163,7 @@ fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
                     owner2.lifecycle.addObserver(obs)
                     onDispose { owner2.lifecycle.removeObserver(obs) }
                 }
-                SettingsSwitchRow("Unrestricted battery", exempt) { want ->
+                SettingsSwitchRow("Unrestricted Battery", exempt) { want ->
                     val intent = if (want && !exempt)
                         android.content.Intent(
                             android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
@@ -173,8 +174,7 @@ fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
                             android.net.Uri.parse("package:${ctx.packageName}"))
                     runCatching { ctx.startActivity(intent) }
                 }
-                SettingCaption("Exempts Grouse from the background app freezer so short absences " +
-                    "keep the connection — no notification needed. The system dialog asks for consent.")
+                SettingCaption("Run without battery restrictions. No notification required.")
             }
 
 
@@ -183,83 +183,3 @@ fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ProvidersScreen(cm: ConnectionManager, nav: NavController) {
-    val ctx = LocalContext.current
-    // Every row below reads and writes goose's own config over ACP, except speech, which is
-    // this device calling LocalAI directly (goose has no TTS, and its dictation transcribes for
-    // goose's own UI rather than returning text to a client).
-    LaunchedEffect(cm.online.value) {
-        if (cm.online.value) {
-            cm.readServerConfig(
-                "GOOSE_PROVIDER", "GOOSE_MODEL", "GOOSE_FAST_MODEL")
-            // Refresh the inventory on entry: providers can be configured server-side while
-            // the app is running, and this screen is where that would be noticed.
-            cm.refreshProviders()
-        }
-    }
-    fun cfg(k: String) = cm.serverConfig[k].orEmpty()
-    Scaffold(topBar = {
-        TopAppBar(
-            title = { Text(stringResource(R.string.providers)) },
-            navigationIcon = {
-                IconButton(onClick = { nav.popBackStack() }) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
-                }
-            },
-        )
-    }) { pad ->
-        Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
-            .verticalScroll(rememberScrollState())) {
-
-            ModelRow(
-                title = "Chat",
-                caption = "The model new chats start on. The picker above the message box " +
-                    "changes the current chat only. A cloud model under provider \"openai\" is " +
-                    "sent to the local server and 404s — move both together.",
-                enabled = true, onEnabled = null,
-                provider = cfg("GOOSE_PROVIDER"),
-                onProvider = { cm.setServerConfig("GOOSE_PROVIDER", it) },
-                model = cfg("GOOSE_MODEL"),
-                onModel = { cm.setServerConfig("GOOSE_MODEL", it) },
-                providers = cm.providerChoices(cfg("GOOSE_PROVIDER")),
-                modelChoices = cm.knownModels.value.toList(),
-            )
-
-            ModelRow(
-                title = "Fast",
-                caption = "Session naming, compaction and summarising. Off uses the chat model. " +
-                    "goose resolves this against whichever provider serves the model NAME, so a " +
-                    "name only one provider knows works from any chat — and one nobody knows " +
-                    "fails silently back to the chat model.",
-                enabled = cfg("GOOSE_FAST_MODEL").isNotBlank(),
-                onEnabled = { on -> if (!on) cm.setServerConfig("GOOSE_FAST_MODEL", "") },
-                provider = cfg("GOOSE_PROVIDER"),
-                onProvider = { cm.setServerConfig("GOOSE_PROVIDER", it) },
-                model = cfg("GOOSE_FAST_MODEL"),
-                onModel = { cm.setServerConfig("GOOSE_FAST_MODEL", it) },
-                providers = cm.providerChoices(cfg("GOOSE_PROVIDER")),
-                modelChoices = cm.knownModels.value.toList(),
-            )
-
-            SettingsSection("Catalog") {
-                SettingsSwitchRow("Show all providers", cm.showAllProviders.value) {
-                    cm.setShowAllProviders(it)
-                }
-                // Without the inventory the pickers can only offer what is already selected.
-                // Say so, rather than letting an empty dropdown read as a broken screen.
-                if (cm.providers.value.isEmpty()) {
-                    SettingCaption(if (cm.online.value)
-                        "This server did not return a provider list, so the pickers only show " +
-                            "what is already set. Type a provider name to change it."
-                        else "Connect to load the provider list.")
-                }
-                SettingCaption("Off shows only providers set up on your goose. On lists goose's " +
-                    "full catalog.")
-            }
-
-            Spacer(Modifier.height(28.dp))
-        }
-    }
-}

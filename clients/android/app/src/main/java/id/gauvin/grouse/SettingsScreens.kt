@@ -278,56 +278,49 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                     if (cm.online.value) "  ·  connected" else "  ·  offline") {
                     nav.navigate("instance")
                 }
-                SettingsNavRow("Providers", "Chat model, vision, speech") {
-                    nav.navigate("providers")
-                }
                 SettingsNavRow("Tools", "Extensions and the tools they expose") {
                     nav.navigate("extensions")
-                }
-                // Only reachable when the feature is switched on below — otherwise this row
-                // would lead to a screen configuring jobs the server does not run.
-                if (cm.assistantEnabled.value) {
-                    SettingsNavRow("Assistant", "The persistent thread and its scheduled jobs") {
-                        nav.navigate("assistant_settings")
-                    }
                 }
             }
 
             SettingsSection("Assistant") {
-                SettingsSwitchRow("Enable assistant", cm.assistantEnabled.value) {
+                SettingsSwitchRow("Enable Assistant", cm.assistantEnabled.value) {
                     cm.setAssistantEnabled(it)
                 }
-                SettingCaption("Off by default. The assistant is one persistent thread kept fed " +
-                    "by scheduled recipes running on the server. Turn it on only if your server " +
-                    "has those jobs — without them the thread stays empty and its status reads " +
-                    "permanently stale. With it off, this is a plain chat client.")
+                SettingCaption("Enable optional assistant thread and functionality. Note: This is an experimental feature.")
             }
 
             SettingsSection("Notifications") {
                 var pushOn by remember { mutableStateOf(cm.store.pushEnabled) }
-                SettingsSwitchRow("Push notifications", pushOn) { on ->
+                SettingsSwitchRow("Push Notifications", pushOn) { on ->
                     pushOn = on
                     val act = ctx.findActivity()
                     if (on && act != null) Push.enable(act) else Push.disable(ctx)
                 }
-                SettingCaption("Receive server-pushed briefings and alerts through a UnifiedPush " +
-                    "distributor (e.g. NextPush on your Nextcloud) — no FCM and no always-on socket. " +
-                    "Turning this on prompts you to pick the distributor, then registers this device.")
+                SettingCaption("Receive server-pushed notifications and alerts through a Unified Push distributor.")
                 val endpoint = cm.store.pushEndpoint
                 if (pushOn && endpoint.isNotBlank()) {
-                    SelectionContainer {
-                        Text("Endpoint: $endpoint", style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.outline)
+                    Text("Endpoint ID", style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp))
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                    ) {
+                        SelectionContainer {
+                            Text(endpoint, style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
+                                modifier = Modifier.padding(12.dp))
+                        }
                     }
-                    SettingCaption("This device's endpoint is published to the server automatically " +
-                        "(GROUSE_PUSH_ENDPOINT), so it stays current across reinstalls.")
                 } else if (pushOn) {
                     SettingCaption("Waiting for the distributor to issue an endpoint…")
                 }
             }
 
             SettingsSection("Appearance") {
-                SettingsSwitchRow("Material You dynamic color", cm.dynamicColor.value) { cm.setDynamicColor(it) }
+                SettingsSwitchRow("Dynamic Color", cm.dynamicColor.value) { cm.setDynamicColor(it) }
                 SettingCaption("Off uses the built-in goose-green palette.")
             }
 
@@ -337,10 +330,7 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                 val bioAvailable = ctx.findActivity()
                     ?.let { it is androidx.fragment.app.FragmentActivity && Biometric.available(it) } ?: false
                 var bioLock by remember { mutableStateOf(cm.store.biometricLock) }
-                // The switch shows and controls the REAL stored value (not ANDed with availability),
-                // so it can always be turned back off — and turning it on when no authenticator is
-                // enrolled is harmless (the lock only engages when Biometric.available is true).
-                SettingsSwitchRow("Require biometric unlock", bioLock) { on ->
+                SettingsSwitchRow("Biometric Lock", bioLock) { on ->
                     bioLock = on; cm.store.biometricLock = on
                 }
                 SettingCaption("Off by default. When on, opening the app (or reconnecting with the " +

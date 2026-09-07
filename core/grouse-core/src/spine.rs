@@ -288,6 +288,14 @@ struct ConnInner {
     ready: Mutex<Option<oneshot::Sender<Result<(), String>>>>,
     /// Core triggers an explicit disconnect through this channel.
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    /// Set by [`Conn::shutdown`]: the end of this wire is deliberate (superseded
+    /// by a newer connect, or an explicit disconnect), not a failure — no
+    /// terminal `Error` status may surface from it. A "new chat" replaces the
+    /// wire while unstable RPCs can sit in flight; before this flag, every such
+    /// replacement flashed `Error("connection closed")` at the UI and read as a
+    /// failure of whatever was mid-round-trip (project creation rode exactly
+    /// this race).
+    closing: AtomicBool,
     /// The handshake's idle select waits on this receiver.
     shutdown_rx: Mutex<Option<oneshot::Receiver<()>>>,
     /// Status-change hook (Core mirrors + fans out to the listener).
@@ -335,12 +343,13 @@ impl Conn {
                 connection: Mutex::new(None),
                 status: Mutex::new(ConnectionStatus::Disconnected),
                 session_id: Mutex::new(None),
+                shutdown_tx: Mutex::new(Some(shutdown_tx)),
+                closing: AtomicBool::new(false),
                 active_run_id: Mutex::new(None),
                 suppress_replay: AtomicBool::new(false),
                 replaying: AtomicBool::new(false),
                 painted_cache: AtomicBool::new(false),
                 ready: Mutex::new(Some(ready_tx)),
-                shutdown_tx: Mutex::new(Some(shutdown_tx)),
                 shutdown_rx: Mutex::new(Some(shutdown_rx)),
                 on_status: Mutex::new(None),
                 on_touched: Mutex::new(None),
@@ -354,9 +363,26 @@ impl Conn {
         (conn, ready_rx)
     }
 
-    /// Signal an explicit disconnect: the handshake's idle select returns and
-    /// the SDK shuts the connection down gracefully (Close frame included).
+    pub(crate) fn is_ready(&self) -> bool {
+        matches!(*self.inner.status.lock(), ConnectionStatus::Ready)
+    }
+
+    pub(crate) fn config_matches(&self, other: &ServerConfig) -> bool {
+        let c = &self.inner.config;
+        c.host == other.host
+            && c.port == other.port
+            && c.secret_key == other.secret_key
+            && c.use_tls == other.use_tls
+            && c.accept_invalid_certs == other.accept_invalid_certs
+            && c.ca_cert_pem == other.ca_cert_pem
+    }
+
+    /// Signal an explicit disconnect — or a newer connect replacing this wire —
+    /// marking the end deliberate: the handshake's idle select returns and the
+    /// SDK shuts the connection down gracefully (Close frame included), and
+    /// `on_connection_ended` surfaces no failure for it.
     pub(crate) fn shutdown(&self) {
+        self.inner.closing.store(true, Ordering::SeqCst);
         if let Some(tx) = self.inner.shutdown_tx.lock().take() {
             let _ = tx.send(());
         }
@@ -517,8 +543,19 @@ impl Conn {
     }
 
     /// Signal Core that the connection ended (drop, explicit disconnect, or
-    /// handshake failure).
+    /// handshake failure). Deliberate closes surface no status — see below.
     pub(crate) fn on_connection_ended(&self, result: Result<(), AcpError>) {
+        // A deliberate `shutdown()` (superseded by a newer connect, or an
+        // explicit disconnect) is not a failure: emit no terminal Error. The
+        // replacement handshake owns the status story from here (Connecting →
+        // Ready), or `disconnect()` already emitted Disconnected. The core's
+        // ended hook below stays the sole reconnect/inertness decision point.
+        if self.inner.closing.load(Ordering::SeqCst) {
+            if let Some(hook) = self.inner.on_ended.lock().clone() {
+                hook(result.map_err(|error| error.to_string()));
+            }
+            return;
+        }
         let message = match &result {
             Ok(()) => "connection closed".to_string(),
             Err(error) => error.to_string(),
@@ -680,6 +717,104 @@ impl Conn {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        *self.inner.session_id.lock() = Some(session_id);
+        self.emit_config(&reply);
+        Ok(())
+    }
+
+    /// Live-wire `session/new` without tearing the connection down. Used by
+    /// `Core::new_session` when a Ready connection with the same host/port/key
+    /// already exists — avoids the `old.shutdown()` race that killed in-flight
+    /// `sources/create` during project creation. Returns the new session id.
+    #[allow(dead_code)]
+    pub(crate) fn live_new_session(
+        &self,
+        recipe_id: Option<String>,
+    ) -> Result<String, AcpError> {
+        let mut params = json!({
+            "cwd": self.inner.config.cwd,
+            "mcpServers": [],
+        });
+        let mut meta = Map::new();
+        meta.insert("client".into(), Value::String(self.inner.config.client_id.clone()));
+        if let Some(recipe) = recipe_id {
+            meta.insert("recipeId".into(), Value::String(recipe));
+        }
+        params["_meta"] = Value::Object(meta);
+        let reply: Value = self.rpc("session/new", params)?;
+        let session_id = reply
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        *self.inner.session_id.lock() = Some(session_id.clone());
+        self.emit_config(&reply);
+        Ok(session_id)
+    }
+    pub(crate) async fn live_new_session_async(
+        &self,
+        recipe_id: Option<String>,
+    ) -> Result<String, AcpError> {
+        let mut params = json!({
+            "cwd": self.inner.config.cwd,
+            "mcpServers": [],
+        });
+        let mut meta = Map::new();
+        meta.insert("client".into(), Value::String(self.inner.config.client_id.clone()));
+        if let Some(recipe) = recipe_id {
+            meta.insert("recipeId".into(), Value::String(recipe));
+        }
+        params["_meta"] = Value::Object(meta);
+        let reply: Value = self.rpc_async("session/new", params).await?;
+        let session_id = reply
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        *self.inner.session_id.lock() = Some(session_id.clone());
+        self.emit_config(&reply);
+        Ok(session_id)
+    }
+    /// Live-wire `session/load` — same wire-reuse rationale as `live_new_session`.
+    #[allow(dead_code)]
+    pub(crate) fn live_load_session(
+        &self,
+        session_id: String,
+        cwd: String,
+        suppress_replay: bool,
+    ) -> Result<(), AcpError> {
+        self.inner.session_id.lock().replace(session_id.clone());
+        self.inner.suppress_replay.store(suppress_replay, Ordering::SeqCst);
+        let mut params = json!({
+            "sessionId": session_id,
+            "cwd": cwd,
+            "mcpServers": [],
+        });
+        if suppress_replay {
+            params["_meta"] = json!({ "replayTail": 1 });
+        }
+        let reply: Value = self.rpc("session/load", params)?;
+        *self.inner.session_id.lock() = Some(session_id);
+        self.emit_config(&reply);
+        Ok(())
+    }
+    pub(crate) async fn live_load_session_async(
+        &self,
+        session_id: String,
+        cwd: String,
+        suppress_replay: bool,
+    ) -> Result<(), AcpError> {
+        self.inner.session_id.lock().replace(session_id.clone());
+        self.inner.suppress_replay.store(suppress_replay, Ordering::SeqCst);
+        let mut params = json!({
+            "sessionId": session_id,
+            "cwd": cwd,
+            "mcpServers": [],
+        });
+        if suppress_replay {
+            params["_meta"] = json!({ "replayTail": 1 });
+        }
+        let reply: Value = self.rpc_async("session/load", params).await?;
         *self.inner.session_id.lock() = Some(session_id);
         self.emit_config(&reply);
         Ok(())
