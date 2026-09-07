@@ -1498,14 +1498,6 @@ class ConnectionManager private constructor(context: Context) {
             // The provider inventory: catalog + which are configured + their models.
             io { unstable.providersList() }
             core.listSessions()   // so the Assistant thread can be resolved by title
-            // New chats start empty — the empty-snapshot Clear would otherwise
-            // flip replayActive to true and stick at "Loading… 0" while the
-            // first prompt streams behind it. Resumes keep the spinner via
-            // open()'s replayActive and the transcript handler's snap check.
-            if (currentSession.value == sid && messages.isEmpty()) {
-                replayActive.value = false
-                replayProgress.value = 0
-            }
         }
         // A rebuild (replay or cache path) just finished: unpin the list and snap to bottom
         // when content actually streamed in.
@@ -1572,7 +1564,11 @@ class ConnectionManager private constructor(context: Context) {
                 snap.forEach { appendFromMessage(it) }
                 // Empty snapshot = a rebuild is about to stream (show "Loading… N"); a
                 // non-empty one is the instant cache paint (no loading state).
-                replayActive.value = snap.isEmpty()
+                // For a brand-new chat the snapshot is also empty, but it must
+                // stay on the empty composer, not the spinner.
+                if (snap.isNotEmpty()) {
+                    replayActive.value = false
+                }
                 replayProgress.value = 0
             }
             is TranscriptEvent.Append -> appendFromMessage(event.message)
