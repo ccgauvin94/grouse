@@ -595,6 +595,7 @@ class ConnectionManager private constructor(context: Context) {
     /** Set when the first `connect()` of the process (or a config change) created a transient
      *  session; the Ready handler then opens the real target. */
     private var pendingResumeAfterConnect: String? = null
+    private var pendingNewSessionAfterConnect: Boolean = false
     /** Saved provider/model/mode picks re-applied once per connection (the core does not
      *  re-apply them; the old client's applyDesired did). */
     private var desiredApplied = false
@@ -1468,6 +1469,12 @@ class ConnectionManager private constructor(context: Context) {
             else core.openSession(deferred)
             return
         }
+        if (pendingNewSessionAfterConnect) {
+            pendingNewSessionAfterConnect = false
+            val rid = pendingRecipeId.also { pendingRecipeId = null }
+            core.newSession(rid)
+            return
+        }
         // A roam peer owns the chat: Ready here is the MAIN connection's — don't repoint the
         // on-screen session at it.
         if (currentRoamPeer == null) {
@@ -2098,6 +2105,12 @@ class ConnectionManager private constructor(context: Context) {
         // it, abandon it so a later unrelated Ready can't complete a stale rename. (Explicit
         // newSession/openSession already clear the flag; this is the belt-and-suspenders.)
         if (pendingAssistantRename && resume != null) pendingAssistantRename = false
+        // Single-flight: if already connecting, queue this open for after Ready
+        if (connecting) {
+            if (resume != null) pendingResumeAfterConnect = resume
+            else pendingNewSessionAfterConnect = true
+            return
+        }
         // A new client can't receive the old turn's RunEnded, so clear turn state here.
         // Otherwise a hung/dropped turn leaves busy=true and every new chat + reconnect
         // inherits a stuck "goose is thinking…" with nothing sent. Same logic for compacting.
