@@ -268,8 +268,18 @@ class ConnectionManager private constructor(context: Context) {
 
     fun refreshSkills() { io { unstable.sourcesList("skill") } }
 
-    fun saveSkill(s: SkillInfo, content: String) {
-        io { unstable.sourcesUpdate("skill", s.path, s.name, s.description, content) }
+    @Volatile private var pendingSkillError: String? = null
+    fun saveSkill(s: SkillInfo, content: String, onResult: (String?) -> Unit = {}) {
+        pendingSkillError = null
+        io {
+            unstable.sourcesUpdate("skill", s.path, s.name, s.description, content)
+            // on_error was posted to main before this returns — read on main for FIFO.
+            main.post {
+                val err = pendingSkillError
+                pendingSkillError = null
+                onResult(err)
+            }
+        }
     }
 
     fun deleteSkill(path: String) { io { unstable.sourcesDelete("skill", path) } }
@@ -1873,22 +1883,19 @@ class ConnectionManager private constructor(context: Context) {
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // Unstable event translation
-
     private fun onUnstableError(method: String, message: String) {
         // A failed sidebar/config refresh is not the conversation's problem: no
         // transcript bubble. But the flags those calls set MUST clear, or the failure
         // sticks: a dead tools/list left `discovering` armed and the NEXT tools reply
         // triggered a spurious allowlist write; a dead extensions/list left the sheet
         // spinning.
-        // The create dialog awaits this (see createProject) — capture before the
-        // quiet/snackbar classification, which only decides SURFACING.
+        // The create/skill dialogs await this (see createProject/saveSkill)
+        // — capture before the quiet/snackbar classification, which only decides SURFACING.
         if (method == "_goose/unstable/sources/create") pendingCreateError = message
+        if (method == "_goose/unstable/sources/update") pendingSkillError = message
         if (method.startsWith("_goose/unstable/tools/list")) discovering = null
         if (method.startsWith("_goose/unstable/config/extensions/list")) extensionsBusy.value = false
         // Automatic probes (fired at connect / on screen open) are background traffic —
-        // the old client rendered their failures as subtle background errors. Snackbar
         // only user-initiated calls; a dead probe (e.g. supported-models against a
         // provider the box can't reach) must not greet the user with an alarm at login.
         val quiet = listOf(

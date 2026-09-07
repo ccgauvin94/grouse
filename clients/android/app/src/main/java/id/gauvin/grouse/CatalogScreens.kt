@@ -261,27 +261,48 @@ fun SkillScreen(cm: ConnectionManager, nav: NavController, name: String) {
                 color = MaterialTheme.colorScheme.outline,
                 modifier = Modifier.padding(vertical = 8.dp))
             var body by remember(sk.path, sk.content) { mutableStateOf(sk.content) }
-            OutlinedTextField(body, { body = it }, minLines = 10, maxLines = 40,
-                enabled = sk.writable,
-                label = { Text(if (sk.writable) "SKILL.md" else "SKILL.md (read-only)") },
-                modifier = Modifier.fillMaxWidth())
-            if (sk.writable) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(enabled = body != sk.content,
-                        onClick = { cm.saveSkill(sk, body) }) { Text(stringResource(R.string.save)) }
+            var showPreview by remember { mutableStateOf(false) }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { showPreview = !showPreview }) {
+                    Text(if (showPreview) "Edit" else "Preview")
+                }
+                if (sk.writable) {
+                    var saving by remember { mutableStateOf(false) }
+                    var saveMsg by remember { mutableStateOf<String?>(null) }
+                    Column(horizontalAlignment = Alignment.End) {
+                        TextButton(enabled = body != sk.content && !saving,
+                            onClick = {
+                                saving = true; saveMsg = null
+                                cm.saveSkill(sk, body) { err ->
+                                    saving = false
+                                    saveMsg = if (err == null) "Saved" else "Save failed: $err"
+                                }
+                            }) { Text(if (saving) "Saving…" else stringResource(R.string.save)) }
+                        saveMsg?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = if (it == "Saved") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 2.dp)) }
+                    }
+                }
+            }
+            if (showPreview) {
+                Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                    SelectionContainer {
+                        Box(Modifier.padding(12.dp)) {
+                            RichText { Markdown(body) }
+                        }
+                    }
                 }
             } else {
-                // Bundled skills live inside goose's own directory; a save would fail, so the
-                // field is disabled rather than offering an edit that cannot land.
+                OutlinedTextField(body, { body = it }, minLines = 10, maxLines = 40,
+                    enabled = sk.writable,
+                    label = { Text(if (sk.writable) "SKILL.md" else "SKILL.md (read-only)") },
+                    modifier = Modifier.fillMaxWidth(), isError = false)
+            }
+            if (!sk.writable) {
                 SettingCaption("Bundled with goose, so it cannot be edited here.")
             }
-            SettingCaption(sk.path)
             Spacer(Modifier.height(28.dp))
         }
     }
 }
-
-
 
 
 // A Code screen and a server-side directory picker stood here and are GONE from this branch.
