@@ -308,7 +308,7 @@ pub trait GrouseUnstableListener: Send + Sync {
 /// "send_prompt/set_config_option/tool queries queue until ready, then flush
 /// in order").
 enum PendingIntent {
-    SendPrompt(Prompt, Option<SendExpect>),
+    SendPrompt(Prompt, Option<SendExpect>, String),
     SetConfig(String, String),
 }
 
@@ -326,7 +326,10 @@ struct CoreState {
     last_config: Option<ServerConfig>,
     /// A turn is in flight on the main connection; the pending queue waits.
     prompting: bool,
-    pending: VecDeque<PendingIntent>,
+    /// Per-session pending intents (key is sessionId, "" for global/no-session).
+    /// Prompts queued in one chat must not leak into another.
+    pending: HashMap<String, VecDeque<PendingIntent>>,
+    next_pending_id: u64,
     /// Exponential backoff state (500ms·2^n, cap 15s, 6 attempts; reset on Ready).
     reconnect_attempts: u32,
     /// Bumped to invalidate pending reconnect timers (a newer connect wins).
@@ -705,7 +708,11 @@ impl Core {
         match self.try_send_prompt(prompt, expect) {
             Ok(()) => {}
             Err((prompt, expect)) => {
-                self.inner.state.lock().pending.push_back(PendingIntent::SendPrompt(prompt, expect));
+                let mut state = self.inner.state.lock();
+                let id = state.next_pending_id.to_string();
+                state.next_pending_id += 1;
+                let key = expect.as_ref().map(|e| e.session_id.clone()).unwrap_or_default();
+                state.pending.entry(key).or_default().push_back(PendingIntent::SendPrompt(prompt, expect, id));
             }
         }
     }
@@ -740,7 +747,7 @@ impl Core {
         match self.try_set_config(config_id, value) {
             Ok(()) => {}
             Err((config_id, value)) => {
-                self.inner.state.lock().pending.push_back(PendingIntent::SetConfig(config_id, value));
+                self.inner.state.lock().pending.entry(String::new()).or_default().push_back(PendingIntent::SetConfig(config_id, value));
             }
         }
     }
@@ -965,7 +972,9 @@ impl Core {
     /// in-flight resync cycle).
     fn reset_chat_state(&self) {
         let mut state = self.inner.state.lock();
-        state.pending.clear();
+        // Per-session pending stays queued for its session; don't clear the
+        // whole map when switching chats (a prompt queued in Chat A while
+        // busy must not vanish when you open Chat B).
         state.prompting = false;
         state.resync_ticks = 0;
         state.sync_stamp = None;
@@ -1085,7 +1094,7 @@ impl Core {
                 }
             }
             self.save_cache();
-            // The replay itself sends NO session_info_update (the real server
+            self.flush_pending();
             // doesn't), so the stamp above can race the session/list reply and
             // land empty — which made every later open look stale. Re-stamp
             // from a session/info probe: deterministic, and its updatedAt is
@@ -1343,30 +1352,54 @@ impl Core {
     /// Drain the pending queue in order once the socket is ready (CONTRACT §4).
     fn flush_pending(&self) {
         loop {
-            let popped = {
+            let (key, intent) = {
                 let mut state = self.inner.state.lock();
                 if state.prompting {
                     return;
                 }
-                state.pending.pop_front()
+                // Global SetConfig queue first (key ""), then current session's SendPrompt queue.
+                let sid = self.active_session_id().unwrap_or_default();
+                if let Some(q) = state.pending.get_mut("") {
+                    if let Some(intent) = q.pop_front() {
+                        if q.is_empty() { state.pending.remove(""); }
+                        (String::new(), intent)
+                    } else {
+                        // No global pending, try current session
+                        if let Some(q) = state.pending.get_mut(&sid) {
+                            if let Some(intent) = q.pop_front() {
+                                if q.is_empty() { state.pending.remove(&sid); }
+                                (sid.clone(), intent)
+                            } else { return; }
+                        } else { return; }
+                    }
+                } else if let Some(q) = state.pending.get_mut(&sid) {
+                    if let Some(intent) = q.pop_front() {
+                        if q.is_empty() { state.pending.remove(&sid); }
+                        (sid.clone(), intent)
+                    } else { return; }
+                } else {
+                    return;
+                }
             };
-            let Some(intent) = popped else { return };
             let requeue = match intent {
-                PendingIntent::SendPrompt(prompt, expect) => {
+                PendingIntent::SendPrompt(prompt, expect, id) => {
                     match self.try_send_prompt(prompt, expect) {
                         Ok(()) => None,
-                        Err((prompt, expect)) => Some(PendingIntent::SendPrompt(prompt, expect)),
+                        Err((prompt, expect)) => {
+                            let k = expect.as_ref().map(|e| e.session_id.clone()).unwrap_or_default();
+                            Some((k, PendingIntent::SendPrompt(prompt, expect, id)))
+                        }
                     }
                 }
                 PendingIntent::SetConfig(config_id, value) => {
                     match self.try_set_config(config_id, value) {
                         Ok(()) => None,
-                        Err((config_id, value)) => Some(PendingIntent::SetConfig(config_id, value)),
+                        Err((config_id, value)) => Some((String::new(), PendingIntent::SetConfig(config_id, value))),
                     }
                 }
             };
-            if let Some(intent) = requeue {
-                self.inner.state.lock().pending.push_front(intent);
+            if let Some((k, intent)) = requeue {
+                self.inner.state.lock().pending.entry(k).or_default().push_front(intent);
                 return;
             }
         }

@@ -1274,13 +1274,6 @@ class ConnectionManager private constructor(context: Context) {
     /** Build a Prompt and hand it to the core. The core rejects a send whose `expect` session
      *  mismatches its bound session — silently, so the mismatch is surfaced here instead. */
     private fun sendPromptBlocks(text: String, images: List<ImageBlock>, files: List<FileBlock> = emptyList(), expect: String?) {
-        val bound = core.activeSessionId()
-        if (expect != null && expect != bound) {
-            messages.add(ChatMessage("error",
-                "not sent — this chat isn't loaded yet (showing $expect, socket on $bound). Try again."))
-            busy.value = false; turnInFlight = false; turnInFlightSession = null
-            return
-        }
         val blocks = mutableListOf<PromptBlock>()
         if (text.isNotBlank()) blocks.add(PromptBlock.Text(text))
         images.forEach { img -> blocks.add(PromptBlock.Image(img.mimeType, img.dataB64)) }
