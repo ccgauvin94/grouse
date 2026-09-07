@@ -1352,7 +1352,7 @@ impl Core {
     /// Drain the pending queue in order once the socket is ready (CONTRACT §4).
     fn flush_pending(&self) {
         loop {
-            let (key, intent) = {
+            let (_key, intent) = {
                 let mut state = self.inner.state.lock();
                 if state.prompting {
                     return;
