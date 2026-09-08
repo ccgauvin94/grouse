@@ -273,41 +273,40 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                                 nav.navigate("project/" + Uri.encode(p)) { launchSingleTop = true }
                             }, query = drawerQuery, onClearQuery = { drawerQuery = "" })
                         }
-                        HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
-                        // What the agent can be given, and when it runs: skills are the notes it
-                        // pulls in on demand, recipes are the jobs, the scheduler is their cron.
-                        // All three are server state that was previously only reachable by editing
-                        // files on the box. Compact rows so the chats list keeps the space.
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                            CompactNavItem("Skills", Icons.Filled.School, route == "skills") {
-                                closeDrawer(); nav.navigate("skills") { launchSingleTop = true }
-                            }
-                            CompactNavItem("Recipes", Icons.Filled.MenuBook, route == "recipes") {
-                                closeDrawer(); nav.navigate("recipes") { launchSingleTop = true }
-                            }
-                            CompactNavItem("Settings", Icons.Filled.Settings, route == "settings") {
-                                closeDrawer(); nav.navigate("settings") { launchSingleTop = true }
-                            }
-                        }
                     } else {
-                        Column(Modifier.fillMaxWidth()) {
-                            Box(Modifier.weight(1f).fillMaxWidth()) {
-                                RoamBrowse(cm, nav, onOpen = {
-                                    drawerQuery = ""
-                                    closeDrawer()
-                                    nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
-                                }, query = drawerQuery, onClearQuery = { drawerQuery = "" })
-                            }
-                            HorizontalDivider(Modifier.padding(horizontal = 16.dp))
-                            // Add/management is a full-screen page (own route) — it carries the
-                            // camera QR scanner, which must not sit under the drawer scrim.
-                            NavigationDrawerItem(
-                                label = { Text("New connection") },
-                                icon = { Icon(Icons.Filled.Add, contentDescription = null) },
-                                selected = route == "roam_add",
-                                onClick = { closeDrawer(); nav.navigate("roam_add") { launchSingleTop = true } },
-                                modifier = Modifier.padding(horizontal = 12.dp),
-                            )
+                        Box(Modifier.weight(1f).fillMaxWidth()) {
+                            RoamBrowse(cm, nav, onOpen = {
+                                drawerQuery = ""
+                                closeDrawer()
+                                nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
+                            }, query = drawerQuery, onClearQuery = { drawerQuery = "" })
+                        }
+                        HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                        // Add/management is a full-screen page (own route) — it carries the
+                        // camera QR scanner, which must not sit under the drawer scrim.
+                        NavigationDrawerItem(
+                            label = { Text("New connection") },
+                            icon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                            selected = route == "roam_add",
+                            onClick = { closeDrawer(); nav.navigate("roam_add") { launchSingleTop = true } },
+                            modifier = Modifier.padding(horizontal = 12.dp),
+                        )
+                    }
+                    // Shared bottom row, same on both tabs: what the agent can be given, and
+                    // when it runs — skills are the notes it pulls in on demand, recipes are
+                    // the jobs, the scheduler is their cron, Settings the rest. All server
+                    // state previously only reachable by editing files on the box. Compact
+                    // rows so the list above keeps the space.
+                    HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                        CompactNavItem("Skills", Icons.Filled.School, route == "skills") {
+                            closeDrawer(); nav.navigate("skills") { launchSingleTop = true }
+                        }
+                        CompactNavItem("Recipes", Icons.Filled.MenuBook, route == "recipes") {
+                            closeDrawer(); nav.navigate("recipes") { launchSingleTop = true }
+                        }
+                        CompactNavItem("Settings", Icons.Filled.Settings, route == "settings") {
+                            closeDrawer(); nav.navigate("settings") { launchSingleTop = true }
                         }
                     }
                 }
