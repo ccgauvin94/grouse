@@ -318,6 +318,13 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                     SettingCaption("Waiting for the distributor to issue an endpoint…")
                 }
             }
+            SettingsSection("Roam") {
+                var roamOn by remember { mutableStateOf(cm.store.roamEnabled) }
+                SettingsSwitchRow("Enable Roam", roamOn) { on ->
+                    roamOn = on; cm.store.roamEnabled = on
+                }
+                SettingCaption("Off by default. When on, shows the Roam tab and enables pairing with a goose serve --roam host.")
+            }
 
             SettingsSection("Appearance") {
                 SettingsSwitchRow("Dynamic Color", cm.dynamicColor.value) { cm.setDynamicColor(it) }

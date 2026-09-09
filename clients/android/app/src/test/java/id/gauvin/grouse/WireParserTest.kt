@@ -146,6 +146,12 @@ class WireParserTest {
         assertEquals("a b c", s.raw)
         assertEquals("a b c", buildCron(s))
     }
+    @Test
+    fun `server crons parse correctly`() {
+        assertEquals(CronKind.HOURLY, parseCron("0 0 7-22 * * *").kind)
+        assertEquals(CronKind.DAILY, parseCron("0 0 0 * * *").kind)
+        assertEquals(CronKind.DAILY, parseCron("0 0 6 * * *").kind)
+    }
 
     // ---------------------------------------------------------------------
     // recipe / schedule / extension parsers

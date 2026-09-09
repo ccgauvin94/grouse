@@ -303,4 +303,8 @@ class SecureStore(context: Context) {
         }.getOrDefault(emptyMap())
         set(v) = cfg.edit().putString("roam_peers",
             org.json.JSONObject(v).toString()).apply()
+    var roamEnabled: Boolean
+        get() = cfg.getBoolean("roam_enabled", false)
+        set(v) = cfg.edit().putBoolean("roam_enabled", v).apply()
+
 }

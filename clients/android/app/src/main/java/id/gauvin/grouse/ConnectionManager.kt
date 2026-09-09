@@ -271,10 +271,21 @@ class ConnectionManager private constructor(context: Context) {
 
     @Volatile private var pendingSkillError: String? = null
     fun saveSkill(s: SkillInfo, content: String, onResult: (String?) -> Unit = {}) {
+        if (!core.ready()) {
+            pendingSkillError = null
+            io {
+                unstable.sourcesUpdate("skill", s.path, s.name, s.description, content)
+                main.post {
+                    val err = pendingSkillError
+                    pendingSkillError = null
+                    onResult(err ?: "Queued — will save when reconnected")
+                }
+            }
+            return
+        }
         pendingSkillError = null
         io {
             unstable.sourcesUpdate("skill", s.path, s.name, s.description, content)
-            // on_error was posted to main before this returns — read on main for FIFO.
             main.post {
                 val err = pendingSkillError
                 pendingSkillError = null

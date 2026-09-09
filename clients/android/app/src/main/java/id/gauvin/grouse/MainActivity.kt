@@ -216,22 +216,26 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                     // Drawer search text. Saveable, and lives ABOVE the tab bodies so it is not
                     // lost when the other tab's composable leaves composition.
                     var drawerQuery by rememberSaveable { mutableStateOf("") }
-                    SingleChoiceSegmentedButtonRow(
-                        modifier = Modifier.fillMaxWidth()
-                            .padding(horizontal = 12.dp)
-                            .padding(bottom = 8.dp)) {
-                        SegmentedButton(
-                            selected = drawerTab == "main",
-                            onClick = { drawerTab = "main" },
-                            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Main") }
-                        SegmentedButton(
-                            selected = drawerTab == "roam",
-                            onClick = { drawerTab = "roam" },
-                            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Roam") }
+                    if (cm.store.roamEnabled) {
+                        SingleChoiceSegmentedButtonRow(
+                            modifier = Modifier.fillMaxWidth()
+                                .padding(horizontal = 12.dp)
+                                .padding(bottom = 8.dp)) {
+                            SegmentedButton(
+                                selected = drawerTab == "main",
+                                onClick = { drawerTab = "main" },
+                                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                                modifier = Modifier.weight(1f)
+                            ) { Text("Main") }
+                            SegmentedButton(
+                                selected = drawerTab == "roam",
+                                onClick = { drawerTab = "roam" },
+                                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                                modifier = Modifier.weight(1f)
+                            ) { Text("Roam") }
+                        }
+                    } else {
+                        if (drawerTab == "roam") drawerTab = "main"
                     }
                     // One filter for both tabs, hoisted here so switching Main/Roam keeps what you
                     // typed. Filtering is client-side over the cached session directory — the
