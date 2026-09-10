@@ -146,8 +146,9 @@ fun RecipesScreen(cm: ConnectionManager, nav: NavController, onOpenChat: () -> U
                         Text(r.title)
                         Text(
                             buildString {
-                                append(if (r.cron.isNullOrBlank()) "not scheduled"
-                                       else cronInEnglish(r.cron))
+                                val displayCron = r.cron ?: job?.cron
+                                append(if (displayCron.isNullOrBlank()) "not scheduled"
+                                       else cronInEnglish(displayCron))
                                 if (job?.running == true) append("  ·  running now")
                                 else if (job?.paused == true) append("  ·  paused")
                                 job?.lastRun?.let { append("  ·  last ${it.take(16).replace('T', ' ')}") }
