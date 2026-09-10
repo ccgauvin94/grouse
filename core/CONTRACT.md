@@ -185,7 +185,7 @@ Separate `GrouseUnstable` interface, clearly marked for retirement. Methods
 - `session_project(session_id, project_id?)` — move between projects
 - `list_tools(session_id)`, `session_extensions_list/add/remove(session_id, …)`
 - `list_global_extensions()`, `set_extension_enabled(name, enabled)`, `add_extension(…)`
-- `sources_list/create/delete/update` (projects + skills)
+- `sources_list/create/delete/update` (projects + skills) — `create` is `sourcesCreate(type, name, description, content, projectId?)` where `projectId` scopes a skill to a project (`global` if null; projects themselves are always global)
 - `config_read(key)`, `config_upsert(key, value)`, `supported_models(provider)`
 - `resources_read(session_id, uri, extension)` → app html
 - `recipes_list/schedule/save/delete`, `schedules_list/pause/unpause/run_now/delete/update`

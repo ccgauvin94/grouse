@@ -137,7 +137,7 @@ mod tests {
         g.add_extension(r#"{"name":"builtin://x"}"#.into(), true);
         // Sources (projects + skills).
         g.sources_list("project".into());
-        g.sources_create("project".into(), "n".into(), "d".into(), "c".into());
+        g.sources_create("project".into(), "n".into(), "d".into(), "c".into(), None);
         g.sources_delete("project".into(), "p".into());
         g.sources_update("project".into(), "p".into(), "n".into(), "d".into(), "c".into());
         // Config & models.

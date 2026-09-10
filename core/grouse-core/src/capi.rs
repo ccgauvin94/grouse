@@ -912,7 +912,42 @@ pub extern "C" fn grouse_unstable_sources_create(h: *mut c_void, source_type: *c
     ) else {
         return;
     };
-    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.sources_create(source_type, name, description, content))).ok();
+    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.sources_create(source_type, name, description, content, None))).ok();
+}
+
+#[no_mangle]
+pub extern "C" fn grouse_unstable_sources_create_with_project(h: *mut c_void, source_type: *const c_char, name: *const c_char, description: *const c_char, content: *const c_char, project_id: *const c_char) {
+    let (Some(source_type), Some(name), Some(description), Some(content)) = (
+        (unsafe { c_param(source_type) }).map(str::to_owned),
+        (unsafe { c_param(name) }).map(str::to_owned),
+        (unsafe { c_param(description) }).map(str::to_owned),
+        (unsafe { c_param(content) }).map(str::to_owned),
+    ) else {
+        return;
+    };
+    let project_id = (unsafe { c_param(project_id) }).map(str::to_owned);
+    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.sources_create(source_type, name, description, content, project_id))).ok();
+}
+#[no_mangle]
+pub extern "C" fn grouse_unstable_sources_create_skill_for_project(
+    h: *mut c_void,
+    name: *const c_char,
+    description: *const c_char,
+    content: *const c_char,
+    project_dir: *const c_char,
+) {
+    let (Some(name), Some(description), Some(content), Some(project_dir)) = (
+        (unsafe { c_param(name) }).map(str::to_owned),
+        (unsafe { c_param(description) }).map(str::to_owned),
+        (unsafe { c_param(content) }).map(str::to_owned),
+        (unsafe { c_param(project_dir) }).map(str::to_owned),
+    ) else {
+        return;
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        handle(h).unstable.sources_create_skill_for_project(name, description, content, project_dir)
+    }))
+    .ok();
 }
 
 #[no_mangle]

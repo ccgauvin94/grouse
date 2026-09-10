@@ -219,18 +219,71 @@ fun SkillsScreen(cm: ConnectionManager, nav: NavController) {
             },
         )
     }) { pad ->
-        Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize()
-            .verticalScroll(rememberScrollState())) {
+        Column(Modifier.padding(pad).padding(horizontal = 16.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
             if (cm.skills.value.isEmpty()) SettingCaption("No skills installed.")
             cm.skills.value.forEach { sk ->
-                SettingsNavRow(sk.name, sk.description.take(90)) {
+                val scopeLabel = if (sk.global) "global" else "project"
+                SettingsNavRow("${sk.name}  · $scopeLabel", sk.description.take(90)) {
                     nav.navigate("skill/" + Uri.encode(sk.name))
                 }
             }
+            // New skill with optional project scope (Claude-like project knowledge)
+            var showCreate by remember { mutableStateOf(false) }
+            var newName by remember { mutableStateOf("") }
+            var newDesc by remember { mutableStateOf("") }
+            var newContent by remember { mutableStateOf("") }
+            var newScope by remember { mutableStateOf<String?>(null) }
+            var createErr by remember { mutableStateOf<String?>(null) }
+            var creating by remember { mutableStateOf(false) }
+            OutlinedButton(onClick = { showCreate = true }, modifier = Modifier.padding(top = 12.dp)) {
+                Text("New skill")
+            }
+            if (showCreate) {
+                AlertDialog(
+                    onDismissRequest = { if (!creating) showCreate = false },
+                    title = { Text("New skill") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(newName, { newName = it }, label = { Text("Name (lowercase, hyphens)") }, singleLine = true)
+                            OutlinedTextField(newDesc, { newDesc = it }, label = { Text("Description") }, singleLine = false)
+                            OutlinedTextField(newContent, { newContent = it }, label = { Text("SKILL.md") }, minLines = 3)
+                            val projects = cm.projects.value
+                            var expanded by remember { mutableStateOf(false) }
+                            ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {
+                                OutlinedTextField(
+                                    value = newScope ?: "Global (all chats)",
+                                    onValueChange = {},
+                                    readOnly = true,
+                                    label = { Text("Scope") },
+                                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                                    modifier = Modifier.menuAnchor().fillMaxWidth()
+                                )
+                                ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                                    DropdownMenuItem(text = { Text("Global (all chats)") }, onClick = { newScope = null; expanded = false })
+                                    projects.forEach { p ->
+                                        DropdownMenuItem(text = { Text("Project: ${p.name}") }, onClick = { newScope = p.name; expanded = false })
+                                    }
+                                }
+                            }
+                            createErr?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(enabled = newName.isNotBlank() && !creating, onClick = {
+                            creating = true; createErr = null
+                            cm.createSkill(newName, newDesc, newContent, newScope) { err ->
+                                creating = false
+                                if (err == null) { showCreate = false; newName = ""; newDesc = ""; newContent = ""; newScope = null }
+                                else createErr = err
+                            }
+                        }) { Text(if (creating) "Creating…" else "Create") }
+                    },
+                    dismissButton = { TextButton(enabled = !creating, onClick = { showCreate = false }) { Text("Cancel") } }
+                )
+            }
             SettingCaption("Listed one line each to the model; the body is only read when it " +
                 "calls load_skill. That is why detailed tool procedure belongs here rather " +
-                "than in the hints, which are in context every single turn.")
-            Spacer(Modifier.height(28.dp))
+                "than in the hints, which are in context every single turn. Project-scoped skills only load in that project's chats.")
         }
     }
 }

@@ -1005,6 +1005,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_sources_create(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_grouseunstable_sources_create_skill_for_project(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_sources_delete(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_sources_list(
@@ -1225,7 +1227,9 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_set_extension_enabled(`ptr`: Long,`name`: RustBuffer.ByValue,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_grouse_core_fn_method_grouseunstable_sources_create(`ptr`: Long,`sourceType`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`description`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_grouse_core_fn_method_grouseunstable_sources_create(`ptr`: Long,`sourceType`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`description`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`projectId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_grouseunstable_sources_create_skill_for_project(`ptr`: Long,`name`: RustBuffer.ByValue,`description`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`projectDir`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_sources_delete(`ptr`: Long,`sourceType`: RustBuffer.ByValue,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1364,289 +1368,292 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if (lib.uniffi_grouse_core_checksum_method_core_active_session_id() != 8270) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_active_session_id() and 0xFFFF) != 8270) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_archive_session() != 46828) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_archive_session() and 0xFFFF) != 46828) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_cancel() != 53904) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_cancel() and 0xFFFF) != 53904) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_config() != 53322) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_config() and 0xFFFF) != 53322) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_connect() != 62952) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_connect() and 0xFFFF) != 62952) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_delete_session() != 3698) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_delete_session() and 0xFFFF) != 3698) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_disconnect() != 29396) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_disconnect() and 0xFFFF) != 29396) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_flush_caches() != 885) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_flush_caches() and 0xFFFF) != 885) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_list_sessions() != 33034) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_list_sessions() and 0xFFFF) != 33034) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_load_cached_transcript() != 50836) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_load_cached_transcript() and 0xFFFF) != 50836) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_new_session() != 50585) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_new_session() and 0xFFFF) != 50585) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_open_session() != 21069) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_open_session() and 0xFFFF) != 21069) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_ready() != 64347) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_ready() and 0xFFFF) != 64347) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_rename_session() != 51923) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_rename_session() and 0xFFFF) != 51923) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_respond_permission() != 49597) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_respond_permission() and 0xFFFF) != 49597) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_roam_connect() != 53647) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_roam_connect() and 0xFFFF) != 53647) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_roam_disconnect() != 55425) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_roam_disconnect() and 0xFFFF) != 55425) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_roam_new_session() != 41163) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_roam_new_session() and 0xFFFF) != 41163) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_roam_new_session_in() != 18714) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_roam_new_session_in() and 0xFFFF) != 18714) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_roam_open_session() != 26278) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_roam_open_session() and 0xFFFF) != 26278) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_send_prompt() != 38382) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_send_prompt() and 0xFFFF) != 38382) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_sessions() != 51807) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_sessions() and 0xFFFF) != 51807) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_set_config_option() != 58160) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_set_config_option() and 0xFFFF) != 58160) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_status() != 4077) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_status() and 0xFFFF) != 4077) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_transcript() != 31384) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_transcript() and 0xFFFF) != 31384) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_transcript_is_fresh() != 53914) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_transcript_is_fresh() and 0xFFFF) != 53914) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_unarchive_session() != 51838) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_unarchive_session() and 0xFFFF) != 51838) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_add_extension() != 24761) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_add_extension() and 0xFFFF) != 24761) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_config_read() != 16179) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_read() and 0xFFFF) != 16179) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_config_upsert() != 60061) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_upsert() and 0xFFFF) != 60061) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_export_session() != 58199) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_export_session() and 0xFFFF) != 58199) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_list_global_extensions() != 49157) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_list_global_extensions() and 0xFFFF) != 49157) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_list_tools() != 33901) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_list_tools() and 0xFFFF) != 33901) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_providers_list() != 51277) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_providers_list() and 0xFFFF) != 51277) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_delete() != 16293) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_delete() and 0xFFFF) != 16293) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_list() != 48625) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_list() and 0xFFFF) != 48625) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_save() != 668) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_save() and 0xFFFF) != 668) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_schedule() != 23344) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_schedule() and 0xFFFF) != 23344) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_resources_read() != 22648) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_resources_read() and 0xFFFF) != 22648) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_respond_elicitation() != 4683) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_respond_elicitation() and 0xFFFF) != 4683) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_respond_recipe_params() != 15384) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_respond_recipe_params() and 0xFFFF) != 15384) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_delete() != 63227) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_delete() and 0xFFFF) != 63227) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_list() != 26010) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_list() and 0xFFFF) != 26010) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_pause() != 41835) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_pause() and 0xFFFF) != 41835) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_run_now() != 17186) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_run_now() and 0xFFFF) != 17186) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_unpause() != 19929) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_unpause() and 0xFFFF) != 19929) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_update() != 60402) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_update() and 0xFFFF) != 60402) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_session_extensions_add() != 20738) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_session_extensions_add() and 0xFFFF) != 20738) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_session_extensions_list() != 46861) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_session_extensions_list() and 0xFFFF) != 46861) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_session_extensions_remove() != 18245) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_session_extensions_remove() and 0xFFFF) != 18245) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_session_info() != 30682) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_session_info() and 0xFFFF) != 30682) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_session_project() != 5880) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_session_project() and 0xFFFF) != 5880) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_set_extension_enabled() != 54877) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_set_extension_enabled() and 0xFFFF) != 54877) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_create() != 63216) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_create() and 0xFFFF) != 38698) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_delete() != 59905) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_create_skill_for_project() and 0xFFFF) != 17478) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_list() != 62916) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_delete() and 0xFFFF) != 59905) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_update() != 58766) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_list() and 0xFFFF) != 62916) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_steer() != 56880) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_update() and 0xFFFF) != 58766) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_supported_models() != 34598) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_steer() and 0xFFFF) != 56880) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_tools_call() != 444) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_supported_models() and 0xFFFF) != 34598) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_working_dir_update() != 28181) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_tools_call() and 0xFFFF) != 444) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_constructor_core_new() != 23476) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_working_dir_update() and 0xFFFF) != 28181) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_constructor_grouseunstable_new() != 25278) {
+    if ((lib.uniffi_grouse_core_checksum_constructor_core_new() and 0xFFFF) != 23476) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_status() != 32576) {
+    if ((lib.uniffi_grouse_core_checksum_constructor_grouseunstable_new() and 0xFFFF) != 25278) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_sessions() != 13238) {
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_status() and 0xFFFF) != 32576) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_transcript() != 27010) {
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_sessions() and 0xFFFF) != 13238) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_stream() != 33084) {
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_transcript() and 0xFFFF) != 27010) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_config() != 19331) {
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_stream() and 0xFFFF) != 33084) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_permission_request() != 48981) {
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_config() and 0xFFFF) != 19331) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_session_touched() != 60888) {
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_permission_request() and 0xFFFF) != 48981) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_projects() != 61380) {
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_session_touched() and 0xFFFF) != 60888) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_roam_peer_status() != 44730) {
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_projects() and 0xFFFF) != 61380) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_roam_sessions() != 29410) {
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_roam_peer_status() and 0xFFFF) != 44730) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_peer_new_session() != 3019) {
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_roam_sessions() and 0xFFFF) != 29410) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_active_run() != 17853) {
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_peer_new_session() and 0xFFFF) != 3019) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_commands() != 60486) {
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_active_run() and 0xFFFF) != 17853) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export() != 3482) {
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_commands() and 0xFFFF) != 60486) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_recipe_params() != 65119) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export() and 0xFFFF) != 3482) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_elicitation() != 60546) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_recipe_params() and 0xFFFF) != 65119) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_compaction_status() != 2189) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_elicitation() and 0xFFFF) != 60546) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_message_usage() != 9674) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_compaction_status() and 0xFFFF) != 2189) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_app_resource() != 53354) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_message_usage() and 0xFFFF) != 9674) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_recipes() != 13751) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_app_resource() and 0xFFFF) != 53354) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_schedules() != 5241) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_recipes() and 0xFFFF) != 13751) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_projects() != 55532) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_schedules() and 0xFFFF) != 5241) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_skills() != 60517) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_projects() and 0xFFFF) != 55532) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_tools() != 58067) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_skills() and 0xFFFF) != 60517) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_extensions() != 59080) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_tools() and 0xFFFF) != 58067) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_session_extensions() != 41133) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_extensions() and 0xFFFF) != 59080) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_config_value() != 12996) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_session_extensions() and 0xFFFF) != 41133) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_supported_models() != 63648) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_config_value() and 0xFFFF) != 12996) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_providers() != 13817) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_supported_models() and 0xFFFF) != 63648) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_session_probe() != 9033) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_providers() and 0xFFFF) != 13817) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_tool_result() != 29014) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_session_probe() and 0xFFFF) != 9033) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_error() != 25867) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_tool_result() and 0xFFFF) != 29014) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_error() and 0xFFFF) != 25867) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -3157,9 +3164,18 @@ public interface GrouseUnstableInterface {
     fun `setExtensionEnabled`(`name`: kotlin.String, `enabled`: kotlin.Boolean)
     
     /**
-     * Create a project or skill (`target.scope: "global"`); re-lists the touched family.
+     * Create a project or skill. Projects are always `target.scope: "global"`;
+     * skills can be project-scoped when `project_id` is `Some` (non-empty):
+     * `target.scope: "projectId"` / `target.projectId: <id>`.
      */
-    fun `sourcesCreate`(`sourceType`: kotlin.String, `name`: kotlin.String, `description`: kotlin.String, `content`: kotlin.String)
+    fun `sourcesCreate`(`sourceType`: kotlin.String, `name`: kotlin.String, `description`: kotlin.String, `content`: kotlin.String, `projectId`: kotlin.String?)
+    
+    /**
+     * Create a skill scoped to a project's directory (e.g. /projects/<name>).
+     * Uses `target.scope: "projectDir"` which works even when the project's
+     * `root` is not configured (unlike `projectId` scope).
+     */
+    fun `sourcesCreateSkillForProject`(`name`: kotlin.String, `description`: kotlin.String, `content`: kotlin.String, `projectDir`: kotlin.String)
     
     /**
      * Delete a project or skill by its source PATH; re-lists the touched family.
@@ -3766,8 +3782,10 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
 
     
     /**
-     * Create a project or skill (`target.scope: "global"`); re-lists the touched family.
-     */override fun `sourcesCreate`(`sourceType`: kotlin.String, `name`: kotlin.String, `description`: kotlin.String, `content`: kotlin.String)
+     * Create a project or skill. Projects are always `target.scope: "global"`;
+     * skills can be project-scoped when `project_id` is `Some` (non-empty):
+     * `target.scope: "projectId"` / `target.projectId: <id>`.
+     */override fun `sourcesCreate`(`sourceType`: kotlin.String, `name`: kotlin.String, `description`: kotlin.String, `content`: kotlin.String, `projectId`: kotlin.String?)
         = 
     callWithHandle {
     uniffiRustCall() { _status ->
@@ -3777,7 +3795,29 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
         FfiConverterString.lower(`sourceType`),
         FfiConverterString.lower(`name`),
         FfiConverterString.lower(`description`),
-        FfiConverterString.lower(`content`),_status)
+        FfiConverterString.lower(`content`),
+        FfiConverterOptionalString.lower(`projectId`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Create a skill scoped to a project's directory (e.g. /projects/<name>).
+     * Uses `target.scope: "projectDir"` which works even when the project's
+     * `root` is not configured (unlike `projectId` scope).
+     */override fun `sourcesCreateSkillForProject`(`name`: kotlin.String, `description`: kotlin.String, `content`: kotlin.String, `projectDir`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_grouseunstable_sources_create_skill_for_project(
+        it,
+        
+        FfiConverterString.lower(`name`),
+        FfiConverterString.lower(`description`),
+        FfiConverterString.lower(`content`),
+        FfiConverterString.lower(`projectDir`),_status)
 }
     }
     

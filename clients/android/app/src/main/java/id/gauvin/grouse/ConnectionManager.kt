@@ -293,8 +293,35 @@ class ConnectionManager private constructor(context: Context) {
             }
         }
     }
+    fun createProjectSkill(projectId: String, name: String, description: String, content: String, onResult: (String?) -> Unit = {}) {
+        val projectDir = "/projects/$projectId"
+        pendingSkillError = null
+        io {
+            unstable.sourcesCreateSkillForProject(name, description, content, projectDir)
+            main.post {
+                val err = pendingSkillError
+                pendingSkillError = null
+                onResult(err)
+            }
+        }
+    }
 
-    fun deleteSkill(path: String) { io { unstable.sourcesDelete("skill", path) } }
+    fun createSkill(name: String, description: String, content: String, projectId: String?, onResult: (String?) -> Unit = {}) {
+        val clean = name.trim()
+        if (clean.isEmpty() || clean.length > 64 || clean.contains(" ") || clean.contains("/")) {
+            onResult("Invalid skill name"); return
+        }
+        pendingSkillError = null
+        io {
+            unstable.sourcesCreate("skill", clean, description, content, projectId?.takeIf { it.isNotBlank() })
+            main.post {
+                val err = pendingSkillError
+                pendingSkillError = null
+                onResult(err)
+            }
+        }
+    }
+
 
     fun sessionsByProject(): List<Pair<String, List<SessionInfo>>> {
         val byName = projects.value.associate { it.id to it.name }
@@ -1074,7 +1101,7 @@ class ConnectionManager private constructor(context: Context) {
         // no project, phantom success.
         pendingCreateError = null
         io {
-            unstable.sourcesCreate("project", name, "", "")
+            unstable.sourcesCreate("project", name, "", "", null)
             // on_error rides main.post too (CoreListener posts to main) and was
             // enqueued before this call returned, so reading on main is FIFO-
             // deterministic: the capture, then this.
