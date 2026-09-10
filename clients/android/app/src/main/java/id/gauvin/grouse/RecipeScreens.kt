@@ -254,7 +254,7 @@ fun cronInEnglish(cron: String): String {
 fun RecipeScreen(cm: ConnectionManager, nav: NavController, recipeId: String, onOpenChat: () -> Unit) {
     LaunchedEffect(cm.online.value) { if (cm.online.value) cm.refreshSchedules() }
     val r = cm.recipes.value.firstOrNull { it.id == recipeId }
-    val job = cm.schedules.value.firstOrNull { it.source == r?.filePath }
+    val job = r?.let { rec -> cm.schedules.value.firstOrNull { it.source.endsWith(rec.filePath) || rec.filePath.endsWith(it.source) } }
     var confirmDelete by remember { mutableStateOf(false) }
 
     Scaffold(topBar = {

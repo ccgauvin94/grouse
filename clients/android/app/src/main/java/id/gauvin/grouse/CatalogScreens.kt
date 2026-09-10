@@ -139,7 +139,7 @@ fun RecipesScreen(cm: ConnectionManager, nav: NavController, onOpenChat: () -> U
             if (cm.recipes.value.isEmpty()) SettingCaption("No saved recipes on the server.")
 
             cm.recipes.value.forEach { r ->
-                val job = cm.schedules.value.firstOrNull { it.source == r.filePath }
+                val job = r.filePath.let { fp -> cm.schedules.value.firstOrNull { it.source.endsWith(fp) || fp.endsWith(it.source) } }
                 Row(Modifier.fillMaxWidth().padding(vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f).clickable { nav.navigate("recipe/" + r.id) }) {
