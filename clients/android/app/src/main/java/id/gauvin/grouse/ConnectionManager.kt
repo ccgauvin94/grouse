@@ -1459,7 +1459,17 @@ class ConnectionManager private constructor(context: Context) {
                 connecting = true
                 status.value = "connecting…"
             }
-            ConnectionStatus.Syncing -> status.value = "loading session…"
+            ConnectionStatus.Syncing -> {
+                // A resync replay (the server changed the active session — another
+                // client, or auto-compaction): the core clears and re-streams the
+                // transcript in place, exactly like an open. Mark it active so the
+                // transcript pins to the bottom while it rebuilds and snaps on the
+                // Ready that follows (replayDoneTick), instead of replaying the
+                // whole chat while the list sits wherever it was.
+                replayActive.value = true
+                replayProgress.value = 0
+                status.value = "loading session…"
+            }
             ConnectionStatus.Disconnected -> {
                 live = false; connecting = false; online.value = false
                 replayActive.value = false

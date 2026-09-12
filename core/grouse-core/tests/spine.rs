@@ -134,6 +134,10 @@ struct FakeServer {
     /// When set, the fake pushes `session_info_update` (with an activeRunId)
     /// + `available_commands_update` notifications right after session/new.
     notify: Arc<std::sync::atomic::AtomicBool>,
+    /// When set, `session/prompt` emits a run-end `session_info_update` (no
+    /// activeRunId) before answering — the server's own post-turn touch that
+    /// must not be mistaken for a remote change.
+    post_turn_touch: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FakeServer {
@@ -144,6 +148,7 @@ impl FakeServer {
             frames: Arc::new(Mutex::new(Vec::new())),
             secret_header: Arc::new(Mutex::new(None)),
             notify: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            post_turn_touch: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -347,6 +352,27 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
                         }
                     });
                     let _ = tx.send(WsMessage::Text(frame.to_string().into())).await;
+                }
+                if server
+                    .post_turn_touch
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    // The server's run-end touch: an updatedAt with no
+                    // activeRunId. Sent BEFORE the prompt reply, so its 1.5s
+                    // resync debounce lands after on_prompt_done clears
+                    // `prompting` — the race that used to replay our own turn.
+                    let touch = json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session,
+                            "update": {
+                                "sessionUpdate": "session_info_update",
+                                "updatedAt": "2026-08-12T14:00:00.000Z"
+                            }
+                        }
+                    });
+                    let _ = tx.send(WsMessage::Text(touch.to_string().into())).await;
                 }
                 json!({ "stopReason": "end_turn" })
             }
@@ -722,6 +748,71 @@ fn spine_e2e_connect_prompt_stream() {
     assert!(!core.ready());
     // No session/prompt ever went out after the first one.
     assert_eq!(server.frames_for("session/prompt").len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// A prompt's own run-end `session_info_update` must NOT trigger a resync replay
+// of the turn the client just streamed. On a long chat that replay is the whole
+// history reloading ("send a reply and the chat reloads from the top").
+// ---------------------------------------------------------------------------
+
+#[test]
+fn prompt_does_not_resync_its_own_turn() {
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    server
+        .post_turn_touch
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
+
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "Ready");
+    assert_eq!(core.active_session_id().as_deref(), Some("sess-e2e"));
+
+    core.send_prompt(
+        Prompt { blocks: vec![PromptBlock::Text { text: "hello".to_string() }] },
+        Some(SendExpect { session_id: "sess-e2e".to_string() }),
+    );
+    wait_for(
+        &ev_rx,
+        |ev| matches!(ev, Ev::Stream(StreamEvent::RunEnded { .. })),
+        "RunEnded",
+    );
+
+    // The run-end touch debounces 1.5s before it probes; give the whole cycle
+    // room. A spurious resync would clear the store and issue `session/load`,
+    // re-streaming the transcript.
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(
+        server.frames_for("session/load").is_empty(),
+        "the server's own run-end touch must not replay the session: {:?}",
+        server.frames_for("session/load")
+    );
+    let agent_count = core
+        .transcript()
+        .iter()
+        .filter(|m| m.content == "hello from fake goose and more")
+        .count();
+    assert_eq!(
+        agent_count, 1,
+        "the reply must appear once; a resync rebuild would duplicate it"
+    );
+
+    core.disconnect();
 }
 
 // ---------------------------------------------------------------------------

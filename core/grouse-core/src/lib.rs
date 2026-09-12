@@ -612,8 +612,13 @@ impl Core {
                 conn.set_painted_cache(painted);
                 crate::roam::runtime().spawn(async move {
                     if conn.live_load_session_async(sid.clone(), c.clone(), suppress).await.is_ok() {
-                        this.save_cache();
-                        this.probe_stamp_and_save();
+                        // Live reuse doesn't go through the handshake's
+                        // on_ready → on_conn_status(Ready) path, so without this
+                        // the UI stayed in `Loading…` (replayActive never
+                        // finalized) and queued prompts never flushed. This
+                        // Ready used to arrive indirectly from a spurious
+                        // resync replay of the session we just loaded.
+                        this.on_conn_status(ConnectionStatus::Ready);
                         return;
                     }
                     // Stale session — try live new session before full reconnect.
@@ -628,8 +633,7 @@ impl Core {
                                     let mut state = this.inner.state.lock();
                                     state.store_session_id = Some(new_id);
                                 }
-                                this.save_cache();
-                                this.probe_stamp_and_save();
+                                this.on_conn_status(ConnectionStatus::Ready);
                                 return;
                             }
                         }
@@ -1108,7 +1112,9 @@ impl Core {
     }
 
     /// `session/info` probe for the active session → re-stamp the cache's
-    /// updatedAt and persist (see [`Self::on_conn_status`]).
+    /// updatedAt and persist (see [`Self::on_conn_status`]) and, when the probe
+    /// carries a message count, refresh the resync baseline (`sync_stamp`) so
+    /// our own just-completed change does not read as a remote one.
     fn probe_stamp_and_save(&self) {
         let Some(session_id) = self.active_session_id() else { return };
         let Some(conn) = self.inner.conn.lock().clone() else { return };
@@ -1121,19 +1127,33 @@ impl Core {
                 )
                 .await
                 .ok()
-                .and_then(|reply| {
-                    reply
-                        .get("session")
-                        .and_then(|session| session.get("updatedAt"))
+                .and_then(|reply| reply.get("session").cloned())
+                .map(|session| {
+                    let updated_at = session
+                        .get("updatedAt")
                         .and_then(Value::as_str)
-                        .map(|s| s.to_string())
+                        .unwrap_or("")
+                        .to_string();
+                    let message_count = session
+                        .pointer("/_meta/messageCount")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(-1);
+                    (updated_at, message_count)
                 });
-            if let Some(updated_at) = probed {
-                core.inner
-                    .state
-                    .lock()
-                    .session_updated_at
-                    .insert(session_id.clone(), updated_at);
+            if let Some((updated_at, message_count)) = probed {
+                let mut state = core.inner.state.lock();
+                if !updated_at.is_empty() {
+                    state
+                        .session_updated_at
+                        .insert(session_id.clone(), updated_at.clone());
+                }
+                // Baseline for the move test in `on_session_probe`. Without
+                // this, the first `session_info_update` after a prompt (the
+                // server's own run-end touch) probes "moved" and replays the
+                // session we just finished streaming.
+                if !updated_at.is_empty() && message_count >= 0 {
+                    state.sync_stamp = Some((updated_at, message_count));
+                }
             }
             core.save_cache();
         });
@@ -1363,6 +1383,14 @@ impl Core {
     fn on_prompt_done(&self) {
         self.inner.state.lock().prompting = false;
         self.save_cache();
+        // Re-baseline the resync stamp from the server after OUR OWN turn. The
+        // server also emits a run-end `session_info_update`, and its debounced
+        // probe otherwise sees a moved (updatedAt, messageCount) against the
+        // stamp captured at open time and replays the whole session in place —
+        // a full-history reload of the turn we just streamed (painful on a
+        // long chat). Recording the post-turn stamp here makes that probe a
+        // no-op while a genuine remote change still differs and resyncs.
+        self.probe_stamp_and_save();
         self.flush_pending();
     }
 
