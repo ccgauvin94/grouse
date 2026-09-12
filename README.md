@@ -11,7 +11,6 @@ transcript and send your prompts.
 [![Core](https://github.com/ccgauvin94/grouse/actions/workflows/core.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/core.yml)
 [![Android](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml)
 [![Flatpak](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml)
-[![Secrets scan](https://github.com/ccgauvin94/grouse/actions/workflows/secrets.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/secrets.yml)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
 ## How it's put together
