@@ -1,81 +1,79 @@
 # grouse
 
-Native chat clients for a [goose](https://github.com/aaif-goose/goose) agent you
-run yourself.
+Native chat clients for a self-hosted [goose](https://github.com/aaif-goose/goose)
+agent.
 
-goose runs on a server (`goose serve`); grouse is what talks to it. Right now
-that's an Android app and a KDE desktop app, with a terminal client planned. The
-server owns sessions, memory, tools, and model choice. The clients render the
-transcript and send your prompts.
+grouse is built on the official goose SDK (`agent-client-protocol`, Client role),
+with the `agent-client-protocol-http` WebSocket transport. The server owns
+sessions, memory, tools, and model choice. The clients render transcripts and send
+prompts.
+
+Platforms: Android (Kotlin/Compose), Linux desktop (Qt 6/KF6 Kirigami). macOS and a
+CLI client are planned.
 
 [![Core](https://github.com/ccgauvin94/grouse/actions/workflows/core.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/core.yml)
 [![Android](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml)
 [![Flatpak](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
-## How it's put together
+## Architecture
 
-The wire is ACP (JSON-RPC 2.0) over WebSocket. There's a second transport called
-roam that carries the same protocol over an iroh connection between two peers,
-for when the server isn't directly reachable.
+Wire protocol: ACP (JSON-RPC 2.0) over WebSocket. A second transport, roam, carries
+the same protocol over an iroh connection between two peers.
 
-The client logic lives once, in Rust, under `core/`. It's exposed through a
-uniffi interface that the Kotlin app consumes, and a C ABI that the desktop app
-uses. The UIs are native and thin. They don't reimplement protocol behavior.
+Client logic lives once, in Rust, under `core/`, and is exposed through a uniffi
+interface for the Kotlin app and a C ABI for the desktop app. The UIs are native and
+thin; protocol behavior is not duplicated in them.
 
-- `core/grouse-core` is the ACP client: connection, sessions, prompts, tools,
-  permissions, the transcript, and the caches.
-- `core/grouse-roam-core` is the roam transport.
-- `core/grouse-unstable` is the `_goose/unstable/*` shim. goose has a few server
-  methods the official SDK doesn't cover yet, so they're isolated here until it does.
-- `clients/android` is Kotlin and Jetpack Compose.
-- `clients/desktop` is Qt 6 and KF6 Kirigami.
-- `clients/cli` isn't written yet. It's just a README at the moment.
+- `core/grouse-core`: ACP client built on the goose SDK. Connection, sessions,
+  prompts, tools, permissions, transcript, caches.
+- `core/grouse-roam-core`: roam transport (iroh).
+- `core/grouse-unstable`: `_goose/unstable/*` shim for server methods not yet in the
+  SDK.
+- `clients/android`: Kotlin + Jetpack Compose.
+- `clients/desktop`: Qt 6 + KF6 Kirigami.
+- `clients/cli`: placeholder, no implementation.
 
 ## Building
 
-The Rust core is the main development loop:
+Rust core:
 
 ```sh
 cargo test --manifest-path core/Cargo.toml
 cargo clippy --manifest-path core/Cargo.toml --all-targets -- -D warnings
 ```
 
-The devcontainer (`scripts/dev-env.sh`) is the easy way to do that without
-installing anything. See `CONTRIBUTING.md`.
+A devcontainer is available (`scripts/dev-env.sh`); see `CONTRIBUTING.md`.
 
-Android, with the Android SDK/NDK and JDK 17 set up:
+Android (Android SDK/NDK, JDK 17):
 
 ```sh
 cd clients/android
 ./gradlew assembleDebug
 ```
 
-If you changed anything in `core/`, rebuild the native library and the uniffi
-bindings before building the app, because the APK ships a prebuilt `.so`:
+The APK includes a prebuilt `libgrouse_core.so`, so regenerate the native library and
+uniffi bindings after any change under `core/`:
 
 ```sh
 just android-libs
 ```
 
-Desktop:
+Desktop (Flatpak bundle):
 
 ```sh
 just desktop
 ```
 
-That wraps `clients/desktop/build-flatpak.sh`, which builds the Flatpak bundle.
-
 ## Releasing
-
-Push a tag:
 
 ```sh
 git tag v0.2 && git push origin v0.2
 ```
 
-GitHub Actions then builds the signed Android APK and the desktop Flatpak and
-attaches both to the release. More detail is in `AGENTS.md`.
+The tag runs the release workflow, which builds the signed Android APK and the
+desktop Flatpak and attaches them to the GitHub release. See `AGENTS.md` for signing
+and native-library requirements.
 
 ## License
 
