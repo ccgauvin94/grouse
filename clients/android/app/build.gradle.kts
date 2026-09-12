@@ -22,8 +22,12 @@ android {
         // installer reports success while the old APK stays in place, so fixes appear not to
         // work and get re-debugged from scratch. versionName carries the date for the same
         // reason: so "which build is this?" is answerable from the About/app-info screen.
-        versionCode = 93
-        versionName = "0.68-20260906"
+        versionCode = 94
+        // A release tag may override the display name (`-Pgrouse.versionName=…`,
+        // set by .github/workflows/release.yml); local builds keep the committed
+        // value. versionCode stays committed: it MUST be bumped by hand before
+        // tagging so an install is never silently skipped.
+        versionName = findProperty("grouse.versionName")?.toString() ?: "0.1-20260912"
     }
 
     // Release signing, used ONLY when the four properties below are supplied (CI sets them from

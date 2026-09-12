@@ -162,7 +162,7 @@ keep them when extending the core.
 |`clients/cli/`|Rust TUI — **README placeholder only, no `Cargo.toml` yet.**|
 |`design/`|Shared design tokens (`tokens.json` + `design-language.md`), owned by the design-language workstream, not platform dirs.|
 |`scripts/`|`build-android-libs.sh` (Android native libs + bindings), `dev-env.sh` (devcontainer wrapper on podman).|
-|`.github/workflows/`|CI: `core.yml`, `android.yml`, `flatpak.yml`, `secrets.yml`.|
+|`.github/workflows/`|CI: `core.yml`, `android.yml`, `flatpak.yml`, `secrets.yml`; `release.yml` (tag-triggered APK + Flatpak → GitHub Release).|
 |`.devcontainer/`|Rocky Linux 9 dev container for core + CLI only.|
 
 ## Development Commands
@@ -241,9 +241,20 @@ gitleaks detect --source .    # CI-gated; a commit must not contain secrets
 |`android.yml`|`./gradlew --no-daemon assembleDebug` + APK artifact|`Android / apk`|
 |`flatpak.yml`|KRunner + roam `.so` host build, then Flatpak bundle (org.kde.Platform 6.10)|`Flatpak / host-components`, `Flatpak / flatpak`|
 |`secrets.yml`|gitleaks|`Secrets scan / gitleaks`|
+|`release.yml`|On a `v*` tag: signed release APK + desktop Flatpak, published as GitHub Release assets|— (not a PR check)|
 
 **There are NO test jobs in CI for Android unit tests or desktop `ctest`** — run
 those locally.
+
+**Releases** are cut by pushing a version tag (`git tag v0.69 && git push origin
+v0.69`). `release.yml` then builds the signed `assembleRelease` APK and the
+Flatpak bundle and publishes them on the GitHub Release. Android signing reads
+the same env vars as local builds (`GROUSE_KEYSTORE` + the three passwords); CI
+prefers `GROUSE_KEYSTORE_BASE64` (+ the three password secrets) and falls back
+to `GROUSE_DEBUG_KEYSTORE_B64` for a sideload-only, mutually-upgradeable
+debug-signed APK. The APK is built from the **committed** native `.so` +
+bindings, so run `just android-libs` and commit the result after any `core/`
+change before tagging.
 
 ## Code Conventions & Common Patterns
 
