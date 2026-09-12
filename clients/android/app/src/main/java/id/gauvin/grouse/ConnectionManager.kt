@@ -1172,11 +1172,10 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     // --- Assistant-thread reset / (re)create ---
-    // The reset is IN-PLACE: /clear keeps the thread's session id (deliver.sh compacts the
-    // same way), so the id never changes and nothing needs re-pointing. The rename-to-Assistant
-    // path only fires when a NEW thread was created (no thread existed); an explicit
-    // newSession/openSession after beginAssistantThread supersedes the pending rename, so a
-    // stray Ready can never title the wrong chat.
+    // The reset is IN-PLACE: /clear keeps the thread's session id, so the id never changes and
+    // nothing needs re-pointing. The rename-to-Assistant path only fires when a NEW thread was
+    // created (no thread existed); an explicit newSession/openSession after beginAssistantThread
+    // supersedes the pending rename, so a stray Ready can never title the wrong chat.
     @Volatile private var pendingAssistantRename = false
 
     /** Clear the assistant thread IN PLACE, keeping its session id.
@@ -1218,15 +1217,7 @@ class ConnectionManager private constructor(context: Context) {
         writeServerConfig("ASSISTANT_ENABLED", if (on) "true" else "false")
     }
 
-    /** Trigger a server-side test run of a delivery pipeline ("morning" | "briefing"):
-     *  a direct tool call touches a /state drop file that a host systemd path unit watches;
-     *  the unit runs deliver.sh with TEST_RUN=1 (all gates and stamps bypassed, briefings
-     *  forced to produce a visible push). */
-    fun testAssistantJob(kind: String, onResult: (String?) -> Unit) {
-        runUtilityTool("touch /state/.assistant-test-$kind") { err, _ -> onResult(err) }
-    }
-
-    /** Read + write server-side goose config (the deliver.sh schedule keys live there). */
+    /** Read + write server-side goose config. */
     fun readServerConfig(vararg keys: String) { io { keys.forEach { unstable.configRead(it) } } }
     fun writeServerConfig(key: String, value: String) {
         io { unstable.configUpsert(key, value) }
@@ -2295,8 +2286,8 @@ class ConnectionManager private constructor(context: Context) {
 
     companion object {
         /** Server-side name of the persistent assistant thread (see docker/llm/goose-recipes).
-         *  Renamed from "goose-assistant" 2026-07-28 -- coordinated with sessions.db and
-         *  deliver.sh's SESSION_NAME, since resolution on all sides is an exact title match. */
+         *  Renamed from "goose-assistant" 2026-07-28 -- coordinated with sessions.db, since
+         *  resolution on all sides is an exact title match. */
         const val ASSISTANT_TITLE = "Assistant"
         /** Sessions are filed by goose's own project id, never by inspecting cwd -- a path is
          *  this server's layout and means nothing on anyone else's. Only the Assistant thread
