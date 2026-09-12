@@ -31,7 +31,7 @@ thin; protocol behavior is not duplicated in them.
 
 ## Support
 
-| Platform | UI | Status | Badge |
+| Platform | UI | Status | Release |
 |---|---|---|---|
 | Android | Kotlin + Jetpack Compose | Supported | [![Android](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml) |
 | Linux | Qt 6 + KF6 Kirigami | Supported | [![Flatpak](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml) |
