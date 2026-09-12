@@ -57,7 +57,15 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 shrink + obfuscate; the app's reflection surface (uniffi/JNA,
+            // Tink) is covered by proguard-rules.pro.
+            isMinifyEnabled = true
+            // Strip resources no reachable code references.
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             // With a real keystore: a distributable build. Without one: sign with the DEBUG
             // keystore so the release APK installs OVER the debug app (same signature, no
             // uninstall) — the personal sideload path, unchanged. What matters either way is
