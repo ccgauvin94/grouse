@@ -310,7 +310,6 @@ pub trait GrouseUnstableListener: Send + Sync {
 enum PendingIntent {
     SendPrompt(Prompt, Option<SendExpect>, String),
     SetConfig(String, String),
-    Unstable { method: String, params: Value },
 }
 
 /// The core's authoritative state, guarded by `CoreInner::state`.
@@ -1321,22 +1320,6 @@ impl Core {
         Ok(())
     }
 
-    fn try_send_unstable(&self, method: String, params: Value) -> Result<(), (String, Value)> {
-        let Some(conn) = self.inner.conn.lock().clone() else {
-            return Err((method, params));
-        };
-        if !conn.is_ready() {
-            return Err((method, params));
-        }
-        let conn_clone = conn.clone();
-        let m = method.clone();
-        let p = params.clone();
-        crate::roam::runtime().spawn(async move {
-            let _ = conn_clone.rpc_async(&m, p).await;
-        });
-        Ok(())
-    }
-
     fn spawn_prompt(&self, conn: Arc<crate::spine::Conn>, session_id: String, prompt: Prompt) {
         let params = prompt_params(&prompt, &session_id);
         let core = self.clone();
@@ -1440,12 +1423,6 @@ impl Core {
                     match self.try_set_config(config_id, value) {
                         Ok(()) => None,
                         Err((config_id, value)) => Some((String::new(), PendingIntent::SetConfig(config_id, value))),
-                    }
-                }
-                PendingIntent::Unstable { method, params } => {
-                    match self.try_send_unstable(method, params) {
-                        Ok(()) => None,
-                        Err((method, params)) => Some((String::new(), PendingIntent::Unstable { method, params })),
                     }
                 }
             };
