@@ -11,8 +11,8 @@ import org.junit.Test
 /**
  * Pins the design/tokens.json color.semantic.{light,dark}.status mapping that the
  * Android status tokens (Color.kt GrouseStatusColors) are hand-synced against. There is no
- * codegen from tokens.json yet (that gap is recorded in AUDIT.md X-4); this test is the
- * guard so a drift in the hand-synced values is caught, not silently shipped.
+ * codegen from tokens.json yet, so this test is the guard: a drift in the hand-synced values
+ * is caught here rather than silently shipped.
  *
  * Values MUST match design/tokens.json:
  *   semantic.light.status = { online #2E7D32, connecting #F5A623, offline #FB4934 }
