@@ -8,6 +8,9 @@ with the `agent-client-protocol-http` WebSocket transport. The server owns
 sessions, memory, tools, and model choice. The clients render transcripts and send
 prompts.
 
+[![Core](https://github.com/ccgauvin94/grouse/actions/workflows/core.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/core.yml)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+
 ## Architecture
 
 Wire protocol: ACP (JSON-RPC 2.0) over WebSocket. A second transport, roam, carries
@@ -33,9 +36,10 @@ thin; protocol behavior is not duplicated in them.
 | Android | Kotlin + Jetpack Compose | Supported | [![Android](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml) |
 | Linux | Qt 6 + KF6 Kirigami | Supported | [![Flatpak](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml) |
 | macOS | SwiftUI | Planned | |
-| iOS | SwiftUI | Not planned | |
-| TUI | Rust | Planned | [![Core](https://github.com/ccgauvin94/grouse/actions/workflows/core.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/core.yml) |
-| License | AGPL-3.0 | | [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE) |
+| iOS | SwiftUI | Not planned* | |
+| TUI | Rust | Planned | |
+
+<sub><i>* Lack of testing equipment</i></sub>
 
 ## Building
 
