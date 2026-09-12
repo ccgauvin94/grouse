@@ -8,9 +8,6 @@ with the `agent-client-protocol-http` WebSocket transport. The server owns
 sessions, memory, tools, and model choice. The clients render transcripts and send
 prompts.
 
-Platforms: Android (Kotlin/Compose), Linux desktop (Qt 6/KF6 Kirigami). macOS and a
-CLI client are planned.
-
 [![Core](https://github.com/ccgauvin94/grouse/actions/workflows/core.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/core.yml)
 [![Android](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml)
 [![Flatpak](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml)
@@ -33,6 +30,16 @@ thin; protocol behavior is not duplicated in them.
 - `clients/android`: Kotlin + Jetpack Compose.
 - `clients/desktop`: Qt 6 + KF6 Kirigami.
 - `clients/cli`: placeholder, no implementation.
+
+## Support
+
+| Platform | UI | Status |
+|---|---|---|
+| Android | Kotlin + Jetpack Compose | Supported |
+| Linux | Qt 6 + KF6 Kirigami | Supported |
+| macOS | SwiftUI | Planned |
+| iOS | SwiftUI | Planned |
+| TUI | Rust | Planned |
 
 ## Building
 
