@@ -31,13 +31,13 @@ thin; protocol behavior is not duplicated in them.
 
 ## Support
 
-| Platform | UI | Status | Release |
-|---|---|---|---|
-| Android | Kotlin + Jetpack Compose | Supported | [![Android](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml) |
-| Linux | Qt 6 + KF6 Kirigami | Supported | [![Flatpak](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml) |
-| macOS | SwiftUI | Planned | |
-| iOS | SwiftUI | Not planned* | |
-| TUI | Rust | Planned | |
+| Platform | UI | Status | Release | Download |
+|---|---|---|---|---|
+| Android | Kotlin + Jetpack Compose | Supported | [![Android](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml) | [APK](https://github.com/ccgauvin94/grouse/releases/latest/download/grouse-android.apk) |
+| Linux | Qt 6 + KF6 Kirigami | Supported | [![Flatpak](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml) | [Flatpak](https://github.com/ccgauvin94/grouse/releases/latest/download/grouse-desktop.flatpak) |
+| macOS | SwiftUI | Planned | | |
+| iOS | SwiftUI | Not planned* | | |
+| TUI | Rust | Planned | | |
 
 <sub><i>* Lack of testing equipment</i></sub>
 
