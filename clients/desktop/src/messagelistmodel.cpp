@@ -61,7 +61,10 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
     case AppHtmlRole: return m.value("appHtml");
     case AppKeyRole: return m.value("appKey");
     case CallsRole: return m.value("calls");
-    case ExpandedRole: return m_expanded.value(m.value("id").toInt(), false);
+    // Keyed by ROW index, not the "id" value: text bubbles carry string message
+    // ids ("" for live ones), so an id.toInt() key collapsed every thought
+    // bubble onto one shared entry.
+    case ExpandedRole: return m_expanded.value(index.row(), false);
     default: return {};
     }
 }
@@ -95,16 +98,13 @@ void MessageListModel::append(const QVariantMap &message)
     emit countChanged();
 }
 
-void MessageListModel::toggleExpanded(int id)
+void MessageListModel::toggleExpanded(int row)
 {
-    for (int i = 0; i < m_rows.size(); ++i) {
-        if (m_rows.at(i).value("id").toInt() == id) {
-            m_expanded[id] = !m_expanded.value(id, false);
-            const QModelIndex idx = index(i);
-            emit dataChanged(idx, idx, {ExpandedRole});
-            return;
-        }
-    }
+    if (row < 0 || row >= m_rows.size())
+        return;
+    m_expanded[row] = !m_expanded.value(row, false);
+    const QModelIndex idx = index(row);
+    emit dataChanged(idx, idx, {ExpandedRole});
 }
 
 void MessageListModel::update(int index, const QVariantMap &message)

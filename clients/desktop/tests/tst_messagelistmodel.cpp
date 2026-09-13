@@ -126,16 +126,16 @@ void TstMessageListModel::expandedStartsCollapsedAndToggles()
     model.append(message(7, QStringLiteral("thought"), QStringLiteral("hmm")));
     QCOMPARE(model.data(model.index(0), MessageListModel::ExpandedRole).toBool(), false);
     QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
-    model.toggleExpanded(7);
+    model.toggleExpanded(0);
     QCOMPARE(spy.size(), 1);
     QCOMPARE(model.data(model.index(0), MessageListModel::ExpandedRole).toBool(), true);
-    model.toggleExpanded(7);
+    model.toggleExpanded(0);
     QCOMPARE(model.data(model.index(0), MessageListModel::ExpandedRole).toBool(), false);
-    // Unknown id is a no-op, not a crash.
+    // Unknown row index is a no-op, not a crash.
     model.toggleExpanded(999);
     QCOMPARE(model.data(model.index(0), MessageListModel::ExpandedRole).toBool(), false);
     // clear() resets the state.
-    model.toggleExpanded(7);
+    model.toggleExpanded(0);
     model.clear();
     model.append(message(7, QStringLiteral("thought"), QStringLiteral("hmm")));
     QCOMPARE(model.data(model.index(0), MessageListModel::ExpandedRole).toBool(), false);

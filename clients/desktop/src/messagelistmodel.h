@@ -55,8 +55,8 @@ public:
     void append(const QVariantMap &message);
     /** Replace row `index`'s data and notify QML of every role. */
     void update(int index, const QVariantMap &message);
-    /** Flip a row's ExpandedRole (thinking bubble open/closed). */
-    Q_INVOKABLE void toggleExpanded(int id);
+    /** Flip a row's ExpandedRole (thinking bubble open/closed). Keyed by row index. */
+    Q_INVOKABLE void toggleExpanded(int row);
     /**
      * Like update(), but the dataChanged notification is deferred and coalesced
      * onto a short timer. Streaming appendChunk accumulates the whole reply into

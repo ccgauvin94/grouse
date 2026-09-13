@@ -241,7 +241,8 @@ Kirigami.Page {
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 height: 1
-                color: Kirigami.Theme.separatorColor
+                color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
+                                                     : Kirigami.Theme.disabledTextColor
             }
 
             RowLayout {
@@ -379,6 +380,51 @@ Kirigami.Page {
             onContentHeightChanged: page.applySessionScroll()
             onHeightChanged: page.applySessionScroll()
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+            // Keep every delegate realized (a transcript is capped at 2000
+            // bubbles in the core): with the default 100px cache the scrollbar
+            // height jumped mid-drag as offscreen delegates were destroyed and
+            // remeasured to 0.
+            cacheBuffer: 20000
+
+            // The waiting bubble is an INLINE footer row: it participates in
+            // contentHeight, so positionViewAtEnd reveals the last message and
+            // the bubble together and neither is ever covered.
+            footer: Rectangle {
+                visible: Mgr.prompting
+                width: ListView.view ? ListView.view.width : 0
+                height: visible ? waitRow.implicitHeight + Kirigami.Units.smallSpacing : 0
+                color: "transparent"
+                Row {
+                    id: waitRow
+                    anchors.left: parent.left
+                    anchors.leftMargin: Kirigami.Units.largeSpacing * 1.5
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Kirigami.Units.smallSpacing
+                    Rectangle {
+                        width: waitInner.implicitWidth + Kirigami.Units.smallSpacing * 2
+                        height: waitInner.implicitHeight + Kirigami.Units.smallSpacing
+                        radius: 16
+                        color: Kirigami.Theme.alternateBackgroundColor
+                        border.color: Kirigami.Theme.disabledTextColor
+                        border.width: 1
+                        Row {
+                            id: waitInner
+                            anchors.centerIn: parent
+                            spacing: Kirigami.Units.smallSpacing
+                            BusyIndicator {
+                                id: busy
+                                width: 18
+                                height: 18
+                                running: Mgr.prompting
+                            }
+                            Controls.Label {
+                                text: qsTr("Grouse is working…")
+                                opacity: 0.8
+                            }
+                        }
+                    }
+                }
+            }
 
             // Inline delegate (a separate-file delegate loses the `model`
             // context for root-object bindings; inline works). Reads role names
@@ -564,7 +610,8 @@ Kirigami.Page {
                     implicitHeight: agentCol.implicitHeight + mdel.pad * 2
                     radius: Theme.radius.xl
                     color: Kirigami.Theme.alternateBackgroundColor
-                    border.color: Kirigami.Theme.separatorColor
+                    border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
+                                                                : Kirigami.Theme.disabledTextColor
                     border.width: 1
                     clip: true
 
@@ -611,7 +658,8 @@ Kirigami.Page {
                     implicitHeight: chipCol.implicitHeight + mdel.pad * 2
                     radius: Theme.radius.lg
                     color: Qt.lighter(Kirigami.Theme.backgroundColor, 1.18)
-                    border.color: Kirigami.Theme.separatorColor
+                    border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
+                                                                : Kirigami.Theme.disabledTextColor
                     border.width: 1
 
                     Column {
@@ -679,7 +727,8 @@ Kirigami.Page {
                     implicitHeight: groupCol.implicitHeight + mdel.pad * 2
                     radius: Theme.radius.lg
                     color: Qt.lighter(Kirigami.Theme.backgroundColor, 1.18)
-                    border.color: Kirigami.Theme.separatorColor
+                    border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
+                                                                : Kirigami.Theme.disabledTextColor
                     border.width: 1
 
                     Column {
@@ -794,7 +843,8 @@ Kirigami.Page {
                     implicitHeight: mcpCol.implicitHeight + mdel.pad * 2
                     radius: Theme.radius.sm
                     color: Qt.lighter(Kirigami.Theme.backgroundColor, 1.18)
-                    border.color: Kirigami.Theme.separatorColor
+                    border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
+                                                                : Kirigami.Theme.disabledTextColor
                     border.width: 1
 
                     Column {
@@ -862,7 +912,7 @@ Kirigami.Page {
                             flat: true
                             text: mdel.thoughtOpen ? qsTr("Thinking") + " -" : qsTr("Thinking") + " >"
                             height: Kirigami.Units.gridUnit * 1.25
-                            onClicked: Mgr.messageModel.toggleExpanded(model.id)
+                            onClicked: Mgr.messageModel.toggleExpanded(index)
                             opacity: 0.7
                         }
                         Controls.Label {
@@ -921,42 +971,6 @@ Kirigami.Page {
                 }
             }
 
-            // Floating waiting indicator: OVERLAYS the list instead of being a
-            // ListView footer, so its height never pollutes contentHeight and
-            // positionViewAtEnd always lands exactly on the last message. Left
-            // margin matches the delegate's `gap` so it lines up under the
-            // agent bubbles instead of hanging out to their right.
-            Rectangle {
-                id: waitBubble
-                visible: Mgr.prompting
-                z: 2
-                height: Kirigami.Units.gridUnit * 2
-                width: busy.implicitWidth + busy.spacing + waitLabel.implicitWidth + Kirigami.Units.smallSpacing * 2
-                radius: 16
-                color: Kirigami.Theme.alternateBackgroundColor
-                border.color: Kirigami.Theme.disabledTextColor
-                border.width: 1
-                anchors.left: parent.left
-                anchors.bottom: parent.bottom
-                anchors.leftMargin: Kirigami.Units.largeSpacing * 1.5
-                anchors.bottomMargin: Kirigami.Units.smallSpacing
-                Row {
-                    anchors.centerIn: parent
-                    spacing: Kirigami.Units.smallSpacing
-                    BusyIndicator {
-                        id: busy
-                        width: 18
-                        height: 18
-                        running: Mgr.prompting
-                    }
-                    Controls.Label {
-                        id: waitLabel
-                        text: qsTr("Grouse is working…")
-                        opacity: 0.8
-                        verticalAlignment: Text.AlignVCenter
-                    }
-                }
-            }
         }
 
         // Pending file attachments: removable chips above the input. Images

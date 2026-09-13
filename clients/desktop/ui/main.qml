@@ -642,7 +642,8 @@ Controls.ApplicationWindow {
                     Layout.fillWidth: true
                     visible: Mgr.online
                     spacing: Kirigami.Units.smallSpacing
-                    // Equal thirds: Skills, Recipes, Scheduler.
+                    // Equal halves: Skills, Recipes. Scheduler is folded into the
+                    // Recipes dialog (a schedule is a recipe setting, not its own screen).
                     Controls.Button {
                         text: qsTr("Skills")
                         icon.name: "document-properties"
@@ -654,12 +655,6 @@ Controls.ApplicationWindow {
                         icon.name: "view-list-details"
                         Layout.fillWidth: true
                         onClicked: recipesDialog.open()
-                    }
-                    Controls.Button {
-                        text: qsTr("Scheduler")
-                        icon.name: "appointment-new"
-                        Layout.fillWidth: true
-                        onClicked: schedulerDialog.open()
                     }
                 }
 
@@ -954,10 +949,6 @@ Controls.ApplicationWindow {
 
     RecipesDialog {
         id: recipesDialog
-    }
-
-    SchedulerDialog {
-        id: schedulerDialog
     }
 
     GlobalExtensionsDialog {

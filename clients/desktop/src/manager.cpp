@@ -558,6 +558,34 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
     const QString expectJson = m_currentSessionId.isEmpty()
         ? QString() : QStringLiteral("{\"session_id\":\"%1\"}").arg(m_currentSessionId);
     const bool ready = m_bridge && m_bridge->isAvailable() && m_bridge->api().grouse_ready(m_bridge->handle());
+    // Local echo of the question (Android's send() does the same): the live wire
+    // carries NO user_message_chunk — the prompt only appears in the next
+    // session/load replay — so without this the bubble surfaces after the reply.
+    // A replay's Clear rebuilds the model from the store anyway, so no duplicate.
+    QVariantMap userRow;
+    userRow["id"] = QString();
+    userRow["role"] = QStringLiteral("user");
+    userRow["text"] = text;
+    userRow["html"] = markdownToHtml(text);
+    QVariantList shown;
+    for (const auto &v : blocks) {
+        const QVariantMap b = v.toMap();
+        if (b.value("type").toString() == QLatin1String("image"))
+            shown << QVariantMap{{"image", true},
+                                 {"url", QStringLiteral("data:%1;base64,%2")
+                                            .arg(b.value("mimeType").toString(),
+                                                 b.value("data").toString())}};
+        else if (b.value("type").toString() == QLatin1String("resource"))
+            shown << QVariantMap{{"image", false},
+                                 {"url", b.value("resource").toMap().value("uri").toString()},
+                                 {"name", QFileInfo(b.value("resource").toMap()
+                                                    .value("uri").toString()).fileName()}};
+    }
+    if (!shown.isEmpty())
+        userRow["images"] = shown;
+    m_messageModel->append(userRow);
+    m_currentIndex = m_messageModel->count() - 1;
+    requestMessagesUpdate();
     if (ready && !m_prompting) {
         m_prompting = true;
         emit promptingChanged();
@@ -822,6 +850,18 @@ void Manager::deleteRecipe(const QString &id)
         return;
     const QByteArray rid = id.toUtf8();
     m_bridge->api().grouse_unstable_recipes_delete(m_bridge->handle(), rid.constData());
+}
+
+// recipes/save replaces the WHOLE recipe: the DTO must be the complete listed
+// object with only the edited keys changed (mirrors Android's recipeWith).
+void Manager::saveRecipe(const QString &id, const QString &recipeJson)
+{
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const QByteArray rid = id.toUtf8();
+    const QByteArray rj = recipeJson.toUtf8();
+    m_bridge->api().grouse_unstable_recipes_save(m_bridge->handle(), rid.constData(),
+                                                 rj.constData());
 }
 
 void Manager::setSchedulePaused(const QString &scheduleId, bool paused)
@@ -1300,13 +1340,19 @@ void Manager::coreOnTranscript(const QString &json)
         }
     }
     if (tag == QStringLiteral("Append")) {
-        if (idx < 0) {
-            m_messageModel->append(row);
-        } else {
-            m_messageModel->update(idx, row);
-        }
+        // The store's arrival order is the truth: append unconditionally (Android's
+        // appendFromMessage). The (id, role) lookup would collapse a fresh bubble
+        // into an older one — live thought bubbles all carry an empty id, so every
+        // second-turn thought used to overwrite the first row in place.
+        m_messageModel->append(row);
     } else { // Update
-        if (idx >= 0)
+        // Only Updates map to an existing row: a non-empty message id matches by
+        // id+role; an empty-id live bubble matches the LAST row of the same role
+        // (Android's updateFromMessage rule — roaming interleaves agent/thought
+        // on the same empty stream).
+        if (idx < 0)
+            m_messageModel->append(row);
+        else
             m_messageModel->update(idx, row);
     }
     m_currentIndex = m_messageModel->count() - 1;

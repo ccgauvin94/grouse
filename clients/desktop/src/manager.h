@@ -174,6 +174,7 @@ public:
     Q_INVOKABLE void runRecipe(const QString &id);
     Q_INVOKABLE void scheduleRecipe(const QString &id, const QString &cron);
     Q_INVOKABLE void deleteRecipe(const QString &id);
+    Q_INVOKABLE void saveRecipe(const QString &id, const QString &recipeJson);
     Q_INVOKABLE void setSchedulePaused(const QString &scheduleId, bool paused);
     Q_INVOKABLE void runScheduleNow(const QString &scheduleId);
     // --- per-session tool management ------------------------------------------
