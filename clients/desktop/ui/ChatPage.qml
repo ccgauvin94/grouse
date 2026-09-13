@@ -1086,7 +1086,10 @@ Kirigami.Page {
                 RowLayout {
                     id: inputRow
                     Layout.fillWidth: true
-                    spacing: Kirigami.Units.smallSpacing
+                    // One uniform gap for the whole row: every control below
+                    // uses the same 4px side padding, so glyph-to-glyph spacing
+                    // is 4+4+4 — no column can drift out of alignment.
+                    spacing: 4
 
                     Controls.Button {
                         id: modePill
@@ -1096,8 +1099,8 @@ Kirigami.Page {
                         icon.name: "tools-wizard"
                         text: page.modePrettyName(page.currentMode())
                         display: Controls.AbstractButton.TextBesideIcon
-                        leftPadding: Kirigami.Units.smallSpacing * 2
-                        rightPadding: Kirigami.Units.smallSpacing * 2
+                        leftPadding: 4
+                        rightPadding: 4
                         background: Rectangle {
                             radius: height / 2
                             color: modePill.hovered ? Kirigami.Theme.highlightColor : Kirigami.Theme.alternateBackgroundColor
@@ -1119,19 +1122,18 @@ Kirigami.Page {
                         }
                     }
 
-                Controls.Button {
-                    id: attachButton
-                    visible: Mgr.online
-                    // Snug to the glyph: a fixed 60px box centered a 24px icon and
-                    // left dead margins on both sides of it.
-                    Layout.preferredWidth: implicitWidth
-                    Layout.alignment: Qt.AlignVCenter
-                    icon.name: "mail-attachment"
-                    display: Controls.AbstractButton.IconOnly
-                    // 2px sides: the style's own border + these paddings are the
-                    // visible "margin"; the icon itself is 16px.
-                    leftPadding: 2
-                    rightPadding: 2
+                    Controls.Button {
+                        id: attachButton
+                        visible: Mgr.online
+                        // Snug to the glyph: a fixed 60px box centered a 24px icon and
+                        // left dead margins on both sides of it.
+                        Layout.preferredWidth: implicitWidth
+                        Layout.alignment: Qt.AlignVCenter
+                        icon.name: "mail-attachment"
+                        display: Controls.AbstractButton.IconOnly
+                        // Same 4px as the pill above and the strip below.
+                        leftPadding: 4
+                        rightPadding: 4
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Attach files")
                     // Native KDE file picker (any file type) via the Manager.
