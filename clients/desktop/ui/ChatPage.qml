@@ -1094,7 +1094,10 @@ Kirigami.Page {
                     Controls.Button {
                         id: modePill
                         visible: Mgr.online
-                        Layout.preferredWidth: implicitWidth
+                        // Fixed icon column: the strip below mirrors it, so the
+                        // two rows share one grid.
+                        Layout.preferredWidth: 68
+                        Layout.maximumWidth: 68
                         Layout.alignment: Qt.AlignVCenter
                         icon.name: "tools-wizard"
                         text: page.modePrettyName(page.currentMode())
@@ -1130,7 +1133,8 @@ Kirigami.Page {
                         flat: true
                         // Snug to the glyph: a fixed 60px box centered a 24px icon and
                         // left dead margins on both sides of it.
-                        Layout.preferredWidth: implicitWidth
+                        Layout.preferredWidth: 20
+                        Layout.maximumWidth: 20
                         Layout.alignment: Qt.AlignVCenter
                         icon.name: "mail-attachment"
                         display: Controls.AbstractButton.IconOnly
@@ -1190,9 +1194,14 @@ Kirigami.Page {
                     id: providerStrip
                     Layout.fillWidth: true
                     visible: Mgr.online
-                    spacing: Kirigami.Units.smallSpacing
+                    // Same 4px step as inputRow above, and the label column is
+                    // exactly the icon pair's width (68+4+20), so the Provider
+                    // combo starts on the same x as the text field.
+                    spacing: 4
 
                     Controls.Label {
+                        Layout.preferredWidth: 92
+                        Layout.maximumWidth: 92
                         text: qsTr("Provider")
                         color: Kirigami.Theme.disabledTextColor
                         font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
