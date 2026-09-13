@@ -1272,6 +1272,21 @@ void Manager::coreOnStatus(const QString &json)
     }
 }
 
+namespace {
+// The project key as the server holds it: the short name ("hacking"). Android's
+// ProjectSummary.toInfo() derives exactly this from the <name>.md basename of
+// sources/list, and a session's project id arrives in either form — the short
+// name (older writes) or the full path (newer ones). Both must collapse to one
+// group or the sidebar shows the project twice.
+QString projectKey(const QString &raw)
+{
+    QString k = raw.section(QLatin1Char('/'), -1);
+    if (k.endsWith(QLatin1String(".md")))
+        k.chop(3);
+    return k;
+}
+} // namespace
+
 void Manager::coreOnSessions(const QString &json)
 {
     QVariantList sessions;
@@ -1285,7 +1300,7 @@ void Manager::coreOnSessions(const QString &json)
         m["updatedAt"] = o.value("updated_at").toString();
         m["lastMessageAt"] = o.value("updated_at").toString();
         m["snippet"] = o.value("last_message_snippet").toString();
-        m["projectId"] = o.value("project_id").toString();
+        m["projectId"] = projectKey(o.value("project_id").toString());
         m["messageCount"] = o.value("message_count").toVariant();
         m["hasRecipe"] = o.value("has_recipe").toBool();
         m["archived"] = o.value("archived").toBool();
@@ -1415,9 +1430,14 @@ void Manager::coreOnProjects(const QString &json)
     const QJsonArray arr = parseArr(json);
     for (const auto &el : arr) {
         const QJsonObject o = el.toObject();
-        projects << QVariantMap{{"id", o.value("path").toString()},
-                                {"name", o.value("name").toString()},
-                                {"path", o.value("path").toString()},
+        const QString path = o.value("path").toString();
+        const QString name = o.value("name").toString();
+        // Group/combo key = the short name form (see projectKey); "path" stays
+        // the full sources/list path for delete/create round-trips.
+        const QString id = projectKey(path).isEmpty() ? name : projectKey(path);
+        projects << QVariantMap{{"id", id},
+                                {"name", name},
+                                {"path", path},
                                 {"description", o.value("description").toString()}};
     }
     onProjects(projects);
