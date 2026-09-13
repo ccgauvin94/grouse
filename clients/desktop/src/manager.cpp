@@ -98,7 +98,7 @@ QString Manager::currentSessionTitle() const
 {
     if (!m_currentSessionTitle.isEmpty())
         return m_currentSessionTitle;
-    return m_currentSessionId.isEmpty() ? QStringLiteral("New chat") : m_currentSessionId;
+    return m_currentSessionId.isEmpty() ? QStringLiteral("New Chat") : m_currentSessionId;
 }
 
 QObject *Manager::sessionsModel() const { return m_sessionsModel; }

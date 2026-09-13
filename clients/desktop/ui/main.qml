@@ -553,12 +553,12 @@ Controls.ApplicationWindow {
                                             ToolTip.text: status
                                         }
                                         Controls.ToolButton {
-                                            text: qsTr("New chat")
+                                            text: qsTr("New Chat")
                                             display: Controls.AbstractButton.TextBesideIcon
                                             icon.name: "document-new"
                                             font.pixelSize: root.sidebarSmallTextSize
                                             ToolTip.visible: hovered
-                                            ToolTip.text: qsTr("New chat on this peer — long-press to choose a working directory")
+                                            ToolTip.text: qsTr("New Chat on this peer — long-press to choose a working directory")
                                             // Long-press opens the cwd dialog; the
                                             // hold timer guards the trailing click
                                             // so a hold never also starts a chat.
@@ -660,7 +660,7 @@ Controls.ApplicationWindow {
                 }
 
                     Controls.Button {
-                        text: qsTr("New chat")
+                        text: qsTr("New Chat")
                         icon.name: "document-new"
                         Layout.fillWidth: true
                         onClicked: Mgr.newChat()
@@ -682,14 +682,6 @@ Controls.ApplicationWindow {
                     onClicked: settingsDialog.open()
                 }
 
-                Controls.Label {
-                    text: Mgr.status
-                    color: Kirigami.Theme.disabledTextColor
-                    font.pixelSize: root.sidebarSmallTextSize
-                    renderType: Text.NativeRendering
-                    elide: Text.ElideRight
-                    Layout.fillWidth: true
-                }
             }
         }
 
@@ -737,7 +729,7 @@ Controls.ApplicationWindow {
                 }
                 Controls.Button {
                     visible: Mgr.online
-                    text: qsTr("New chat")
+                    text: qsTr("New Chat")
                     icon.name: "document-new"
                     Layout.alignment: Qt.AlignHCenter
                     onClicked: Mgr.beginChat()
@@ -1023,7 +1015,7 @@ Controls.ApplicationWindow {
         property string targetId
         property string targetName
         MenuItem {
-            text: qsTr("New chat in this project")
+            text: qsTr("New Chat in this project")
             icon.name: "document-new"
             onTriggered: Mgr.newChatInProject(projectMenu.targetId)
         }
@@ -1092,7 +1084,7 @@ Controls.ApplicationWindow {
     // blank entry falls back to the config working dir.
     Controls.Dialog {
         id: roamNewChatDialog
-        title: qsTr("New chat on peer")
+        title: qsTr("New Chat on peer")
         modal: true
         standardButtons: Controls.Dialog.Ok | Controls.Dialog.Cancel
         property string targetLabel: ""

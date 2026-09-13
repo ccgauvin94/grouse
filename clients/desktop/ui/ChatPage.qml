@@ -1191,12 +1191,6 @@ Kirigami.Page {
                     visible: Mgr.online
                     spacing: Kirigami.Units.smallSpacing
 
-                    Controls.Label {
-                        text: qsTr("Provider")
-                        color: Kirigami.Theme.disabledTextColor
-                        font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
-                        renderType: Text.NativeRendering
-                    }
                     Controls.ComboBox {
                         id: providerCombo
                         Layout.preferredWidth: 150
@@ -1213,12 +1207,6 @@ Kirigami.Page {
                         ToolTip.visible: hovered
                         ToolTip.text: qsTr("Provider for this chat")
                     }
-                    Controls.Label {
-                        text: qsTr("Model")
-                        color: Kirigami.Theme.disabledTextColor
-                        font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
-                        renderType: Text.NativeRendering
-                    }
                     Controls.ComboBox {
                         id: modelCombo
                         Layout.preferredWidth: 180
@@ -1232,6 +1220,14 @@ Kirigami.Page {
                         ToolTip.text: qsTr("Model for this chat")
                     }
                     Item { Layout.fillWidth: true }
+                    // The connection status moved from the sidebar's bottom to
+                    // this strip's right end; the pickers' own ToolTips name them.
+                    Controls.Label {
+                        text: Mgr.status
+                        color: Kirigami.Theme.disabledTextColor
+                        font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
+                        renderType: Text.NativeRendering
+                    }
                 }
             }
 
