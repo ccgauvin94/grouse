@@ -37,7 +37,7 @@ prompts.
 <sub><i>* Lack of testing equipment</i></sub>
 
 <details>
-<summary>Architecture</summary>
+<summary><h2>Architecture</h2></summary>
 
 Wire protocol: ACP (JSON-RPC 2.0) over WebSocket. A second transport, roam, carries
 the same protocol over an iroh connection between two peers.
@@ -58,7 +58,7 @@ thin; protocol behavior is not duplicated in them.
 </details>
 
 <details>
-<summary>Building</summary>
+<summary><h2>Building</h2></summary>
 
 Rust core:
 
@@ -91,7 +91,8 @@ just desktop
 
 </details>
 
-## Releasing
+<details>
+<summary><h2>Releasing</h2></summary>
 
 ```sh
 git tag v0.2 && git push origin v0.2
@@ -100,6 +101,8 @@ git tag v0.2 && git push origin v0.2
 The tag runs the release workflow, which builds the signed Android APK and the
 desktop Flatpak and attaches them to the GitHub release. See `AGENTS.md` for signing
 and native-library requirements.
+
+</details>
 
 ## License
 
