@@ -1478,9 +1478,38 @@ impl Core {
         self.inner.listener.on_sessions(sessions);
     }
 
+    /// Merge a config reply into the cached option list (session/new|load
+    /// replies, set_config_option replies, and `config_option_update`
+    /// notifications all funnel here).
+    ///
+    /// Two shapes matter on the wire: goose can answer `set_config_option`
+    /// with a bare `null` (no `configOptions` key at all), and the typed
+    /// `config_option_update` notification carries no `choices` lists. A
+    /// wholesale replace would wipe both, which is why the merge keeps the
+    /// prior entry's choices when the incoming option has none.
     fn on_config_reply(&self, options: Vec<ConfigOption>) {
-        self.inner.state.lock().config = options.clone();
-        self.inner.listener.on_config(options);
+        if options.is_empty() {
+            return; // null reply / empty update: keep the last full list
+        }
+        {
+            let mut state = self.inner.state.lock();
+            for option in options {
+                match state.config.iter_mut().find(|o| o.id == option.id) {
+                    Some(existing) => {
+                        existing.value = option.value.clone();
+                        if !option.name.is_empty() {
+                            existing.name = option.name;
+                        }
+                        if !option.choices.is_empty() {
+                            existing.choices = option.choices;
+                        }
+                    }
+                    None => state.config.push(option),
+                }
+            }
+        }
+        let snapshot = self.inner.state.lock().config.clone();
+        self.inner.listener.on_config(snapshot);
     }
 
     fn on_active_run(&self, session_id: String, run_id: String) {

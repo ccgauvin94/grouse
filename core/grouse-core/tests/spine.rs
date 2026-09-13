@@ -19,7 +19,7 @@ use async_tungstenite::tungstenite::Message as WsMessage;
 use futures::stream::StreamExt;
 use grouse_core::{
     ConfigOption, ConnectionStatus, Core, CoreListener, PermissionRequest, ProjectSummary, Prompt,
-    PromptBlock, SendExpect, SessionSummary, StreamEvent, TranscriptEvent,
+    ConfigChoice, PromptBlock, SendExpect, SessionSummary, StreamEvent, TranscriptEvent,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -261,7 +261,10 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
                 json!({
                     "sessionId": "sess-e2e",
                     "configOptions": [
-                        { "id": "provider", "name": "Provider", "currentValue": "openai" }
+                        { "id": "provider", "name": "Provider", "currentValue": "openai" },
+                        { "id": "model", "name": "Model", "currentValue": "m-a",
+                          "options": [ { "value": "m-a", "name": "A" },
+                                       { "value": "m-b", "name": "B" } ] }
                     ]
                 })
             }
@@ -381,6 +384,14 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
                     "updatedAt": "2026-08-12T13:00:00.000Z",
                     "_meta": { "messageCount": 3 }
                 }
+            }),
+            // goose's real shape for a select set: the CURRENT list with the
+            // chosen value, and (as on the typed notification) no per-option
+            // choices for the changed entry.
+            "session/set_config_option" => json!({
+                "configOptions": [
+                    { "id": "model", "name": "Model", "currentValue": "m-b" }
+                ]
             }),
             _ => json!({}),
         };
@@ -633,12 +644,23 @@ fn spine_e2e_connect_prompt_stream() {
     assert_eq!(core.active_session_id().as_deref(), Some("sess-e2e"));
     assert_eq!(
         core.config(),
-        vec![ConfigOption {
-            id: "provider".to_string(),
-            value: "openai".to_string(),
-            name: "Provider".to_string(),
-            choices: vec![],
-        }]
+        vec![
+            ConfigOption {
+                id: "provider".to_string(),
+                value: "openai".to_string(),
+                name: "Provider".to_string(),
+                choices: vec![],
+            },
+            ConfigOption {
+                id: "model".to_string(),
+                value: "m-a".to_string(),
+                name: "Model".to_string(),
+                choices: vec![
+                    ConfigChoice { value: "m-a".to_string(), name: "A".to_string() },
+                    ConfigChoice { value: "m-b".to_string(), name: "B".to_string() },
+                ],
+            }
+        ]
     );
 
     // The wire shape: initialize carried the goose client caps + the secret
@@ -810,6 +832,61 @@ fn prompt_does_not_resync_its_own_turn() {
     assert_eq!(
         agent_count, 1,
         "the reply must appear once; a resync rebuild would duplicate it"
+    );
+
+    core.disconnect();
+}
+
+// ---------------------------------------------------------------------------
+// set_config_option updates merge IN PLACE: the changed option takes the new
+// value while its choices list survives an update that carries none (the
+// typed notification shape), and untouched options keep everything. A
+// wholesale replace emptied both dropdowns with no way back.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_config_update_merges_and_preserves_choices() {
+    let (port_tx, port_rx) = mpsc::channel();
+    let _server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
+
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "Ready");
+
+    core.set_config_option("model".to_string(), "m-b".to_string());
+    wait_for(
+        &ev_rx,
+        |ev| {
+            matches!(ev, Ev::Config(options)
+                if options.iter().any(|o| o.id == "model" && o.value == "m-b"))
+        },
+        "merged config",
+    );
+
+    let config = core.config();
+    assert_eq!(config.len(), 2, "both options survive");
+    let provider = config.iter().find(|o| o.id == "provider").expect("provider");
+    assert_eq!(provider.value, "openai", "untouched option keeps its value");
+    let model = config.iter().find(|o| o.id == "model").expect("model");
+    assert_eq!(model.value, "m-b", "the update lands");
+    assert_eq!(
+        model.choices.len(),
+        2,
+        "an update without choices must not erase the initial list"
     );
 
     core.disconnect();
