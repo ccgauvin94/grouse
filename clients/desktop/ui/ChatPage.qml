@@ -1134,8 +1134,10 @@ Kirigami.Page {
                         Layout.alignment: Qt.AlignVCenter
                         icon.name: "mail-attachment"
                         display: Controls.AbstractButton.IconOnly
-                        // Same 4px as the pill above and the strip below.
-                        leftPadding: 4
+                        // Same 4px as the pill above and the strip below, except the
+                        // left edge: flush to the container margin (the glyph itself
+                        // still carries the 16px icon cell's ~2px intrinsic slack).
+                        leftPadding: 0
                         rightPadding: 4
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Attach files")
