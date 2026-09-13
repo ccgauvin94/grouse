@@ -1099,7 +1099,8 @@ Kirigami.Page {
                         icon.name: "tools-wizard"
                         text: page.modePrettyName(page.currentMode())
                         display: Controls.AbstractButton.TextBesideIcon
-                        leftPadding: 4
+                        // 0/4: flush glyph start, one 4px step to the attach icon.
+                        leftPadding: 0
                         rightPadding: 4
                         background: Rectangle {
                             radius: height / 2
@@ -1134,11 +1135,9 @@ Kirigami.Page {
                         Layout.alignment: Qt.AlignVCenter
                         icon.name: "mail-attachment"
                         display: Controls.AbstractButton.IconOnly
-                        // Same 4px as the pill above and the strip below, except the
-                        // left edge: flush to the container margin (the glyph itself
-                        // still carries the 16px icon cell's ~2px intrinsic slack).
+                        // No own padding: the row's 4px spacing is the only gap.
                         leftPadding: 0
-                        rightPadding: 4
+                        rightPadding: 0
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Attach files")
                     // Native KDE file picker (any file type) via the Manager.
@@ -1163,6 +1162,10 @@ Kirigami.Page {
                     placeholderText: qsTr("Message Goose…")
                     wrapMode: TextEdit.Wrap
                     focus: true
+                    // 6px text inset inside the border, so attach→field and
+                    // field→Send read as the same ~10px step.
+                    leftPadding: 6
+                    rightPadding: 6
                     onTextChanged: page.updateSlashPopup()
                     Keys.onPressed: (event) => {
                         if (event.key === Qt.Key_Return && !(event.modifiers & Qt.ShiftModifier)) {
