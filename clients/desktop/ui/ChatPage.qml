@@ -1126,18 +1126,14 @@ Kirigami.Page {
                     Controls.Button {
                         id: attachButton
                         visible: Mgr.online
-                        // Flat: the icon is the whole control; the boxed style's
-                        // 16px icon cell + borders read as stray margin.
-                        flat: true
-                        // Snug to the glyph: a fixed 60px box centered a 24px icon and
-                        // left dead margins on both sides of it.
+                        // Boxed (bordered) but snug: the 4px side paddings match the
+                        // mode pill's, so the drawn box is ~24px on a 16px glyph.
                         Layout.preferredWidth: implicitWidth
                         Layout.alignment: Qt.AlignVCenter
                         icon.name: "mail-attachment"
                         display: Controls.AbstractButton.IconOnly
-                        // No own padding: the row's 4px spacing is the only gap.
-                        leftPadding: 0
-                        rightPadding: 0
+                        leftPadding: 4
+                        rightPadding: 4
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Attach files")
                     // Native KDE file picker (any file type) via the Manager.
