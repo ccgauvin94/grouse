@@ -1091,6 +1091,7 @@ Kirigami.Page {
                     Controls.Button {
                         id: modePill
                         visible: Mgr.online
+                        Layout.preferredWidth: implicitWidth
                         Layout.alignment: Qt.AlignVCenter
                         icon.name: "tools-wizard"
                         text: page.modePrettyName(page.currentMode())
@@ -1121,10 +1122,14 @@ Kirigami.Page {
                 Controls.Button {
                     id: attachButton
                     visible: Mgr.online
-                    Layout.preferredWidth: Kirigami.Units.gridUnit * 3
+                    // Snug to the glyph: a fixed 60px box centered a 24px icon and
+                    // left dead margins on both sides of it.
+                    Layout.preferredWidth: implicitWidth
                     Layout.alignment: Qt.AlignVCenter
                     icon.name: "mail-attachment"
                     display: Controls.AbstractButton.IconOnly
+                    leftPadding: Kirigami.Units.smallSpacing
+                    rightPadding: Kirigami.Units.smallSpacing
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Attach files")
                     // Native KDE file picker (any file type) via the Manager.
