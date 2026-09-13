@@ -1128,8 +1128,10 @@ Kirigami.Page {
                     Layout.alignment: Qt.AlignVCenter
                     icon.name: "mail-attachment"
                     display: Controls.AbstractButton.IconOnly
-                    leftPadding: Kirigami.Units.smallSpacing
-                    rightPadding: Kirigami.Units.smallSpacing
+                    // 2px sides: the style's own border + these paddings are the
+                    // visible "margin"; the icon itself is 16px.
+                    leftPadding: 2
+                    rightPadding: 2
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Attach files")
                     // Native KDE file picker (any file type) via the Manager.
