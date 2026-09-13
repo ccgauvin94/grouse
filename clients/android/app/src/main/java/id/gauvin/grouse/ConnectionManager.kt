@@ -1145,14 +1145,25 @@ class ConnectionManager private constructor(context: Context) {
         )
     }
 
-    /** The assistant thread's id.
+/** The assistant thread's id.
      *
-     *  The CACHED id wins over the title lookup, not the other way round (see the note in the
-     *  Sessions handler). The cached id is the one this app actually created and renamed, so it
-     *  is the authoritative answer; the title lookup is the fallback for a fresh install. */
-    fun assistantSessionId(): String? =
-        store.assistantSessionId
-            ?: sessions.value.firstOrNull { it.title == ASSISTANT_TITLE }?.sessionId
+     *  One rule, used by every caller: the cached id wins while it still exists in the
+     *  current list (it is the id this app created/renamed — authoritative); a cache that
+     *  no longer matches any listed session is stale and re-seeded from the title lookup.
+     *  The title lookup is the MAIN connection's newest "Assistant" by real time
+     *  (`updatedEpoch()` — timestamp shapes vary, so string compare mis-sorts); the roam
+     *  peers keep their own Assistant threads and only serve as last-resort matches, so a
+     *  peer's id can never displace the main one in the cache. */
+    fun assistantSessionId(): String? {
+        val cached = store.assistantSessionId
+        if (cached != null && sessions.value.any { it.sessionId == cached }) return cached
+        val named = sessions.value.filter { it.title == ASSISTANT_TITLE }
+        val match = named.filter { !it.sessionId.startsWith("roam:") }
+            .ifEmpty { named }
+            .maxByOrNull { it.updatedEpoch() }
+        match?.let { store.assistantSessionId = it.sessionId }   // heal the stale cache
+        return match?.sessionId
+    }
 
     /** True when the on-screen conversation IS the privileged assistant thread. */
     val onAssistant: Boolean get() = currentSession.value != null && currentSession.value == assistantSessionId()
@@ -1584,12 +1595,13 @@ class ConnectionManager private constructor(context: Context) {
         val main = list.map { it.toInfo() }
         val roam = this.sessions.value.filter { it.sessionId.startsWith("roam:") }
         sessions.value = main + roam
-        // Only seed the cache when empty. It used to be written on every session list,
-        // which let an OLD session sharing the title clobber the id of the thread this app
-        // had just created. Newest title match wins, in case stale duplicates linger.
-        if (store.assistantSessionId == null)
-            sessions.value.filter { it.title == ASSISTANT_TITLE }
-                .maxByOrNull { it.updatedAt }?.let { store.assistantSessionId = it.sessionId }
+        // Seed/heal through the single resolver: an id missing from the fresh list is
+        // stale (the thread was replaced/archived on the server) and re-resolved.
+        run {
+            val cached = store.assistantSessionId
+            if (cached == null || sessions.value.none { it.sessionId == cached })
+                assistantSessionId()
+        }
         if (pendingOpenAssistant) {
             pendingOpenAssistant = false
             val id = assistantSessionId()
