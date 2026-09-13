@@ -54,8 +54,15 @@ Kirigami.Page {
         return o ? o.choices : []
     }
 
-    // Compact token-count formatting: 4200 -> "4.2k", 128000 -> "128k".
+    // Compact token-count formatting, human-first: 4200 -> "4.2k",
+    // 128000 -> "128k", 1048576 -> "1M" (a bare "1049k" is unreadable next to
+    // the "40.3k" it is paired with).
     function fmtK(n) {
+        if (n >= 1000000) {
+            const m = n / 1000000
+            const ms = m >= 10 ? String(Math.round(m)) : String(Math.round(m * 10) / 10)
+            return ms + "M"
+        }
         if (n >= 1000) {
             const v = n / 1000
             const s = v >= 100 ? String(Math.round(v)) : String(Math.round(v * 10) / 10)
@@ -65,7 +72,10 @@ Kirigami.Page {
     }
     function contextPercent() {
         if (Mgr.contextSize <= 0) return 0
-        return Math.round(Mgr.contextUsed * 100 / Mgr.contextSize)
+        const p = Mgr.contextUsed * 100 / Mgr.contextSize
+        // One decimal below 10% so a nearly-empty window still reads as
+        // progress ("3.8%"), whole numbers above it ("42%").
+        return p < 10 ? Math.round(p * 10) / 10 : Math.round(p)
     }
     function formatContext() {
         return page.fmtK(Mgr.contextUsed) + " / " + page.fmtK(Mgr.contextSize) + " · " + page.contextPercent() + "%"
@@ -329,6 +339,13 @@ Kirigami.Page {
                     onClicked: Mgr.compactConversation()
                 }
             }
+        }
+
+        // The context strip is chrome, not transcript: the line below it is
+        // where the chat begins.
+        Kirigami.Separator {
+            Layout.fillWidth: true
+            visible: contextRow.visible
         }
 
         Column {
@@ -1104,7 +1121,7 @@ Kirigami.Page {
                 Controls.Button {
                     id: attachButton
                     visible: Mgr.online
-                    width: Kirigami.Units.gridUnit * 3
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 3
                     Layout.alignment: Qt.AlignVCenter
                     icon.name: "mail-attachment"
                     display: Controls.AbstractButton.IconOnly
