@@ -366,6 +366,7 @@ Controls.ApplicationWindow {
                                 if (e.button === Qt.RightButton) {
                                     sessionMenu.targetSessionId = sessionid
                                     sessionMenu.targetTitle = title
+                                    sessionMenu.targetProject = projectid
                                     // popup(x,y) is relative to the menu's parent
                                     // (the window), so map from the MouseArea's local coords.
                                     var pos = mouse.mapToItem(root.contentItem, e.x, e.y)
@@ -977,6 +978,7 @@ Controls.ApplicationWindow {
         id: sessionMenu
         property string targetSessionId
         property string targetTitle
+        property string targetProject
         MenuItem {
             text: qsTr("Rename…")
             icon.name: "edit-rename"
@@ -1040,6 +1042,21 @@ Controls.ApplicationWindow {
         modal: true
         standardButtons: Controls.Dialog.Ok | Controls.Dialog.Cancel
         onAccepted: Mgr.moveSessionToProject(sessionMenu.targetSessionId, moveProjectCombo.currentValue)
+        // Push the project list on every open: the dialogs are declared instances,
+        // so a ListModel's Component.onCompleted would run once at startup — before
+        // the sources/list reply has landed — and stay empty forever.
+        function fillProjects() {
+            const m = [{ id: "", name: qsTr("Chats (no project)") }]
+            for (var i = 0; i < Mgr.projects.length; i++)
+                m.push({ id: Mgr.projects[i].id, name: Mgr.projects[i].name })
+            moveProjectCombo.model = m
+            // Preselect the session's current project (index 0 = unfiled).
+            let sel = 0
+            for (var j = 0; j < m.length; j++)
+                if (m[j].id === sessionMenu.targetProject) sel = j
+            moveProjectCombo.currentIndex = sel
+        }
+        onOpened: fillProjects()
         contentItem: ColumnLayout {
             spacing: Kirigami.Units.smallSpacing
             Controls.Label { text: qsTr("Project:") }
@@ -1048,13 +1065,6 @@ Controls.ApplicationWindow {
                 Layout.fillWidth: true
                 textRole: "name"
                 valueRole: "id"
-                model: ListModel {
-                    Component.onCompleted: {
-                        append({ id: "", name: qsTr("Chats (no project)") })
-                        for (var i = 0; i < Mgr.projects.length; i++)
-                            append({ id: Mgr.projects[i].id, name: Mgr.projects[i].name })
-                    }
-                }
             }
         }
     }
