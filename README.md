@@ -85,3 +85,9 @@ and native-library requirements.
 ## License
 
 AGPL-3.0. See [LICENSE](LICENSE).
+
+<img width="1128" height="752" alt="image" src="https://github.com/user-attachments/assets/a03f7e10-c635-4d58-a8f9-c4f508826277" />
+<img width="1116" height="2484" alt="Screenshot_20260909-165613" src="https://github.com/user-attachments/assets/ccbd4cc2-6881-47a0-a1e5-d83d0e4df8c8" />
+<img width="1116" height="2484" alt="Screenshot_20260909-165534" src="https://github.com/user-attachments/assets/d3141077-e8fc-41b6-a450-bd6432ab99aa" />
+<img width="1116" height="2484" alt="Screenshot_20260909-165527" src="https://github.com/user-attachments/assets/9bbeaec9-2f89-4237-8add-173bf1d0d7a4" />
+
