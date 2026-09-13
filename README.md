@@ -1,3 +1,6 @@
+[![Core](https://github.com/ccgauvin94/grouse/actions/workflows/core.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/core.yml)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+
 # grouse
 
 Native chat clients for a self-hosted [goose](https://github.com/aaif-goose/goose)
@@ -7,9 +10,6 @@ grouse is built on the official goose SDK (`agent-client-protocol`, Client role)
 with the `agent-client-protocol-http` WebSocket transport. The server owns
 sessions, memory, tools, and model choice. The clients render transcripts and send
 prompts.
-
-[![Core](https://github.com/ccgauvin94/grouse/actions/workflows/core.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/core.yml)
-[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
 <details>
 <summary>Screenshots</summary>
@@ -24,7 +24,20 @@ prompts.
 
 </details>
 
-## Architecture
+## Support
+
+| Platform | UI | Status | Release | Download |
+|---|---|---|---|---|
+| Android | Kotlin + Jetpack Compose | Supported | [![Android](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml) | [APK](https://github.com/ccgauvin94/grouse/releases/latest/download/grouse-android.apk) |
+| Linux | Qt 6 + KF6 Kirigami | Supported | [![Flatpak](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml) | [Flatpak](https://github.com/ccgauvin94/grouse/releases/latest/download/grouse-desktop.flatpak) |
+| macOS | SwiftUI | Planned | | |
+| iOS | SwiftUI | Not planned* | | |
+| TUI | Rust | Planned | | |
+
+<sub><i>* Lack of testing equipment</i></sub>
+
+<details>
+<summary>Architecture</summary>
 
 Wire protocol: ACP (JSON-RPC 2.0) over WebSocket. A second transport, roam, carries
 the same protocol over an iroh connection between two peers.
@@ -42,19 +55,10 @@ thin; protocol behavior is not duplicated in them.
 - `clients/desktop`: Qt 6 + KF6 Kirigami.
 - `clients/cli`: placeholder, no implementation.
 
-## Support
+</details>
 
-| Platform | UI | Status | Release | Download |
-|---|---|---|---|---|
-| Android | Kotlin + Jetpack Compose | Supported | [![Android](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml) | [APK](https://github.com/ccgauvin94/grouse/releases/latest/download/grouse-android.apk) |
-| Linux | Qt 6 + KF6 Kirigami | Supported | [![Flatpak](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml) | [Flatpak](https://github.com/ccgauvin94/grouse/releases/latest/download/grouse-desktop.flatpak) |
-| macOS | SwiftUI | Planned | | |
-| iOS | SwiftUI | Not planned* | | |
-| TUI | Rust | Planned | | |
-
-<sub><i>* Lack of testing equipment</i></sub>
-
-## Building
+<details>
+<summary>Building</summary>
 
 Rust core:
 
@@ -84,6 +88,8 @@ Desktop (Flatpak bundle):
 ```sh
 just desktop
 ```
+
+</details>
 
 ## Releasing
 
