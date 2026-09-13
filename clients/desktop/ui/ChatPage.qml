@@ -1125,6 +1125,9 @@ Kirigami.Page {
                     Controls.Button {
                         id: attachButton
                         visible: Mgr.online
+                        // Flat: the icon is the whole control; the boxed style's
+                        // 16px icon cell + borders read as stray margin.
+                        flat: true
                         // Snug to the glyph: a fixed 60px box centered a 24px icon and
                         // left dead margins on both sides of it.
                         Layout.preferredWidth: implicitWidth
