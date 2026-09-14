@@ -39,12 +39,17 @@ endforeach()
 set(CHART_UI_URL "file://${CMAKE_CURRENT_SOURCE_DIR}/../ui")
 configure_file(qml/tst_chartbubble.qml.in
     ${CMAKE_CURRENT_BINARY_DIR}/qml/tst_chartbubble.qml @ONLY)
+# RecipesDialog test: same baked-in ui/ import URL (stub Mgr comes from the
+# runner's QuickTest Setup context property).
+set(RECIPES_UI_URL "file://${CMAKE_CURRENT_SOURCE_DIR}/../ui")
+configure_file(qml/tst_recipesdialog.qml.in
+    ${CMAKE_CURRENT_BINARY_DIR}/qml/tst_recipesdialog.qml @ONLY)
 # Plain QML tests pass through unchanged (no placeholders).
 configure_file(qml/tst_combobox.qml
     ${CMAKE_CURRENT_BINARY_DIR}/qml/tst_combobox.qml COPYONLY)
 
 qt_add_executable(tst_qml qml/tst_qml.cpp)
-target_link_libraries(tst_qml PRIVATE Qt6::QuickTest Qt6::Test)
+target_link_libraries(tst_qml PRIVATE Qt6::QuickTest Qt6::Test Qt6::Qml)
 # QUICK_TEST_SOURCE_DIR tells the runner where the tst_*.qml files live.
 target_compile_definitions(tst_qml PRIVATE QUICK_TEST_SOURCE_DIR="${CMAKE_CURRENT_BINARY_DIR}/qml")
 add_test(NAME tst_qml COMMAND tst_qml)

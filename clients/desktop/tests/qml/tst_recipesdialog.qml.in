@@ -1,0 +1,80 @@
+import QtQuick
+import QtTest
+import "@RECIPES_UI_URL@"
+
+// RecipesDialog master-detail: opens against a stub Mgr with one recipe whose
+// schedule_cron is EMPTY (the cron lives on the matched job — the production
+// shape that made the picker open blank), a job, and config choices. Delegate
+// and detail-pane instantiation is the point: binding TypeErrors at delegate
+// creation (the listSB/ScrollBar class of bug) are invisible to qmllint and
+// the page-load smoke.
+TestCase {
+    id: tc
+    name: "RecipesDialog"
+    width: 900
+    height: 700
+
+    Component {
+        id: dlgComp
+        RecipesDialog { }
+    }
+
+    function test_masterDetailAndCronFallback() {
+        const dlg = dlgComp.createObject(tc)
+        dlg.open()
+        verify(dlg.visible)
+        waitForRendering(dlg.detailList)
+        wait(50)
+        // Offscreen never delivers the visibility event that marks a Popup's
+        // ListView visible, and views instantiate delegates only when visible.
+        // Set it explicitly — instantiation (the binding-error surface this
+        // test exists to guard) then runs identically to the real popup.
+        dlg.detailList.visible = true
+        wait(50)
+        compare(dlg.detailList.count, 1)
+        const row = dlg.detailList.itemAtIndex(0)
+        verify(row !== null)
+        let status = ""
+        // The delegate's contentItem is a Column; its children are the labels.
+        const kids = row.contentItem.children
+        for (let i = 0; i < kids.length; ++i)
+            if (kids[i].text !== undefined && String(kids[i].text).indexOf("daily at") >= 0)
+                status = kids[i].text
+        verify(status.length > 0)
+
+        // Selecting the recipe pushes the detail: the editor must fall back to
+        // the job's cron, not show the empty schedule_cron.
+        dlg.selectById("r1")
+        compare(dlg.selOrigCron, "0 0 6 * * *")
+        compare(dlg.cronText, "0 0 6 * * *")
+        compare(dlg.cronSpec.kind, "daily")
+        compare(dlg.cronKindPicker.currentIndex, 1)
+        compare(dlg.hourPicker.currentIndex, 6)
+        compare(dlg.minutePicker.currentIndex, 0)
+
+        // Model pin: "m1" is not in the config's model choices; the pin is
+        // appended rather than dropped. Provider pin "meta" is also absent
+        // from the choices list and must show up.
+        const modelValues = dlg.modelPicker.model.map(c => c.value)
+        verify(modelValues.indexOf("m1") >= 0)
+        compare(dlg.modelPicker.currentValue, "m1")
+        const providerValues = dlg.providerPicker.model.map(c => c.value)
+        verify(providerValues.indexOf("meta") >= 0)
+        compare(dlg.providerPicker.currentValue, "meta")
+
+        // Prompt/Instructions were pushed (not left stale/empty).
+        compare(dlg.promptEditor.text, "hi")
+        compare(dlg.instructionsEditor.text, "be brief")
+
+        // Editing the picker changes the built cron and arms Save.
+        dlg.setSpec({ hour: 7 })
+        compare(dlg.cronText, "0 0 7 * * *")
+
+        // The plain-English formatter's two-arg paths (the String.arg() crash
+        // that chained-arg fixed: hourly range and weekly).
+        compare(dlg.cronInEnglish("0 30 7-22 * * *"), "hourly, 07:30-22:30")
+        compare(dlg.cronInEnglish("0 15 8 * * Mon"), "Mon at 08:15")
+
+        dlg.destroy()
+    }
+}
