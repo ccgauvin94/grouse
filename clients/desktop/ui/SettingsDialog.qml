@@ -4,8 +4,8 @@ import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
 // KDE-native settings dialog: fields in a Kirigami.FormLayout, persisted via
-// QSettings through Mgr (which owns the QSettings store). Providers and global
-// tools live one level deeper — reached from here, not from the sidebar.
+// QSettings through Mgr (which owns the QSettings store). Global tools live
+// one level deeper — reached from here, not from the sidebar.
 Controls.Dialog {
     id: dialog
     title: qsTr("Settings")
@@ -13,7 +13,6 @@ Controls.Dialog {
     standardButtons: Controls.Dialog.Close
     closePolicy: Controls.Popup.CloseOnEscape
 
-    signal openProviders()
     signal openGlobalTools()
 
     Component.onCompleted: reload()
@@ -140,14 +139,8 @@ Controls.Dialog {
                 Kirigami.FormData.label: ""
                 onClicked: Mgr.disconnect()
             }
-            // Providers (server model config) and global tools (config.yaml
-            // extensions) are reached from Settings, not the sidebar.
-            Controls.Button {
-                text: qsTr("Providers…")
-                icon.name: "network-server"
-                Kirigami.FormData.label: ""
-                onClicked: { dialog.close(); dialog.openProviders() }
-            }
+            // Global tools (config.yaml extensions) are reached from Settings,
+            // not the sidebar.
             Controls.Button {
                 text: qsTr("Global tools…")
                 icon.name: "configure"

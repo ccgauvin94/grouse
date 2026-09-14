@@ -914,12 +914,7 @@ Controls.ApplicationWindow {
 
     SettingsDialog {
         id: settingsDialog
-        onOpenProviders: providersDialog.open()
         onOpenGlobalTools: globalExtensionsDialog.open()
-    }
-
-    ProvidersDialog {
-        id: providersDialog
     }
 
     SkillsDialog {
