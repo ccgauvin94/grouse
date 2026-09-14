@@ -19,14 +19,17 @@ Controls.Dialog {
         cwdField.text = Mgr.workingDir
         tlsBox.checked = Mgr.useTls
         dialog.testMessage = ""
+        dialog.testing = false
     }
 
     property bool testOk: false
     property string testMessage: ""
+    property bool testing: false
 
     Connections {
         target: Mgr
         function onConnectionTested(ok, message) {
+            dialog.testing = false
             dialog.testOk = ok
             dialog.testMessage = message
         }
@@ -76,14 +79,19 @@ Controls.Dialog {
             implicitHeight: Kirigami.Units.gridUnit * 2
             text: qsTr("Test connection")
             icon.name: "network-connect"
-            onClicked: Mgr.testConnection()
+            onClicked: {
+                dialog.testing = true
+                dialog.testMessage = qsTr("Testing…")
+                Mgr.testConnection()
+            }
         }
         Controls.Label {
             width: parent.width
             visible: dialog.testMessage.length > 0
             text: dialog.testMessage
-            color: dialog.testOk ? Kirigami.Theme.positiveTextColor
-                                 : Kirigami.Theme.negativeTextColor
+            color: dialog.testing ? Kirigami.Theme.textColor
+                                  : (dialog.testOk ? Kirigami.Theme.positiveTextColor
+                                                   : Kirigami.Theme.negativeTextColor)
             wrapMode: Text.Wrap
             font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.9))
         }

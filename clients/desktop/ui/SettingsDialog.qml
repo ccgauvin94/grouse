@@ -40,10 +40,12 @@ Controls.Dialog {
 
     property bool testOk: false
     property string testMessage: ""
+    property bool testing: false
 
     Connections {
         target: Mgr
         function onConnectionTested(ok, message) {
+            dialog.testing = false
             dialog.testOk = ok
             dialog.testMessage = message
         }
@@ -91,13 +93,19 @@ Controls.Dialog {
                 text: qsTr("Test connection")
                 icon.name: "network-connect"
                 Kirigami.FormData.label: ""
-                onClicked: { dialog.commit(); Mgr.testConnection() }
+                onClicked: {
+                    dialog.commit()
+                    dialog.testing = true
+                    dialog.testMessage = qsTr("Testing…")
+                    Mgr.testConnection()
+                }
             }
             Controls.Label {
                 visible: dialog.testMessage.length > 0
                 text: dialog.testMessage
-                color: dialog.testOk ? Kirigami.Theme.positiveTextColor
-                                     : Kirigami.Theme.negativeTextColor
+                color: dialog.testing ? Kirigami.Theme.textColor
+                                      : (dialog.testOk ? Kirigami.Theme.positiveTextColor
+                                                       : Kirigami.Theme.negativeTextColor)
                 wrapMode: Text.Wrap
                 Kirigami.FormData.label: ""
             }

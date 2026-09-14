@@ -1230,6 +1230,16 @@ void Manager::coreOnStatus(const QString &json)
         setStatus(QStringLiteral("ready"));
         m_prompting = false;
         emit promptingChanged();
+        // Resolve a pending testConnection() probe. The failure paths
+        // (Disconnected/Error) already reported; only Ready completed silently,
+        // which made a SUCCESSFUL test indistinguishable from "nothing happened".
+        if (m_testPending) {
+            m_testPending = false;
+            emit connectionTested(true,
+                QStringLiteral("Connection OK — %1:%2, handshake complete.")
+                    .arg(useTls() ? QStringLiteral("wss://") : QStringLiteral("ws://"),
+                         host().trimmed(), port().trimmed()));
+        }
         // The core bridge resolves lazily; by Ready it is definitely live, so this
         // is the safe point to re-arm dials for persisted roam peers (once).
         if (!m_roamRestored) {
