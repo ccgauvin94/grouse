@@ -117,43 +117,13 @@ Controls.ApplicationWindow {
                     Layout.fillHeight: true
                     visible: root.sidebarTab === "main"
 
-                // Pinned sidebar chrome, not part of the list: because the
-                // ListView below overlays the rail (overlay ScrollBar), this
-                // row must sit above the list so the New-project button never
-                // slides under the scrollbar when the list overflows.
-                RowLayout {
-                    id: sessionsHeader
+                ListView {
+                    id: sessionList
+                    // The old pinned "Sessions" rail is gone; the list starts
+                    // at the top of the column.
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.top: parent.top
-                    spacing: Kirigami.Units.smallSpacing
-                    Controls.Label {
-                        text: qsTr("Sessions")
-                        font.weight: Font.DemiBold
-                        font.pixelSize: root.sidebarTextSize
-                        renderType: Text.NativeRendering
-                        Layout.fillWidth: true
-                    }
-                    Controls.ToolButton {
-                        text: qsTr("New project")
-                        display: Controls.AbstractButton.IconOnly
-                        icon.name: "project-development-new"
-                        onClicked: newProjectDialog.open()
-                        ToolTip.visible: hovered
-                        ToolTip.text: qsTr("New project")
-                    }
-                }
-
-                ListView {
-                    id: sessionList
-                    // Start below the pinned Sessions header instead of
-                    // overlaying the rail, so the vertical ScrollBar (which
-                    // overlays the viewport) spans only the list and cannot
-                    // clip the New-project button above it.
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: sessionsHeader.bottom
-                    anchors.topMargin: Kirigami.Units.smallSpacing * 2
                     anchors.bottom: parent.bottom
                     clip: true
                     model: Mgr.sessionsModel
@@ -250,14 +220,30 @@ Controls.ApplicationWindow {
                                     color: Kirigami.Theme.disabledTextColor
                                     font.pixelSize: root.sidebarSmallTextSize
                                     renderType: Text.NativeRendering
+                                    // The top Projects band shows the New-project
+                                    // button where its aggregate count used to be.
+                                    visible: !del.isProjects
+                                }
+                                Controls.ToolButton {
+                                    visible: del.isProjects
+                                    text: qsTr("New project")
+                                    display: Controls.AbstractButton.IconOnly
+                                    icon.name: "project-development-new"
+                                    onClicked: newProjectDialog.open()
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: qsTr("New project")
                                 }
                             }
                             // Left-click a project opens its summary; right-click
                             // shows the project menu.
                             MouseArea {
                                 id: headerMouse
+                                // Stop short of the right-hand button column on
+                                // the top Projects row so New project stays clickable.
                                 anchors.left: parent.left
                                 anchors.right: parent.right
+                                anchors.rightMargin: del.isProjects
+                                                   ? Kirigami.Units.gridUnit * 3 : 0
                                 anchors.top: parent.top
                                 anchors.bottom: parent.bottom
                                 anchors.leftMargin: Kirigami.Units.gridUnit * 1.75
