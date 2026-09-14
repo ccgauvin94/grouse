@@ -136,19 +136,22 @@ Controls.Dialog {
             Layout.fillWidth: true
         }
 
-        ListView {
-            id: recipeList
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            clip: true
-            spacing: Kirigami.Units.smallSpacing
-            model: Mgr.recipes
-            Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
+            ListView {
+                id: recipeList
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                spacing: Kirigami.Units.smallSpacing
+                model: Mgr.recipes
+                Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
 
-            delegate: Rectangle {
-                id: del
-                width: ListView.view.width
-                implicitHeight: delCol.implicitHeight + Kirigami.Units.largeSpacing * 2
+                delegate: Rectangle {
+                    id: del
+                    // The vertical ScrollBar overlays the viewport; without a
+                    // reserve (as ChatPage does) it sits on the card's border.
+                    width: ListView.view.width - (recipeList.ScrollBar.vertical.visible
+                                                  ? recipeList.ScrollBar.vertical.width + 2 : 0)
+                    implicitHeight: delCol.implicitHeight + Kirigami.Units.largeSpacing * 2
                 radius: Kirigami.Units.smallSpacing
                 color: Kirigami.Theme.alternateBackgroundColor
                 // separatorColor is absent on the 6.10 Platform theme; the disabled
@@ -303,12 +306,16 @@ Controls.Dialog {
 
                     // --- Prompt ------------------------------------------------
                     Controls.Label { text: qsTr("Prompt"); font.weight: Font.DemiBold }
-                    Controls.TextArea {
-                        id: promptArea
+                    // Fixed-height ScrollView: the old capped TextArea clipped
+                    // anything past the cap with no way to reach it.
+                    Controls.ScrollView {
                         Layout.fillWidth: true
-                        implicitHeight: Math.min(160, contentHeight + 8)
-                        wrapMode: Text.Wrap
-                        text: del.origPrompt
+                        Layout.preferredHeight: 160
+                        Controls.TextArea {
+                            id: promptArea
+                            wrapMode: Text.Wrap
+                            text: del.origPrompt
+                        }
                     }
                     RowLayout {
                         Controls.Label { text: ""; Layout.fillWidth: true }
@@ -325,12 +332,14 @@ Controls.Dialog {
 
                     // --- Instructions --------------------------------------------
                     Controls.Label { text: qsTr("Instructions"); font.weight: Font.DemiBold }
-                    Controls.TextArea {
-                        id: instrArea
+                    Controls.ScrollView {
                         Layout.fillWidth: true
-                        implicitHeight: Math.min(160, contentHeight + 8)
-                        wrapMode: Text.Wrap
-                        text: del.origInstructions
+                        Layout.preferredHeight: 160
+                        Controls.TextArea {
+                            id: instrArea
+                            wrapMode: Text.Wrap
+                            text: del.origInstructions
+                        }
                     }
                     RowLayout {
                         Controls.Label { text: ""; Layout.fillWidth: true }
