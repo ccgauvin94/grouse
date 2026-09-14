@@ -938,6 +938,23 @@ void Manager::saveSkill(const QString &path, const QString &name,
     const QByteArray d = description.toUtf8();
     const QByteArray c = content.toUtf8();
     m_bridge->api().grouse_unstable_sources_update(m_bridge->handle(), type.constData(),
+                                                  p.constData(), nm.constData(), d.constData(), c.constData());
+}
+
+// The project's whole source is replaced (the same sources/update the skills
+// use, type "project"); the core re-lists projects on the reply, so open
+// views refresh on their own.
+void Manager::saveProject(const QString &path, const QString &name,
+                          const QString &description, const QString &content)
+{
+    if (!m_bridge || !m_bridge->isAvailable() || path.isEmpty())
+        return;
+    const QByteArray type = QByteArrayLiteral("project");
+    const QByteArray p = path.toUtf8();
+    const QByteArray nm = name.toUtf8();
+    const QByteArray d = description.toUtf8();
+    const QByteArray c = content.toUtf8();
+    m_bridge->api().grouse_unstable_sources_update(m_bridge->handle(), type.constData(),
                                                    p.constData(), nm.constData(), d.constData(), c.constData());
 }
 
@@ -1445,10 +1462,27 @@ void Manager::coreOnProjects(const QString &json)
         // Group/combo key = the short name form (see projectKey); "path" stays
         // the full sources/list path for delete/create round-trips.
         const QString id = projectKey(path).isEmpty() ? name : projectKey(path);
+        // The project's content IS its instructions file (projects/<name>.md);
+        // goose feeds it to sessions filed under the project. The working root
+        // is not a field — it lives as a `root:` line inside the content
+        // (Android's parseProjects does the same extraction).
+        const QString content = o.value("content").toString();
+        QString root;
+        const QStringList contentLines = content.split(QLatin1Char('\n'));
+        for (const QString &line : contentLines) {
+            const QString t = line.trimmed();
+            if (t.startsWith(QLatin1String("root:"))) {
+                root = t.mid(5).trimmed();
+                break;
+            }
+        }
         projects << QVariantMap{{"id", id},
                                 {"name", name},
                                 {"path", path},
-                                {"description", o.value("description").toString()}};
+                                {"description", o.value("description").toString()},
+                                {"content", content},
+                                {"root", root},
+                                {"writable", o.value("writable").toBool(true)}};
     }
     onProjects(projects);
 }

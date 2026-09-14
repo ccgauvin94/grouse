@@ -117,6 +117,13 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
     var deleteNote by remember { mutableStateOf<String?>(null) }
     var info by remember { mutableStateOf<String?>(null) }
     var infoBusy by remember { mutableStateOf(false) }
+    // Instructions editor: seeded from the project's content and RESEEDED when
+    // the list refreshes (the save's re-list) — remember keyed on content, the
+    // recipe-instructions idiom. Note clears on the next edit.
+    var instr by rememberSaveable { mutableStateOf<String?>(null) }
+    var instrBusy by remember { mutableStateOf(false) }
+    var instrNote by remember { mutableStateOf<String?>(null) }
+    val savedMsg = stringResource(R.string.saved)
     fun goToChat() = nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
 
     actionsFor?.let { s -> SessionActionsDialog(cm, s) { actionsFor = null } }
@@ -157,7 +164,9 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
     // Membership is projectId now. The cwd test is kept as a FALLBACK for the directory-era
     // projects (Cooking, Hacking, Inbox) whose sessions were filed by working directory and
     // never migrated -- dropping it would empty those screens.
-    val projectId = cm.projects.value.firstOrNull { it.name.equals(project, true) }?.id
+    val proj = cm.projects.value.firstOrNull { it.name.equals(project, true) }
+    val projectId = proj?.id
+    val instrText = instr ?: proj?.content.orEmpty()
     val chats = cm.sessions.value.filter { s ->
         ConnectionManager.sessionKind(s) != SessionKind.ASSISTANT &&
             projectId != null && s.projectId == projectId
@@ -173,6 +182,49 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
         )
     }) { pad ->
         LazyColumn(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
+            item {
+                Text(stringResource(R.string.instructions), style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = 6.dp, top = 10.dp, bottom = 4.dp))
+            }
+            item {
+                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                        OutlinedTextField(
+                            value = instrText,
+                            onValueChange = { instr = it; instrNote = null },
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp),
+                            label = { Text(stringResource(R.string.project_instructions_hint)) },
+                            maxLines = 16,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(enabled = instrBusy || (proj != null && proj.path.isNotEmpty() &&
+                                        instrText != proj.content),
+                                onClick = {
+                                    if (proj == null) return@TextButton
+                                    instrBusy = true
+                                    cm.saveProjectInstructions(proj, instrText) { err ->
+                                        instrBusy = false
+                                        // Success: the re-list reseeds the editor (instr clears
+                                        // below); the note says so. Failure keeps the draft.
+                                        if (err == null) instr = null
+                                        instrNote = err ?: savedMsg
+                                    }
+                                }) { Text(stringResource(R.string.save)) }
+                            if (instrBusy) {
+                                Spacer(Modifier.width(10.dp))
+                                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                            }
+                            instrNote?.let {
+                                Spacer(Modifier.width(10.dp))
+                                Text(it, style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.outline)
+                            }
+                        }
+                    }
+                }
+            }
             item {
                 Text(stringResource(R.string.chats), style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,

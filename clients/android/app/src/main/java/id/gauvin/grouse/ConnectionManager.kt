@@ -306,6 +306,22 @@ class ConnectionManager private constructor(context: Context) {
         }
     }
 
+    /** Replace a project's instructions (its projects/<name>.md content). Same
+     *  whole-source sources/update as skills; the core re-lists projects on the
+     *  reply, so [projects] reseeds the editor. Shares the pendingSkillError
+     *  slot with the skill save: it captures the same sources/update failure. */
+    fun saveProjectInstructions(p: ProjectInfo, content: String, onResult: (String?) -> Unit = {}) {
+        pendingSkillError = null
+        io {
+            unstable.sourcesUpdate("project", p.path, p.name, p.description, content)
+            main.post {
+                val err = pendingSkillError
+                pendingSkillError = null
+                onResult(err)
+            }
+        }
+    }
+
     fun createSkill(name: String, description: String, content: String, projectId: String?, onResult: (String?) -> Unit = {}) {
         val clean = name.trim()
         if (clean.isEmpty() || clean.length > 64 || clean.contains(" ") || clean.contains("/")) {
@@ -2267,6 +2283,7 @@ class ConnectionManager private constructor(context: Context) {
                 root = content.lineSequence()
                     .firstOrNull { it.trim().startsWith("root:") }
                     ?.substringAfter("root:")?.trim().orEmpty(),
+                content = content,
             )
         }.sortedBy { it.name.lowercase() }
     }

@@ -128,10 +128,12 @@
     <string name="save_prompt">Save prompt</string>
     <string name="instructions">Instructions</string>
     <string name="instructions_hint">The system prompt for this run.</string>
+    <string name="project_instructions_hint">Notes given to every chat filed under this project (the projects/&lt;name&gt;.md source).</string>
     <string name="save_instructions">Save instructions</string>
     <string name="delete_recipe">Delete recipe</string>
     <string name="recipe_delete_body">The recipe file is removed from the server. Any schedule running it stops working.</string>
     <string name="save">Save</string>
+    <string name="saved">Saved</string>
 
     <!-- InstanceScreens -->
     <string name="instance">Instance</string>

@@ -191,6 +191,11 @@ public:
     Q_INVOKABLE void saveSkill(const QString &path, const QString &name,
                                const QString &description, const QString &content);
     Q_INVOKABLE void deleteSkill(const QString &path);
+    // --- projects -------------------------------------------------------------
+    // Edit a project's instructions (its projects/<name>.md content). Whole
+    // source replace via sources/update; the core re-lists on the reply.
+    Q_INVOKABLE void saveProject(const QString &path, const QString &name,
+                                 const QString &description, const QString &content);
     // --- server config (providers) --------------------------------------------
     Q_INVOKABLE void setServerConfig(const QString &key, const QString &value);
     Q_INVOKABLE void readServerConfig(const QString &key);

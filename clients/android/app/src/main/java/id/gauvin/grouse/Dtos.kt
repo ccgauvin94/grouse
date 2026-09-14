@@ -76,6 +76,9 @@ data class ProjectInfo(
      *  content. The core's ProjectSummary does not carry content, so this is only populated
      *  through the unstable sources/list path. */
     val root: String = "",
+    /** The project's instructions — the whole projects/<name>.md body, which goose feeds to
+     *  sessions filed under the project. Editable through sources/update (whole replace). */
+    val content: String = "",
 )
 
 /** One scheduled job from `schedules/list`.
