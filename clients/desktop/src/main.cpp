@@ -66,6 +66,11 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("grouse"));
     QCoreApplication::setApplicationName(QStringLiteral("grouse-desktop"));
+    // Wayland's app_id comes from this, and Plasma matches the window's icon
+    // against <app_id>.desktop: without it the app id is the binary name and
+    // the titlebar/taskbar show the generic icon even though the .desktop and
+    // SVG ship correctly (id.gauvin.Grouse).
+    app.setDesktopFileName(QStringLiteral("id.gauvin.Grouse"));
 
     // This is a static desktop UI. Native text rendering uses the platform's
     // font hinting instead of rasterizing small labels as Qt Quick textures.
