@@ -143,14 +143,15 @@ Controls.Dialog {
                 clip: true
                 spacing: Kirigami.Units.smallSpacing
                 model: Mgr.recipes
-                Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
+                Controls.ScrollBar.vertical: Controls.ScrollBar { id: listSB; policy: Controls.ScrollBar.AsNeeded }
 
                 delegate: Rectangle {
                     id: del
                     // The vertical ScrollBar overlays the viewport; without a
                     // reserve (as ChatPage does) it sits on the card's border.
-                    width: ListView.view.width - (recipeList.ScrollBar.vertical.visible
-                                                  ? recipeList.ScrollBar.vertical.width + 2 : 0)
+                    // An attached property can't be read through another
+                    // object's id from the delegate, so the bar is named.
+                    width: ListView.view.width - (listSB.visible ? listSB.width + 2 : 0)
                     implicitHeight: delCol.implicitHeight + Kirigami.Units.largeSpacing * 2
                 radius: Kirigami.Units.smallSpacing
                 color: Kirigami.Theme.alternateBackgroundColor
