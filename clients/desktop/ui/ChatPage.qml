@@ -29,6 +29,12 @@ Kirigami.Page {
         const m = page.findOption("model")
         modelChoices = m ? m.choices : []
         modelIndex = page.indexOf(modelChoices, m ? m.currentValue : "")
+        // goose sends thinking_effort only for models that expose extended
+        // thinking, so the picker hides itself whenever the option is absent
+        // (an empty ComboBox would sit there suggesting a missing feature).
+        const e = page.findOption("thinking_effort")
+        effortChoices = e ? e.choices : []
+        effortIndex = page.indexOf(effortChoices, e ? e.currentValue : "")
     }
 
     property var pendingFiles: []
@@ -128,6 +134,10 @@ Kirigami.Page {
     property int providerIndex: -1
     property var modelChoices: []
     property int modelIndex: -1
+    // Extended-thinking effort ("off"/"low"/…), only present on models that
+    // expose it — the picker hides itself when the list is empty.
+    property var effortChoices: []
+    property int effortIndex: -1
 
     property string hintText: Mgr.online ? "" : qsTr("Choose a session on the left, or start a new chat, then enter a message below.")
 
@@ -1218,6 +1228,21 @@ Kirigami.Page {
                         onActivated: Mgr.setConfigOption("model", currentValue)
                         ToolTip.visible: hovered
                         ToolTip.text: qsTr("Model for this chat")
+                    }
+                    // Thinking effort sits with the model it applies to; it only
+                    // exists when the chosen model has extended thinking.
+                    Controls.ComboBox {
+                        id: effortCombo
+                        visible: page.effortChoices.length > 0
+                        Layout.preferredWidth: 130
+                        Layout.maximumWidth: 160
+                        textRole: "name"
+                        valueRole: "value"
+                        model: page.effortChoices
+                        currentIndex: page.effortIndex
+                        onActivated: Mgr.setConfigOption("thinking_effort", currentValue)
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Thinking effort for this chat")
                     }
                     Item { Layout.fillWidth: true }
                     // The connection status moved from the sidebar's bottom to
