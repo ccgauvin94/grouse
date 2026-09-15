@@ -905,7 +905,6 @@ Controls.ApplicationWindow {
     // Clicking a project header shows its summary + root.
     ProjectDialog {
         id: projectDialog
-        onOpenProjectMemory: topic => memoryDialog.openForTopic(topic)
     }
 
     ConnectDialog {
@@ -916,11 +915,6 @@ Controls.ApplicationWindow {
     SettingsDialog {
         id: settingsDialog
         onOpenGlobalTools: globalExtensionsDialog.open()
-        onOpenMemory: memoryDialog.openGlobal()
-    }
-
-    MemoryDialog {
-        id: memoryDialog
     }
 
     SkillsDialog {

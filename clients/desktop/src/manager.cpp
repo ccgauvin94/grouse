@@ -780,20 +780,8 @@ void Manager::createProject(const QString &name)
     const QByteArray type = QByteArrayLiteral("project");
     const QByteArray nm = n.toUtf8();
     const QByteArray empty = QByteArray();
-    // Seed-on-create: the instructions teach the project its memory topic, so
-    // "a file per project" works from the first chat (the memory extension is
-    // global and project-blind; the name convention is the scoping). The
-    // Android createProject seeds the identical text.
-    const QByteArray seed = QStringLiteral(
-        "%1 project.\n\n"
-        "Memory: this project's durable notes live in the goose memory file "
-        "\"%1\". Load the \"%1\" memory file at the start of every chat filed "
-        "here, and when a durable decision, preference, or fact emerges in "
-        "this project, add it to the \"%1\" memory file (first line: "
-        "space-separated keywords).")
-        .arg(n).toUtf8();
     m_bridge->api().grouse_unstable_sources_create(m_bridge->handle(), type.constData(),
-                                                   nm.constData(), empty.constData(), seed.constData());
+                                                   nm.constData(), empty.constData(), empty.constData());
 }
 
 void Manager::deleteProject(const QString &nameOrPath)
@@ -968,126 +956,6 @@ void Manager::saveProject(const QString &path, const QString &name,
     const QByteArray c = content.toUtf8();
     m_bridge->api().grouse_unstable_sources_update(m_bridge->handle(), type.constData(),
                                                    p.constData(), nm.constData(), d.constData(), c.constData());
-}
-
-// ---------------------------------------------------------------------------
-// Goose memory store (the builtin Memory extension's files on the server)
-//
-// There is no memory RPC; the extension keeps one flat .txt per topic under
-// $XDG_CONFIG_HOME/goose/memory (verified against the live container: HOME is
-// /state, so the literal fallback is the same dir). A direct `shell` tools_call
-// reads/writes them with no model turn. Per-project memory is the same store
-// with the topic named after the project — the seeded instructions are what
-// teach the model that convention.
-// ---------------------------------------------------------------------------
-namespace {
-const char *kMemProbe =
-    "D=\"\"; for d in \"$XDG_CONFIG_HOME/goose/memory\" \"$HOME/.config/goose/memory\" "
-    "/state/config/goose/memory; do [ -d \"$d\" ] && D=\"$d\" && break; done; ";
-
-// Topics become file names; keep them slug-like (the store already holds
-// underscore/case names, and project slugs are lowercase/digits/hyphen).
-bool topicSafe(const QString &t)
-{
-    if (t.isEmpty() || t.size() > 64 || t.contains(QLatin1String("..")))
-        return false;
-    for (const QChar &c : t) {
-        if (!c.isLetterOrNumber() && c != QLatin1Char('_') && c != QLatin1Char('-')
-            && c != QLatin1Char('.'))
-            return false;
-    }
-    return !t.startsWith(QLatin1Char('.'));
-}
-
-QString memFileName(const QString &topic)
-{
-    return topic.contains(QLatin1Char('.')) ? topic : topic + QStringLiteral(".txt");
-}
-
-QString shellArgs(const QString &cmd)
-{
-    const QJsonObject o{{QStringLiteral("command"), cmd}};
-    return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
-}
-} // namespace
-
-void Manager::runToolOnSession(const QString &tool, const QString &argsJson,
-                               const std::function<void(const QString &, bool)> &cb)
-{
-    // tools_call needs a live session to run through — memory reads work from
-    // anywhere once a chat is open, and every auto-resumed app state has one.
-    if (!m_bridge || !m_bridge->isAvailable() || m_currentSessionId.isEmpty()) {
-        cb(QStringLiteral("not connected — no session to call tools through"), true);
-        return;
-    }
-    m_toolQueue.append(cb);
-    const QByteArray sid = m_currentSessionId.toUtf8();
-    const QByteArray t = tool.toUtf8();
-    const QByteArray a = argsJson.toUtf8();
-    m_bridge->api().grouse_unstable_tools_call(m_bridge->handle(), sid.constData(),
-                                               t.constData(), a.constData());
-}
-
-bool Manager::memoryReady() const
-{
-    return m_bridge && m_bridge->isAvailable() && !m_currentSessionId.isEmpty();
-}
-
-void Manager::memoryList()
-{
-    const QString cmd = QString::fromLatin1(kMemProbe)
-        + QStringLiteral("[ -n \"$D\" ] || { echo \"(no memory store yet on the server)\"; exit 0; };"
-                         " for f in \"$D\"/*.txt; do [ -f \"$f\" ] || continue;"
-                         " printf '%s\\t%s\\n' \"$(basename \"$f\" .txt)\" \"$(head -1 \"$f\")\";"
-                         " done");
-    runToolOnSession(QStringLiteral("shell"), shellArgs(cmd),
-                     [this](const QString &out, bool err) {
-        QVariantList topics;
-        if (!err) {
-            const QStringList lines = out.trimmed().split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-            for (const QString &line : lines) {
-                const int tab = line.indexOf(QLatin1Char('\t'));
-                topics << QVariantMap{
-                    {"name", tab < 0 ? line : line.left(tab)},
-                    {"summary", tab < 0 ? QString() : line.mid(tab + 1).left(90)}};
-            }
-        }
-        emit memoryTopics(topics, !err, err ? out : QString());
-    });
-}
-
-void Manager::memoryRead(const QString &topic)
-{
-    if (!topicSafe(topic)) {
-        emit memoryContentLoaded(topic, QString(), false);
-        return;
-    }
-    const QString cmd = QString::fromLatin1(kMemProbe)
-        + QStringLiteral("[ -n \"$D\" ] || exit 0; cat \"$D/%1\" 2>/dev/null")
-              .arg(memFileName(topic));
-    runToolOnSession(QStringLiteral("shell"), shellArgs(cmd),
-                     [this, topic](const QString &out, bool err) {
-        emit memoryContentLoaded(topic, err ? QString() : out, !err);
-    });
-}
-
-void Manager::memoryWrite(const QString &topic, const QString &content)
-{
-    if (!topicSafe(topic)) {
-        emit memorySaved(topic, false, QStringLiteral("Invalid memory name."));
-        return;
-    }
-    // Base64 carries ANY content through the shell argument unchanged (the
-    // alphabet has no quotes), so the store can hold markdown/heredocs safely.
-    const QString b64 = QString::fromUtf8(content.toUtf8().toBase64());
-    const QString cmd = QString::fromLatin1(kMemProbe)
-        + QStringLiteral("D=\"${D:-${XDG_CONFIG_HOME:-$HOME/.config}/goose/memory}\";"
-                         " mkdir -p \"$D\"; printf '%s' '") + b64
-        + QStringLiteral("' | base64 -d > \"$D/%1\"; echo saved").arg(memFileName(topic));
-    runToolOnSession(QStringLiteral("shell"), shellArgs(cmd),
-                     [this, topic](const QString &out, bool err) {
-        emit memorySaved(topic, !err, err ? out : QStringLiteral("Saved."));
-    });
 }
 
 void Manager::deleteSkill(const QString &path)
@@ -1793,12 +1661,7 @@ void Manager::coreOnSessionProbe(const QString &sid, const QString &u, qint64 n)
 
 void Manager::coreOnToolResult(const QString &text, int isError)
 {
-    // Only tools_call emits this (core shim); the core runs them sequentially
-    // per connection, so FIFO order pairs every reply with its caller.
-    if (m_toolQueue.isEmpty())
-        return;
-    const auto cb = m_toolQueue.takeFirst();
-    cb(text, isError != 0);
+    Q_UNUSED(text); Q_UNUSED(isError);
 }
 
 void Manager::coreOnError(const QString &method, const QString &message)

@@ -115,19 +115,8 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
     var confirmDelete by remember { mutableStateOf(false) }
     var deleteBusy by remember { mutableStateOf(false) }
     var deleteNote by remember { mutableStateOf<String?>(null) }
-    // Project memory: the global store's topic named after the project (the
-    // seeded instructions teach the model to keep durable notes there).
-    var mem by remember { mutableStateOf<String?>(null) }
-    var memDraft by remember { mutableStateOf<String?>(null) }
-    var memBusy by remember { mutableStateOf(false) }
-    var memNote by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(project) {
-        memBusy = true
-        cm.memoryRead(project) { err, text ->
-            memBusy = false
-            mem = if (err != null) "($err)" else text
-        }
-    }
+    var info by remember { mutableStateOf<String?>(null) }
+    var infoBusy by remember { mutableStateOf(false) }
     // Instructions editor: seeded from the project's content and RESEEDED when
     // the list refreshes (the save's re-list) — remember keyed on content, the
     // recipe-instructions idiom. Note clears on the next edit.
@@ -285,64 +274,41 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
                 }
             }
             item {
-                Text(stringResource(R.string.project_memory), style = MaterialTheme.typography.labelMedium,
+                Text(stringResource(R.string.goosehints_memory), style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(start = 6.dp, top = 18.dp, bottom = 4.dp))
             }
             item {
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                     Column(Modifier.fillMaxWidth().padding(14.dp)) {
-                        val shown = memDraft ?: mem
                         when {
-                            shown == null && memBusy -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            infoBusy -> Row(verticalAlignment = Alignment.CenterVertically) {
                                 CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                                 Spacer(Modifier.width(10.dp))
-                                Text(stringResource(R.string.loading), style = MaterialTheme.typography.bodySmall)
+                                Text(stringResource(R.string.asking_fast_model),
+                                    style = MaterialTheme.typography.bodySmall)
                             }
-                            shown == null -> Text(stringResource(R.string.connect_open_chat_first),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.outline)
-                            else -> {
-                                OutlinedTextField(
-                                    value = shown,
-                                    onValueChange = { memDraft = it; memNote = null },
-                                    modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp),
-                                    label = { Text(stringResource(R.string.project_memory_hint, project)) },
-                                    maxLines = 16,
-                                )
+                            info != null -> {
+                                Text(info!!, style = MaterialTheme.typography.bodySmall)
                                 Spacer(Modifier.height(6.dp))
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    TextButton(
-                                        enabled = !memBusy && memDraft != null && mem != null &&
-                                            memDraft != mem,
-                                        onClick = {
-                                            val body = memDraft ?: return@TextButton
-                                            memBusy = true
-                                            cm.memoryWrite(project, body) { err ->
-                                                memBusy = false
-                                                if (err == null) { mem = body; memDraft = null }
-                                                memNote = err ?: savedMsg
-                                            }
-                                        }) { Text(stringResource(R.string.save)) }
-                                    TextButton(
-                                        enabled = !memBusy && memDraft == null,
-                                        onClick = {
-                                            memBusy = true
-                                            cm.memoryRead(project) { err, text ->
-                                                memBusy = false
-                                                mem = if (err != null) "($err)" else text
-                                            }
-                                        }) { Text(stringResource(R.string.reload)) }
-                                    if (memBusy) {
-                                        Spacer(Modifier.width(10.dp))
-                                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                                TextButton(onClick = {
+                                    infoBusy = true
+                                    cm.fetchProjectInfo(project) { err, text ->
+                                        infoBusy = false; info = err ?: text
                                     }
-                                    memNote?.let {
-                                        Spacer(Modifier.width(10.dp))
-                                        Text(it, style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.outline)
+                                }) { Text(stringResource(R.string.reload)) }
+                            }
+                            else -> {
+                                Text(stringResource(R.string.project_hints_info),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.outline)
+                                Spacer(Modifier.height(6.dp))
+                                TextButton(onClick = {
+                                    infoBusy = true
+                                    cm.fetchProjectInfo(project) { err, text ->
+                                        infoBusy = false; info = err ?: text
                                     }
-                                }
+                                }) { Text(stringResource(R.string.load)) }
                             }
                         }
                     }
@@ -360,172 +326,5 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
 
 
 // ---- Settings ---------------------------------------------------------------
-
-// ---- Global memory store (the server's builtin Memory extension files) -----
-
-/** Topic list: one file per topic; the first line is the keyword list. The
- *  store is global and project-blind — a "project memory" is simply a topic
- *  named after the project (the seeded project instructions say so). Reached
- *  from Settings; the skills screen is the structural twin. */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun MemoryScreen(cm: ConnectionManager, nav: NavController) {
-    var topics by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
-    var busy by remember { mutableStateOf(false) }
-    var note by remember { mutableStateOf<String?>(null) }
-    var draftName by remember { mutableStateOf("") }
-    fun load() {
-        busy = true
-        cm.memoryList { err, rows -> busy = false; topics = rows; note = err }
-    }
-    LaunchedEffect(Unit) { load() }
-    Scaffold(topBar = {
-        TopAppBar(
-            title = { Text(stringResource(R.string.memory_topics)) },
-            navigationIcon = {
-                IconButton(onClick = { nav.popBackStack() }) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
-                }
-            },
-            actions = {
-                IconButton(onClick = { load() }) {
-                    Icon(Icons.Filled.Refresh, contentDescription = "reload")
-                }
-            }
-        )
-    }) { pad ->
-        LazyColumn(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
-            item {
-                Text(stringResource(R.string.memory_topics_hint),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.padding(start = 6.dp, bottom = 6.dp))
-            }
-            note?.let { n ->
-                item {
-                    Text(n, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(start = 6.dp, bottom = 6.dp))
-                }
-            }
-            item {
-                Row(verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(vertical = 4.dp)) {
-                    OutlinedTextField(draftName, { draftName = it }, singleLine = true,
-                        label = { Text(stringResource(R.string.new_topic)) },
-                        modifier = Modifier.weight(1f))
-                    Spacer(Modifier.width(8.dp))
-                    TextButton(enabled = draftName.isNotBlank() && cm.memoryReady(),
-                        onClick = {
-                            val t = draftName.trim()
-                            draftName = ""
-                            busy = true
-                            cm.memoryWrite(t, "# $t\n") { err ->
-                                busy = false
-                                note = err
-                                if (err == null) nav.navigate("memory/" + Uri.encode(t))
-                                else load()
-                            }
-                        }) { Text(stringResource(R.string.add)) }
-                }
-            }
-            items(topics, key = { it.first }) { row ->
-                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                    .clickable { nav.navigate("memory/" + Uri.encode(row.first)) }) {
-                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(row.first, style = MaterialTheme.typography.titleMedium,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (row.second.isNotBlank())
-                                Text(row.second, style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.outline, maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis)
-                        }
-                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
-                            tint = MaterialTheme.colorScheme.outline)
-                    }
-                }
-            }
-            if (busy && topics.isEmpty()) item {
-                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(10.dp))
-                    Text(stringResource(R.string.loading), style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        }
-    }
-}
-
-/** One memory topic: the whole file, editable (the store has no versioning —
- *  saving replaces the file, exactly like the skills editor). */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun MemoryTopicScreen(cm: ConnectionManager, nav: NavController, topic: String) {
-    var text by remember { mutableStateOf<String?>(null) }      // current editor content
-    var saved by remember { mutableStateOf<String?>(null) }     // last known server copy
-    var busy by remember { mutableStateOf(false) }
-    var note by remember { mutableStateOf<String?>(null) }
-    val savedMsg = stringResource(R.string.saved)
-    fun load() {
-        busy = true
-        cm.memoryRead(topic) { err, t ->
-            busy = false
-            val v = if (err != null) "" else t
-            text = v; saved = v
-            note = err
-        }
-    }
-    LaunchedEffect(topic) { load() }
-    Scaffold(topBar = {
-        TopAppBar(
-            title = { Text(topic, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-            navigationIcon = {
-                IconButton(onClick = { nav.popBackStack() }) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
-                }
-            }
-        )
-    }) { pad ->
-        Column(Modifier.padding(pad).padding(horizontal = 12.dp, vertical = 8.dp).fillMaxSize()) {
-            Text(stringResource(R.string.memory_topics_hint),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline)
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                value = text ?: "",
-                onValueChange = { text = it; note = null },
-                modifier = Modifier.fillMaxWidth().weight(1f),
-                label = { Text("$topic.txt") },
-            )
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(
-                    enabled = !busy && text != null && saved != null && text != saved,
-                    onClick = {
-                        val body = text ?: return@TextButton
-                        busy = true
-                        cm.memoryWrite(topic, body) { err ->
-                            busy = false
-                            if (err == null) saved = body
-                            note = err ?: savedMsg
-                        }
-                    }) { Text(stringResource(R.string.save)) }
-                TextButton(enabled = !busy, onClick = { load() }) {
-                    Text(stringResource(R.string.reload))
-                }
-                if (busy) {
-                    Spacer(Modifier.width(10.dp))
-                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                }
-                note?.let {
-                    Spacer(Modifier.width(10.dp))
-                    Text(it, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline)
-                }
-            }
-        }
-    }
-}
 
 // ---- Reusable settings building blocks --------------------------------------

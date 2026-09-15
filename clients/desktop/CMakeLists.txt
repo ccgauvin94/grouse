@@ -64,7 +64,6 @@ qt_add_resources(grouse-desktop "app"
         ui/RecipesDialog.qml
         ui/SkillsDialog.qml
         ui/ProjectDialog.qml
-        ui/MemoryDialog.qml
 )
 
 install(TARGETS grouse-desktop
