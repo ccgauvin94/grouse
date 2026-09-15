@@ -528,7 +528,15 @@ impl GrouseUnstable {
     /// Invoke a tool DIRECTLY — no model turn, deterministic. The concatenated text content
     /// blocks (or the error text) arrive on `on_tool_result`.
     pub fn tools_call(&self, session_id: String, name: String, args: String) {
-        let Ok(args) = serde_json::from_str::<Value>(&args) else { return };
+        // A malformed-args call can never get a server reply, and clients
+        // FIFO a reply to every tools_call (Android's toolCallQueue) — the
+        // caller must be answered. The no-connection path stays a SILENT
+        // no-op by contract (CONTRACT §1; grouse-unstable pins it).
+        let Ok(args) = serde_json::from_str::<Value>(&args) else {
+            self.listener
+                .on_tool_result("tools/call: arguments were not valid JSON".into(), true);
+            return;
+        };
         let Some(conn) = self.route(&session_id) else { return };
         match conn.rpc(
             "_goose/unstable/tools/call",
@@ -1420,6 +1428,23 @@ mod tests {
                 ("_goose/unstable/tools/call", json!({"sessionId": "s1", "name": "shell__run", "arguments": {"cmd": "boom"}})),
             ],
         );
+    }
+
+    #[test]
+    fn tools_call_guards_answer_the_caller() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        let (g, rec) = harness(stub.clone());
+
+        // Malformed args: the caller still gets an error on_tool_result (the
+        // client FIFO pairs every tools_call with a reply; a silent return
+        // stalls it forever).
+        g.tools_call("s1".to_string(), "shell".to_string(), "not json".to_string());
+
+        assert_eq!(rec.events(), vec![Ev::ToolResult(
+            "tools/call: arguments were not valid JSON".to_string(), true)]);
+        // Nothing reached the server.
+        assert_calls(&stub, &[]);
     }
 
     #[test]
