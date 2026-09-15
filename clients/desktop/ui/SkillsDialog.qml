@@ -100,12 +100,17 @@ Controls.Dialog {
                     }
                 }
 
-                Controls.TextArea {
-                    id: skillTextArea
+                // Same class as the project/recipes editors: a bare TextArea
+                // past the visible height is unreachable without a ScrollView
+                // (a read-only bundled skill must still be readable).
+                Controls.ScrollView {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    wrapMode: Text.WrapAnywhere
-                    readOnly: dialog.selectedSkill ? !dialog.selectedSkill.writable : true
+                    Controls.TextArea {
+                        id: skillTextArea
+                        wrapMode: Text.WrapAnywhere
+                        readOnly: dialog.selectedSkill ? !dialog.selectedSkill.writable : true
+                    }
                 }
 
                 RowLayout {

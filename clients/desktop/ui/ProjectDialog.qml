@@ -61,13 +61,18 @@ Controls.Dialog {
             text: qsTr("Instructions")
             font.weight: Font.DemiBold
         }
-        Controls.TextArea {
-            id: instructionsArea
+        // A bare TextArea has no flickable — long instructions were
+        // unreachable past the box. ScrollView gives it one (the Recipes
+        // prompt/instructions fix, same class).
+        Controls.ScrollView {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            readOnly: dialog.proj() ? !dialog.proj().writable : true
-            wrapMode: Text.WrapAnywhere
-            placeholderText: qsTr("(no instructions written yet)")
+            Controls.TextArea {
+                id: instructionsArea
+                readOnly: dialog.proj() ? !dialog.proj().writable : true
+                wrapMode: Text.WrapAnywhere
+                placeholderText: qsTr("(no instructions written yet)")
+            }
         }
         Controls.Label {
             text: qsTr("These notes are given to every chat filed under this project.")
