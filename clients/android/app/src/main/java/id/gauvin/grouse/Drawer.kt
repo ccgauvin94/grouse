@@ -166,6 +166,9 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     val activeChats = visibleChats.filterNot { it.archived }
     val byProjectId = activeChats.groupBy { it.projectId }
     val freeChats = byProjectId[null].orEmpty()
+    // One membership rule for the cards below — the same call the project details
+    // screen makes, so a card's count and that project's chat list are the same list.
+    fun chatsIn(id: String) = ConnectionManager.projectChats(activeChats, id)
     val archivedChats = visibleChats.filter { it.archived }
     // A query hides a project card entirely unless the name itself matches or one of its chats
     // does. Left standing empty, the card reads "this project has no chats" — a false negative
@@ -173,7 +176,7 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     val projects = cm.projects.value.filter { proj ->
         !searching ||
             ConnectionManager.queryMatches(query, listOf(proj.name)) ||
-            byProjectId[proj.id]?.isNotEmpty() == true
+            chatsIn(proj.id).isNotEmpty()
     }
     // Nothing left anywhere: the add-buttons and section headers would be the only rows, which
     // is worse than saying "no matches" and offering the way out.
@@ -246,7 +249,7 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
         if (!projectsCollapsed || searching) {
             projects.forEach { proj ->
                 val p = proj.name
-                val inProject = byProjectId[proj.id].orEmpty()
+                val inProject = chatsIn(proj.id)
                 // While searching a card is open regardless of the tapped state: a hit you have
                 // to tap to reveal isn't a search result, and the collapsed card is exactly as
                 // misleading as an empty one.

@@ -196,7 +196,9 @@ class ConnectionManager private constructor(context: Context) {
         override fun onSessionProbe(sessionId: String, updatedAt: String, messageCount: Long) {
             // The core owns resync now (probe → in-place replay); the app never probes.
         }
-        override fun onToolResult(text: String, isError: Boolean) { main.post { this@ConnectionManager.onToolResult(text, isError) } }
+        // The core emits this only in response to a direct tools_call; the app issues none
+        // since fetchProjectInfo was removed (the server requires Auto mode for those).
+        override fun onToolResult(text: String, isError: Boolean) { }
         override fun onError(method: String, message: String) { main.post { onUnstableError(method, message) } }
     })
 
@@ -1040,51 +1042,13 @@ class ConnectionManager private constructor(context: Context) {
      *  No model is involved: the core invokes developer__shell through `tools/call` on the
      *  bound session -- deterministic, exact output, near-instant. Because the session never
      *  receives a prompt it gains no messages (the old throwaway-session variant was needed
-     *  only because the hand-rolled client had no direct-call path on the live wire). */
-    private fun runUtilityTool(command: String, timeoutMs: Long = 30_000, onDone: (String?, String) -> Unit) =
-        runToolDirect("shell", kotlinx.serialization.json.buildJsonObject {
-            put("command", kotlinx.serialization.json.JsonPrimitive(command))
-        }, timeoutMs, onDone)
-
-    /** Invoke ONE tool directly and hand back its text, with no model turn.
-     *  Generalised out of runUtilityTool, which was the shell-only special case. */
-    private fun runToolDirect(
-        tool: String,
-        args: kotlinx.serialization.json.JsonObject,
-        timeoutMs: Long = 30_000,
-        onDone: (String?, String) -> Unit,
-    ) {
-        val sid = core.activeSessionId()
-        if (sid == null || !core.ready()) { onDone("not ready — no session", ""); return }
-        var done = false
-        lateinit var watchdog: Runnable
-        lateinit var entry: PendingToolCall
-        fun finish(err: String?, out: String) {
-            if (done) return
-            done = true
-            main.removeCallbacks(watchdog)
-            toolCallQueue.removeAll { it === entry }
-            onDone(err, out)
-        }
-        watchdog = Runnable { finish("Timed out talking to the server.", "") }
-        main.postDelayed(watchdog, timeoutMs)
-        entry = PendingToolCall(::finish)
-        toolCallQueue.addLast(entry)
-        io { unstable.toolsCall(sid, tool, args.toString()) }
-    }
-
-    private data class PendingToolCall(val onDone: (String?, String) -> Unit)
-    // Direct tool replies arrive on one listener slot; the core executes tools_call requests
-    // sequentially per connection, so a FIFO matches replies to callers exactly.
-    private val toolCallQueue = ArrayDeque<PendingToolCall>()
-
-    private fun cleanProjectName(raw: String): String? {
-        val name = raw.trim().trim('/').removePrefix("projects/")
-            .removePrefix("workspace/").trim('/')
-        if (name.isEmpty() || name.contains("..") || name.contains('/') ||
-            name.any { it.isWhitespace() } || name.contains('\'') || name.contains('"')) return null
-        return name
-    }
+     *  only because the hand-rolled client had no direct-call path on the live wire).
+     *
+     *  Removed 2026-09-15 with its last caller (fetchProjectInfo): the server refuses direct
+     *  tool calls outside Auto mode ("app tool calls require auto mode"), so a client-side
+     *  shell round-trip is not a viable read path. A memory RPC upstream is the real fix.
+     *  The `tools_call` FIFO plumbing (runToolDirect/toolCallQueue) went with it; onToolResult
+     *  stays as the listener's no-op (the core emits it only in response to tools_call). */
 
     /** Create a project on the server.
      *
@@ -1127,19 +1091,6 @@ class ConnectionManager private constructor(context: Context) {
                 onResult(err)
             }
         }
-    }
-
-    /** Read a project's .goosehints and local memory (goose's memory extension stores its
-     *  local scope at <cwd>/.goose/memory). Direct shell call -- exact file contents. */
-    fun fetchProjectInfo(project: String, onResult: (String?, String) -> Unit) {
-        val name = cleanProjectName(project) ?: run { onResult("bad project name", ""); return }
-        runUtilityTool(
-            "echo '=== .goosehints ==='; cat '/workspace/$name/.goosehints' 2>/dev/null || echo '(none)'; " +
-                "echo; echo '=== .goose/memory ==='; " +
-                "for f in '/workspace/$name/.goose/memory'/*; do [ -f \"\$f\" ] || continue; " +
-                "echo \"-- \$(basename \"\$f\")\"; cat \"\$f\"; done 2>/dev/null; " +
-                "[ -d '/workspace/$name/.goose/memory' ] || echo '(none)'"
-        ) { err, text -> onResult(err, text) }
     }
 
     /** Delete a project and unfile its chats.
@@ -2151,13 +2102,6 @@ class ConnectionManager private constructor(context: Context) {
             recipeParams = true))
     }
 
-    /** Reply to a DIRECT tool invocation. The core executes tools_call requests sequentially,
-     *  so the FIFO matches replies to callers in order. */
-    private fun onToolResult(text: String, isError: Boolean) {
-        val entry = toolCallQueue.removeFirstOrNull() ?: return
-        entry.onDone(if (isError) text.ifBlank { "tool call failed" } else null, text)
-    }
-
     // ---------------------------------------------------------------------------
     // The core connect entry point (all session opens funnel through here)
     // ---------------------------------------------------------------------------
@@ -2323,6 +2267,15 @@ class ConnectionManager private constructor(context: Context) {
          *  is special, and it is identified by title. */
         fun sessionKind(s: SessionInfo): SessionKind =
             if (s.title == ASSISTANT_TITLE) SessionKind.ASSISTANT else SessionKind.CHAT
+
+        /** The chats filed under a project — the ONE membership rule, shared by the drawer's
+         *  project cards and the project details screen so the two cannot disagree. Active
+         *  (non-archived) sessions whose _meta.projectId matches; the Assistant thread counts
+         *  like any other chat, since the drawer always grouped it that way while the details
+         *  screen silently dropped it (and listed archived chats the drawer hides). */
+        fun projectChats(all: List<SessionInfo>, projectId: String?): List<SessionInfo> =
+            if (projectId == null) emptyList()
+            else all.filter { it.projectId == projectId && !it.archived }
 
         /** Drawer search (tier 1 — names, not contents). Case-insensitive, and every
          *  whitespace-separated term must land somewhere, so "feeder cam" still finds

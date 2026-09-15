@@ -79,10 +79,7 @@
     <string name="delete">Delete</string>
     <string name="project_deleted">Project deleted</string>
     <string name="ok">OK</string>
-    <string name="goosehints_memory">GOOSEHINTS &amp; MEMORY</string>
-    <string name="asking_fast_model">Asking the fast model to read them…</string>
     <string name="reload">Reload</string>
-    <string name="project_hints_info">The project\'s .goosehints and local memory (.goose/memory) live on the server; loading them runs a quick fast-model session.</string>
     <string name="load">Load</string>
     <string name="delete_project">Delete project…</string>
     <string name="reset_assistant_thread">Reset assistant thread?</string>

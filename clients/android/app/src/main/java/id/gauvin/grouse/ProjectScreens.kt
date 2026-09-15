@@ -115,8 +115,6 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
     var confirmDelete by remember { mutableStateOf(false) }
     var deleteBusy by remember { mutableStateOf(false) }
     var deleteNote by remember { mutableStateOf<String?>(null) }
-    var info by remember { mutableStateOf<String?>(null) }
-    var infoBusy by remember { mutableStateOf(false) }
     // Instructions editor: seeded from the project's content and RESEEDED when
     // the list refreshes (the save's re-list) — remember keyed on content, the
     // recipe-instructions idiom. Note clears on the next edit.
@@ -161,16 +159,14 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
         )
     }
 
-    // Membership is projectId now. The cwd test is kept as a FALLBACK for the directory-era
-    // projects (Cooking, Hacking, Inbox) whose sessions were filed by working directory and
-    // never migrated -- dropping it would empty those screens.
+    // Membership is the drawer's own rule (ConnectionManager.projectChats): active
+    // sessions filed under this project, the Assistant thread included. The old
+    // inline filter dropped the Assistant and kept archived chats, so the drawer
+    // and this screen disagreed — most visibly on the assistant project.
     val proj = cm.projects.value.firstOrNull { it.name.equals(project, true) }
     val projectId = proj?.id
     val instrText = instr ?: proj?.content.orEmpty()
-    val chats = cm.sessions.value.filter { s ->
-        ConnectionManager.sessionKind(s) != SessionKind.ASSISTANT &&
-            projectId != null && s.projectId == projectId
-    }
+    val chats = ConnectionManager.projectChats(cm.sessions.value, projectId)
     Scaffold(topBar = {
         TopAppBar(
             title = { Text(project, maxLines = 1, overflow = TextOverflow.Ellipsis) },
@@ -270,47 +266,6 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
                         }
                         Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
                             tint = MaterialTheme.colorScheme.outline)
-                    }
-                }
-            }
-            item {
-                Text(stringResource(R.string.goosehints_memory), style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(start = 6.dp, top = 18.dp, bottom = 4.dp))
-            }
-            item {
-                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                    Column(Modifier.fillMaxWidth().padding(14.dp)) {
-                        when {
-                            infoBusy -> Row(verticalAlignment = Alignment.CenterVertically) {
-                                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                                Spacer(Modifier.width(10.dp))
-                                Text(stringResource(R.string.asking_fast_model),
-                                    style = MaterialTheme.typography.bodySmall)
-                            }
-                            info != null -> {
-                                Text(info!!, style = MaterialTheme.typography.bodySmall)
-                                Spacer(Modifier.height(6.dp))
-                                TextButton(onClick = {
-                                    infoBusy = true
-                                    cm.fetchProjectInfo(project) { err, text ->
-                                        infoBusy = false; info = err ?: text
-                                    }
-                                }) { Text(stringResource(R.string.reload)) }
-                            }
-                            else -> {
-                                Text(stringResource(R.string.project_hints_info),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.outline)
-                                Spacer(Modifier.height(6.dp))
-                                TextButton(onClick = {
-                                    infoBusy = true
-                                    cm.fetchProjectInfo(project) { err, text ->
-                                        infoBusy = false; info = err ?: text
-                                    }
-                                }) { Text(stringResource(R.string.load)) }
-                            }
-                        }
                     }
                 }
             }
