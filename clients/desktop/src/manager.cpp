@@ -811,6 +811,12 @@ void Manager::moveSessionToProject(const QString &sessionId, const QString &proj
     const QByteArray pid = projectId.isEmpty() ? QByteArray() : projectId.toUtf8();
     m_bridge->api().grouse_unstable_session_project(m_bridge->handle(), sid.constData(),
                                                     projectId.isEmpty() ? nullptr : pid.constData());
+    // The C call is synchronous (block_on), so the server has committed the move
+    // by the time it returns. Re-read sessions so the sidebar regroups the thread
+    // under its new project — the model keys each section off the session's
+    // projectId from session/list, and session_project only re-lists project
+    // sources, never sessions. (Android hides this by patching its list locally.)
+    refreshSessions();
 }
 
 void Manager::newChatInProject(const QString &projectId)
