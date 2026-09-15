@@ -121,6 +121,10 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
     var instr by rememberSaveable { mutableStateOf<String?>(null) }
     var instrBusy by remember { mutableStateOf(false) }
     var instrNote by remember { mutableStateOf<String?>(null) }
+    // Collapsed by default: the chats are what this screen is for, and the
+    // instructions are long reference text. Survives rotation/navigation so the
+    // screen doesn't re-collapse under a reader who just opened it.
+    var instructionsOpen by rememberSaveable { mutableStateOf(false) }
     val savedMsg = stringResource(R.string.saved)
     fun goToChat() = nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
 
@@ -178,12 +182,38 @@ fun ProjectScreen(cm: ConnectionManager, nav: NavController, project: String) {
         )
     }) { pad ->
         LazyColumn(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
+            // Header toggles the editor. The collapsed state still shows the first
+            // non-blank line of the body, so an empty field and written instructions
+            // don't look the same from here.
             item {
-                Text(stringResource(R.string.instructions), style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(start = 6.dp, top = 10.dp, bottom = 4.dp))
+                Row(Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable { instructionsOpen = !instructionsOpen }
+                    .padding(start = 6.dp, top = 10.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        if (instructionsOpen) Icons.Filled.KeyboardArrowDown
+                        else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = if (instructionsOpen) "collapse instructions"
+                                             else "expand instructions",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(4.dp))
+                    Text(stringResource(R.string.instructions),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary)
+                    if (!instructionsOpen) {
+                        val hint = instrText.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
+                        if (hint.isNotBlank()) {
+                            Spacer(Modifier.width(8.dp))
+                            Text(hint, style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
             }
-            item {
+            if (instructionsOpen) item {
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                     Column(Modifier.fillMaxWidth().padding(14.dp)) {
                         OutlinedTextField(
