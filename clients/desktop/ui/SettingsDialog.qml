@@ -14,6 +14,7 @@ Controls.Dialog {
     closePolicy: Controls.Popup.CloseOnEscape
 
     signal openGlobalTools()
+    signal openMemory()
 
     Component.onCompleted: reload()
     function reload() {
@@ -146,6 +147,13 @@ Controls.Dialog {
                 icon.name: "configure"
                 Kirigami.FormData.label: ""
                 onClicked: { dialog.close(); dialog.openGlobalTools() }
+            }
+            // The server's goose memory store (topic files), not QSettings.
+            Controls.Button {
+                text: qsTr("Memory…")
+                icon.name: "text-editor"
+                Kirigami.FormData.label: ""
+                onClicked: { dialog.close(); dialog.openMemory() }
             }
         }
     }

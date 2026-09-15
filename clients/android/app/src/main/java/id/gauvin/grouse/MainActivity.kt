@@ -354,6 +354,10 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
             composable("skill/{name}") { back ->
                 SkillScreen(cm, nav, Uri.decode(back.arguments?.getString("name") ?: ""))
             }
+            composable("memory") { MemoryScreen(cm, nav) }
+            composable("memory/{topic}") { back ->
+                MemoryTopicScreen(cm, nav, Uri.decode(back.arguments?.getString("topic") ?: ""))
+            }
             composable("recipe/{rid}") { back ->
                 RecipeScreen(cm, nav, back.arguments?.getString("rid") ?: "", onOpenChat = {
                     nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }

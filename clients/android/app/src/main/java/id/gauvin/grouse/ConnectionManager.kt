@@ -1078,14 +1078,6 @@ class ConnectionManager private constructor(context: Context) {
     // sequentially per connection, so a FIFO matches replies to callers exactly.
     private val toolCallQueue = ArrayDeque<PendingToolCall>()
 
-    private fun cleanProjectName(raw: String): String? {
-        val name = raw.trim().trim('/').removePrefix("projects/")
-            .removePrefix("workspace/").trim('/')
-        if (name.isEmpty() || name.contains("..") || name.contains('/') ||
-            name.any { it.isWhitespace() } || name.contains('\'') || name.contains('"')) return null
-        return name
-    }
-
     /** Create a project on the server.
      *
      *  Was `mkdir -p /projects/<name>` over a shell tool, because a project WAS a directory.
@@ -1117,7 +1109,16 @@ class ConnectionManager private constructor(context: Context) {
         // no project, phantom success.
         pendingCreateError = null
         io {
-            unstable.sourcesCreate("project", name, "", "", null)
+            // Seed-on-create: teach the project its memory topic, so "a file
+            // per project" works from the first chat (the memory extension is
+            // global and project-blind; the name convention is the scoping).
+            // Desktop's createProject seeds the identical text.
+            val seed = "$name project.\n\n" +
+                "Memory: this project's durable notes live in the goose memory file \"$name\". " +
+                "Load the \"$name\" memory file at the start of every chat filed here, and when " +
+                "a durable decision, preference, or fact emerges in this project, add it to the " +
+                "\"$name\" memory file (first line: space-separated keywords)."
+            unstable.sourcesCreate("project", name, "", seed, null)
             // on_error rides main.post too (CoreListener posts to main) and was
             // enqueued before this call returned, so reading on main is FIFO-
             // deterministic: the capture, then this.
@@ -1129,17 +1130,65 @@ class ConnectionManager private constructor(context: Context) {
         }
     }
 
-    /** Read a project's .goosehints and local memory (goose's memory extension stores its
-     *  local scope at <cwd>/.goose/memory). Direct shell call -- exact file contents. */
-    fun fetchProjectInfo(project: String, onResult: (String?, String) -> Unit) {
-        val name = cleanProjectName(project) ?: run { onResult("bad project name", ""); return }
+    // -----------------------------------------------------------------------
+    // Goose memory store (the builtin Memory extension's files on the server)
+    //
+    // There is no memory RPC; the extension keeps one flat .txt per topic
+    // under $XDG_CONFIG_HOME/goose/memory (verified in the live container).
+    // A direct `shell` tools_call reads/writes them with no model turn.
+    // "Per-project memory" is the same global store with the topic named
+    // after the project — the seeded instructions teach the model that
+    // convention. Desktop's Manager mirrors this exactly (kMemProbe).
+    // Replaced fetchProjectInfo, which probed /workspace/<name>/.goose/memory
+    // — the directory-era layout this server has not used since migration.
+    // -----------------------------------------------------------------------
+    private val memProbe =
+        "D=\"\"; for d in \"\$XDG_CONFIG_HOME/goose/memory\" \"\$HOME/.config/goose/memory\" " +
+            "/state/config/goose/memory; do [ -d \"\$d\" ] && D=\"\$d\" && break; done; "
+
+    private fun memTopicSafe(t: String): Boolean =
+        t.isNotEmpty() && t.length <= 64 && !t.contains("..") && !t.startsWith(".") &&
+            t.all { it.isLetterOrDigit() || it == '_' || it == '-' || it == '.' }
+
+    private fun memFileName(topic: String) = if (topic.contains('.')) topic else "$topic.txt"
+
+    fun memoryReady(): Boolean = core.ready() && core.activeSessionId() != null
+
+    /** Lists memory topics; rows are (name, summary), the summary being the
+     *  file's first line (the keyword-list convention). */
+    fun memoryList(onResult: (String?, List<Pair<String, String>>) -> Unit) {
         runUtilityTool(
-            "echo '=== .goosehints ==='; cat '/workspace/$name/.goosehints' 2>/dev/null || echo '(none)'; " +
-                "echo; echo '=== .goose/memory ==='; " +
-                "for f in '/workspace/$name/.goose/memory'/*; do [ -f \"\$f\" ] || continue; " +
-                "echo \"-- \$(basename \"\$f\")\"; cat \"\$f\"; done 2>/dev/null; " +
-                "[ -d '/workspace/$name/.goose/memory' ] || echo '(none)'"
+            memProbe + "[ -n \"\$D\" ] || { echo __NOSTORE__; exit 0; }; " +
+                "for f in \"\$D\"/*.txt; do [ -f \"\$f\" ] || continue; " +
+                "printf '%s\\t%s\\n' \"\$(basename \"\$f\" .txt)\" \"\$(head -1 \"\$f\")\"; done"
+        ) { err, text ->
+            when {
+                err != null -> onResult(err, emptyList())
+                text.contains("__NOSTORE__") -> onResult(null, emptyList())
+                else -> onResult(null, text.trim().lines().filter { it.isNotBlank() }.map { line ->
+                    val tab = line.indexOf('\t')
+                    if (tab < 0) line to "" else line.substring(0, tab) to line.substring(tab + 1).take(90)
+                })
+            }
+        }
+    }
+
+    fun memoryRead(topic: String, onResult: (String?, String) -> Unit) {
+        if (!memTopicSafe(topic)) { onResult("Invalid memory name", ""); return }
+        runUtilityTool(
+            memProbe + "[ -n \"\$D\" ] || exit 0; cat \"\$D/${memFileName(topic)}\" 2>/dev/null"
         ) { err, text -> onResult(err, text) }
+    }
+
+    /** Base64 carries ANY body through the shell argument unchanged (the
+     *  alphabet has no quotes), so files can hold markdown/dollar/heredocs. */
+    fun memoryWrite(topic: String, content: String, onResult: (String?) -> Unit = {}) {
+        if (!memTopicSafe(topic)) { onResult("Invalid memory name"); return }
+        val b64 = android.util.Base64.encodeToString(content.toByteArray(), android.util.Base64.NO_WRAP)
+        runUtilityTool(
+            memProbe + "D=\"\${D:-\${XDG_CONFIG_HOME:-\$HOME/.config}/goose/memory}\"; " +
+                "mkdir -p \"\$D\"; printf '%s' '$b64' | base64 -d > \"\$D/${memFileName(topic)}\"; echo saved"
+        ) { err, _ -> onResult(err) }
     }
 
     /** Delete a project and unfile its chats.

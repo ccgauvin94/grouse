@@ -92,12 +92,40 @@ public:
     { record(QStringLiteral("saveRecipe:%1").arg(id)); Q_UNUSED(dto); }
     Q_INVOKABLE void deleteRecipe(const QString &id) { record(QStringLiteral("deleteRecipe:%1").arg(id)); }
 
+    // Memory store surface (the real Manager answers these through a shell
+    // tools_call; the stub replies synchronously with canned rows).
+    Q_INVOKABLE bool memoryReady() const { return true; }
+    Q_INVOKABLE void memoryList()
+    {
+        record(QStringLiteral("memoryList"));
+        QVariantList rows;
+        rows << QVariantMap{{QStringLiteral("name"), QStringLiteral("Education")},
+                             {QStringLiteral("summary"), QStringLiteral("# education phd")}};
+        rows << QVariantMap{{QStringLiteral("name"), QStringLiteral("hacking")},
+                             {QStringLiteral("summary"), QStringLiteral("# homelab")}};
+        emit memoryTopics(rows, true, QString());
+    }
+    Q_INVOKABLE void memoryRead(const QString &topic)
+    {
+        record(QStringLiteral("memoryRead:%1").arg(topic));
+        emit memoryContentLoaded(topic, QStringLiteral("# keywords\nbody for %1\n").arg(topic), true);
+    }
+    Q_INVOKABLE void memoryWrite(const QString &topic, const QString &content)
+    {
+        record(QStringLiteral("memoryWrite:%1").arg(topic));
+        Q_UNUSED(content);
+        emit memorySaved(topic, true, QStringLiteral("Saved."));
+    }
+
 signals:
     void recipesChanged();
     void schedulesChanged();
     void configChanged();
     void refreshCountChanged();
     void lastCallChanged();
+    void memoryTopics(const QVariantList &topics, bool ok, const QString &note);
+    void memoryContentLoaded(const QString &topic, const QString &text, bool ok);
+    void memorySaved(const QString &topic, bool ok, const QString &note);
 
 private:
     void record(const QString &call) { m_lastCall = call; emit lastCallChanged(); }

@@ -281,6 +281,10 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                 SettingsNavRow("Tools", "Extensions and the tools they expose") {
                     nav.navigate("extensions")
                 }
+                SettingsNavRow(stringResource(R.string.global_memory),
+                    stringResource(R.string.global_memory_subtitle)) {
+                    nav.navigate("memory")
+                }
             }
 
             SettingsSection("Assistant") {

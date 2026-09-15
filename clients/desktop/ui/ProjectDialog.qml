@@ -20,6 +20,8 @@ Controls.Dialog {
     property string projectId
     property string origContent: ""
 
+    signal openProjectMemory(string topic)
+
     // A sources/list re-list (our own save, or another client's) lands here
     // while the dialog is open. Push it into the editor only while the user
     // hasn't dirtied it; the baseline always follows the server.
@@ -90,6 +92,20 @@ Controls.Dialog {
                 text: dialog.proj() && !dialog.proj().writable ? qsTr("Read-only") : ""
                 color: Kirigami.Theme.disabledTextColor
                 visible: text.length > 0
+            }
+            // The project's own memory topic (same global store, named after
+            // the project by the seeded instructions).
+            Controls.Button {
+                text: qsTr("Project memory…")
+                icon.name: "text-editor"
+                flat: true
+                visible: dialog.proj() !== null
+                onClicked: {
+                    const p = dialog.proj()
+                    if (!p) return
+                    dialog.close()
+                    dialog.openProjectMemory(p.id)
+                }
             }
             Controls.Button {
                 text: qsTr("Save")

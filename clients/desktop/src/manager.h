@@ -6,6 +6,7 @@
 #include <QSettings>
 #include <QVariant>
 #include <QVariantList>
+#include <functional>
 
 class CoreBridge;
 class RoamListModel;
@@ -196,6 +197,14 @@ public:
     // source replace via sources/update; the core re-lists on the reply.
     Q_INVOKABLE void saveProject(const QString &path, const QString &name,
                                  const QString &description, const QString &content);
+    // --- goose memory store (server files, via a direct shell tool call) ----
+    // The builtin Memory extension keeps one .txt per topic under
+    // $XDG_CONFIG_HOME/goose/memory. There is no memory RPC, so the shell
+    // tool reads/writes the files; results arrive on the signals below.
+    Q_INVOKABLE void memoryList();
+    Q_INVOKABLE void memoryRead(const QString &topic);
+    Q_INVOKABLE void memoryWrite(const QString &topic, const QString &content);
+    Q_INVOKABLE bool memoryReady() const;   // a session is open to call tools through
     // --- server config (providers) --------------------------------------------
     Q_INVOKABLE void setServerConfig(const QString &key, const QString &value);
     Q_INVOKABLE void readServerConfig(const QString &key);
@@ -276,10 +285,21 @@ signals:
     void skillsChanged();
     /** Result of testConnection(): reachability + secret-key auth + ACP handshake. */
     void connectionTested(bool ok, const QString &message);
+    // --- memory store results ------------------------------------------------
+    // topics: [{name, summary}] from memoryList (summary = the file's keyword line).
+    void memoryTopics(const QVariantList &topics, bool ok, const QString &note);
+    void memoryContentLoaded(const QString &topic, const QString &text, bool ok);
+    void memorySaved(const QString &topic, bool ok, const QString &note);
 
 private:
     void setStatus(const QString &s);
     void setOnline(bool o);
+    // Direct tool call on the open session; cb runs on the main thread with
+    // (text, isError). The core executes tools_call sequentially per
+    // connection, so a FIFO matches replies to callers exactly (Android's
+    // toolCallQueue pattern).
+    void runToolOnSession(const QString &tool, const QString &argsJson,
+                          const std::function<void(const QString &, bool)> &cb);
     void onSessionTouched(const QString &sid, const QString &title, const QString &updatedAt);
     void appendChunk(const QString &role, const QString &text, const QString &messageId, bool thought);
     void finalizeCurrentMessage();
@@ -390,6 +410,7 @@ private:
     void publishToolGroups();
 
     QString m_currentSessionId;
+    QList<std::function<void(const QString &, bool)>> m_toolQueue;
     QString m_currentSessionTitle;
     /// True while the chat area shows the landing page (no conversation committed).
     bool m_landing = true;

@@ -44,6 +44,10 @@ configure_file(qml/tst_chartbubble.qml.in
 set(RECIPES_UI_URL "file://${CMAKE_CURRENT_SOURCE_DIR}/../ui")
 configure_file(qml/tst_recipesdialog.qml.in
     ${CMAKE_CURRENT_BINARY_DIR}/qml/tst_recipesdialog.qml @ONLY)
+# MemoryDialog test (same import URL + stub Mgr).
+set(MEMORY_UI_URL "file://${CMAKE_CURRENT_SOURCE_DIR}/../ui")
+configure_file(qml/tst_memorydialog.qml.in
+    ${CMAKE_CURRENT_BINARY_DIR}/qml/tst_memorydialog.qml @ONLY)
 # Plain QML tests pass through unchanged (no placeholders).
 configure_file(qml/tst_combobox.qml
     ${CMAKE_CURRENT_BINARY_DIR}/qml/tst_combobox.qml COPYONLY)
