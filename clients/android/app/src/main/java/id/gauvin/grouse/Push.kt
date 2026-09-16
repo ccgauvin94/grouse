@@ -8,15 +8,11 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.unifiedpush.android.connector.FailedReason
 import org.unifiedpush.android.connector.PushService
 import org.unifiedpush.android.connector.UnifiedPush
 import org.unifiedpush.android.connector.data.PushEndpoint
 import org.unifiedpush.android.connector.data.PushMessage
-import java.util.concurrent.Executors
 
 /** Parse a push envelope {type,session,text}; plain text (no type) is a briefing. Malformed
  *  JSON falls through to the raw text as a briefing. Top-level internal so the JVM unit tests
@@ -93,35 +89,17 @@ class GoosePushService : PushService() {
 
     override fun onNewEndpoint(endpoint: PushEndpoint, instance: String) {
         SecureStore(this).pushEndpoint = endpoint.url
-        PushRegistry.publish(this, endpoint.url)
         // Self-heal for rotation (the exact bug that made "test pushes not arrive": a reinstall
         // minted a fresh uppush registration while the server kept POSTing the dead token).
         // Publish the endpoint into goose's server-side config over the ACP socket, where senders
         // read it. Best-effort — if the socket is down now, the next app start re-registers
-        // (Push.refresh) and lands here again.
+        // (Push.refresh) and lands here again. NOTE: this is the only publication path; the
+        // external-registry POST that used to sit here was removed 2026-09-15 — Grouse clients
+        // must not depend on server-side plumbing we invented (Grouse/Goose contract).
         ConnectionManager.get(this).publishPushEndpoint(endpoint.url)
     }
 
     override fun onRegistrationFailed(reason: FailedReason, instance: String) {}
 
     override fun onUnregistered(instance: String) { SecureStore(this).pushEndpoint = "" }
-}
-
-/** Best-effort: POST our endpoint URL to an external registry so its senders know where to reach
- *  us. No-op until a registry URL is configured (SecureStore.pushRegistryUrl). */
-object PushRegistry {
-    private val io = Executors.newSingleThreadExecutor()
-    fun publish(context: Context, endpoint: String) {
-        val url = SecureStore(context).pushRegistryUrl.ifBlank { return }
-        io.execute {
-            runCatching {
-                val body = endpoint.toRequestBody("text/plain".toMediaTypeOrNull())
-                // Plain OkHttpClient: the push registry is a normal HTTPS endpoint (the
-                // trust-all TLS builder that used to live in Net.kt existed only for goosed's
-                // self-signed cert, which the registry never is).
-                okhttp3.OkHttpClient().newCall(Request.Builder().url(url).post(body).build())
-                    .execute().close()
-            }
-        }
-    }
 }

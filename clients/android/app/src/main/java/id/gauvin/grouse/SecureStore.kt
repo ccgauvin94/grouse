@@ -236,11 +236,6 @@ class SecureStore(context: Context) {
         get() = cfg.getString("push_endpoint", "") ?: ""
         set(v) = cfg.edit().putString("push_endpoint", v).apply()
 
-    /** Optional external registry to POST the endpoint to on rotation. Blank = disabled. */
-    var pushRegistryUrl: String
-        get() = cfg.getString("push_registry", "") ?: ""
-        set(v) = cfg.edit().putString("push_registry", v).apply()
-
     /** The session id this device is awaiting a finished-turn nudge for (turn-push filtering). */
     var pendingPushSessionId: String?
         get() = cfg.getString("pending_push_session", null)
