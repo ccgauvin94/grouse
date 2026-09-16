@@ -998,6 +998,16 @@ void Manager::deleteSkill(const QString &path)
 
 // ---- server config (providers) ---------------------------------------------
 
+void Manager::publishPushEndpoint(const QString &url)
+{
+    if (url.isEmpty())
+        return;
+    // One key per client so two devices never overwrite each other, and no Grouse
+    // code reads it back: this exists solely so an operator's own sender can find
+    // the desktop's endpoint (docs/NOTIFICATIONS.md).
+    setServerConfig(QStringLiteral("GROUSE_PUSH_ENDPOINT_DESKTOP"), url);
+}
+
 void Manager::setServerConfig(const QString &key, const QString &value)
 {
     if (!m_bridge || !m_bridge->isAvailable())

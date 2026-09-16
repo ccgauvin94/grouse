@@ -22,8 +22,12 @@ void send(const QString &summary, const QString &body)
                          QStringLiteral("/org/freedesktop/Notifications"),
                          QStringLiteral("org.freedesktop.Notifications"),
                          QDBusConnection::sessionBus());
-    if (!iface.isValid())
+    if (!iface.isValid()) {
+        qInfo("Grouse notify: no notification service (%s)",
+              qUtf8Printable(iface.lastError().message()));
         return;
+    }
+    qInfo("Grouse notify: %s", qUtf8Printable(summary));
 
     QVariantMap hints;
     // Attributes the popup to our .desktop file so the shell shows the right icon

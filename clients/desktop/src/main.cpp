@@ -11,6 +11,7 @@
 
 #include "dbusadapter.h"
 #include "manager.h"
+#include "pushclient.h"
 
 namespace {
 
@@ -88,9 +89,26 @@ int main(int argc, char *argv[])
     // Ship the KRunner plugin to the host when running as a flatpak.
     installHostIntegration();
 
+    // UnifiedPush RECEIVE only (see docs/NOTIFICATIONS.md): Grouse ships no sender.
+    PushClient push;
+    QObject::connect(&push, &PushClient::endpointRegistered,
+                     &manager, &Manager::publishPushEndpoint);
+
+    // Bus-activated for a push: handle it without a window, then quit. There is no
+    // QML engine and no connection here — a notification is the entire job.
+    if (app.arguments().contains(QStringLiteral("--unifiedpush-background"))) {
+        push.start();
+        push.runBackground(20000);
+        return app.exec();
+    }
+
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("Mgr"), &manager);
+    engine.rootContext()->setContextProperty(QStringLiteral("Push"), &push);
     engine.load(QUrl(QStringLiteral("qrc:/main.qml")));
+
+    // Register with the session's distributor (idempotent; keeps the endpoint fresh).
+    push.start();
 
     // Connect at startup when prior settings exist (resuming the last chat).
     manager.autoConnect();

@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=id.gauvin.Grouse
+Exec=grouse-desktop --unifiedpush-background

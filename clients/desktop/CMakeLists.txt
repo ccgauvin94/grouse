@@ -37,6 +37,8 @@ qt_add_executable(grouse-desktop
     src/markdown.cpp
     src/notifier.h
     src/notifier.cpp
+    src/pushclient.h
+    src/pushclient.cpp
 )
 
 target_include_directories(grouse-desktop PRIVATE src)
@@ -80,6 +82,12 @@ install(FILES
 install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/data/hicolor/scalable/apps/id.gauvin.Grouse.svg
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps
+)
+# Lets the session bus wake us for a push while the window is closed (flatpak exports
+# this from the app image to the host). See docs/NOTIFICATIONS.md.
+install(FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/data/id.gauvin.Grouse.service
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/dbus-1/services
 )
 
 if(BUILD_TESTING)

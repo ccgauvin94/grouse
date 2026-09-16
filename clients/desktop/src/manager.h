@@ -206,6 +206,10 @@ public:
                                  const QString &description, const QString &content);
     // --- server config (providers) --------------------------------------------
     Q_INVOKABLE void setServerConfig(const QString &key, const QString &value);
+    /** Write this client's UnifiedPush endpoint where an operator's own sender can find
+     *  it. Deliberately outside the client contract: nothing in Grouse assumes a server
+     *  sender exists, and a stock goose server never pushes (docs/NOTIFICATIONS.md). */
+    Q_INVOKABLE void publishPushEndpoint(const QString &url);
     Q_INVOKABLE void readServerConfig(const QString &key);
     Q_INVOKABLE void refreshSupportedModels(const QString &providerId);
     Q_INVOKABLE QString permissionToolCallId() const { return m_permToolCallId; }

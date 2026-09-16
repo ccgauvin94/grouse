@@ -24,6 +24,7 @@ Controls.Dialog {
         cwdField.text = Mgr.workingDir
         autoBox.checked = Mgr.autoConnectEnabled
         notifyBox.checked = Mgr.notificationsEnabled
+        pushBox.checked = Push.enabled
         dialog.testMessage = ""
     }
     onOpened: reload()
@@ -134,6 +135,31 @@ Controls.Dialog {
                 id: notifyBox
                 text: qsTr("Notify when the window isn't focused")
                 Kirigami.FormData.label: qsTr("Notifications:")
+            }
+            // UnifiedPush is receive-only here: the app registers with the desktop's
+            // distributor and shows whatever your own senders POST to that endpoint.
+            // A stock goose server never pushes — nothing depends on this.
+            Controls.CheckBox {
+                id: pushBox
+                text: qsTr("Register with the desktop's UnifiedPush distributor")
+                Kirigami.FormData.label: qsTr("Push:")
+                onToggled: Push.enabled = checked
+            }
+            Controls.TextField {
+                readOnly: true
+                visible: Push.endpoint.length > 0
+                text: Push.endpoint
+                Kirigami.FormData.label: qsTr("Push endpoint:")
+                Controls.ToolTip.visible: hovered
+                Controls.ToolTip.text: qsTr("What your own sender POSTs to (receive-only)")
+            }
+            Controls.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                visible: Push.status.length > 0
+                text: qsTr("UnifiedPush: %1 — Grouse ships no sender; your goose-side scripts are the sender.").arg(Push.status)
+                color: Kirigami.Theme.disabledTextColor
+                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
             }
 
             Kirigami.Separator {
