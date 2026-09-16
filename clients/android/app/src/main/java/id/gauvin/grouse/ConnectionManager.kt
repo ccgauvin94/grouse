@@ -117,7 +117,9 @@ class ConnectionManager private constructor(context: Context) {
         pendingSends.removeAll { it.sessionId == sessionId }
         refreshQueuedCount()
     }
-    // True between sendPrompt and RunEnded. `busy` is UI state and is also set while merely
+    // True between sendPrompt and RunEnded — or, reconciled, while the server reports a
+    // live run id for the on-screen session (an adopted turn: started here before a
+    // reconnect, or by another client). `busy` is UI state and is also set while merely
     // queued, so it cannot answer "is the wire busy" -- this can.
     private var turnInFlight = false
     // Which session owns the in-flight turn. A run belongs to ONE session/connection;
@@ -1946,6 +1948,19 @@ class ConnectionManager private constructor(context: Context) {
         } else if (sessionId == currentSession.value) {
             activeRunId = runId
             activeRunIdState.value = runId
+            // Reconcile: a live run id on the session ON SCREEN is a running turn,
+            // whoever started it. After a background drop the re-dial cleared the
+            // send-side flags (open() must clear them, or a missed RunEnded wedges
+            // every later chat), and this update is the only signal that the server
+            // is still working — the indicator, Stop and steer-vs-queue all gate on
+            // busy. Adopt ownership only when nothing is in flight, so a turn this
+            // app is driving elsewhere keeps its queue routing; a run id here while
+            // another turn is owned is recorded (as before) for the next dispatch.
+            if (!turnInFlight) {
+                turnInFlight = true
+                turnInFlightSession = sessionId
+                busy.value = true
+            }
         }
     }
 
