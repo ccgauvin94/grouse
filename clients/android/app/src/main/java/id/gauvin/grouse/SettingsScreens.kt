@@ -283,6 +283,19 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                 }
             }
 
+            // Picker noise control. The inventory (and the configured flag) comes from the
+            // server's providers/list; the pickers already filter on it, this is the switch
+            // that lets you see the whole catalog when hunting for something unconfigured.
+            SettingsSection("Providers") {
+                var configuredOnly by remember { mutableStateOf(!cm.showAllProviders.value) }
+                SettingsSwitchRow("Show configured providers only", configuredOnly) { on ->
+                    configuredOnly = on
+                    cm.setShowAllProviders(!on)
+                }
+                SettingCaption("Hides the rest of goose's catalog from the provider pickers. " +
+                    "The current pick is always shown, configured or not.")
+            }
+
             SettingsSection("Notifications") {
                 var pushOn by remember { mutableStateOf(cm.store.pushEnabled) }
                 SettingsSwitchRow("Push Notifications", pushOn) { on ->

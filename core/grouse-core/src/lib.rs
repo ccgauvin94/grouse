@@ -814,6 +814,7 @@ impl Core {
             label,
             self.inner.listener.clone(),
             is_active,
+            self.config_hook(),
             self.inner.cache.clone(),
         );
         peers.push(peer);

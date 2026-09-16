@@ -24,6 +24,7 @@ Controls.Dialog {
         cwdField.text = Mgr.workingDir
         autoBox.checked = Mgr.autoConnectEnabled
         notifyBox.checked = Mgr.notificationsEnabled
+        configuredOnlyBox.checked = Mgr.configuredProvidersOnly
         pushBox.checked = Push.enabled
         dialog.testMessage = ""
     }
@@ -37,6 +38,7 @@ Controls.Dialog {
         Mgr.workingDir = cwdField.text
         Mgr.autoConnectEnabled = autoBox.checked
         Mgr.notificationsEnabled = notifyBox.checked
+        Mgr.configuredProvidersOnly = configuredOnlyBox.checked
     }
     onClosed: commit()
 
@@ -135,6 +137,13 @@ Controls.Dialog {
                 id: notifyBox
                 text: qsTr("Notify when the window isn't focused")
                 Kirigami.FormData.label: qsTr("Notifications:")
+            }
+            // Picker noise control: goose's inventory marks which providers are actually
+            // configured; this hides the rest. The current pick is always kept.
+            Controls.CheckBox {
+                id: configuredOnlyBox
+                text: qsTr("Show configured providers only")
+                Kirigami.FormData.label: qsTr("Providers:")
             }
             // UnifiedPush is receive-only here: the app registers with the desktop's
             // distributor and shows whatever your own senders POST to that endpoint.

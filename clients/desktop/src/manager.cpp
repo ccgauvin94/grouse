@@ -74,6 +74,7 @@ QString Manager::secretKey() const { return m_store.value("secret", "").toString
 bool Manager::useTls() const { return m_store.value("wss", true).toBool(); }
 bool Manager::autoConnectEnabled() const { return m_store.value("auto_connect", true).toBool(); }
 bool Manager::notificationsEnabled() const { return m_store.value("notify_events", true).toBool(); }
+bool Manager::configuredProvidersOnly() const { return m_store.value("configured_providers_only", true).toBool(); }
 QString Manager::workingDir() const { return m_store.value("cwd", "").toString(); }
 
 void Manager::setHost(const QString &v) { m_store.setValue("host", v); emit settingsChanged(); }
@@ -82,6 +83,12 @@ void Manager::setSecretKey(const QString &v) { m_store.setValue("secret", v.trim
 void Manager::setUseTls(bool v) { m_store.setValue("wss", v); emit settingsChanged(); }
 void Manager::setAutoConnectEnabled(bool v) { m_store.setValue("auto_connect", v); emit settingsChanged(); }
 void Manager::setNotificationsEnabled(bool v) { m_store.setValue("notify_events", v); emit settingsChanged(); }
+void Manager::setConfiguredProvidersOnly(bool v)
+{
+    m_store.setValue("configured_providers_only", v);
+    emit settingsChanged();
+    emit providersChanged();   // the pickers filter on this
+}
 void Manager::setWorkingDir(const QString &v)
 {
     m_store.setValue("cwd", v.trimmed().remove(QRegularExpression(QStringLiteral("/+$"))));
@@ -1325,6 +1332,7 @@ void Manager::coreOnStatus(const QString &json)
         refreshSessions();
         refreshProjects();
         refreshRecipes();
+        refreshProviders();
         if (!m_pendingProjectFiling.isEmpty()) {
             const QString proj = m_pendingProjectFiling;
             m_pendingProjectFiling.clear();
@@ -1746,10 +1754,29 @@ void Manager::coreOnSupportedModels(const QString &provider, const QString &json
     onSupportedModels(provider, models);
 }
 
-void Manager::coreOnProviders(const QString &)
+void Manager::coreOnProviders(const QString &json)
 {
-    // Provider inventory is server-authoritative; currently not surfaced in the
-    // desktop UI beyond the model list handled above.
+    // goose's inventory of providers, each with a `configured` flag: the authority on
+    // which are usable (the app used to carry a hardcoded list that drifted).
+    QStringList configured;
+    for (const auto &el : parseArr(json)) {
+        const QJsonObject o = el.toObject();
+        const QString id = o.value("providerId").toString();
+        if (!id.isEmpty() && o.value("configured").toBool())
+            configured << id;
+    }
+    // An empty parse must not empty the pickers: a server that doesn't answer this
+    // leaves the previous list (and configured-providers-only degrades to "show all").
+    if (configured.isEmpty() && !m_configuredProviders.isEmpty())
+        return;
+    m_configuredProviders = configured;
+    emit providersChanged();
+}
+
+void Manager::refreshProviders()
+{
+    if (m_bridge && m_bridge->isAvailable())
+        m_bridge->api().grouse_unstable_providers_list(m_bridge->handle());
 }
 
 void Manager::coreOnSessionProbe(const QString &sid, const QString &u, qint64 n)

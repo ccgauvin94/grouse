@@ -22,9 +22,24 @@ Kirigami.Page {
             if (list[i].value === value) return i
         return -1
     }
+    // Configured-only filtering (goose's own `configured` flag): hide the rest of the
+    // catalog, but never the current pick — a combo that drops its own value looks like
+    // it switched provider by itself. An unknown inventory (empty) shows everything.
+    function keepConfigured(choices, current) {
+        if (!Mgr.configuredProvidersOnly || Mgr.configuredProviders.length === 0)
+            return choices
+        const keep = []
+        for (let i = 0; i < choices.length; ++i) {
+            const c = choices[i]
+            if (c.value === current || Mgr.configuredProviders.indexOf(c.value) >= 0)
+                keep.push(c)
+        }
+        return keep.length > 0 ? keep : choices
+    }
+
     function rebuildSelectors() {
         const p = page.findOption("provider")
-        providerChoices = p ? p.choices : []
+        providerChoices = page.keepConfigured(p ? p.choices : [], p ? p.currentValue : "")
         providerIndex = page.indexOf(providerChoices, p ? p.currentValue : "")
         const m = page.findOption("model")
         modelChoices = m ? m.choices : []
@@ -175,6 +190,7 @@ Kirigami.Page {
     Connections {
         target: Mgr
         function onConfigChanged() { page.rebuildSelectors() }
+        function onProvidersChanged() { page.rebuildSelectors() }
         function onCurrentSessionChanged() { page.handleSessionSwitch(); page.updateSlashPopup() }
         function onMessagesChanged() {
             page.keepScrolled()

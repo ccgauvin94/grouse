@@ -34,6 +34,11 @@ class Manager : public QObject
     /** Desktop notifications for events the client already knows from its own
      *  connection (turn finished, approval needed, a session touched elsewhere). */
     Q_PROPERTY(bool notificationsEnabled READ notificationsEnabled WRITE setNotificationsEnabled NOTIFY settingsChanged)
+    /** Filter the provider pickers to the ones the server reports as configured. The
+     *  inventory is goose's own (`providers/list`, `configured` flag); the current pick is
+     *  always kept so the combo can't appear to switch provider on its own. */
+    Q_PROPERTY(bool configuredProvidersOnly READ configuredProvidersOnly WRITE setConfiguredProvidersOnly NOTIFY settingsChanged)
+    Q_PROPERTY(QStringList configuredProviders READ configuredProviders NOTIFY providersChanged)
     Q_PROPERTY(QString workingDir READ workingDir WRITE setWorkingDir NOTIFY settingsChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(bool online READ online NOTIFY onlineChanged)
@@ -75,6 +80,8 @@ public:
     bool useTls() const;
     bool autoConnectEnabled() const;
     bool notificationsEnabled() const;
+    bool configuredProvidersOnly() const;
+    QStringList configuredProviders() const { return m_configuredProviders; }
     QString workingDir() const;
     void setHost(const QString &v);
     void setPort(const QString &v);
@@ -82,6 +89,7 @@ public:
     void setUseTls(bool v);
     void setAutoConnectEnabled(bool v);
     void setNotificationsEnabled(bool v);
+    void setConfiguredProvidersOnly(bool v);
     void setWorkingDir(const QString &v);
     /** The ACP endpoint URL the configured host/port/key map to ("wss://host:port/acp"). */
     QString wsUrl() const;
@@ -173,6 +181,8 @@ public:
     Q_INVOKABLE void deleteSession(const QString &sessionId);
     // --- projects -------------------------------------------------------------
     Q_INVOKABLE void refreshProjects();
+    /** Ask the server for its provider inventory (which are configured, and their models). */
+    Q_INVOKABLE void refreshProviders();
     Q_INVOKABLE void createProject(const QString &name);
     Q_INVOKABLE void deleteProject(const QString &nameOrPath);
     Q_INVOKABLE void moveSessionToProject(const QString &sessionId, const QString &projectId);
@@ -294,6 +304,8 @@ signals:
     void landingChanged();
     void queuedChanged();
     void activeRunIdChanged();
+    /** The provider inventory arrived (or changed): pickers filter on it. */
+    void providersChanged();
     void compactingChanged();
     void contextChanged();
     void commandsChanged();
@@ -313,6 +325,7 @@ private:
      *  notification, and show it. The desktop announces any turn — it is the only client
      *  here — and contributes the session title, which a push to a sleeping phone cannot. */
     void notifyTurnFinished();
+    QStringList m_configuredProviders;
     QString m_announcedTurnSession;
     qint64 m_announcedTurnAtMs = 0;
     void onSessionTouched(const QString &sid, const QString &title, const QString &updatedAt);

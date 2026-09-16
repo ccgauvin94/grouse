@@ -66,7 +66,8 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::spine::RpcConn;
 use crate::{
-    ConnectionStatus, CoreListener, Message, PermissionOutcome, SessionSummary, StreamEvent,
+    ConfigOption, ConnectionStatus, CoreListener, Message, PermissionOutcome, SessionSummary,
+    StreamEvent,
     ToolCallKind, TranscriptEvent,
 };
 use crate::cache::CacheStore;
@@ -295,6 +296,9 @@ enum Outcome {
 /// browse mode — after `initialize` only `session/list` runs; sessions open
 /// explicitly via [`RoamPeer::open_session`].
 pub struct RoamPeer {
+    /// Where a peer's session config goes: the CORE's merge, not the UI listener. See
+    /// [`RoamPeer::emit_config`].
+    config_sink: Arc<dyn Fn(Vec<ConfigOption>) + Send + Sync>,
     /// Stable peer name; the routing key and the `roam:<label>:` id prefix.
     label: String,
     inner: Mutex<PeerInner>,
@@ -429,6 +433,7 @@ impl RoamPeer {
         label: String,
         listener: Arc<dyn CoreListener>,
         is_active: Arc<dyn Fn() -> bool + Send + Sync>,
+        config_sink: Arc<dyn Fn(Vec<ConfigOption>) + Send + Sync>,
         cache: Arc<CacheStore>,
     ) -> Arc<Self> {
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel();
@@ -439,6 +444,7 @@ impl RoamPeer {
             cmd_rx: Arc::new(tokio::sync::Mutex::new(cmd_rx)),
             listener,
             is_active,
+            config_sink,
             cache,
         });
         let task = peer.clone();
@@ -1188,7 +1194,25 @@ impl RoamPeer {
     /// `configOptions` yields an empty vec — the app tolerates that.
     fn emit_config(&self, reply: &Value) {
         let options = crate::spine::parse_config_options(reply);
-        self.listener.on_config(options);
+        // Through the CORE's config sink, never straight to the UI: the core merges —
+        // preserving each option's choices when an update omits them, which is exactly
+        // what `session/set_config_option` replies and peer `config_option_update`s do —
+        // and emits one merged snapshot. Emitting directly replaced the UI's whole list,
+        // so a partial update wiped the provider and thinking-effort choices (the
+        // reported "providers disappear / effort unavailable" in Roam).
+        //
+        // Only while this peer owns the active session: an inactive peer's config must
+        // not repaint a local chat's pickers. A peer that becomes active later re-emits
+        // its own config on `session/load`.
+        self.publish_config(options);
+    }
+
+    /// Hand a peer's option update to the core's merge, when this peer is the active
+    /// connection.
+    fn publish_config(&self, options: Vec<ConfigOption>) {
+        if !options.is_empty() && (self.is_active)() {
+            (self.config_sink)(options);
+        }
     }
 
     /// `session/list` arrived: store it, flip to Ready, emit. Browse mode — no
@@ -1524,7 +1548,9 @@ impl RoamPeer {
                         choices: Vec::new(),
                     })
                     .collect::<Vec<_>>();
-                self.listener.on_config(options);
+                // Choices are deliberately empty here (the typed update schema carries
+                // none); the core's merge keeps the ones the load reply supplied.
+                self.publish_config(options);
             }
             _ => {} // other updates are not peer-scoped chat events
         }
@@ -2167,7 +2193,7 @@ mod tests {
 
     fn offline_peer(
         label: &str,
-        listener: Arc<dyn CoreListener>,
+        listener: Arc<RecordingListener>,
         is_active: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> (Arc<RoamPeer>, tokio_mpsc::UnboundedReceiver<PeerCommand>) {
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel();
@@ -2175,13 +2201,20 @@ mod tests {
         // the state machine directly and assert on `cmd_rx` returned below,
         // never through a live command loop.
         let (_slot_tx, slot_rx) = tokio_mpsc::unbounded_channel();
+        // A peer's config goes to the core's merge in production; here the recorder stands
+        // in for that merge, so config assertions ("config N") keep their meaning.
+        let recorder = listener.clone();
+        let as_dyn: Arc<dyn CoreListener> = listener;
         let peer = Arc::new(RoamPeer {
             label: label.to_string(),
             inner: Mutex::new(PeerInner::new()),
             cmd_tx,
             cmd_rx: Arc::new(tokio::sync::Mutex::new(slot_rx)),
-            listener,
+            listener: as_dyn,
             is_active,
+            config_sink: Arc::new(move |options: Vec<ConfigOption>| {
+                recorder.events.lock().push(format!("config {}", options.len()));
+            }),
             // A dir per PEER, not per label: `open` reads the transcript cache
             // now, so peers sharing a dir would read each other's rows — tests
             // that happen to use the same session id would leak into each
