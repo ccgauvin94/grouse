@@ -283,13 +283,6 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                 }
             }
 
-            SettingsSection("Assistant") {
-                SettingsSwitchRow("Enable Assistant", cm.assistantEnabled.value) {
-                    cm.setAssistantEnabled(it)
-                }
-                SettingCaption("Enable optional assistant thread and functionality. Note: This is an experimental feature.")
-            }
-
             SettingsSection("Notifications") {
                 var pushOn by remember { mutableStateOf(cm.store.pushEnabled) }
                 SettingsSwitchRow("Push Notifications", pushOn) { on ->
@@ -318,14 +311,6 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                     SettingCaption("Waiting for the distributor to issue an endpoint…")
                 }
             }
-            SettingsSection("Roam") {
-                var roamOn by remember { mutableStateOf(cm.store.roamEnabled) }
-                SettingsSwitchRow("Enable Roam", roamOn) { on ->
-                    roamOn = on; cm.store.roamEnabled = on
-                }
-                SettingCaption("Off by default. When on, shows the Roam tab and enables pairing with a goose serve --roam host.")
-            }
-
             SettingsSection("Appearance") {
                 SettingsSwitchRow("Dynamic Color", cm.dynamicColor.value) { cm.setDynamicColor(it) }
                 SettingCaption("Off uses the built-in goose-green palette.")
@@ -344,6 +329,22 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                     "saved key) needs your fingerprint/face or device PIN; takes effect next launch." +
                     if (!bioAvailable) " (No authenticator is enrolled on this device yet, so it " +
                         "won't engage until you add one.)" else "")
+            }
+
+            // Features still finding their shape, grouped so "this may move" is stated once
+            // instead of as a caption on each. Both are off unless turned on, and each one
+            // changes what the app surfaces (a persistent Assistant thread; a Roam tab for
+            // pairing with `goose serve --roam`).
+            SettingsSection("Experimental") {
+                SettingsSwitchRow("Enable Assistant", cm.assistantEnabled.value) {
+                    cm.setAssistantEnabled(it)
+                }
+                SettingCaption("Optional assistant thread and functionality.")
+                var roamOn by remember { mutableStateOf(cm.store.roamEnabled) }
+                SettingsSwitchRow("Enable Roam", roamOn) { on ->
+                    roamOn = on; cm.store.roamEnabled = on
+                }
+                SettingCaption("Shows the Roam tab and enables pairing with a goose serve --roam host.")
             }
 
             Spacer(Modifier.height(24.dp))
