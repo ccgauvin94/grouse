@@ -33,6 +33,12 @@ active window. Android uses `Notifier.kt` with two channels (`Connection`,
   what the client knows: `app_visible`, `armed_session`, `session_title`,
   `announce_any_turn`.
 
+Both delivery paths can see the same event — a live connection watches the turn end,
+while the operator's sender pushes for it seconds later — so the policy also takes
+`announced_session` / `announced_secs_ago` (the last turn this client announced
+itself) and suppresses the second sighting inside a bounded window. Senders cannot
+supply the missing identity: goose's `Stop` hook payload carries no run id.
+
 Android calls these through uniffi; the desktop through `grouse_push_parse` /
 `grouse_push_decide` on the C ABI. Neither client parses an envelope or decides
 for itself — that is the point, and it is why the Kotlin parser and its tests were

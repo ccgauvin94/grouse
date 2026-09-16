@@ -234,11 +234,17 @@ behaves identically on the phone and the desktop.
   `NotifyContext` is what the client knows: `app_visible` (Android: foreground;
   desktop: active window), `armed_session` (the session this device last sent to),
   `session_title` (where known — the desktop's sidebar has it, a push to a sleeping
-  phone does not), and `announce_any_turn` (true for a single-client desktop, false
-  for the phone, which suppresses turns it did not arm).
+  phone does not), `announce_any_turn` (true for a single-client desktop, false for
+  the phone, which suppresses turns it did not arm), and `announced_session` /
+  `announced_secs_ago` — the last turn the client announced itself, so the same turn
+  end arriving twice (the live connection sees it; the operator's sender pushes for
+  it) is announced once. Senders cannot disambiguate: goose's `Stop` hook payload
+  carries no run id, so a bounded recency window is the available identity.
 
 Wording (`"Grouse replied"`, `"Grouse briefing"`, the empty-transcript fallback)
 lives here too: the two clients used to say different things for the same event.
+An announcer passes `announced_*` as unset: this is the *first* sighting, and the
+dedupe exists only to silence the other path, never a genuine second turn.
 Clients gate approval requests and "a session changed elsewhere" themselves — those
 are client-local events, not push kinds.
 

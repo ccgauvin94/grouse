@@ -9,6 +9,7 @@
 #include "roamlistmodel.h"
 #include "sessionlistmodel.h"
 
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
@@ -1516,9 +1517,21 @@ void Manager::notifyTurnFinished()
     const QJsonObject d = parseObj(pushDecide(
         QString::fromUtf8(QJsonDocument(envelope).toJson(QJsonDocument::Compact)),
         QString::fromUtf8(QJsonDocument(ctx).toJson(QJsonDocument::Compact))));
-    if (d.value(QStringLiteral("show")).toBool())
+    if (d.value(QStringLiteral("show")).toBool()) {
         Notifier::send(d.value(QStringLiteral("summary")).toString(),
                        d.value(QStringLiteral("body")).toString());
+        // Remember it: the operator's sender pushes for this same turn end, and the
+        // shared policy suppresses that second announcement.
+        m_announcedTurnSession = m_currentSessionId;
+        m_announcedTurnAtMs = QDateTime::currentMSecsSinceEpoch();
+    }
+}
+
+int Manager::announcedTurnSecsAgo() const
+{
+    if (m_announcedTurnSession.isEmpty() || m_announcedTurnAtMs == 0)
+        return -1;
+    return int((QDateTime::currentMSecsSinceEpoch() - m_announcedTurnAtMs) / 1000);
 }
 
 void Manager::coreOnSessionTouched(const QString &sid, const QString &title, const QString &u)

@@ -1888,6 +1888,29 @@ public object FfiConverterUShort: FfiConverter<UShort, Short> {
 /**
  * @suppress
  */
+public object FfiConverterUInt: FfiConverter<UInt, Int> {
+    override fun lift(value: Int): UInt {
+        return value.toUInt()
+    }
+
+    override fun read(buf: ByteBuffer): UInt {
+        return lift(buf.getInt())
+    }
+
+    override fun lower(value: UInt): Int {
+        return value.toInt()
+    }
+
+    override fun allocationSize(value: UInt) = 4UL
+
+    override fun write(value: UInt, buf: ByteBuffer) {
+        buf.putInt(value.toInt())
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterULong: FfiConverter<ULong, Long> {
     override fun lift(value: Long): ULong {
         return value.toULong()
@@ -4195,6 +4218,18 @@ data class NotifyContext (
     var `sessionTitle`: kotlin.String?
     , 
     /**
+     * The session and age of the last notification THIS client showed for a finished
+     * turn. The two delivery paths overlap by design (a live connection sees the turn
+     * end; the operator's sender pushes for the same turn), so the same event would be
+     * announced twice. Senders cannot disambiguate — goose's hook payload carries no run
+     * id — so recency is the available identity: the same session inside the window is
+     * the same turn.
+     */
+    var `announcedSession`: kotlin.String?
+    , 
+    var `announcedSecsAgo`: kotlin.UInt?
+    , 
+    /**
      * True when a finished turn the client did NOT start is still worth announcing —
      * a single-client desktop, where any turn is effectively yours. False on the
      * phone: a push can arrive for work another client (or a scheduled run) started,
@@ -4220,6 +4255,8 @@ public object FfiConverterTypeNotifyContext: FfiConverterRustBuffer<NotifyContex
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalUInt.read(buf),
             FfiConverterBoolean.read(buf),
         )
     }
@@ -4228,6 +4265,8 @@ public object FfiConverterTypeNotifyContext: FfiConverterRustBuffer<NotifyContex
             FfiConverterBoolean.allocationSize(value.`appVisible`) +
             FfiConverterOptionalString.allocationSize(value.`armedSession`) +
             FfiConverterOptionalString.allocationSize(value.`sessionTitle`) +
+            FfiConverterOptionalString.allocationSize(value.`announcedSession`) +
+            FfiConverterOptionalUInt.allocationSize(value.`announcedSecsAgo`) +
             FfiConverterBoolean.allocationSize(value.`announceAnyTurn`)
     )
 
@@ -4235,6 +4274,8 @@ public object FfiConverterTypeNotifyContext: FfiConverterRustBuffer<NotifyContex
             FfiConverterBoolean.write(value.`appVisible`, buf)
             FfiConverterOptionalString.write(value.`armedSession`, buf)
             FfiConverterOptionalString.write(value.`sessionTitle`, buf)
+            FfiConverterOptionalString.write(value.`announcedSession`, buf)
+            FfiConverterOptionalUInt.write(value.`announcedSecsAgo`, buf)
             FfiConverterBoolean.write(value.`announceAnyTurn`, buf)
     }
 }
@@ -6208,6 +6249,38 @@ internal object uniffiCallbackInterfaceGrouseUnstableListener {
  * @suppress
  */
 public object FfiConverterTypeGrouseUnstableListener: FfiConverterCallbackInterface<GrouseUnstableListener>()
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalUInt: FfiConverterRustBuffer<kotlin.UInt?> {
+    override fun read(buf: ByteBuffer): kotlin.UInt? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUInt.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UInt?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUInt.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.UInt?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUInt.write(value, buf)
+        }
+    }
+}
 
 
 

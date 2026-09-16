@@ -110,6 +110,8 @@ pub extern "C" fn grouse_push_decide(envelope_json: *const c_char,
             app_visible: true, // no context -> nothing to show (the safe side)
             armed_session: None,
             session_title: None,
+            announced_session: None,
+            announced_secs_ago: None,
             announce_any_turn: false,
         });
     c_json(&crate::notify::decide_notify(envelope, context))

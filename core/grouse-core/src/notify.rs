@@ -44,6 +44,14 @@ pub struct NotifyContext {
     /// push delivered to a sleeping phone carries ids only). Used as the notification's
     /// summary so "Daily Digest" beats "Grouse replied" wherever it is available.
     pub session_title: Option<String>,
+        /// The session and age of the last notification THIS client showed for a finished
+    /// turn. The two delivery paths overlap by design (a live connection sees the turn
+    /// end; the operator's sender pushes for the same turn), so the same event would be
+    /// announced twice. Senders cannot disambiguate — goose's hook payload carries no run
+    /// id — so recency is the available identity: the same session inside the window is
+    /// the same turn.
+    pub announced_session: Option<String>,
+    pub announced_secs_ago: Option<u32>,
     /// True when a finished turn the client did NOT start is still worth announcing —
     /// a single-client desktop, where any turn is effectively yours. False on the
     /// phone: a push can arrive for work another client (or a scheduled run) started,
@@ -95,6 +103,19 @@ pub fn parse_push(raw: &str) -> PushEnvelope {
     }
 }
 
+/// How long after announcing a turn a push for the same session is still considered the
+/// same event. The hook fires at turn end and the connection sees the same end within
+/// seconds, so this only has to absorb that skew — not a whole conversation.
+const SAME_TURN_WINDOW_SECS: u32 = 120;
+
+fn already_announced(envelope: &PushEnvelope, ctx: &NotifyContext) -> bool {
+    let Some(session) = envelope.session_id.as_deref() else { return false };
+    ctx.announced_session.as_deref() == Some(session)
+        && ctx
+            .announced_secs_ago
+            .is_some_and(|secs| secs <= SAME_TURN_WINDOW_SECS)
+}
+
 fn briefing(text: &str) -> PushEnvelope {
     PushEnvelope { kind: PushKind::Briefing, session_id: None, text: text.to_string() }
 }
@@ -114,6 +135,10 @@ pub fn decide_notify(envelope: PushEnvelope, ctx: NotifyContext) -> NotifyDecisi
     }
     match envelope.kind {
         PushKind::Turn => {
+            // Both paths can see the same turn end; the first one to announce wins.
+            if already_announced(&envelope, &ctx) {
+                return NotifyDecision::hidden();
+            }
             // Attribution: a turn can only be announced when this client can call it
             // its own. A client that does not announce unattributed turns (the phone)
             // needs an armed session that matches; one that does (the desktop) still
@@ -152,6 +177,8 @@ mod tests {
             app_visible: visible,
             armed_session: armed.map(str::to_owned),
             session_title: None,
+            announced_session: None,
+            announced_secs_ago: None,
             announce_any_turn: true,
         }
     }
@@ -161,6 +188,8 @@ mod tests {
             app_visible: visible,
             armed_session: armed.map(str::to_owned),
             session_title: None,
+            announced_session: None,
+            announced_secs_ago: None,
             announce_any_turn: false,
         }
     }
@@ -245,6 +274,35 @@ mod tests {
         let d = decide_notify(brief, ctx(false, None));
         assert_eq!(d.summary, "Grouse briefing");
         assert_eq!(d.body, "a briefing");
+    }
+
+    #[test]
+    fn the_second_path_to_the_same_turn_stays_quiet() {
+        // The connection announced this turn five seconds ago; the operator's sender
+        // pushes for the very same turn end. One notification, not two.
+        let turn = parse_push(r#"{"type":"turn","session":"s","text":"done"}"#);
+        let mut c = ctx(false, None);
+        c.announced_session = Some("s".to_string());
+        c.announced_secs_ago = Some(5);
+        assert!(!decide_notify(turn.clone(), c).show);
+
+        // A different session, or a stale window, is a new event.
+        let mut other = ctx(false, None);
+        other.announced_session = Some("elsewhere".to_string());
+        other.announced_secs_ago = Some(5);
+        assert!(decide_notify(turn.clone(), other).show);
+
+        let mut stale = ctx(false, None);
+        stale.announced_session = Some("s".to_string());
+        stale.announced_secs_ago = Some(SAME_TURN_WINDOW_SECS + 1);
+        assert!(decide_notify(turn.clone(), stale).show);
+
+        // Briefings are never deduped against a turn: they are a different message.
+        let brief = parse_push(r#"{"type":"notify","text":"brief"}"#);
+        let mut c = ctx(false, None);
+        c.announced_session = Some("s".to_string());
+        c.announced_secs_ago = Some(1);
+        assert!(decide_notify(brief, c).show);
     }
 
     #[test]

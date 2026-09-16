@@ -56,6 +56,7 @@ class GoosePushService : PushService() {
         // can arrive for work another client or a scheduled run started, and only a
         // session this device armed is announced.
         val envelope = parsePush(raw)
+        val (announcedSession, announcedSecsAgo) = cm.announcedTurn
         val decision = decideNotify(
             envelope,
             NotifyContext(
@@ -64,6 +65,9 @@ class GoosePushService : PushService() {
                 sessionTitle = cm.currentSession.value?.let {
                     cm.sessions.value.firstOrNull { s -> s.sessionId == it }?.title
                 },
+                // The live path may have announced this very turn seconds ago.
+                announcedSession = announcedSession,
+                announcedSecsAgo = announcedSecsAgo?.toUInt(),
                 announceAnyTurn = false,
             ),
         )

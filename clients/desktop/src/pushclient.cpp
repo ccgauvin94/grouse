@@ -230,10 +230,19 @@ void PushClient::handlePush(const QString &raw)
     if (envelope.isEmpty())
         return;
     qInfo("Grouse push: received %s", qUtf8Printable(raw.left(200)));
-    const QJsonObject ctx{{QStringLiteral("app_visible"), Notifier::appVisible()},
-                          {QStringLiteral("armed_session"), QJsonValue::Null},
-                          {QStringLiteral("session_title"), QJsonValue::Null},
-                          {QStringLiteral("announce_any_turn"), true}};
+    // The live path may have announced this very turn seconds ago; the core decides
+    // whether this second sighting is a new event.
+    const QString announced = m_manager->announcedTurnSession();
+    const int announcedAgo = m_manager->announcedTurnSecsAgo();
+    const QJsonObject ctx{
+        {QStringLiteral("app_visible"), Notifier::appVisible()},
+        {QStringLiteral("armed_session"), QJsonValue::Null},
+        {QStringLiteral("session_title"), QJsonValue::Null},
+        {QStringLiteral("announced_session"),
+         announced.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(announced)},
+        {QStringLiteral("announced_secs_ago"),
+         announcedAgo < 0 ? QJsonValue(QJsonValue::Null) : QJsonValue(announcedAgo)},
+        {QStringLiteral("announce_any_turn"), true}};
     const QJsonObject d = QJsonDocument::fromJson(
         m_manager->pushDecide(envelope,
             QString::fromUtf8(QJsonDocument(ctx).toJson(QJsonDocument::Compact))).toUtf8()).object();

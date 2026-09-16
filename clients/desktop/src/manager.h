@@ -214,6 +214,11 @@ public:
      *  and decide whether it warrants a notification given what this client knows. JSON
      *  in, JSON out — literally the same functions the Android client calls over uniffi,
      *  so the two can't disagree about what a payload means or when to interrupt. */
+    /** The last turn this client announced, so the same event arriving as a push moments
+     *  later is not announced twice (core notify.rs dedupes on it). Empty when nothing was
+     *  announced — a process that just started has announced nothing. */
+    QString announcedTurnSession() const { return m_announcedTurnSession; }
+    int announcedTurnSecsAgo() const;
     Q_INVOKABLE QString pushParse(const QString &raw) const;
     Q_INVOKABLE QString pushDecide(const QString &envelopeJson,
                                    const QString &contextJson) const;
@@ -308,6 +313,8 @@ private:
      *  notification, and show it. The desktop announces any turn — it is the only client
      *  here — and contributes the session title, which a push to a sleeping phone cannot. */
     void notifyTurnFinished();
+    QString m_announcedTurnSession;
+    qint64 m_announcedTurnAtMs = 0;
     void onSessionTouched(const QString &sid, const QString &title, const QString &updatedAt);
     void appendChunk(const QString &role, const QString &text, const QString &messageId, bool thought);
     void finalizeCurrentMessage();

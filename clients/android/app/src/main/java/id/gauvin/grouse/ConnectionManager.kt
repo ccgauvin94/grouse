@@ -67,6 +67,13 @@ class ConnectionManager private constructor(context: Context) {
     private val appContext = context.applicationContext
     private val notifier = Notifier(context)
     private var appForeground = true
+
+    // The last finished turn this app announced. Both delivery paths can see the same turn
+    // end — the live connection here, and the operator's sender pushing for it moments
+    // later — and the shared policy (core notify.rs) suppresses the second one. In memory
+    // only: a process that just started has announced nothing.
+    @Volatile private var announcedTurnSession: String? = null
+    @Volatile private var announcedTurnAtMs: Long = 0L
     private var serviceRunning = false
     // Sends that must wait for (re)connect or for the running turn to end — a queue, not one
     // slot, so a second reply while still connecting can't clobber the first. The user bubble is
@@ -1395,6 +1402,20 @@ class ConnectionManager private constructor(context: Context) {
     private fun lastAssistantText(): String =
         messages.lastOrNull { it.role == "assistant" }?.text ?: "Turn finished."
 
+    /** Record the turn this app just announced (see notifiedTurn below). */
+    fun noteAnnouncedTurn(sessionId: String?) {
+        announcedTurnSession = sessionId
+        announcedTurnAtMs = android.os.SystemClock.elapsedRealtime()
+    }
+
+    /** (session, seconds ago) of the last turn this app announced, or (null, null). */
+    val announcedTurn: Pair<String?, Int?>
+        get() {
+            val session = announcedTurnSession ?: return null to null
+            val secs = ((android.os.SystemClock.elapsedRealtime() - announcedTurnAtMs) / 1000).toInt()
+            return session to secs
+        }
+
     /** Stop the running turn. The core sends the ACP cancel; the server ends the turn and the
      *  queue drains on RunEnded. Stop means stop -- for THIS chat's queued prompts, which are
      *  dropped rather than deferred. A parked prompt in another chat is a different turn's
@@ -1752,8 +1773,16 @@ class ConnectionManager private constructor(context: Context) {
                     appVisible = appForeground,
                     armedSession = null,
                     sessionTitle = sessions.value.firstOrNull { it.sessionId == currentSession.value }?.title,
+                    // This path IS the announcer for a turn it watched end; the dedupe
+                    // fields exist to silence the *other* path (the operator's push for
+                    // the same turn), never a genuine second turn of our own.
+                    announcedSession = null,
+                    announcedSecsAgo = null,
                     announceAnyTurn = true))
-            if (decision.show) notifier.postMessage(decision.summary, decision.body)
+            if (decision.show) {
+                notifier.postMessage(decision.summary, decision.body)
+                noteAnnouncedTurn(currentSession.value)
+            }
         }
         if (queued != null) {
             // Send the queued prompt now that the wire is free. Service stays up (we are
