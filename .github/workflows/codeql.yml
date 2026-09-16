@@ -1,0 +1,79 @@
+# CodeQL (advanced setup).
+#
+# Default setup cannot analyze this repo's Kotlin: the Android client is a Gradle
+# project at clients/android/, and autobuild finds no build command, so the
+# java-kotlin configuration sat in a permanent error state ("CodeQL exited with
+# errors" / "No build command found"). Advanced setup lets us hand CodeQL the
+# build it must trace.
+#
+# The other three languages were already working under default setup and need no
+# build here: c-cpp and rust are extracted build-free (the desktop client's Qt/KF6
+# toolchain is not on a stock runner, and nothing here needs it — the app is
+# analysed, not compiled), and actions has no build step at all.
+#
+# NOTE: this file only takes effect once default setup is DISABLED for the repo
+# (Security → Code security → CodeQL: switch off default setup). While default
+# setup is on, GitHub ignores this workflow.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, off-hours: catches newly published queries without churning per push.
+    - cron: "30 4 * * 1"
+
+# Least privilege for the analysis job: read the code, write results, read the
+# run it is reporting against (CodeQL uploads SARIF to code scanning).
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The client that needed a real build (see the header).
+          - language: java-kotlin
+            build-mode: manual
+          - language: c-cpp
+            build-mode: none
+          - language: rust
+            build-mode: none
+          - language: actions
+            build-mode: none
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Android build is JDK 17 (clients/android/env.sh pins the same).
+      - if: matrix.language == 'java-kotlin'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      # Traced by CodeQL: this is the step default setup could not derive. The
+      # Android SDK is preinstalled on ubuntu-latest (ANDROID_HOME), the Gradle
+      # wrapper is committed, and the native libs are pre-staged in the AAR — so
+      # no cargo/NDK step is needed to compile the app's Kotlin.
+      - if: matrix.language == 'java-kotlin'
+        name: Build Android client
+        working-directory: clients/android
+        run: ./gradlew --no-daemon assembleDebug
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
