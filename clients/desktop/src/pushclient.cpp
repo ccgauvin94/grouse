@@ -89,6 +89,12 @@ QString PushClient::token()
     if (t.isEmpty()) {
         t = QUuid::createUuid().toString(QUuid::WithoutBraces);
         store.setValue(QStringLiteral("push_token"), t);
+        // Flush NOW. QSettings buffers, and a killed/crashed app never runs the
+        // destructor — the token would be lost, the next start would mint another,
+        // and the distributor would keep BOTH registrations (a duplicate in its UI,
+        // an orphaned endpoint in the push server, and no way to tell which one our
+        // token now owns).
+        store.sync();
     }
     return t;
 }
