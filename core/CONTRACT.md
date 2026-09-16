@@ -218,6 +218,32 @@ Custom notifications (gated on `customNotifications`): `status_message` →
 
 ---
 
+## 5.5 Notification policy (`grouse-core::notify`)
+
+Two namespace-level functions (no handle, no state) exported over uniffi and, as
+JSON in/JSON out, over the C ABI (`grouse_push_parse`, `grouse_push_decide`). They
+are **the** implementation of "what does this payload mean, and should it interrupt
+the user" — clients contribute only transport and rendering, so a sender's payload
+behaves identically on the phone and the desktop.
+
+- `parse_push(raw: String) -> PushEnvelope` — `{kind: Turn|Briefing, session_id?,
+  text}`. Never fails: a body that is not a JSON object (or does not parse) is a
+  briefing carrying the raw text, because a sender with a broken envelope should
+  still reach the user.
+- `decide_notify(envelope, ctx) -> NotifyDecision` — `{show, summary, body}`.
+  `NotifyContext` is what the client knows: `app_visible` (Android: foreground;
+  desktop: active window), `armed_session` (the session this device last sent to),
+  `session_title` (where known — the desktop's sidebar has it, a push to a sleeping
+  phone does not), and `announce_any_turn` (true for a single-client desktop, false
+  for the phone, which suppresses turns it did not arm).
+
+Wording (`"Grouse replied"`, `"Grouse briefing"`, the empty-transcript fallback)
+lives here too: the two clients used to say different things for the same event.
+Clients gate approval requests and "a session changed elsewhere" themselves — those
+are client-local events, not push kinds.
+
+---
+
 ## 6. Roam (parallel peers)
 
 The core owns the peer registry (the desktop's `m_roamPeers`). Peers are

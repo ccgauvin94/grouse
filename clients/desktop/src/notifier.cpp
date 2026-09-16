@@ -8,12 +8,17 @@
 
 namespace Notifier {
 
+bool appVisible()
+{
+    return QGuiApplication::applicationState() == Qt::ApplicationActive;
+}
+
 bool shouldNotify()
 {
     // ApplicationInactive covers "another window has focus" and "minimized";
     // ApplicationSuspended (session locked) counts too — the notification is
     // waiting when the user comes back.
-    return QGuiApplication::applicationState() != Qt::ApplicationActive;
+    return !appVisible();
 }
 
 void send(const QString &summary, const QString &body)

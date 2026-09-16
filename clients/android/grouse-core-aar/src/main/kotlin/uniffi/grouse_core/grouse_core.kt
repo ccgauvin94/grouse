@@ -897,6 +897,10 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
+    external fun uniffi_grouse_core_checksum_func_decide_notify(
+    ): Int
+    external fun uniffi_grouse_core_checksum_func_parse_push(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_active_session_id(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_archive_session(
@@ -1249,6 +1253,10 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_init_callback_vtable_grouseunstablelistener(`vtable`: UniffiVTableCallbackInterfaceGrouseUnstableListener,
     ): Unit
+    external fun uniffi_grouse_core_fn_func_decide_notify(`envelope`: RustBuffer.ByValue,`ctx`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_grouse_core_fn_func_parse_push(`raw`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun ffi_grouse_core_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun ffi_grouse_core_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1368,6 +1376,12 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_grouse_core_checksum_func_decide_notify() != 46161) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_func_parse_push() != 24581) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_grouse_core_checksum_method_core_active_session_id() != 8270) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -4158,6 +4172,123 @@ public object FfiConverterTypeMessage: FfiConverterRustBuffer<Message> {
 
 
 /**
+ * What the client knows when a payload arrives.
+ */
+data class NotifyContext (
+    /**
+     * True when the user is looking at this client right now — Android: the app is
+     * in the foreground; desktop: the window is active. Each platform defines
+     * "visible" for itself; the policy only needs the answer.
+     */
+    var `appVisible`: kotlin.Boolean
+    , 
+    /**
+     * The session this client last sent a turn to, when it tracks one.
+     */
+    var `armedSession`: kotlin.String?
+    , 
+    /**
+     * The session's title, when the client knows it (the desktop's sidebar does; a
+     * push delivered to a sleeping phone carries ids only). Used as the notification's
+     * summary so "Daily Digest" beats "Grouse replied" wherever it is available.
+     */
+    var `sessionTitle`: kotlin.String?
+    , 
+    /**
+     * True when a finished turn the client did NOT start is still worth announcing —
+     * a single-client desktop, where any turn is effectively yours. False on the
+     * phone: a push can arrive for work another client (or a scheduled run) started,
+     * and buzzing for it is noise; the phone only announces turns it armed.
+     */
+    var `announceAnyTurn`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNotifyContext: FfiConverterRustBuffer<NotifyContext> {
+    override fun read(buf: ByteBuffer): NotifyContext {
+        return NotifyContext(
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NotifyContext) = (
+            FfiConverterBoolean.allocationSize(value.`appVisible`) +
+            FfiConverterOptionalString.allocationSize(value.`armedSession`) +
+            FfiConverterOptionalString.allocationSize(value.`sessionTitle`) +
+            FfiConverterBoolean.allocationSize(value.`announceAnyTurn`)
+    )
+
+    override fun write(value: NotifyContext, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`appVisible`, buf)
+            FfiConverterOptionalString.write(value.`armedSession`, buf)
+            FfiConverterOptionalString.write(value.`sessionTitle`, buf)
+            FfiConverterBoolean.write(value.`announceAnyTurn`, buf)
+    }
+}
+
+
+
+/**
+ * Whether to show anything, and with what wording. Wording lives here too: the two
+ * clients used to say different things for the same event.
+ */
+data class NotifyDecision (
+    var `show`: kotlin.Boolean
+    , 
+    var `summary`: kotlin.String
+    , 
+    var `body`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNotifyDecision: FfiConverterRustBuffer<NotifyDecision> {
+    override fun read(buf: ByteBuffer): NotifyDecision {
+        return NotifyDecision(
+            FfiConverterBoolean.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NotifyDecision) = (
+            FfiConverterBoolean.allocationSize(value.`show`) +
+            FfiConverterString.allocationSize(value.`summary`) +
+            FfiConverterString.allocationSize(value.`body`)
+    )
+
+    override fun write(value: NotifyDecision, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`show`, buf)
+            FfiConverterString.write(value.`summary`, buf)
+            FfiConverterString.write(value.`body`, buf)
+    }
+}
+
+
+
+/**
  * One permission option (CONTRACT §5 / inventory §3).
  */
 data class PermissionOption (
@@ -4331,6 +4462,54 @@ public object FfiConverterTypePrompt: FfiConverterRustBuffer<Prompt> {
 
     override fun write(value: Prompt, buf: ByteBuffer) {
             FfiConverterSequenceTypePromptBlock.write(value.`blocks`, buf)
+    }
+}
+
+
+
+/**
+ * A decoded push envelope. Senders produce `{type,session,text}` JSON; anything
+ * that is not a JSON object is a briefing whose text is the raw body (the oldest
+ * senders posted bare text).
+ */
+data class PushEnvelope (
+    var `kind`: PushKind
+    , 
+    var `sessionId`: kotlin.String?
+    , 
+    var `text`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePushEnvelope: FfiConverterRustBuffer<PushEnvelope> {
+    override fun read(buf: ByteBuffer): PushEnvelope {
+        return PushEnvelope(
+            FfiConverterTypePushKind.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PushEnvelope) = (
+            FfiConverterTypePushKind.allocationSize(value.`kind`) +
+            FfiConverterOptionalString.allocationSize(value.`sessionId`) +
+            FfiConverterString.allocationSize(value.`text`)
+    )
+
+    override fun write(value: PushEnvelope, buf: ByteBuffer) {
+            FfiConverterTypePushKind.write(value.`kind`, buf)
+            FfiConverterOptionalString.write(value.`sessionId`, buf)
+            FfiConverterString.write(value.`text`, buf)
     }
 }
 
@@ -4910,6 +5089,43 @@ public object FfiConverterTypePromptBlock : FfiConverterRustBuffer<PromptBlock>{
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
+ * What a push is: a finished-turn nudge, or a proactive briefing.
+ */
+
+enum class PushKind {
+    
+    TURN,
+    BRIEFING;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePushKind: FfiConverterRustBuffer<PushKind> {
+    override fun read(buf: ByteBuffer) = try {
+        PushKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: PushKind) = 4UL
+
+    override fun write(value: PushKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 
@@ -6280,4 +6496,36 @@ public object FfiConverterSequenceTypePromptBlock: FfiConverterRustBuffer<List<P
         }
     }
 }
+        /**
+         * The show/don't-show rule, shared by push delivery and by the in-session paths
+         * (a client that watched a turn end constructs a `Turn` envelope from what it has
+         * and asks the same question).
+         */ fun `decideNotify`(`envelope`: PushEnvelope, `ctx`: NotifyContext): NotifyDecision {
+            return FfiConverterTypeNotifyDecision.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_func_decide_notify(
+    
+        
+        FfiConverterTypePushEnvelope.lower(`envelope`),
+        FfiConverterTypeNotifyContext.lower(`ctx`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Decode a push body. Never fails: an unparseable body is a briefing carrying the
+         * raw text, because a sender that got the envelope wrong should still reach the user.
+         */ fun `parsePush`(`raw`: kotlin.String): PushEnvelope {
+            return FfiConverterTypePushEnvelope.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_func_parse_push(
+    
+        
+        FfiConverterString.lower(`raw`),_status)
+}
+    )
+    }
+    
+
 

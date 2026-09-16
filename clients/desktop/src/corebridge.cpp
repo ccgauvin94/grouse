@@ -79,6 +79,8 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_core_create);
     RESOLVE(grouse_core_free);
     RESOLVE(grouse_string_free);
+    RESOLVE(grouse_push_parse);
+    RESOLVE(grouse_push_decide);
     RESOLVE(grouse_connect);
     RESOLVE(grouse_disconnect);
     RESOLVE(grouse_new_session);

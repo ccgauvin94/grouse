@@ -1008,6 +1008,23 @@ void Manager::publishPushEndpoint(const QString &url)
     setServerConfig(QStringLiteral("GROUSE_PUSH_ENDPOINT_DESKTOP"), url);
 }
 
+QString Manager::pushParse(const QString &raw) const
+{
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_push_parse)
+        return QString();
+    const QByteArray r = raw.toUtf8();
+    return m_bridge->takeString(m_bridge->api().grouse_push_parse(r.constData()));
+}
+
+QString Manager::pushDecide(const QString &envelopeJson, const QString &contextJson) const
+{
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_push_decide)
+        return QString();
+    const QByteArray e = envelopeJson.toUtf8();
+    const QByteArray c = contextJson.toUtf8();
+    return m_bridge->takeString(m_bridge->api().grouse_push_decide(e.constData(), c.constData()));
+}
+
 void Manager::setServerConfig(const QString &key, const QString &value)
 {
     if (!m_bridge || !m_bridge->isAvailable())
@@ -1482,6 +1499,28 @@ void Manager::coreOnPermission(const QString &json)
                  req.value("detail").toString(), options);
 }
 
+void Manager::notifyTurnFinished()
+{
+    if (!notificationsEnabled())
+        return;
+    // The shared policy decides: decode nothing (this turn was watched live, not pushed),
+    // but ask the same question — is the user looking? is it ours to announce? — and use
+    // the same wording the phone would.
+    const QJsonObject envelope{{QStringLiteral("kind"), QStringLiteral("Turn")},
+                               {QStringLiteral("session_id"), m_currentSessionId},
+                               {QStringLiteral("text"), lastAssistantText()}};
+    const QJsonObject ctx{{QStringLiteral("app_visible"), Notifier::appVisible()},
+                          {QStringLiteral("armed_session"), QJsonValue::Null},
+                          {QStringLiteral("session_title"), m_currentSessionTitle},
+                          {QStringLiteral("announce_any_turn"), true}};
+    const QJsonObject d = parseObj(pushDecide(
+        QString::fromUtf8(QJsonDocument(envelope).toJson(QJsonDocument::Compact)),
+        QString::fromUtf8(QJsonDocument(ctx).toJson(QJsonDocument::Compact))));
+    if (d.value(QStringLiteral("show")).toBool())
+        Notifier::send(d.value(QStringLiteral("summary")).toString(),
+                       d.value(QStringLiteral("body")).toString());
+}
+
 void Manager::coreOnSessionTouched(const QString &sid, const QString &title, const QString &u)
 {
     Q_UNUSED(u);
@@ -1489,7 +1528,10 @@ void Manager::coreOnSessionTouched(const QString &sid, const QString &title, con
     // only needs to refresh the sidebar so order/title/status reflect the touch.
     // A touch on a session we are NOT looking at is the one case the window can't
     // show: another client, or a scheduled run, did something. Announce it there.
-    if (sid != m_currentSessionId && notificationsEnabled() && Notifier::shouldNotify())
+    // A client-local event, not a push payload, so it bypasses the shared policy: the
+    // phone renders it as a sidebar badge instead (it has a session list to badge; the
+    // desktop has a sidebar and no badge model).
+    if (sid != m_currentSessionId && notificationsEnabled() && !Notifier::appVisible())
         Notifier::send(title.isEmpty() ? QStringLiteral("Session updated") : title,
                        QStringLiteral("Changed by another client or a scheduled run."));
     refreshSessions();
@@ -1757,14 +1799,7 @@ void Manager::coreOnStream(const QString &json)
         emit promptingChanged();
         emit compactingChanged();
         flushQueue();
-        // The turn is over and the window may not be showing it. Unlike the phone's
-        // finished-turn nudge (server-side, and contentless because the hook has no
-        // reply), the desktop already holds the final text — so the notification
-        // carries it instead of "open to see".
-        if (notificationsEnabled() && Notifier::shouldNotify())
-            Notifier::send(m_currentSessionTitle.isEmpty() ? QStringLiteral("Grouse")
-                                                           : m_currentSessionTitle,
-                           lastAssistantText());
+        notifyTurnFinished();
     }
 }
 
@@ -2077,7 +2112,7 @@ void Manager::onPermission(const QString &toolCallId, const QString &title,
     emit permissionRequested();
     // The dialog is waiting behind whatever the user is looking at. The phone has
     // had this notification all along; the desktop silently blocked instead.
-    if (notificationsEnabled() && Notifier::shouldNotify())
+    if (notificationsEnabled() && !Notifier::appVisible())
         Notifier::send(QStringLiteral("Grouse needs approval"),
                        QStringLiteral("Allow “%1”?").arg(title));
 }

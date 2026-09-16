@@ -24,6 +24,10 @@ import uniffi.grouse_core.ConfigOption as CoreConfigOption
 import uniffi.grouse_core.ConnectionStatus
 import uniffi.grouse_core.Core
 import uniffi.grouse_core.CoreListener
+import uniffi.grouse_core.NotifyContext
+import uniffi.grouse_core.PushEnvelope
+import uniffi.grouse_core.PushKind
+import uniffi.grouse_core.decideNotify
 import uniffi.grouse_core.GrouseUnstable
 import uniffi.grouse_core.GrouseUnstableListener
 import uniffi.grouse_core.Message
@@ -1738,7 +1742,19 @@ class ConnectionManager private constructor(context: Context) {
         // idle between a queue and its turn.
         val queued = dequeueFor(owner)
         busy.value = queued != null
-        if (!appForeground) notifier.postReply(lastAssistantText())
+        if (!appForeground) {
+            // The live path: this app's own turn, so it is announced whenever the app is not
+            // in front (announceAnyTurn). The empty-transcript fallback and the wording come
+            // from the core, so the phone and the desktop read identically.
+            val decision = decideNotify(
+                PushEnvelope(PushKind.TURN, currentSession.value, lastAssistantText()),
+                NotifyContext(
+                    appVisible = appForeground,
+                    armedSession = null,
+                    sessionTitle = sessions.value.firstOrNull { it.sessionId == currentSession.value }?.title,
+                    announceAnyTurn = true))
+            if (decision.show) notifier.postMessage(decision.summary, decision.body)
+        }
         if (queued != null) {
             // Send the queued prompt now that the wire is free. Service stays up (we are
             // still busy), so backgrounding between the two turns is safe.

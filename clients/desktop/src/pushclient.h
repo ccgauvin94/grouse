@@ -5,6 +5,7 @@
 #include <QVariantMap>
 
 class QTimer;
+class Manager;
 
 /**
  * UnifiedPush receive path for the desktop client.
@@ -30,7 +31,9 @@ class PushClient : public QObject
     Q_PROPERTY(QString endpoint READ endpoint NOTIFY endpointChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
 public:
-    explicit PushClient(QObject *parent = nullptr);
+    /** `manager` is the core bridge to the shared notification policy (notify.rs) and to
+     *  the config write that publishes the endpoint. */
+    explicit PushClient(Manager *manager, QObject *parent = nullptr);
 
     bool enabled() const { return m_enabled; }
     void setEnabled(bool on);
@@ -59,6 +62,8 @@ signals:
     void endpointRegistered(const QString &endpoint);
 
 private:
+    /** Decode + decide through the core, then render. One policy for both clients. */
+    void handlePush(const QString &raw);
     void setStatus(const QString &s);
     void setEndpoint(const QString &url);
     bool exportConnector();
@@ -67,6 +72,7 @@ private:
     void registerWithDistributor();
     void unregister();
 
+    Manager *m_manager = nullptr;
     bool m_enabled = true;
     QString m_endpoint;
     QString m_status = QStringLiteral("not registered");

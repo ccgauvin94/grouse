@@ -35,6 +35,7 @@ uniffi::setup_scaffolding!();
 
 pub mod cache;
 pub mod capi;
+pub mod notify;
 pub mod roam;
 pub mod spine;
 pub mod transcript;

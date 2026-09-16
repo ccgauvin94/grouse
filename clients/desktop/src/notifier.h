@@ -15,6 +15,10 @@
  */
 namespace Notifier {
 
+/** True when the user is looking at this window right now — the `app_visible` the
+ *  shared notification policy takes (core `notify.rs`). */
+bool appVisible();
+
 /** True only when the app is not the active window — the one time a notification
  *  tells the user something the window isn't already showing. */
 bool shouldNotify();

@@ -41,6 +41,10 @@ public:
                                     const char *cache_dir, char **out_err);
         void (*grouse_core_free)(void *h);
         void (*grouse_string_free)(char *s);
+        // Notification policy (pure functions, no handle): the same Rust implementation
+        // the phone calls, so the envelope and the show/don't-show rule cannot drift.
+        char *(*grouse_push_parse)(const char *raw);
+        char *(*grouse_push_decide)(const char *envelope_json, const char *context_json);
         void (*grouse_connect)(void *h, const char *config_json, char **out_err);
         void (*grouse_disconnect)(void *h);
         void (*grouse_new_session)(void *h, const char *recipe_id, char **out_err);

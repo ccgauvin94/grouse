@@ -90,7 +90,7 @@ int main(int argc, char *argv[])
     installHostIntegration();
 
     // UnifiedPush RECEIVE only (see docs/NOTIFICATIONS.md): Grouse ships no sender.
-    PushClient push;
+    PushClient push(&manager);
     QObject::connect(&push, &PushClient::endpointRegistered,
                      &manager, &Manager::publishPushEndpoint);
 

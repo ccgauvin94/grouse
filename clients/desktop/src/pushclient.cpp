@@ -1,5 +1,6 @@
 #include "pushclient.h"
 
+#include "manager.h"
 #include "notifier.h"
 
 #include <QCoreApplication>
@@ -21,30 +22,10 @@ const char *kConnectorPath = "/org/unifiedpush/Connector";
 const char *kDistributorPath = "/org/unifiedpush/Distributor";
 const char *kDistributorIface = "org.unifiedpush.Distributor2";
 
-/** The phone's envelope: {type,session,text}. Bare text (or anything that is not a
- *  JSON object) is a briefing, which is what the briefing runs send. */
-struct Envelope {
-    QString type;
-    QString session;
-    QString text;
-};
-
-Envelope parsePush(const QString &raw)
-{
-    const QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8());
-    if (!doc.isObject())
-        return {QString(), QString(), raw};
-    const QJsonObject o = doc.object();
-    const QString body = o.value(QStringLiteral("text")).toString();
-    return {o.value(QStringLiteral("type")).toString(),
-            o.value(QStringLiteral("session")).toString(),
-            body.isEmpty() ? raw : body};
-}
-
 } // namespace
 
-PushClient::PushClient(QObject *parent)
-    : QObject(parent)
+PushClient::PushClient(Manager *manager, QObject *parent)
+    : QObject(parent), m_manager(manager)
 {
     QSettings store(QStringLiteral("grouse"), QStringLiteral("grouse-desktop"));
     m_enabled = store.value(QStringLiteral("push_enabled"), true).toBool();
@@ -232,21 +213,31 @@ QVariantMap PushClient::Unregistered(const QVariantMap &args)
 QVariantMap PushClient::Message(const QVariantMap &args)
 {
     const QString raw = QString::fromUtf8(args.value(QStringLiteral("message")).toByteArray()).trimmed();
-    if (raw.isEmpty())
-        return {};
-    const Envelope env = parsePush(raw);
-    qInfo("Grouse push: received %s%s", qUtf8Printable(raw.left(200)),
-          env.type.isEmpty() ? "" : qUtf8Printable(QStringLiteral(" (type %1)").arg(env.type)));
-    // The window is the only thing that can show this; when it can't, notify. In
-    // background mode there is no window at all, so this holds.
-    if (Notifier::shouldNotify()) {
-        if (env.type == QLatin1String("turn"))
-            Notifier::send(QStringLiteral("Grouse replied"),
-                           env.text.isEmpty() ? QStringLiteral("Open to see the reply.") : env.text);
-        else
-            Notifier::send(QStringLiteral("Grouse"), env.text);
-    }
+    if (!raw.isEmpty())
+        handlePush(raw);
     if (m_quitCountdown)
         m_quitCountdown->start(150);   // let the notification flush, then quit
     return {};
+}
+
+void PushClient::handlePush(const QString &raw)
+{
+    if (!m_manager)
+        return;
+    // ONE policy, in the core: the same parser and the same show/don't-show rule the
+    // phone calls over uniffi. This client contributes only what it knows.
+    const QString envelope = m_manager->pushParse(raw);
+    if (envelope.isEmpty())
+        return;
+    qInfo("Grouse push: received %s", qUtf8Printable(raw.left(200)));
+    const QJsonObject ctx{{QStringLiteral("app_visible"), Notifier::appVisible()},
+                          {QStringLiteral("armed_session"), QJsonValue::Null},
+                          {QStringLiteral("session_title"), QJsonValue::Null},
+                          {QStringLiteral("announce_any_turn"), true}};
+    const QJsonObject d = QJsonDocument::fromJson(
+        m_manager->pushDecide(envelope,
+            QString::fromUtf8(QJsonDocument(ctx).toJson(QJsonDocument::Compact))).toUtf8()).object();
+    if (d.value(QStringLiteral("show")).toBool())
+        Notifier::send(d.value(QStringLiteral("summary")).toString(),
+                       d.value(QStringLiteral("body")).toString());
 }

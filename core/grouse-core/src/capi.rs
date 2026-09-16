@@ -85,6 +85,36 @@ pub extern "C" fn grouse_string_free(s: *mut c_char) {
     }
 }
 
+/// Decode a push payload into a `PushEnvelope` JSON record (see `notify.rs`). The
+/// same function the Kotlin binding exports, so both clients share one parser.
+#[no_mangle]
+pub extern "C" fn grouse_push_parse(raw: *const c_char) -> *mut c_char {
+    match unsafe { c_param(raw) } {
+        Some(raw) => c_json(&crate::notify::parse_push(raw)),
+        None => c_str(""),
+    }
+}
+
+/// Decide whether a decoded payload should become a notification, given what the
+/// client knows (`NotifyContext` JSON). Returns a `NotifyDecision` JSON record; a
+/// malformed context is a no-show rather than a crash.
+#[no_mangle]
+pub extern "C" fn grouse_push_decide(envelope_json: *const c_char,
+                                     context_json: *const c_char) -> *mut c_char {
+    let envelope: crate::notify::PushEnvelope = match c_json_in(envelope_json) {
+        Some(e) => e,
+        None => return c_str(""),
+    };
+    let context: crate::notify::NotifyContext =
+        c_json_in(context_json).unwrap_or(crate::notify::NotifyContext {
+            app_visible: true, // no context -> nothing to show (the safe side)
+            armed_session: None,
+            session_title: None,
+            announce_any_turn: false,
+        });
+    c_json(&crate::notify::decide_notify(envelope, context))
+}
+
 // ---------------------------------------------------------------------------
 // Listener callback table (CONTRACT §3.2 + §5)
 // ---------------------------------------------------------------------------

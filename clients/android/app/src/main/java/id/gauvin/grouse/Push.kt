@@ -4,40 +4,24 @@ package id.gauvin.grouse
 
 import android.app.Activity
 import android.content.Context
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import org.unifiedpush.android.connector.FailedReason
 import org.unifiedpush.android.connector.PushService
 import org.unifiedpush.android.connector.UnifiedPush
 import org.unifiedpush.android.connector.data.PushEndpoint
 import org.unifiedpush.android.connector.data.PushMessage
-
-/** Parse a push envelope {type,session,text}; plain text (no type) is a briefing. Malformed
- *  JSON falls through to the raw text as a briefing. Top-level internal so the JVM unit tests
- *  can exercise it without instantiating the Android service. */
-internal fun parsePush(raw: String): Triple<String?, String?, String> = try {
-    val o = Json.parseToJsonElement(raw).jsonObject
-    Triple(
-        o["type"]?.jsonPrimitive?.contentOrNull,
-        o["session"]?.jsonPrimitive?.contentOrNull,
-        o["text"]?.jsonPrimitive?.contentOrNull ?: raw,
-    )
-} catch (e: Exception) {
-    Triple(null, null, raw)
-}
-
-/** True when a finished-turn push should become a notification: the app is backgrounded, the
- *  envelope names a session, and it is the session this device armed (sent a turn and is still
- *  waiting on completion). Top-level internal so the JVM unit tests can exercise it. */
-internal fun shouldShowTurnNudge(pushedSessionId: String?, pendingSessionId: String?, isForeground: Boolean): Boolean =
-    !isForeground && pushedSessionId != null && pushedSessionId == pendingSessionId
+import uniffi.grouse_core.NotifyContext
+import uniffi.grouse_core.PushKind
+import uniffi.grouse_core.decideNotify
+import uniffi.grouse_core.parsePush
 
 /**
  * UnifiedPush wiring. The distributor (e.g. NextPush, backed by the uppush app on the user's
  * Nextcloud) holds the one battery-friendly connection; the server POSTs to the endpoint URL to
  * wake us — no FCM, no per-app foreground socket needed just to receive alerts.
+ *
+ * Only TRANSPORT lives here. The envelope parser and the show/don't-show rule are in the core
+ * (notify.rs), shared with the desktop client, so a sender's payload behaves the same
+ * everywhere. See ../../docs/NOTIFICATIONS.md.
  */
 object Push {
     /** Turn push on: ensure a distributor is chosen, then register (→ GoosePushService.onNewEndpoint). */
@@ -67,23 +51,33 @@ class GoosePushService : PushService() {
         val raw = String(message.content).trim()
         if (raw.isEmpty()) return
         val cm = ConnectionManager.get(this)
-        // Envelope {type,session,text}; plain text (no type) is treated as a briefing.
-        val (type, session, text) = parsePush(raw)
-        if (type == "turn") {
-            // Finished-turn nudge (fires for every goose turn, Desktop too -- the server can't tell
-            // clients apart). Only show it for a turn THIS device actually sent and is still waiting
-            // on, and not while you're already watching (foreground). Tap deep-links to that session.
-            if (shouldShowTurnNudge(session, cm.store.pendingPushSessionId, cm.isForeground)) {
-                cm.store.pendingPushSessionId = null
-                Notifier(this).postReply(text, session)
-            }
-        } else {
-            // Briefing/proactive: ALWAYS record for the Assistant status/dialog — even when
-            // foreground, or a briefing that lands while you're in the app is lost and the dialog
-            // wrongly reads "none yet". Only raise a notification when backgrounded. Tap lands in
-            // the persistent Assistant thread.
-            SecureStore(this).apply { lastBriefingAt = System.currentTimeMillis(); lastBriefingText = text }
-            if (!cm.isForeground) Notifier(this).postProactive(text, session)
+        // One policy, in the core: decode the envelope and decide whether it is worth
+        // interrupting the user. `announce_any_turn = false` is the phone's rule — a push
+        // can arrive for work another client or a scheduled run started, and only a
+        // session this device armed is announced.
+        val envelope = parsePush(raw)
+        val decision = decideNotify(
+            envelope,
+            NotifyContext(
+                appVisible = cm.isForeground,
+                armedSession = cm.store.pendingPushSessionId,
+                sessionTitle = cm.currentSession.value?.let {
+                    cm.sessions.value.firstOrNull { s -> s.sessionId == it }?.title
+                },
+                announceAnyTurn = false,
+            ),
+        )
+        if (envelope.kind == PushKind.BRIEFING) {
+            // A briefing is recorded for the Assistant status/dialog even while the app is
+            // in front — otherwise one that lands while you are looking is lost and the
+            // dialog wrongly reads "none yet".
+            cm.store.lastBriefingAt = System.currentTimeMillis()
+            cm.store.lastBriefingText = envelope.text
+        }
+        if (decision.show) {
+            if (envelope.kind == PushKind.TURN) cm.store.pendingPushSessionId = null
+            Notifier(this).postMessage(decision.summary, decision.body, envelope.sessionId,
+                proactive = envelope.kind != PushKind.TURN)
         }
     }
 

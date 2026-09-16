@@ -210,6 +210,13 @@ public:
      *  it. Deliberately outside the client contract: nothing in Grouse assumes a server
      *  sender exists, and a stock goose server never pushes (docs/NOTIFICATIONS.md). */
     Q_INVOKABLE void publishPushEndpoint(const QString &url);
+    /** The shared notification policy, in the core (`notify.rs`): decode a push payload,
+     *  and decide whether it warrants a notification given what this client knows. JSON
+     *  in, JSON out — literally the same functions the Android client calls over uniffi,
+     *  so the two can't disagree about what a payload means or when to interrupt. */
+    Q_INVOKABLE QString pushParse(const QString &raw) const;
+    Q_INVOKABLE QString pushDecide(const QString &envelopeJson,
+                                   const QString &contextJson) const;
     Q_INVOKABLE void readServerConfig(const QString &key);
     Q_INVOKABLE void refreshSupportedModels(const QString &providerId);
     Q_INVOKABLE QString permissionToolCallId() const { return m_permToolCallId; }
@@ -297,6 +304,10 @@ private:
     /** The final assistant text in the transcript, elided — the body of the
      *  "turn finished" notification (the phone's nudge can't carry this). */
     QString lastAssistantText() const;
+    /** Ask the shared policy (core notify.rs) whether this finished turn warrants a
+     *  notification, and show it. The desktop announces any turn — it is the only client
+     *  here — and contributes the session title, which a push to a sleeping phone cannot. */
+    void notifyTurnFinished();
     void onSessionTouched(const QString &sid, const QString &title, const QString &updatedAt);
     void appendChunk(const QString &role, const QString &text, const QString &messageId, bool thought);
     void finalizeCurrentMessage();

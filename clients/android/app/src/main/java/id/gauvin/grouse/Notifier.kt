@@ -92,9 +92,15 @@ class Notifier(context: Context) {
         nm.notify(id, n)
     }
 
-    /** Turn finished while backgrounded: show the reply, tap deep-links to its session. */
-    fun postReply(text: String, sessionId: String? = null) =
-        postReplyable("Grouse replied", text, 1, ID_ALERT, sessionId)
+    /** A decision the core already made (notify.rs), rendered. The core supplies the
+     *  summary and body so the phone and the desktop say the same thing for the same
+     *  event; this only chooses the notification identity and the deep link. */
+    fun postMessage(summary: String, body: String, sessionId: String? = null,
+                    proactive: Boolean = false) =
+        postReplyable(summary, body,
+            if (proactive) 2 else 1,
+            if (proactive) ID_PROACTIVE else ID_ALERT,
+            sessionId)
 
     /** goose is blocked on a tool approval while backgrounded. */
     fun postApprovalNeeded(tool: String) {
@@ -107,10 +113,6 @@ class Notifier(context: Context) {
             .build()
         nm.notify(ID_ALERT, n)
     }
-
-    /** A proactive briefing; tap deep-links to the persistent goose-assistant thread. */
-    fun postProactive(text: String, sessionId: String? = null) =
-        postReplyable("Grouse briefing", text, 2, ID_PROACTIVE, sessionId)
 
     fun cancelAlert() = nm.cancel(ID_ALERT)
 

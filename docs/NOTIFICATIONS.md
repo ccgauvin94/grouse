@@ -23,6 +23,24 @@ gated by **Settings → Notifications**, firing only when the app is not the
 active window. Android uses `Notifier.kt` with two channels (`Connection`,
 `Replies`) and inline Reply / Mark-as-read actions.
 
+## Where the policy lives
+
+`core/grouse-core/src/notify.rs` — one implementation, exposed on the contract:
+
+- `parse_push(raw) -> PushEnvelope` — the envelope, never failing (a broken body is
+  a briefing carrying the raw text).
+- `decide_notify(envelope, ctx) -> NotifyDecision` — `{show, summary, body}`, from
+  what the client knows: `app_visible`, `armed_session`, `session_title`,
+  `announce_any_turn`.
+
+Android calls these through uniffi; the desktop through `grouse_push_parse` /
+`grouse_push_decide` on the C ABI. Neither client parses an envelope or decides
+for itself — that is the point, and it is why the Kotlin parser and its tests were
+deleted when this landed (the cases live in `notify.rs`). What stays per-client is
+*transport* (UnifiedPush connector vs `Connector2`) and *rendering*
+(`NotificationCompat` vs `org.freedesktop.Notifications`), plus the two
+client-local events above (approval, session-changed), which are not push kinds.
+
 ## Out-of-band push (operator-owned)
 
 `goose serve` has no push. A client that is *not* running therefore cannot be
