@@ -73,6 +73,7 @@ private:
     void unregister();
 
     Manager *m_manager = nullptr;
+    bool m_onlineHooked = false;
     bool m_enabled = true;
     QString m_endpoint;
     QString m_status = QStringLiteral("not registered");

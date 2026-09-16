@@ -111,6 +111,17 @@ void PushClient::start()
 {
     if (!m_enabled)
         return;
+    // Registration starts before the wire does (the endpoint can arrive while the app is
+    // still connecting), and publishing it is a config write that needs a connection —
+    // so republish whenever the connection comes up. Idempotent, and it doubles as the
+    // self-heal for a rotation that happened while we were offline.
+    if (m_manager && !m_onlineHooked) {
+        m_onlineHooked = true;
+        connect(m_manager, &Manager::onlineChanged, this, [this] {
+            if (m_manager->online() && !m_endpoint.isEmpty())
+                emit endpointRegistered(m_endpoint);
+        });
+    }
     if (!QDBusConnection::sessionBus().isConnected()) {
         setStatus(QStringLiteral("no session bus"));
         return;
