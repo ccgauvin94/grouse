@@ -35,6 +35,8 @@ qt_add_executable(grouse-desktop
     src/sessionlistmodel.cpp
     src/markdown.h
     src/markdown.cpp
+    src/notifier.h
+    src/notifier.cpp
 )
 
 target_include_directories(grouse-desktop PRIVATE src)

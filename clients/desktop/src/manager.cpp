@@ -5,6 +5,7 @@
 #include "corebridge.h"
 #include "markdown.h"
 #include "messagelistmodel.h"
+#include "notifier.h"
 #include "roamlistmodel.h"
 #include "sessionlistmodel.h"
 
@@ -71,6 +72,7 @@ QString Manager::port() const { return m_store.value("port", "3284").toString();
 QString Manager::secretKey() const { return m_store.value("secret", "").toString().trimmed(); }
 bool Manager::useTls() const { return m_store.value("wss", true).toBool(); }
 bool Manager::autoConnectEnabled() const { return m_store.value("auto_connect", true).toBool(); }
+bool Manager::notificationsEnabled() const { return m_store.value("notify_events", true).toBool(); }
 QString Manager::workingDir() const { return m_store.value("cwd", "").toString(); }
 
 void Manager::setHost(const QString &v) { m_store.setValue("host", v); emit settingsChanged(); }
@@ -78,6 +80,7 @@ void Manager::setPort(const QString &v) { m_store.setValue("port", v); emit sett
 void Manager::setSecretKey(const QString &v) { m_store.setValue("secret", v.trimmed()); emit settingsChanged(); }
 void Manager::setUseTls(bool v) { m_store.setValue("wss", v); emit settingsChanged(); }
 void Manager::setAutoConnectEnabled(bool v) { m_store.setValue("auto_connect", v); emit settingsChanged(); }
+void Manager::setNotificationsEnabled(bool v) { m_store.setValue("notify_events", v); emit settingsChanged(); }
 void Manager::setWorkingDir(const QString &v)
 {
     m_store.setValue("cwd", v.trimmed().remove(QRegularExpression(QStringLiteral("/+$"))));
@@ -1471,9 +1474,14 @@ void Manager::coreOnPermission(const QString &json)
 
 void Manager::coreOnSessionTouched(const QString &sid, const QString &title, const QString &u)
 {
-    Q_UNUSED(sid); Q_UNUSED(title); Q_UNUSED(u);
+    Q_UNUSED(u);
     // The core performs its own debounced resync of the active session. The UI
     // only needs to refresh the sidebar so order/title/status reflect the touch.
+    // A touch on a session we are NOT looking at is the one case the window can't
+    // show: another client, or a scheduled run, did something. Announce it there.
+    if (sid != m_currentSessionId && notificationsEnabled() && Notifier::shouldNotify())
+        Notifier::send(title.isEmpty() ? QStringLiteral("Session updated") : title,
+                       QStringLiteral("Changed by another client or a scheduled run."));
     refreshSessions();
 }
 
@@ -1739,6 +1747,14 @@ void Manager::coreOnStream(const QString &json)
         emit promptingChanged();
         emit compactingChanged();
         flushQueue();
+        // The turn is over and the window may not be showing it. Unlike the phone's
+        // finished-turn nudge (server-side, and contentless because the hook has no
+        // reply), the desktop already holds the final text — so the notification
+        // carries it instead of "open to see".
+        if (notificationsEnabled() && Notifier::shouldNotify())
+            Notifier::send(m_currentSessionTitle.isEmpty() ? QStringLiteral("Grouse")
+                                                           : m_currentSessionTitle,
+                           lastAssistantText());
     }
 }
 
@@ -2049,6 +2065,25 @@ void Manager::onPermission(const QString &toolCallId, const QString &title,
     m_permTitle = title;
     m_permOptions = options;
     emit permissionRequested();
+    // The dialog is waiting behind whatever the user is looking at. The phone has
+    // had this notification all along; the desktop silently blocked instead.
+    if (notificationsEnabled() && Notifier::shouldNotify())
+        Notifier::send(QStringLiteral("Grouse needs approval"),
+                       QStringLiteral("Allow “%1”?").arg(title));
+}
+
+QString Manager::lastAssistantText() const
+{
+    for (int row = m_messageModel->rowCount() - 1; row >= 0; --row) {
+        const QModelIndex idx = m_messageModel->index(row, 0);
+        if (idx.data(MessageListModel::RoleRole).toString() != QLatin1String("assistant"))
+            continue;
+        const QString text = idx.data(MessageListModel::TextRole).toString().trimmed();
+        if (text.isEmpty())
+            continue;
+        return text.size() > 180 ? text.left(180) + QStringLiteral("…") : text;
+    }
+    return QStringLiteral("Turn finished.");
 }
 
 void Manager::onError(const QString &text, bool background)

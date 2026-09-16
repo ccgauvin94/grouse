@@ -23,6 +23,7 @@ Controls.Dialog {
         keyField.text = Mgr.secretKey
         cwdField.text = Mgr.workingDir
         autoBox.checked = Mgr.autoConnectEnabled
+        notifyBox.checked = Mgr.notificationsEnabled
         dialog.testMessage = ""
     }
     onOpened: reload()
@@ -34,6 +35,7 @@ Controls.Dialog {
         Mgr.secretKey = keyField.text
         Mgr.workingDir = cwdField.text
         Mgr.autoConnectEnabled = autoBox.checked
+        Mgr.notificationsEnabled = notifyBox.checked
     }
     onClosed: commit()
 
@@ -124,6 +126,14 @@ Controls.Dialog {
                 id: autoBox
                 text: qsTr("Connect automatically on launch")
                 Kirigami.FormData.label: qsTr("Startup:")
+            }
+            // Desktop notifications come from this client's own connection (turn
+            // finished, approval needed, a session changed elsewhere) — no server
+            // support involved. Shown only when the window isn't the active one.
+            Controls.CheckBox {
+                id: notifyBox
+                text: qsTr("Notify when the window isn't focused")
+                Kirigami.FormData.label: qsTr("Notifications:")
             }
 
             Kirigami.Separator {

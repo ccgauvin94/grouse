@@ -12,6 +12,7 @@
     "--device=dri",
     "--socket=pulseaudio",
     "--own-name=id.gauvin.Grouse",
+    "--talk-name=org.freedesktop.Notifications",
     "--filesystem=~/.local/lib/qt6/plugins:create",
     "--filesystem=xdg-config/plasma-workspace/env:create"
   ],

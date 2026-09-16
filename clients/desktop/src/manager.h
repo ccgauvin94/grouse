@@ -31,6 +31,9 @@ class Manager : public QObject
     Q_PROPERTY(QString secretKey READ secretKey WRITE setSecretKey NOTIFY settingsChanged)
     Q_PROPERTY(bool useTls READ useTls WRITE setUseTls NOTIFY settingsChanged)
     Q_PROPERTY(bool autoConnectEnabled READ autoConnectEnabled WRITE setAutoConnectEnabled NOTIFY settingsChanged)
+    /** Desktop notifications for events the client already knows from its own
+     *  connection (turn finished, approval needed, a session touched elsewhere). */
+    Q_PROPERTY(bool notificationsEnabled READ notificationsEnabled WRITE setNotificationsEnabled NOTIFY settingsChanged)
     Q_PROPERTY(QString workingDir READ workingDir WRITE setWorkingDir NOTIFY settingsChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(bool online READ online NOTIFY onlineChanged)
@@ -71,12 +74,14 @@ public:
     QString secretKey() const;
     bool useTls() const;
     bool autoConnectEnabled() const;
+    bool notificationsEnabled() const;
     QString workingDir() const;
     void setHost(const QString &v);
     void setPort(const QString &v);
     void setSecretKey(const QString &v);
     void setUseTls(bool v);
     void setAutoConnectEnabled(bool v);
+    void setNotificationsEnabled(bool v);
     void setWorkingDir(const QString &v);
     /** The ACP endpoint URL the configured host/port/key map to ("wss://host:port/acp"). */
     QString wsUrl() const;
@@ -285,6 +290,9 @@ signals:
 private:
     void setStatus(const QString &s);
     void setOnline(bool o);
+    /** The final assistant text in the transcript, elided — the body of the
+     *  "turn finished" notification (the phone's nudge can't carry this). */
+    QString lastAssistantText() const;
     void onSessionTouched(const QString &sid, const QString &title, const QString &updatedAt);
     void appendChunk(const QString &role, const QString &text, const QString &messageId, bool thought);
     void finalizeCurrentMessage();

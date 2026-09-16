@@ -20,9 +20,10 @@ add_library(grouse_core STATIC
     ${CMAKE_SOURCE_DIR}/src/sessionlistmodel.cpp
     ${CMAKE_SOURCE_DIR}/src/markdown.cpp
     ${CMAKE_SOURCE_DIR}/src/roamlistmodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/notifier.cpp
 )
 target_include_directories(grouse_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(grouse_core PUBLIC Qt6::Widgets)
+target_link_libraries(grouse_core PUBLIC Qt6::Widgets Qt6::DBus)
 
 foreach(test_name tst_markdown tst_messagelistmodel tst_sessionlistmodel
                   tst_manager tst_roamlistmodel)
