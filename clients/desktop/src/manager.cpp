@@ -598,13 +598,33 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
             onError(QString::fromUtf8(err), false);
             m_bridge->api().grouse_string_free(err);
         }
+    } else if (ready && m_prompting && !m_activeRunId.isEmpty() && shown.isEmpty()) {
+        // STEER (Android parity): the turn already running on THIS session is
+        // redirected by this message instead of queueing behind it. m_activeRunId
+        // is only ever set for the current session, so a run on another session
+        // can't be steered from here. Text only — steering carries no blocks, so
+        // a message with attachments queues rather than silently dropping them.
+        // The server validates expected_run_id: a run that ended between typing
+        // and sending fails loudly instead of starting a stray second turn.
+        const QByteArray t = text.toUtf8();
+        const QByteArray r = m_activeRunId.toUtf8();
+        m_bridge->api().grouse_unstable_steer(m_bridge->handle(), t.constData(), r.constData());
     } else {
-        // Not ready or a turn is already running: queue (the core flushes the
-        // prompt queue itself; this app-level queue only waits for ready()).
+        // Not ready, or a turn is running without a steer key: queue (the core
+        // flushes the prompt queue itself; this app-level queue only waits for
+        // ready()).
         enqueue({text, blocks});
         if (!ready && !secretKey().isEmpty())
             connectToServer();
     }
+}
+
+void Manager::setActiveRunId(const QString &runId)
+{
+    if (m_activeRunId == runId)
+        return;
+    m_activeRunId = runId;
+    emit activeRunIdChanged();
 }
 
 void Manager::enqueue(const PendingSend &p)
@@ -1715,7 +1735,7 @@ void Manager::coreOnStream(const QString &json)
     } else if (root.contains(QStringLiteral("RunEnded"))) {
         m_prompting = false;
         m_compacting = false;
-        m_activeRunId.clear();
+        setActiveRunId(QString());
         emit promptingChanged();
         emit compactingChanged();
         flushQueue();
@@ -1891,9 +1911,9 @@ void Manager::onModeChanged(const QString &modeId)
 void Manager::onActiveRunChanged(const QString &sessionId, const QString &runId)
 {
     if (sessionId == m_currentSessionId || sessionId.isEmpty())
-        m_activeRunId = runId;
+        setActiveRunId(runId);
     else
-        m_activeRunId.clear();
+        setActiveRunId(QString());
 }
 
 void Manager::onUsage(int used, int size, double cost, const QString &currency)

@@ -52,6 +52,9 @@ class Manager : public QObject
     Q_PROPERTY(bool landingPage READ landingPage NOTIFY landingChanged)
     // --- chat parity state (mirrors the Android client's ConnectionManager) ---
     Q_PROPERTY(int queuedCount READ queuedCount NOTIFY queuedChanged)
+    /** The running turn's run id for THIS session (the steer key), empty when
+     *  no turn is live or the live run belongs to another session. */
+    Q_PROPERTY(QString activeRunId READ activeRunId NOTIFY activeRunIdChanged)
     Q_PROPERTY(bool compacting READ compacting NOTIFY compactingChanged)
     Q_PROPERTY(int contextUsed READ contextUsed NOTIFY contextChanged)
     Q_PROPERTY(int contextSize READ contextSize NOTIFY contextChanged)
@@ -205,6 +208,7 @@ public:
     Q_INVOKABLE QVariantList permissionOptions() const { return m_permOptions; }
 
     int queuedCount() const { return m_pendingQueue.size(); }
+    QString activeRunId() const { return m_activeRunId; }
     bool compacting() const { return m_compacting; }
     int contextUsed() const { return m_contextUsed; }
     int contextSize() const { return m_contextSize; }
@@ -268,6 +272,7 @@ signals:
     void permissionRequested();
     void landingChanged();
     void queuedChanged();
+    void activeRunIdChanged();
     void compactingChanged();
     void contextChanged();
     void commandsChanged();
@@ -322,6 +327,8 @@ private:
     void dispatchSend(const QString &text, const QVariantList &blocks);
     void enqueue(const PendingSend &p);
     void flushQueue();
+    /** Assign the steer key, emitting activeRunIdChanged only on a real change. */
+    void setActiveRunId(const QString &runId);
     /** Turn local file paths into ACP prompt content blocks (image vs embedded resource). */
     QVariantList buildAttachmentBlocks(const QVariantList &paths);
     /** Coalesce messagesChanged emissions while a turn streams (see m_updateTimer). */

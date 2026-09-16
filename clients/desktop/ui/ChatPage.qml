@@ -139,6 +139,11 @@ Kirigami.Page {
     property var effortChoices: []
     property int effortIndex: -1
 
+    // Android parity: with a live run id for THIS session, the next message
+    // steers the running turn instead of queueing behind it. Steering carries
+    // text only, so a message with attachments queues either way.
+    readonly property bool canSteer: Mgr.prompting && Mgr.activeRunId.length > 0
+
     property string hintText: Mgr.online ? "" : qsTr("Choose a session on the left, or start a new chat, then enter a message below.")
 
     // True while startup is actively connecting / loading a chat. Drives the
@@ -1073,7 +1078,9 @@ Kirigami.Page {
             visible: Mgr.queuedCount > 0
             leftPadding: Kirigami.Units.largeSpacing
             topPadding: Kirigami.Units.smallSpacing
-            text: qsTr("%1 queued — will send when this turn finishes").arg(Mgr.queuedCount)
+            text: page.canSteer
+                  ? qsTr("%1 queued — will steer into current turn").arg(Mgr.queuedCount)
+                  : qsTr("%1 queued — will send when this turn finishes").arg(Mgr.queuedCount)
             opacity: 0.8
             font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
         }
@@ -1165,7 +1172,10 @@ Kirigami.Page {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     Layout.minimumWidth: 120
-                    placeholderText: qsTr("Message Goose…")
+                    placeholderText: Mgr.prompting
+                                     ? (page.canSteer ? qsTr("Steer the running turn…")
+                                                      : qsTr("Queue a message…"))
+                                     : qsTr("Message Goose…")
                     wrapMode: TextEdit.Wrap
                     focus: true
                     // 6px text inset inside the border, so attach→field and
