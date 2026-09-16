@@ -1300,9 +1300,13 @@ impl Core {
                 // The UI is showing a different chat than the socket is bound
                 // to; reject instead of mis-routing (CONTRACT §3.1). The UI
                 // observes the mismatch through its getters.
+                //
+                // Neither id is printed: a session id is a bearer-like
+                // identifier, and a log is the wrong place for one even when
+                // the mismatch is the thing being diagnosed (the caller knows
+                // both ids — it passed one in).
                 eprintln!(
-                    "grouse-core: send_prompt rejected — UI expects session {:?}, socket bound to {:?}",
-                    exp.session_id, sid
+                    "grouse-core: send_prompt rejected — UI expects a different session than the socket is bound to"
                 );
                 return Ok(());
             }

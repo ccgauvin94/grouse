@@ -28,8 +28,11 @@ impl CoreListener for L {
             }
         }
     }
-    fn on_session_touched(&self, session_id: String, title: String, updated_at: String) {
-        println!("-- touched: id={} title={:?} updatedAt={}", session_id, title, updated_at);
+    fn on_session_touched(&self, _session_id: String, title: String, updated_at: String) {
+        // The id is deliberately not printed (session ids are credential-like; see
+        // the note in lib.rs's mismatch log). The smoke run only needs to see that
+        // the touch arrived, and for which chat by title.
+        println!("-- touched: title={:?} updatedAt={}", title, updated_at);
     }
     fn on_transcript(&self, _e: grouse_core::TranscriptEvent) {}
     fn on_stream(&self, _e: grouse_core::StreamEvent) {}
@@ -61,8 +64,8 @@ impl grouse_core::GrouseUnstableListener for UL {
     fn on_config_value(&self, _k: String, _v: String) {}
     fn on_supported_models(&self, _p: String, _m: String) {}
     fn on_providers(&self, _providers: String) {}
-    fn on_session_probe(&self, session_id: String, updated_at: String, message_count: i64) {
-        println!("-- probe: id={} updatedAt={} count={}", session_id, updated_at, message_count);
+    fn on_session_probe(&self, _session_id: String, updated_at: String, message_count: i64) {
+        println!("-- probe: updatedAt={} count={}", updated_at, message_count);
     }
     fn on_tool_result(&self, _t: String, _e: bool) {}
     fn on_error(&self, _m: String, _e: String) {}

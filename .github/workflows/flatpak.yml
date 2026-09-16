@@ -13,6 +13,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+
+# Least privilege: the default token only needs to read the repo (CodeQL
+# actions/missing-workflow-permissions).
+permissions:
+  contents: read
 jobs:
   # Host-side components that cannot be built inside the flatpak SDK, handed to
   # the flatpak job as artifacts and staged into the manifest.
