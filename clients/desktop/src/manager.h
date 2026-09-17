@@ -57,6 +57,9 @@ class Manager : public QObject
     Q_PROPERTY(bool configuredProvidersOnly READ configuredProvidersOnly WRITE setConfiguredProvidersOnly NOTIFY settingsChanged)
     Q_PROPERTY(QStringList configuredProviders READ configuredProviders NOTIFY providersChanged)
     Q_PROPERTY(QString workingDir READ workingDir WRITE setWorkingDir NOTIFY settingsChanged)
+    /** Roam (iroh peer transport) is opt-in: its sidebar tab and stored peers
+     *  stay dormant until the user enables it in Settings. */
+    Q_PROPERTY(bool roamEnabled READ roamEnabled WRITE setRoamEnabled NOTIFY settingsChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(bool online READ online NOTIFY onlineChanged)
     /** Is a live wire carrying the chat ON SCREEN? For a peer-owned chat the main
@@ -103,6 +106,7 @@ public:
     bool configuredProvidersOnly() const;
     QStringList configuredProviders() const { return m_configuredProviders; }
     QString workingDir() const;
+    bool roamEnabled() const;
     void setHost(const QString &v);
     void setPort(const QString &v);
     void setSecretKey(const QString &v);
@@ -111,6 +115,7 @@ public:
     void setNotificationsEnabled(bool v);
     void setConfiguredProvidersOnly(bool v);
     void setWorkingDir(const QString &v);
+    void setRoamEnabled(bool v);
     /** The ACP endpoint URL the configured host/port/key map to ("wss://host:port/acp"). */
     QString wsUrl() const;
     QString status() const { return m_status; }

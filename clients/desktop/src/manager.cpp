@@ -76,6 +76,22 @@ bool Manager::autoConnectEnabled() const { return m_store.value("auto_connect", 
 bool Manager::notificationsEnabled() const { return m_store.value("notify_events", true).toBool(); }
 bool Manager::configuredProvidersOnly() const { return m_store.value("configured_providers_only", true).toBool(); }
 QString Manager::workingDir() const { return m_store.value("cwd", "").toString(); }
+bool Manager::roamEnabled() const { return m_store.value("roam_enabled", false).toBool(); }
+
+void Manager::setRoamEnabled(bool v)
+{
+    if (roamEnabled() == v)
+        return;
+    m_store.setValue("roam_enabled", v);
+    emit settingsChanged();
+    // Enabling mid-session must bring stored peers up without a restart: the
+    // Ready hook below only re-arms them once per launch.
+    if (v && m_online && !m_roamRestored) {
+        m_roamRestored = true;
+        syncRoamIdentityToCore();
+        restoreRoamPeers();
+    }
+}
 
 void Manager::setHost(const QString &v) { m_store.setValue("host", v); emit settingsChanged(); }
 void Manager::setPort(const QString &v) { m_store.setValue("port", v); emit settingsChanged(); }
@@ -1354,8 +1370,9 @@ void Manager::coreOnStatus(const QString &json)
                          host().trimmed(), port().trimmed()));
         }
         // The core bridge resolves lazily; by Ready it is definitely live, so this
-        // is the safe point to re-arm dials for persisted roam peers (once).
-        if (!m_roamRestored) {
+        // is the safe point to re-arm dials for persisted roam peers (once). Roam
+        // is opt-in, so stay dormant (and leave m_roamRestored false) when off.
+        if (roamEnabled() && !m_roamRestored) {
             m_roamRestored = true;
             syncRoamIdentityToCore();
             restoreRoamPeers();

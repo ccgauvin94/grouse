@@ -103,6 +103,7 @@ Controls.ApplicationWindow {
                     }
                     Controls.Button {
                         text: qsTr("Roam")
+                        visible: Mgr.roamEnabled
                         checkable: true
                         checked: root.sidebarTab === "roam"
                         Layout.fillWidth: true
@@ -899,6 +900,12 @@ Controls.ApplicationWindow {
             permissionDialog.pendingToolCallId = Mgr.permissionToolCallId()
             permissionDialog.appTitle = Mgr.permissionTitle()
             permissionDialog.open()
+        }
+        // Roam is opt-in; if it is switched off while its pane is showing, fall
+        // back to Main rather than leave an orphaned hidden tab selected.
+        function onRoamEnabledChanged() {
+            if (!Mgr.roamEnabled && root.sidebarTab === "roam")
+                root.sidebarTab = "main"
         }
     }
 

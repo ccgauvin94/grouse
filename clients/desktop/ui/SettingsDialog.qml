@@ -26,6 +26,7 @@ Controls.Dialog {
         notifyBox.checked = Mgr.notificationsEnabled
         configuredOnlyBox.checked = Mgr.configuredProvidersOnly
         pushBox.checked = Push.enabled
+        roamBox.checked = Mgr.roamEnabled
         dialog.testMessage = ""
     }
     onOpened: reload()
@@ -39,6 +40,7 @@ Controls.Dialog {
         Mgr.autoConnectEnabled = autoBox.checked
         Mgr.notificationsEnabled = notifyBox.checked
         Mgr.configuredProvidersOnly = configuredOnlyBox.checked
+        Mgr.roamEnabled = roamBox.checked
     }
     onClosed: commit()
 
@@ -169,6 +171,20 @@ Controls.Dialog {
                 text: qsTr("UnifiedPush: %1 — Grouse ships no sender; your goose-side scripts are the sender.").arg(Push.status)
                 color: Kirigami.Theme.disabledTextColor
                 font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
+            }
+
+            Controls.Label {
+                text: qsTr("Features")
+                font.bold: true
+                Kirigami.FormData.label: ""
+                Layout.topMargin: Kirigami.Units.gridUnit
+            }
+            // Off by default: roam peers are a separate iroh transport, not the
+            // home server, so the tab (and stored peers) stay dormant until asked.
+            Controls.CheckBox {
+                id: roamBox
+                text: qsTr("Show the Roam tab")
+                Kirigami.FormData.label: qsTr("Roam:")
             }
 
             Kirigami.Separator {
