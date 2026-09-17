@@ -126,6 +126,14 @@ struct State {
     /// same index — so this never goes stale short of a `clear`/`replace`,
     /// which rebuild it.
     tool_by_id: HashMap<String, usize>,
+    /// The rows currently held were painted from the on-disk cache and a
+    /// `session/load` replay is owed. The replay APPENDS, so the first real
+    /// row must drop them wholesale rather than append after them — otherwise
+    /// the transcript holds painted rows followed by replayed rows, which is
+    /// NOT the server's order and can present an old message as the newest
+    /// thing on screen. Enforced here, in the store, so every caller (cold
+    /// start, live reuse, resync) gets it by construction.
+    provisional: bool,
 }
 
 /// Hard cap on retained bubbles (S-RC-4). A transcript is inherently
@@ -168,6 +176,25 @@ impl State {
         index_bubbles(&mut self.tool_by_id, &self.bubbles);
         self.stream_idx = None;
     }
+
+    /// Forget everything and start clean, keeping the id index consistent.
+    fn reset(&mut self) {
+        self.bubbles.clear();
+        self.tool_by_id.clear();
+        self.stream_idx = None;
+        self.stream_role.clear();
+        self.stream_msg_id.clear();
+        self.provisional = false;
+    }
+
+    /// Drop a provisional cache paint the moment real server content arrives
+    /// (see [`State::provisional`]). Idempotent: a no-op once superseded, so
+    /// every row of a replay may call it.
+    fn supersede_provisional(&mut self) {
+        if self.provisional {
+            self.reset();
+        }
+    }
 }
 
 /// Accumulates streamed chunks into transcript bubbles and fans events out to
@@ -188,6 +215,7 @@ impl TranscriptStore {
                 stream_role: String::new(),
                 stream_msg_id: String::new(),
                 tool_by_id: HashMap::new(),
+                provisional: false,
             }),
         }
     }
@@ -199,11 +227,17 @@ impl TranscriptStore {
     /// non-empty message_id and they differ. Otherwise the chunk accumulates
     /// into the current bubble (desktop `appendChunk` fresh check).
     ///
+    /// Real content supersedes a provisional cache paint first (see
+    /// [`State::provisional`]): the replay APPENDS, so painted rows left in
+    /// place would be followed by replayed rows — not the server's order, and
+    /// an old message can end up reading as the newest.
+    ///
     /// Emits the matching `on_stream` chunk and an `on_transcript`
     /// Append/Update.
     pub fn append_chunk(&self, role: &str, text: &str, message_id: Option<&str>, thought: bool) {
         let (stream_evt, transcript_evt) = {
             let mut st = self.state.lock();
+            st.supersede_provisional();
             let fresh = st.stream_idx.is_none()
                 || st.stream_role != role
                 || (message_id.is_some()
@@ -266,6 +300,7 @@ impl TranscriptStore {
     pub fn tool_call(&self, title: &str, detail: &str, tool_call_id: &str, kind: ToolCallKind) {
         let transcript_evt = {
             let mut st = self.state.lock();
+            st.supersede_provisional();
             let row = ToolRow::new(title, detail, tool_call_id);
             // Indexed by id (S-RC-4) so a later tool_update is O(1).
             let row_id = row.tool_call_id.clone();
@@ -340,6 +375,7 @@ impl TranscriptStore {
     pub fn tool_update(&self, id: &str, status: &str, output: &str, live: bool) {
         let transcript_evt = {
             let mut st = self.state.lock();
+            st.supersede_provisional();
             // O(1) lookup via the tool_by_id index (S-RC-4) — the previous
             // newest-backwards scan was O(n) per update, quadratic over a long
             // chat. Fall back to a scan only if the index is somehow stale.
@@ -409,13 +445,26 @@ impl TranscriptStore {
     pub fn clear(&self) {
         {
             let mut st = self.state.lock();
-            st.bubbles.clear();
-            st.tool_by_id.clear();
-            st.stream_idx = None;
-            st.stream_role.clear();
-            st.stream_msg_id.clear();
+            st.reset();
         }
         self.listener.on_transcript(TranscriptEvent::Clear);
+    }
+
+    /// Drop a provisional cache paint (see [`State::provisional`]) — the spine
+    /// calls this as the first row of a `session/load` replay arrives, and once
+    /// more when a load completes without producing any, meaning the server's
+    /// copy is empty. A no-op once real content superseded the paint, so it is
+    /// safe to call per row.
+    pub fn supersede_provisional(&self) {
+        self.state.lock().supersede_provisional();
+    }
+
+    /// Mark the rows currently held as provisional, without repainting: the
+    /// rows on screen are the right ones to SHOW but must not survive a replay
+    /// that is about to rebuild the transcript (a stale resume during
+    /// reconnect, where the store still holds the pre-drop transcript).
+    pub fn mark_provisional(&self) {
+        self.state.lock().provisional = true;
     }
 
     /// Snapshot of the accumulated transcript (flat `Message` projection).
@@ -436,6 +485,19 @@ impl TranscriptStore {
     /// recomposition storm). The Clear is skipped, so the reading position
     /// and the list stay untouched.
     pub fn replace(&self, messages: Vec<Message>) {
+        self.replace_inner(messages, false);
+    }
+
+    /// Paint a cached transcript as PROVISIONAL: the rows render instantly and
+    /// are dropped wholesale by the first real server row (see
+    /// [`State::provisional`]). Use this — not [`Self::replace`] — whenever a
+    /// `session/load` replay is owed, which is every cache paint that is not
+    /// known to be current.
+    pub fn replace_provisional(&self, messages: Vec<Message>) {
+        self.replace_inner(messages, true);
+    }
+
+    fn replace_inner(&self, messages: Vec<Message>, provisional: bool) {
         {
             let mut st = self.state.lock();
             let same = {
@@ -452,13 +514,14 @@ impl TranscriptStore {
                 matches && n == messages.len()
             };
             if same {
+                // Identical paint (the Kotlin cold-start paint followed by the
+                // core's own): nothing to repaint, but still adopt this call's
+                // provisional mode — a stale cache must stay armed, and a
+                // fresh one must stop being droppable.
+                st.provisional = provisional;
                 return;
             }
-            st.bubbles.clear();
-            st.tool_by_id.clear();
-            st.stream_idx = None;
-            st.stream_role.clear();
-            st.stream_msg_id.clear();
+            st.reset();
             for m in messages {
                 if m.role == "tool" {
                     let idx = st.bubbles.len();
@@ -479,6 +542,7 @@ impl TranscriptStore {
                     });
                 }
             }
+            st.provisional = provisional;
         }
         self.listener.on_transcript(TranscriptEvent::Clear);
     }
@@ -914,5 +978,83 @@ mod tests {
             Message { id: "m2".into(), role: "agent".into(), content: "changed".into() , output: String::new() },
         ]);
         assert_eq!(&*t_evts.lock(), &["clear", "clear"]);
+    }
+
+    #[test]
+    fn provisional_paint_is_superseded_by_the_first_real_row() {
+        // A stale cache is painted provisionally, and the replay APPENDS.
+        // Without the drop the transcript holds painted rows followed by
+        // replayed rows — not the server's order — which is how a 19-hour-old
+        // message came to read as the newest thing on screen.
+        let (l, _t, _s) = listener();
+        let store = TranscriptStore::new(l);
+        store.replace_provisional(vec![
+            Message { id: "old2".into(), role: "user".into(), content: "old prompt".into(), output: String::new() },
+            Message { id: "old1".into(), role: "agent".into(), content: "19h-old reply".into(), output: String::new() },
+        ]);
+        assert_eq!(msgs(&store).len(), 2, "painted rows render instantly");
+
+        // First replayed row: painted rows go, the replay's order wins.
+        store.append_chunk("user", "replayed", Some("m1"), false);
+        assert_eq!(
+            msgs(&store),
+            vec![("user".to_string(), "m1".to_string(), "replayed".to_string())],
+            "a replayed row must never land after painted rows"
+        );
+    }
+
+    #[test]
+    fn provisional_paint_survives_promotion_to_fresh() {
+        // Cold start paints the cache (provisional), then open_session finds it
+        // CURRENT and replaces identical content. The paint must stop being
+        // droppable, or the first live row would wipe the cached history.
+        let (l, _t, _s) = listener();
+        let store = TranscriptStore::new(l);
+        let snapshot = vec![
+            Message { id: "m1".into(), role: "user".into(), content: "hi".into(), output: String::new() },
+            Message { id: "m2".into(), role: "agent".into(), content: "hello".into(), output: String::new() },
+        ];
+        store.replace_provisional(snapshot.clone());
+        store.replace(snapshot);
+        store.append_chunk("user", "next", Some("m3"), false);
+        assert_eq!(
+            msgs(&store),
+            vec![
+                ("user".to_string(), "m1".to_string(), "hi".to_string()),
+                ("agent".to_string(), "m2".to_string(), "hello".to_string()),
+                ("user".to_string(), "m3".to_string(), "next".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn authoritative_replace_is_not_dropped_by_later_rows() {
+        let (l, _t, _s) = listener();
+        let store = TranscriptStore::new(l);
+        store.replace(vec![Message {
+            id: "a".into(),
+            role: "agent".into(),
+            content: "authoritative".into(),
+            output: String::new(),
+        }]);
+        store.append_chunk("user", "live", Some("m2"), false);
+        assert_eq!(msgs(&store).len(), 2, "a non-provisional snapshot must survive real rows");
+    }
+
+    #[test]
+    fn tool_rows_also_supersede_a_provisional_paint() {
+        let (l, _t, _s) = listener();
+        let store = TranscriptStore::new(l);
+        store.replace_provisional(vec![Message {
+            id: "old".into(),
+            role: "agent".into(),
+            content: "stale".into(),
+            output: String::new(),
+        }]);
+        store.tool_call("Bash", "ls", "t1", ToolCallKind::Plain);
+        let t = msgs(&store);
+        assert_eq!(t.len(), 1, "the painted row must be gone");
+        assert_eq!(t[0].0, "tool");
+        assert_eq!(t[0].1, "t1");
     }
 }

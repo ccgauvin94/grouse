@@ -460,7 +460,6 @@ impl Core {
                 recipe_id: config.initial_recipe_id.clone(),
             },
             false,
-            false,
         );
         self.wait_ready(ready_rx);
     }
@@ -525,7 +524,8 @@ impl Core {
                             this.on_conn_status(ConnectionStatus::Ready);
                         }
                         Err(_) => {
-                            let _ = this.connect_impl(cfg, ConnectSpec::New { recipe_id: rid }, false, false);
+                            let _ =
+                                this.connect_impl(cfg, ConnectSpec::New { recipe_id: rid }, false);
                         }
                     }
                 });
@@ -533,7 +533,7 @@ impl Core {
             }
         }
         let (_, _rx) =
-            self.connect_impl(config, ConnectSpec::New { recipe_id }, false, false);
+            self.connect_impl(config, ConnectSpec::New { recipe_id }, false);
     }
 
     /// Whether the cached transcript for a session is up to date with the
@@ -580,19 +580,15 @@ impl Core {
             None => (false, None),
         };
         // ALWAYS paint the cached transcript instantly — never clear it and wait
-        // on the wire. A fresh cache suppresses the replay outright; a stale one
-        // stays on screen only until the replay's first real row lands, which is
-        // what `painted` arms below (the replay APPENDS, so leaving the painted
-        // copy in place would duplicate the whole transcript).
-        let painted = match cached {
-            Some(messages) => {
-                self.inner.store.replace(messages);
-                !suppress
-            }
-            None => {
-                self.inner.store.clear();
-                false
-            }
+        // on the wire. A fresh cache suppresses the replay outright and its rows
+        // are authoritative; a stale one is painted PROVISIONAL, so the first
+        // real row of the replay this load owes drops it wholesale — the replay
+        // APPENDS, so painted rows left in place would be followed by replayed
+        // ones. The store owns that handoff (`replace_provisional`).
+        match cached {
+            Some(messages) if suppress => self.inner.store.replace(messages),
+            Some(messages) => self.inner.store.replace_provisional(messages),
+            None => self.inner.store.clear(),
         };
         let config = {
             let mut state = self.inner.state.lock();
@@ -609,7 +605,6 @@ impl Core {
                 let sid = session_id.clone();
                 let c = cwd.clone();
                 let cfg = config.clone();
-                conn.set_painted_cache(painted);
                 crate::roam::runtime().spawn(async move {
                     if conn.live_load_session_async(sid.clone(), c.clone(), suppress).await.is_ok() {
                         // Live reuse doesn't go through the handshake's
@@ -638,17 +633,13 @@ impl Core {
                             }
                         }
                     }
-                    let _ = this.connect_impl(cfg, ConnectSpec::Resume { session_id: sid, cwd: c }, suppress, painted);
+                    let _ = this.connect_impl(cfg, ConnectSpec::Resume { session_id: sid, cwd: c }, suppress);
                 });
                 return;
             }
         }
-        let (_, _rx) = self.connect_impl(
-            config,
-            ConnectSpec::Resume { session_id, cwd },
-            suppress,
-            painted,
-        );
+        let (_, _rx) =
+            self.connect_impl(config, ConnectSpec::Resume { session_id, cwd }, suppress);
     }
 
     /// Render the cached transcript for a session WITHOUT connecting (cold
@@ -658,6 +649,13 @@ impl Core {
     /// the cache is fresh.
     pub fn load_cached_transcript(&self, session_id: String) {
         if let Some((messages, _)) = self.inner.cache.load_transcript(&session_id) {
+            // Authoritative, NOT provisional: this is the cold-start
+            // placeholder for the chat the user was last in, painted before any
+            // connect. `connect()` binds a throwaway session first and the app
+            // opens the real one afterwards, so nothing here owes a replay. The
+            // path that DOES owe one (`open_session`, and the reconnect's stale
+            // resume) repaints with the provisional mode it decides on, and
+            // `replace` adopts that mode when the content is identical.
             self.inner.store.replace(messages);
             // These rows are this session's, whatever session the connection
             // that follows happens to bind first (see `store_session_id`).
@@ -996,7 +994,6 @@ impl Core {
         config: ServerConfig,
         spec: ConnectSpec,
         suppress_replay: bool,
-        painted_cache: bool,
     ) -> (Arc<crate::spine::Conn>, oneshot::Receiver<Result<(), String>>) {
         let gen = {
             let mut state = self.inner.state.lock();
@@ -1018,9 +1015,6 @@ impl Core {
             spec,
         );
         conn.set_suppress_replay(suppress_replay);
-        // Both flags are armed BEFORE the task spawns: the handshake's first
-        // replayed row must never race the flag that tells it what to do.
-        conn.set_painted_cache(painted_cache);
         conn.set_on_status(self.status_hook());
         conn.set_on_touched(self.touched_hook());
         conn.set_on_active_run(self.active_run_hook());
@@ -1233,16 +1227,18 @@ impl Core {
             Some((_, cached_at)) => self.transcript_is_fresh(&resume, &cached_at),
             None => false,
         };
+        // A stale resume replays the whole history onto the live transcript the
+        // store kept across the drop. The replay APPENDS — chunks reset the
+        // stream anchor, they do NOT dedupe against existing rows — so the rows
+        // held now have to be dropped when the replay's first real row lands,
+        // or replayed history would land after them. Arm that in the store.
+        if !suppress {
+            self.inner.store.mark_provisional();
+        }
         let (_, _rx) = self.connect_impl(
             config,
             ConnectSpec::Resume { session_id: resume, cwd },
             suppress,
-            // Not a painted cache here but the same hazard: the store still
-            // holds the live transcript and a stale resume replays the whole
-            // history onto it. Chunks do NOT dedupe against the store —
-            // append_chunk only continues the currently-open bubble — so the
-            // replay has to drop what is there when its first row lands.
-            !suppress,
         );
     }
 

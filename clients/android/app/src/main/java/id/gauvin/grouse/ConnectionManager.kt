@@ -1437,6 +1437,36 @@ class ConnectionManager private constructor(context: Context) {
         sendPromptBlocks("/compact", emptyList(), expect = currentSession.value)
     }
 
+    /** Is a live wire carrying the chat on screen? The main connection's `online` is the
+     *  wrong question for a peer-owned chat, which rides its own iroh connection. */
+    val wireUpForCurrentChat: Boolean
+        get() {
+            val peer = currentRoamPeer
+            return if (peer != null) roamStatus[peer] == "ready" else online.value
+        }
+
+    /**
+     * The wire that owns the in-flight turn is gone for good, so nothing this app can
+     * receive will ever end that turn: the peer's RunEnded died with the connection, and a
+     * host that was killed emits neither it nor an empty run id. Left armed, `busy` stays
+     * true forever — the composer keeps saying "Queue message…", every later send is parked
+     * behind a turn that can never finish, and NOTHING surfaces a failure. On 2026-09-16 the
+     * user's "stop" messages sat in the client for an hour exactly that way.
+     *
+     * The transcript and the queue are kept: queued bubbles stay on screen and flush on the
+     * next Ready. If a turn really is still running server-side, the peer's next live-run
+     * update re-adopts `busy` (see [onCoreActiveRun]).
+     *
+     * Only the wire that OWNS the turn may release it — a drop in another chat, or on the
+     * main socket while a peer owns the turn, must not.
+     */
+    private fun releaseTurnForLostWire(lostSessionId: String) {
+        if (!turnOwnerMatches(turnInFlightSession, currentSession.value, lostSessionId)) return
+        busy.value = false
+        turnInFlight = false
+        turnInFlightSession = null
+    }
+
     /** Answer the given approval request; null optionId denies (cancelled). */
     fun answerPermission(p: AcpEvent.Permission, optionId: String?) {
         core.respondPermission(p.toolCallId,
@@ -1470,11 +1500,14 @@ class ConnectionManager private constructor(context: Context) {
                 live = false; connecting = false; online.value = false
                 replayActive.value = false
                 status.value = "not connected"
+                // The only owner of the turn on this socket is the on-screen main chat.
+                if (currentRoamPeer == null) currentSession.value?.let { releaseTurnForLostWire(it) }
             }
             is ConnectionStatus.Error -> {
                 live = false; connecting = false; online.value = false
                 replayActive.value = false
                 status.value = friendlyConnectError(st.message)
+                if (currentRoamPeer == null) currentSession.value?.let { releaseTurnForLostWire(it) }
             }
         }
     }
@@ -1882,9 +1915,13 @@ class ConnectionManager private constructor(context: Context) {
             }
             st == "disconnected" -> {
                 if (currentRoamPeer == label) {
+                    val owned = currentSession.value
                     currentRoamPeer = null
                     replayActive.value = false   // no wire = nothing more to load
-                    if (roamPeer(currentSession.value) == label) {
+                    if (roamPeer(owned) == label) {
+                        // Release the turn BEFORE the session is dropped, or the queue
+                        // below it stays parked behind a turn with no wire left to end it.
+                        owned?.let { releaseTurnForLostWire(it) }
                         messages.clear(); currentSession.value = null
                     }
                 }
@@ -1895,6 +1932,9 @@ class ConnectionManager private constructor(context: Context) {
                 if (currentRoamPeer == label) {
                     currentRoamPeer = null
                     replayActive.value = false
+                    // A settled dial failure is terminal: the turn it owned ended with it.
+                    currentSession.value?.takeIf { roamPeer(it) == label }
+                        ?.let { releaseTurnForLostWire(it) }
                 }
                 status.value = "roam: $label — ${st.removePrefix("error:")}"
             }
@@ -2374,6 +2414,19 @@ class ConnectionManager private constructor(context: Context) {
         fun roamPeer(sessionId: String?): String? =
             sessionId?.takeIf { it.startsWith("roam:") }
                 ?.removePrefix("roam:")?.substringBefore(':')?.ifBlank { null }
+
+        /** May the wire carrying [lostSessionId] release the in-flight turn?
+         *
+         *  Only the wire that OWNS the turn may: a drop in another chat, or on the main
+         *  socket while a peer owns the turn, must leave it alone. With no recorded owner
+         *  (the turn was armed but routing was not recorded), ownership falls back to the
+         *  chat on screen — that is the one whose composer is stuck.
+         */
+        fun turnOwnerMatches(
+            turnInFlightSession: String?,
+            currentSession: String?,
+            lostSessionId: String,
+        ): Boolean = (turnInFlightSession ?: currentSession) == lostSessionId
 
         /** Compact status for an endpoint row.
          *

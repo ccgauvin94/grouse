@@ -373,7 +373,7 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         // instead of visually breaking.
                         Text(
                             when {
-                                !online && busy -> "Reconnecting…"
+                                !cm.wireUpForCurrentChat && busy -> "Reconnecting…"
                                 // A session/load replay is streaming into the buffer: count
                                 // replayed messages live — a big history can take tens of
                                 // seconds and a static "Connecting…" looked hung. The counter
@@ -609,9 +609,16 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
             // A queued message's bubble is identical to a sent one, so without this there is no way
             // to tell "waiting its turn" from "silently dropped".
             if (cm.queuedCount.value > 0) {
-                val willSteer = cm.activeRunIdState.value != null
-                Text(if (willSteer) "${cm.queuedCount.value} queued — will steer into current turn"
-                    else "${cm.queuedCount.value} queued — will send when this turn finishes",
+                // Say WHY it is waiting. "will send when this turn finishes" is a lie when
+                // there is no wire — that turn can never finish — which is how a user came
+                // to believe their stop messages had been delivered (2026-09-16).
+                val willSteer = cm.activeRunIdState.value != null && cm.busy.value
+                Text(when {
+                        willSteer -> "${cm.queuedCount.value} queued — will steer into current turn"
+                        !cm.wireUpForCurrentChat ->
+                            "${cm.queuedCount.value} queued — not connected; will send when it reconnects"
+                        else -> "${cm.queuedCount.value} queued — will send when this turn finishes"
+                    },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(start = 4.dp, top = 2.dp))
             }

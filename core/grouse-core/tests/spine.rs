@@ -968,6 +968,17 @@ fn stale_cache_is_painted_then_replaced_not_appended() {
         "replayed content must appear exactly once: {final_text}"
     );
 
+    // The ordering guarantee, which is what actually bit on 2026-09-16: the
+    // painted rows had been NEWER than the history the replay delivered, so an
+    // append left a 19-hour-old message as the LAST row and the user answered
+    // it. After a replay the last row must be the server's last row.
+    let rows: Vec<String> = core.transcript().iter().map(|m| m.content.clone()).collect();
+    assert_eq!(
+        rows.last().map(String::as_str),
+        Some("replayed line one and two"),
+        "the newest row on screen must be the newest the server sent: {rows:?}"
+    );
+
     core.disconnect();
     let _ = std::fs::remove_dir_all(&data_dir);
 }
