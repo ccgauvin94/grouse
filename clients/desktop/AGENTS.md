@@ -48,6 +48,14 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
   tab lists endpoints as drop-downs of sessions. Chat-scoped and
   session-bound ops route through the core, which resolves the owning peer from
   the `roam:<label>:<id>` session prefix.
+- **Roam ids never cross the wire, and empty chats are unlistable.** The
+  `roam:` prefix is client-side: the peer's connection rewrites `sessionId` to
+  its raw id at the single rewrite point (`RoamPeer::rpc` → `wire_params`), and
+  the peer's `session/list` only returns sessions that HAVE messages. The peer
+  layer therefore unions its open session into every emitted `on_roam_sessions`
+  list — a just-created chat shows up immediately even though the server can't
+  list it yet. Do not "fix" the duplicated strip in the unstable shim, and do
+  not drop the union when refactoring `apply_sessions`.
 - **The C ABI is the only wire path.** `CoreBridge` resolves the exact
   `grouse_*` symbols from `core/grouse-core/src/capi.rs` and installs the
   `GrouseCoreListener` callback table. The library resolves via `GROUSE_CORE`,

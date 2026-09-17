@@ -1219,7 +1219,7 @@ impl RoamPeer {
     /// session is auto-opened here (open only via `open_session`).
     fn apply_sessions(&self, list: &ListSessionsResponse) {
         let mut cwds = HashMap::new();
-        let sessions: Vec<SessionSummary> = list
+        let mut sessions: Vec<SessionSummary> = list
             .sessions
             .iter()
             .map(|s| {
@@ -1243,6 +1243,33 @@ impl RoamPeer {
                 let key = self.cache_key(&raw);
                 if let Some((messages, _)) = self.cache.load_transcript(&key) {
                     inner.staging.insert(raw, StagedSession { messages, has_new: false });
+                }
+            }
+            // The peer's list only contains sessions that HAVE messages (goose's
+            // session/list filters empty ones). A chat this client just created is
+            // open but empty — invisible to the relist, so the drawer would never
+            // learn it exists. Union the open session into the list: once its first
+            // message lands, the server's own entry appears and the next list
+            // replaces this synthetic row with server truth.
+            if let Some(raw) = inner.open_session_id.clone() {
+                let app_id = format!("roam:{}:{}", self.label, raw);
+                if !sessions.iter().any(|s| s.id == app_id) {
+                    let staged = inner.staging.get(&raw).map(|s| s.messages.len()).unwrap_or(0);
+                    sessions.insert(
+                        0,
+                        SessionSummary {
+                            id: app_id,
+                            title: String::new(),
+                            updated_at: String::new(),
+                            last_message_snippet: None,
+                            project_id: None,
+                            message_count: staged as i64,
+                            model: String::new(),
+                            has_recipe: false,
+                            has_new: false,
+                            archived: false,
+                        },
+                    );
                 }
             }
             inner.sessions = sessions;
@@ -2571,6 +2598,32 @@ mod tests {
         let sessions = peer.sessions();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "roam:laptop:s2");
+    }
+
+    #[test]
+    fn apply_sessions_unions_the_open_empty_session() {
+        // goose's session/list only returns sessions that HAVE messages, so a
+        // chat this client just created (open, zero messages) is invisible to
+        // the relist — and without a union the drawer would never learn it
+        // exists. The open session must survive the list replacement until the
+        // server itself lists it (first message landed).
+        let listener = test_listener();
+        let (peer, _cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        peer.inner.lock().open_session_id = Some("s9".to_string());
+        peer.apply_sessions(&list_response(&[("s1", "Old", "2026-01-01T00:00:00Z")]));
+        let sessions = peer.sessions();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].id, "roam:laptop:s9");
+        assert_eq!(sessions[1].id, "roam:laptop:s1");
+        // Once the peer lists it, no duplicate row and server truth wins.
+        peer.apply_sessions(&list_response(&[
+            ("s9", "New", "2026-02-01T00:00:00Z"),
+            ("s1", "Old", "2026-01-01T00:00:00Z"),
+        ]));
+        let sessions = peer.sessions();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].id, "roam:laptop:s9");
+        assert_eq!(sessions[0].title, "New");
     }
 
     #[test]

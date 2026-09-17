@@ -270,6 +270,15 @@ the same way they queue on the main connection. Surfaced as:
   working-dir, resources, export) ROUTE to the owning peer's connection when
   the session id carries the `roam:` prefix — the peer answers its own
   sessions' tool/extension queries (the in-chat N-tools indicator works there).
+- wire ids vs app ids: the `roam:` prefix is CLIENT-side only. The peer's own
+  connection rewrites `sessionId` to its raw id at its single rewrite point
+  (`RoamPeer::rpc` → `wire_params`); events echoed back to the app carry the
+  app-facing prefixed form.
+- the peer's `session/list` only returns sessions that HAVE messages (goose
+  filters empty ones), so a just-created chat is invisible to a relist. The
+  peer layer unions its open session into every emitted list — the drawer
+  always shows the open chat; the next list (first message landed) replaces
+  the synthetic row with server truth.
 
 The roam transport stays the shared `grouse-roam-core` library (iroh), now a
 dependency of `grouse-core`'s transport layer.
