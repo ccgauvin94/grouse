@@ -27,6 +27,7 @@ private slots:
     void modelAndStateInvariants();
     void invokableSurfaceRunsWithoutCrash();
     void bridgeLoadsWhenCorePresent();
+    void turnOwnerMatches_ownerRule();
 };
 
 void TstManager::modelAndStateInvariants()
@@ -42,6 +43,32 @@ void TstManager::modelAndStateInvariants()
     QVERIFY(mgr.sessions().toList().isEmpty());
     QVERIFY(mgr.config().toList().isEmpty());
     QCOMPARE(mgr.queuedCount(), 0);
+}
+
+/**
+ * Which wire may release a wedged in-flight turn (Android parity).
+ *
+ * A host killed mid-turn emits neither RunEnded nor a cleared run id, so the
+ * `prompting` latch stays set, every later send is parked behind a turn that can
+ * never finish, and the UI promises "will send when this turn finishes". Releasing
+ * it must be the OWNER's wire, though: clearing it on any drop would let an
+ * unrelated chat's disconnect unblock a turn that is genuinely still running (and
+ * the queue would then send into a live turn, interleaving transcripts).
+ */
+void TstManager::turnOwnerMatches_ownerRule()
+{
+    const QString chatA = QStringLiteral("roam:Phaethon:20260822_1");
+    const QString chatB = QStringLiteral("20260917_8");
+
+    // The owning wire releases the turn.
+    QVERIFY(turnOwnerMatches(chatA, chatB, chatA));
+    // A drop in another chat must not.
+    QVERIFY(!turnOwnerMatches(chatA, chatA, chatB));
+    // No recorded owner: ownership falls back to the chat on screen.
+    QVERIFY(turnOwnerMatches(QString(), chatA, chatA));
+    QVERIFY(!turnOwnerMatches(QString(), chatB, chatA));
+    // Nothing to release with no session at all.
+    QVERIFY(!turnOwnerMatches(QString(), QString(), chatA));
 }
 
 void TstManager::invokableSurfaceRunsWithoutCrash()

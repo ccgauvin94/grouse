@@ -25,6 +25,20 @@ use serde_json::Value;
 
 use crate::{Message, SessionSummary};
 
+/// Transcript-cache format version.
+///
+/// Bumped to 2 when the transcript store stopped allowing a replay to append
+/// onto a painted cache: caches written before that could hold painted rows
+/// FOLLOWED by replayed ones — not the server's order — which could show an old
+/// message as the newest on screen, and `save_transcript` stamps the file with
+/// the client's own last-known `updatedAt`, so such a cache compared equal to
+/// the server's stamp and looked "fresh" forever, suppressing the very replay
+/// that would correct it. A v1 file is therefore not merely stale but
+/// MIS-ORDERED, so it must not be trusted even when its stamp matches: reading
+/// it returns `None` and the next open takes the replay path, which rewrites it
+/// in the server's order. This is what self-heals caches already on disk.
+pub const TRANSCRIPT_CACHE_VERSION: u64 = 2;
+
 /// The tool catalog cache, mirroring the desktop's tool-cache JSON.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,7 +114,11 @@ impl CacheStore {
             }
             arr.push(o);
         }
-        let root = serde_json::json!({ "updatedAt": updated_at, "messages": arr });
+        let root = serde_json::json!({
+            "v": TRANSCRIPT_CACHE_VERSION,
+            "updatedAt": updated_at,
+            "messages": arr,
+        });
         write_json(&self.transcript_path(session_id), &root)
     }
 
@@ -111,6 +129,13 @@ impl CacheStore {
     pub fn load_transcript(&self, session_id: &str) -> Option<(Vec<Message>, String)> {
         let bytes = fs::read(self.transcript_path(session_id)).ok()?;
         let root: Value = serde_json::from_slice(&bytes).ok()?;
+        // A pre-fix cache may be mis-ordered (see TRANSCRIPT_CACHE_VERSION) and
+        // its own stamp can make it look fresh, so treat it as absent: the
+        // caller then replays and rewrites it. One-time; the format is stamped
+        // from here on.
+        if root.get("v").and_then(Value::as_u64) != Some(TRANSCRIPT_CACHE_VERSION) {
+            return None;
+        }
         let updated_at = root
             .get("updatedAt")
             .and_then(Value::as_str)
@@ -366,6 +391,40 @@ mod tests {
     }
 
     #[test]
+    fn pre_fix_transcript_caches_are_never_trusted() {
+        // Written before the ordering fix, so it may hold painted rows followed by
+        // replayed ones. Its stamp EQUALS the server's here — which is exactly the
+        // trap: the old client stamped the file with its own last-known updatedAt,
+        // so a mis-ordered cache compared fresh forever and suppressed the replay
+        // that would have corrected it. It must read as absent even then.
+        let dir = temp_cache_dir("version");
+        let store = CacheStore::new(dir.clone());
+        fs::write(
+            dir.join("s1.json"),
+            r#"{"updatedAt":"2026-08-12T10:00:00Z","messages":[{"id":"m1","role":"agent","text":"old","html":""}]}"#,
+        )
+        .unwrap();
+        assert!(
+            store.load_transcript("s1").is_none(),
+            "a pre-fix cache must force a replay, not be trusted"
+        );
+
+        // The current format is trusted, and carries the stamp through.
+        let messages = vec![Message {
+            id: "m1".into(),
+            role: "agent".into(),
+            content: "new".into(),
+            output: String::new(),
+        }];
+        assert!(store.save_transcript("s1", &messages, "2026-08-12T10:00:00Z"));
+        let (loaded, updated_at) = store.load_transcript("s1").expect("v2 cache loads");
+        assert_eq!(updated_at, "2026-08-12T10:00:00Z");
+        assert_eq!(msgs(&loaded), msgs(&messages));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn cache_freshness_is_the_callers_job() {
         let dir = temp_cache_dir("fresh");
         let store = CacheStore::new(dir.clone());
@@ -401,9 +460,12 @@ mod tests {
     #[test]
     fn reads_desktop_cache_format() {
         let dir = temp_cache_dir("desktop");
-        // A desktop-written cache: rich tool rows, a collapsed toolgroup with
-        // nested calls, a chart row — no `id` keys anywhere.
+        // The richer row shapes a cache can carry: tool rows, a collapsed
+        // toolgroup with nested calls, a chart row — no `id` keys anywhere. The
+        // reader must map them (a file WITHOUT the current `v` is rejected
+        // outright instead — see `pre_fix_transcript_caches_are_never_trusted`).
         let desktop = serde_json::json!({
+            "v": super::TRANSCRIPT_CACHE_VERSION,
             "updatedAt": "2026-08-12T10:00:00Z",
             "messages": [
                 {"role": "user", "text": "hello", "html": "<p>hello</p>"},

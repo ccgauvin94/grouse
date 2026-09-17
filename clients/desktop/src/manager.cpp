@@ -599,6 +599,7 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
     requestMessagesUpdate();
     if (ready && !m_prompting) {
         m_prompting = true;
+        m_promptingSessionId = m_currentSessionId;
         emit promptingChanged();
         char *err = nullptr;
         const QByteArray prompt = promptJson(text, blocks).toUtf8();
@@ -628,6 +629,37 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
         if (!ready && !secretKey().isEmpty())
             connectToServer();
     }
+}
+
+bool Manager::wireUpForCurrentChat() const
+{
+    if (!m_activePeerLabel.isEmpty())
+        return m_roamModel && m_roamModel->peerConnected(m_activePeerLabel);
+    return m_online;
+}
+
+void Manager::releaseTurnForLostWire(const QString &lostSessionId)
+{
+    // Only the wire that OWNS the turn may release it: a drop in another chat, or on
+    // the main socket while a peer owns the turn, must leave it alone (Android parity).
+    if (!turnOwnerMatches(m_promptingSessionId, m_currentSessionId, lostSessionId))
+        return;
+    // A dead host emits neither RunEnded nor a cleared run id, so without this
+    // m_prompting stays true forever: "N queued — will send when this turn finishes"
+    // is a promise that can never be kept and the queue never drains.
+    m_promptingSessionId.clear();
+    if (m_prompting) {
+        m_prompting = false;
+        emit promptingChanged();
+    }
+    if (m_compacting) {
+        m_compacting = false;
+        emit compactingChanged();
+    }
+    setActiveRunId(QString());
+    // The queue itself survives (the core flushes on the next Ready); releasing the
+    // latch is what lets it move at all.
+    flushQueue();
 }
 
 void Manager::setActiveRunId(const QString &runId)
@@ -1347,6 +1379,8 @@ void Manager::coreOnStatus(const QString &json)
     } else if (s == QStringLiteral("\"Disconnected\"") || s == QStringLiteral("Disconnected")) {
         setOnline(false);
         setStatus(QStringLiteral("not connected"));
+        if (m_activePeerLabel.isEmpty())
+            releaseTurnForLostWire(m_currentSessionId);
         if (m_testPending) {
             m_testPending = false;
             emit connectionTested(false, QStringLiteral("Connection failed — disconnected."));
@@ -1357,6 +1391,8 @@ void Manager::coreOnStatus(const QString &json)
         QString msg = o.value(QStringLiteral("Error")).toObject().value(QStringLiteral("message")).toString();
         setOnline(false);
         setStatus(msg.isEmpty() ? QStringLiteral("connection error") : msg);
+        if (m_activePeerLabel.isEmpty())
+            releaseTurnForLostWire(m_currentSessionId);
         if (m_testPending) {
             m_testPending = false;
             emit connectionTested(false, msg.isEmpty() ? QStringLiteral("Connection failed.") : msg);
@@ -1598,6 +1634,10 @@ void Manager::coreOnRoamPeerStatus(const QString &label, const QString &status)
 {
     const bool down = status == QStringLiteral("disconnected") || status.startsWith(QStringLiteral("error:"));
     m_roamModel->setPeerStatus(label, status, !down);
+    emit wireUpChanged();
+    // A settled dial failure is terminal: the turn it owned ended with it.
+    if (down && label == m_activePeerLabel)
+        releaseTurnForLostWire(m_currentSessionId);
     // The roam row elides the status at 130px, hiding the actual dial failure.
     // Surface errors in the main status bar so the real cause is readable.
     if (status.startsWith(QStringLiteral("error:")))
@@ -1834,6 +1874,7 @@ void Manager::coreOnStream(const QString &json)
                 o.value("cost").toDouble(), o.value("currency").toString());
     } else if (root.contains(QStringLiteral("RunEnded"))) {
         m_prompting = false;
+        m_promptingSessionId.clear();
         m_compacting = false;
         setActiveRunId(QString());
         emit promptingChanged();

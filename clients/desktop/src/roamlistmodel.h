@@ -49,6 +49,9 @@ public:
     void clear();
     /** Row index of a peer's header row, or -1. */
     int headerRow(const QString &label) const;
+    /** Is this peer's wire up? Answers "is there a wire for the chat on screen?"
+     *  for a peer-owned session, where the main connection's `online` is not. */
+    bool peerConnected(const QString &label) const;
     /** Toggle a peer's drop-down. */
     void togglePeer(const QString &label);
 

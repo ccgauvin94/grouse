@@ -23,6 +23,23 @@ class QTimer;
  * via the listener table, are marshalled onto the Qt main thread, and drive the
  * models with identical observable behavior to the old local ACP client.
  */
+/** May the wire carrying `lostSessionId` release the in-flight turn?
+ *
+ *  Only the wire that OWNS the turn may: a drop in another chat, or on the main
+ *  socket while a peer owns the turn, must leave it alone. With no recorded owner
+ *  (the prompt was armed but its session was not stamped), ownership falls back to
+ *  the chat on screen — the one whose composer is stuck. Android parity:
+ *  `ConnectionManager.Companion.turnOwnerMatches`.
+ */
+inline bool turnOwnerMatches(const QString &promptingSessionId,
+                             const QString &currentSessionId,
+                             const QString &lostSessionId)
+{
+    const QString owner = promptingSessionId.isEmpty() ? currentSessionId
+                                                       : promptingSessionId;
+    return owner == lostSessionId;
+}
+
 class Manager : public QObject
 {
     Q_OBJECT
@@ -42,6 +59,9 @@ class Manager : public QObject
     Q_PROPERTY(QString workingDir READ workingDir WRITE setWorkingDir NOTIFY settingsChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(bool online READ online NOTIFY onlineChanged)
+    /** Is a live wire carrying the chat ON SCREEN? For a peer-owned chat the main
+     *  socket's `online` is the wrong question — it rides its own roam connection. */
+    Q_PROPERTY(bool wireUpForCurrentChat READ wireUpForCurrentChat NOTIFY wireUpChanged)
     Q_PROPERTY(bool prompting READ prompting NOTIFY promptingChanged)
     Q_PROPERTY(QObject* messageModel READ messageModel CONSTANT)
     Q_PROPERTY(QObject* roamModel READ roamModel CONSTANT)
@@ -95,6 +115,7 @@ public:
     QString wsUrl() const;
     QString status() const { return m_status; }
     bool online() const { return m_online; }
+    bool wireUpForCurrentChat() const;
     bool prompting() const { return m_prompting; }
     QObject* messageModel() const;
     QVariant sessions() const { return m_sessions; }
@@ -289,6 +310,7 @@ signals:
     void settingsChanged();
     void statusChanged();
     void onlineChanged();
+    void wireUpChanged();
     void promptingChanged();
     void messagesChanged();
     void sessionsChanged();
@@ -372,6 +394,10 @@ private:
     void flushQueue();
     /** Assign the steer key, emitting activeRunIdChanged only on a real change. */
     void setActiveRunId(const QString &runId);
+    /** The wire that owns the in-flight turn is gone for good: release it so the
+     *  send queue can drain and the UI stops claiming a turn is running (Android
+     *  parity, ConnectionManager.releaseTurnForLostWire). */
+    void releaseTurnForLostWire(const QString &lostSessionId);
     /** Turn local file paths into ACP prompt content blocks (image vs embedded resource). */
     QVariantList buildAttachmentBlocks(const QVariantList &paths);
     /** Coalesce messagesChanged emissions while a turn streams (see m_updateTimer). */
@@ -403,6 +429,9 @@ private:
     QString m_status = QStringLiteral("not connected");
     bool m_online = false;
     bool m_prompting = false;
+    /// Which session owns the in-flight prompt. A wire may only release the turn it
+    /// owns; empty falls back to the session on screen (the stuck composer).
+    QString m_promptingSessionId;
 
     QVariantList m_sessions;
     QVariantList m_projects;

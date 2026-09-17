@@ -1096,7 +1096,12 @@ Kirigami.Page {
             topPadding: Kirigami.Units.smallSpacing
             text: page.canSteer
                   ? qsTr("%1 queued — will steer into current turn").arg(Mgr.queuedCount)
-                  : qsTr("%1 queued — will send when this turn finishes").arg(Mgr.queuedCount)
+                  : Mgr.wireUpForCurrentChat
+                    ? qsTr("%1 queued — will send when this turn finishes").arg(Mgr.queuedCount)
+                    // No wire: that turn can never finish, so promising it would be a lie.
+                    // Saying "not connected" is what tells the user the message is
+                    // waiting on the connection, not on the agent (Android parity).
+                    : qsTr("%1 queued — not connected; will send when it reconnects").arg(Mgr.queuedCount)
             opacity: 0.8
             font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
         }

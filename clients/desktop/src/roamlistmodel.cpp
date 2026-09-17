@@ -96,6 +96,15 @@ void RoamListModel::setPeerStatus(const QString &label, const QString &status, b
     }
 }
 
+bool RoamListModel::peerConnected(const QString &label) const
+{
+    for (const Peer &p : m_peers) {
+        if (p.label == label)
+            return p.connected;
+    }
+    return false;
+}
+
 void RoamListModel::setPeerSessions(const QString &label, const QVariantList &sessions)
 {
     for (Peer &p : m_peers) {
