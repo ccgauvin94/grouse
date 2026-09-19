@@ -834,23 +834,31 @@ Controls.ApplicationWindow {
                     readonly property bool gAttrib: modelData.attrib
                     readonly property bool gEnabled: modelData.enabled
                     readonly property bool gKnown: modelData.known
+                    // The expander shows only on rows that really have sub-tools:
+                    // namespaced tools observed in this session (the group's tool list is
+                    // built from the key prefix regardless of extension type), or a
+                    // still-undiscovered mcp catalogue that could reveal more. Bare-named
+                    // builtins (developer's shell/edit, summon's delegate) match neither.
+                    readonly property bool gHasTools: modelData.tools.length > 0
+                    readonly property bool gExpandable: gHasTools || (gAttrib && !gKnown)
 
                     RowLayout {
                         width: parent.width
                         spacing: Kirigami.Units.smallSpacing
-                        Controls.Button {
-                            flat: true
-                            display: Controls.AbstractButton.IconOnly
-                            icon.name: tdel.expanded ? "arrow-down" : "arrow-right"
-                            implicitWidth: Kirigami.Units.gridUnit
-                            Layout.preferredWidth: Kirigami.Units.gridUnit
-                            Layout.preferredHeight: Kirigami.Units.gridUnit * 1.25
-                            onClicked: {
-                                tdel.expanded = !tdel.expanded
-                                if (tdel.expanded && tdel.gAttrib && !tdel.gKnown)
-                                    Mgr.discoverToolGroup(tdel.gKey)
-                            }
+                    Controls.Button {
+                        flat: true
+                        display: Controls.AbstractButton.IconOnly
+                        icon.name: tdel.expanded ? "arrow-down" : "arrow-right"
+                        implicitWidth: Kirigami.Units.gridUnit
+                        Layout.preferredWidth: Kirigami.Units.gridUnit
+                        Layout.preferredHeight: Kirigami.Units.gridUnit * 1.25
+                        visible: tdel.gExpandable
+                        onClicked: {
+                            tdel.expanded = !tdel.expanded
+                            if (tdel.expanded && tdel.gAttrib && !tdel.gKnown)
+                                Mgr.discoverToolGroup(tdel.gKey)
                         }
+                    }
                         Controls.Switch {
                             Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
                             checked: tdel.gEnabled
@@ -862,11 +870,15 @@ Controls.ApplicationWindow {
                             Layout.fillWidth: true
                             font.bold: true
                         }
-                        Controls.Label {
-                            text: tdel.gAttrib ? (tdel.gKnown ? tdel.expanded ? "" : modelData.tools.length + qsTr(" tools") : qsTr("…")) : ""
-                            opacity: 0.6
-                            horizontalAlignment: Text.AlignRight
-                        }
+                    Controls.Label {
+                        text: tdel.gExpandable
+                              ? ((tdel.gKnown || tdel.gHasTools)
+                                 ? (tdel.expanded ? "" : modelData.tools.length + qsTr(" tools"))
+                                 : qsTr("…"))
+                              : ""
+                        opacity: 0.6
+                        horizontalAlignment: Text.AlignRight
+                    }
                     }
 
                     Column {
@@ -874,7 +886,7 @@ Controls.ApplicationWindow {
                         width: parent.width
                         visible: tdel.expanded
                         Repeater {
-                            model: tdel.gAttrib ? modelData.tools : []
+                            model: tdel.gExpandable ? modelData.tools : []
                             delegate: RowLayout {
                                 width: parent.width
                                 spacing: Kirigami.Units.smallSpacing

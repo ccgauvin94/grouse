@@ -47,6 +47,9 @@ Controls.Dialog {
                 readonly property string eKey: modelData.key
                 readonly property bool eAttrib: modelData.attrib
                 readonly property bool eEnabled: modelData.enabled
+                // Expander only where sub-tools actually exist (the saved allowlist or a
+                // discovered catalogue filled modelData.tools — see Manager::globalExtensions).
+                readonly property bool eHasTools: modelData.tools.length > 0
 
                 RowLayout {
                     width: parent.width
@@ -58,7 +61,7 @@ Controls.Dialog {
                         implicitWidth: Kirigami.Units.gridUnit
                         Layout.preferredWidth: Kirigami.Units.gridUnit
                         Layout.preferredHeight: Kirigami.Units.gridUnit * 1.25
-                        visible: edel.eAttrib
+                        visible: edel.eHasTools
                         onClicked: edel.expanded = !edel.expanded
                     }
                     Controls.Switch {
@@ -82,7 +85,7 @@ Controls.Dialog {
                     width: parent.width
                     visible: edel.expanded
                     Repeater {
-                        model: edel.eAttrib ? modelData.tools : []
+                        model: edel.eHasTools ? modelData.tools : []
                         delegate: RowLayout {
                             width: parent.width
                             spacing: Kirigami.Units.smallSpacing

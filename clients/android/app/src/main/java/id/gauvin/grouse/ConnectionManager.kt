@@ -485,9 +485,19 @@ class ConnectionManager private constructor(context: Context) {
         names.filter { it.contains("__") }
             .groupBy({ it.substringBefore("__") }, { it.substringAfter("__") })
 
-    /** Whether per-tool control can be offered for this extension at all. Only mcp-backed ones
-     *  namespace their tools, and only namespaced tools can be mapped back to an owner. */
-    fun toolsAttributable(e: ExtInfo): Boolean = e.type == "mcp"
+    /** Whether this extension HAS sub-tools — drives the expander arrow so it shows on
+     *  rows that actually offer per-tool control and hides on the ones that don't. The
+     *  old rule was a type guess and it was wrong both ways: platform extensions DO
+     *  namespace their tools ("chatrecall__chatrecall", "extensionmanager__manage_extensions"),
+     *  while the HTTP MCP ones (kagi) report type "streamable_http", never "mcp" — so every
+     *  real row lost its arrow while nothing gained one. Data beats type: namespaced tools
+     *  observed in this session, a non-empty discovered catalogue, or a saved global
+     *  allowlist. Bare-named builtins (developer's shell/edit, summon's delegate, skills'
+     *  load_skill) can never be attributed, so none of the three ever lights up for them. */
+    fun toolsAttributable(e: ExtInfo): Boolean =
+        sessionTools.value.containsKey(e.configKey) ||
+            (catalogOf(e)?.isNotEmpty() == true) ||
+            ((e.raw["available_tools"] as? JsonArray)?.let { it.isNotEmpty() } == true)
 
     /** Whether the full tool CATALOGUE is observable right now. It only is from inside a live
      *  session: `discoverTools` reads it by briefly running the extension unfiltered in the

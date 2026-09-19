@@ -1194,10 +1194,10 @@ QVariant Manager::globalExtensions() const
             for (const auto &t : full)
                 tools << QVariantMap{{"name", t.mid(prefix.length())}, {"on", true}};
         } else {
-            for (const auto &t : d.availableTools) {
-                if (t.startsWith(prefix))
-                    tools << QVariantMap{{"name", t.mid(prefix.length())}, {"on", true}};
-            }
+            // available_tools entries are BARE tool names (verified live: a prefixed
+            // allowlist matches nothing and silently disables the whole extension).
+            for (const auto &t : d.availableTools)
+                tools << QVariantMap{{"name", t}, {"on", true}};
         }
         group["tools"] = tools;
         out << group;
@@ -1227,12 +1227,12 @@ void Manager::setGlobalToolEnabled(const QString &extName, const QString &toolNa
     const ExtDef *d = extDef(extName);
     if (!d)
         return;
-    const QString prefix = d->key + QStringLiteral("__");
     QSet<QString> current(d->availableTools.constBegin(), d->availableTools.constEnd());
-    if (on == current.contains(prefix + toolName))
+    // available_tools is a list of BARE tool names (server-verified), both read and written.
+    if (on == current.contains(toolName))
         return;
-    if (on) current << (prefix + toolName);
-    else current.remove(prefix + toolName);
+    if (on) current << toolName;
+    else current.remove(toolName);
     QJsonObject scoped = d->raw;
     QJsonArray arr;
     for (const auto &t : std::as_const(current))
@@ -1263,8 +1263,12 @@ void Manager::setSessionTools(const QString &extName, const QStringList &allowed
         (!full.isEmpty() && allowed.size() >= full.size()) ? QStringList() : allowed;
     QJsonObject scoped = d->raw;
     QJsonArray arr;
+    // The caller passes fully-qualified `key__tool` names (they come from the session's
+    // tool list); the server's available_tools matches on BARE names — a prefixed entry
+    // silently filters out every tool (verified live). Strip on the way out.
+    const QString strip = d->key + QStringLiteral("__");
     for (const auto &t : list)
-        arr.append(t);
+        arr.append(t.startsWith(strip) ? t.mid(strip.length()) : t);
     scoped.insert("available_tools", arr);
     m_discoveringExt.clear();
     const QByteArray sid = m_currentSessionId.toUtf8();
