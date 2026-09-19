@@ -844,20 +844,27 @@ Controls.ApplicationWindow {
                     RowLayout {
                         width: parent.width
                         spacing: Kirigami.Units.smallSpacing
-                    Controls.Button {
-                        flat: true
-                        display: Controls.AbstractButton.IconOnly
-                        icon.name: tdel.expanded ? "arrow-down" : "arrow-right"
-                        implicitWidth: Kirigami.Units.gridUnit
-                        Layout.preferredWidth: Kirigami.Units.gridUnit
-                        Layout.preferredHeight: Kirigami.Units.gridUnit * 1.25
-                        visible: tdel.gExpandable
-                        onClicked: {
-                            tdel.expanded = !tdel.expanded
-                            if (tdel.expanded && !tdel.gKnown)
-                                Mgr.discoverToolGroup(tdel.gKey)
+                        // Fixed-width slot for the expander: hiding the BUTTON
+                        // alone lets the Switch drift left on arrowless rows
+                        // (an invisible item still claims its column). The Item
+                        // keeps every switch at the same x.
+                        Item {
+                            Layout.preferredWidth: Kirigami.Units.gridUnit
+                            implicitWidth: Kirigami.Units.gridUnit
+                            Layout.preferredHeight: Kirigami.Units.gridUnit * 1.25
+                            Controls.Button {
+                                anchors.centerIn: parent
+                                flat: true
+                                display: Controls.AbstractButton.IconOnly
+                                icon.name: tdel.expanded ? "arrow-down" : "arrow-right"
+                                visible: tdel.gExpandable
+                                onClicked: {
+                                    tdel.expanded = !tdel.expanded
+                                    if (tdel.expanded && !tdel.gKnown)
+                                        Mgr.discoverToolGroup(tdel.gKey)
+                                }
+                            }
                         }
-                    }
                         Controls.Switch {
                             Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
                             checked: tdel.gEnabled
@@ -870,11 +877,12 @@ Controls.ApplicationWindow {
                             font.bold: true
                         }
                     Controls.Label {
-                        text: tdel.gExpandable
-                              ? (tdel.gKnown
-                                 ? (tdel.expanded ? "" : modelData.tools.length + qsTr(" tools"))
-                                 : qsTr("…"))
-                              : ""
+                        // The count shows on every KNOWN row — expandable or
+                        // not (the background sweep makes rows known without a
+                        // click); "…" only while a row is still unknown.
+                        text: tdel.gKnown
+                              ? (tdel.expanded ? "" : modelData.tools.length + qsTr(" tools"))
+                              : (tdel.gExpandable ? qsTr("…") : "")
                         opacity: 0.6
                         horizontalAlignment: Text.AlignRight
                     }

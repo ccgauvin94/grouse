@@ -50,6 +50,10 @@ Manager::Manager(QObject *parent)
 
     // Coalesce transcript updates while a turn streams (same rate-limit as the
     // old per-chunk path): the signal fires at most every 50ms.
+    m_peekTimer = new QTimer(this);
+    m_peekTimer->setSingleShot(true);
+    connect(m_peekTimer, &QTimer::timeout, this, &Manager::doPeekStep);
+
     m_updateTimer = new QTimer(this);
     m_updateTimer->setSingleShot(true);
     m_updateTimer->setInterval(50);
@@ -347,6 +351,7 @@ void Manager::openRoamSession(const QString &label, const QString &sessionId, co
     m_extDefs.clear();
     m_sessionExts.clear();
     m_sessionRestricted.clear();
+    m_peekQueue.clear();
     loadToolCache(sessionId);   // best-effort memory of last run's catalogues
     publishToolGroups();
     emit currentSessionChanged();
@@ -373,6 +378,7 @@ void Manager::newRoamSession(const QString &label)
     m_extDefs.clear();
     m_sessionExts.clear();
     m_sessionRestricted.clear();
+    m_peekQueue.clear();
     publishToolGroups();
     m_messageModel->clear();
     m_currentIndex = -1;
@@ -399,6 +405,7 @@ void Manager::newRoamSessionIn(const QString &label, const QString &cwd)
     m_extDefs.clear();
     m_sessionExts.clear();
     m_sessionRestricted.clear();
+    m_peekQueue.clear();
     publishToolGroups();
     m_messageModel->clear();
     m_currentIndex = -1;
@@ -514,6 +521,7 @@ void Manager::openSession(const QString &sessionId)
     m_extDefs.clear();
     m_sessionExts.clear();
     m_sessionRestricted.clear();
+    m_peekQueue.clear();
     loadToolCache(sessionId);
     publishToolGroups();
     m_messageModel->clear();
@@ -543,6 +551,7 @@ void Manager::newChat()
     m_extDefs.clear();
     m_sessionExts.clear();
     m_sessionRestricted.clear();
+    m_peekQueue.clear();
     m_messageModel->clear();
     m_currentIndex = -1;
     publishToolGroups();
@@ -1338,6 +1347,20 @@ void Manager::loadToolCache(const QString &sessionId)
     // is what lets "does this row have >=2 sub-tools?" survive a restart
     // instead of re-arrowing every row on first open. Only keys not already
     // learned this run are merged (live truth wins over memory).
+    // Global memory first: one server-wide sweep result shared by every chat.
+    const QByteArray persisted =
+        m_store.value(QStringLiteral("tool_catalogs")).toString().toUtf8();
+    if (!persisted.isEmpty()) {
+        const QJsonObject cats = QJsonDocument::fromJson(persisted).object();
+        for (auto it = cats.constBegin(); it != cats.constEnd(); ++it) {
+            if (m_toolCatalog.contains(it.key()))
+                continue;
+            QStringList tools;
+            for (const auto &v : it.value().toArray())
+                tools << v.toString();
+            m_toolCatalog.insert(it.key(), tools);
+        }
+    }
     if (sessionId.isEmpty())
         return;
     QString safe = sessionId;
@@ -2308,6 +2331,9 @@ void Manager::onSessionExtensions(const QStringList &names, const QSet<QString> 
         const bool attachedNow = names.contains(target);
         const bool wasAttached = m_discoveringAttached;
         m_discoveringExt.clear();
+        m_peekQueue.removeAll(target);       // this row is handled (or was repaired)
+        if (!m_peekQueue.isEmpty())
+            m_peekTimer->start(400);
         if (attachedNow) {
             m_toolCatalog[target] = m_discoveringFull;
             if (wasAttached) {
@@ -2342,9 +2368,69 @@ void Manager::onSessionExtensions(const QStringList &names, const QSet<QString> 
         }
         m_discoveringFull.clear();
         m_discoveringAttached = false;
+        persistCatalogs();
     }
+    buildPeekQueue();
     publishToolGroups();
     saveToolCache(m_currentSessionId);
+}
+
+// The background sweep: learn every extension's tool list once, opportunistically,
+// while the chat is doing nothing. Each step is the same transient attach→list→
+// detach the manual peek arrow performs (a detached row never stays attached), so
+// the drawer can print "# tools" on EVERY row — including rows nobody expanded —
+// without permanently inflating the session's context. Persisted to QSettings, so
+// a server with N extensions costs N one-off peeks per install, not per session.
+void Manager::buildPeekQueue()
+{
+    if (!m_peekQueue.isEmpty() || !m_discoveringExt.isEmpty())
+        return;                              // a sweep or a manual peek is running
+    if (m_currentSessionId.isEmpty() || !m_activePeerLabel.isEmpty())
+        return;                              // only the local chat can host a peek
+    for (const auto &d : std::as_const(m_extDefs))
+        if (!m_toolCatalog.contains(d.key) && !m_sessionExts.contains(d.key))
+            m_peekQueue << d.key;
+    if (!m_peekQueue.isEmpty())
+        m_peekTimer->start(1500);
+}
+
+void Manager::doPeekStep()
+{
+    if (m_peekQueue.isEmpty())
+        return;
+    // Never interfere with an active turn — INCLUDING one started elsewhere
+    // (m_activeRunId is the server's own echo, so scheduled runs steering into
+    // this chat gate the sweep too), compaction, a manual peek, or a lost wire.
+    if (m_prompting || m_compacting || !m_activeRunId.isEmpty()
+        || !m_discoveringExt.isEmpty()
+        || !m_bridge || !m_bridge->isAvailable()
+        || !m_bridge->api().grouse_ready(m_bridge->handle())
+        || m_currentSessionId.isEmpty() || !m_activePeerLabel.isEmpty()) {
+        m_peekTimer->start(2500);            // retry when the chat goes quiet
+        return;
+    }
+    while (!m_peekQueue.isEmpty()) {
+        const QString key = m_peekQueue.takeFirst();
+        if (m_toolCatalog.contains(key) || m_sessionExts.contains(key) || !extDef(key))
+            continue;                        // state moved on; skip stale queue item
+        discoverToolGroup(key);
+        break;                               // the commit in onSessionExtensions re-arms
+    }
+    if (!m_peekQueue.isEmpty() && m_discoveringExt.isEmpty())
+        m_peekTimer->start(700);             // safety re-arm if the peek never lands
+}
+
+void Manager::persistCatalogs()
+{
+    QJsonObject o;
+    for (auto it = m_toolCatalog.constBegin(); it != m_toolCatalog.constEnd(); ++it) {
+        QJsonArray a;
+        for (const auto &t : it.value())
+            a.append(t);
+        o.insert(it.key(), a);
+    }
+    m_store.setValue(QStringLiteral("tool_catalogs"),
+                     QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)));
 }
 
 void Manager::onPermission(const QString &toolCallId, const QString &title,

@@ -61,7 +61,11 @@ Controls.Dialog {
                         implicitWidth: Kirigami.Units.gridUnit
                         Layout.preferredWidth: Kirigami.Units.gridUnit
                         Layout.preferredHeight: Kirigami.Units.gridUnit * 1.25
-                        visible: edel.eHasTools
+                        // Same fixed-slot trick as the chat tools drawer: the
+                        // BUTTON hides, the column stays, so switches line up
+                        // across rows with and without expanders.
+                        opacity: edel.eHasTools ? 1.0 : 0.0
+                        enabled: edel.eHasTools
                         onClicked: edel.expanded = !edel.expanded
                     }
                     Controls.Switch {

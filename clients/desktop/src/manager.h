@@ -486,6 +486,16 @@ private:
     /// the session's active namespaced tools ARE its full catalogue — the
     /// expander gate can then answer ">=2?" without a peek at all.
     QSet<QString> m_sessionRestricted;
+    /// Background catalogue sweep: keys of detached rows never peeked yet. One
+    /// transient attach→list→detach at a time, only while the chat is idle;
+    /// results persist (QSettings + the per-session tool cache), so each
+    /// extension's full list is learned essentially once ever. This is what
+    /// replaces the permanent "…" with a real "# tools" on every row.
+    QStringList m_peekQueue;
+    QTimer *m_peekTimer = nullptr;
+    void buildPeekQueue();
+    void doPeekStep();
+    void persistCatalogs();
     /// Full tool catalog per discovered extension (extName -> tool names).
     QHash<QString, QStringList> m_toolCatalog;
 
