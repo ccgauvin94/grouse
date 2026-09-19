@@ -1771,6 +1771,19 @@ class ConnectionManager private constructor(context: Context) {
         }
         if (idx < 0 || idx >= messages.size) return
         val cur = messages[idx]
+        if (m.role == "tool") {
+            // Late MCP-App promotion: the core re-issues the ToolCall (stashed
+            // above) and then updates the transcript row. The chip was built as
+            // a plain tool; rebuild it from the upgraded kind (which also fires
+            // the template fetch). Extracted-from-group calls arrive as an
+            // Append instead and never reach here.
+            val stash = pendingToolStash[m.id]
+            if (stash?.kind is ToolCallKind.McpApp && cur.role == "tool") {
+                pendingToolStash.remove(m.id)
+                messages[idx] = buildToolBubble(m, stash, cur.id)
+                return
+            }
+        }
         messages[idx] = cur.copy(
             // NEVER reclassify an existing bubble's role from an update: a live
             // roam stream interleaves AgentMessageChunk (assistant) and

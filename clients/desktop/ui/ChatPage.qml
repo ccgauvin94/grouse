@@ -492,6 +492,7 @@ Kirigami.Page {
                 readonly property string messageUsage: model.usage ? String(model.usage) : ""
                 readonly property string messageChartData: model.chartData ? String(model.chartData) : ""
                 readonly property string messageAppHtml: model.appHtml ? String(model.appHtml) : ""
+                readonly property string messageAppKey: model.appKey ? String(model.appKey) : ""
                 readonly property var messageCalls: model.calls ? model.calls : []
 
                 readonly property bool isUser: mdel.messageRole === "user"
@@ -929,13 +930,25 @@ Kirigami.Page {
                             opacity: 0.8
                             font.family: "monospace"
                         }
-                        Controls.Label {
+                        RowLayout {
                             visible: mdel.messageAppHtml.length > 0 && mdel.toolOpen
-                            text: qsTr("Template fetched; interactive rendering needs a web engine (not available on desktop).")
                             width: parent.width
-                            wrapMode: Text.Wrap
-                            opacity: 0.6
-                            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8
+                            spacing: Kirigami.Units.smallSpacing
+                            Controls.Label {
+                                // org.kde.Platform ships no QtWebEngine, so the app cannot
+                                // render in-page here (Android does). The template is
+                                // self-contained HTML — opening it is the honest bridge.
+                                text: qsTr("App template fetched; interactive in-chat rendering needs a web engine (see Android).")
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                opacity: 0.6
+                                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8
+                            }
+                            Controls.Button {
+                                text: qsTr("Open App")
+                                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
+                                onClicked: Mgr.openAppInHtml(mdel.messageAppKey)
+                            }
                         }
                     }
                     TapHandler { onTapped: mdel.toolOpen = !mdel.toolOpen }

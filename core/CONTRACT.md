@@ -138,6 +138,16 @@ Usage { used, size, cost, currency } · RunEnded(stop_reason)`
 `ToolCall.kind` collapses the desktop's toolgroup/chart/mcpapp split into:
 `Plain | Chart(spec) | McpApp { app_key, uri, extension, input }`.
 
+**Late MCP-App hydration.** goose attaches `_meta.goose.mcpApp` to the COMPLETING
+`tool_call_update`, not the `tool_call` frame (the tool's `ui://` resource only
+resolves after the call ran). When that happens the core promotes the transcript
+bubble and RE-ISSUES `ToolCall{ tool_call_id, kind = McpApp }` for the same id,
+followed by the matching `on_transcript` Update (or Update+Append when the row
+was inside a collapsed toolgroup). Clients must treat a re-issued ToolCall as a
+CONVERT-IN-PLACE instruction (match on `tool_call_id`; desktop rewrites the chip
+row, Android rebuilds the bubble from the re-stashed kind) — appending blindly
+duplicates the row. A second promotion of the same id is a core-side no-op.
+
 ---
 
 ## 4. Session lifecycle (owned by the core)

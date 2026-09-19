@@ -139,6 +139,11 @@ keep them when extending the core.
   goose has no default. It is asked for at connect time.
 - **Recipe parameter requests** hard-fail unless the client declares
   `clientCapabilities._meta.goose.recipeParameterRequests: true` at initialize.
+- **MCP Apps** hydrate only if the client declares
+  `clientCapabilities._meta.goose.mcpHostCapabilities.extensions["io.modelcontextprotocol/ui"]`
+  at initialize; without it goose strips the tool's `_meta.goose.mcpApp` and every app
+  degrades to a plain tool chip. The server also only hydrates apps whose TOOL DEFINITION
+  carries `_meta.ui.resourceUri` (not merely the call result).
 - **Trust boundary** for `content`/`output`/`appHtml`/chart specs: the core
   never escapes server-provided content; every UI must treat it as untrusted at
   its rendering surface and sanitize or sandbox any HTML/JS renderer. See

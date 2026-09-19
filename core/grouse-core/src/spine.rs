@@ -948,7 +948,22 @@ impl Conn {
             .as_ref()
             .map(tool_call_status_str)
             .unwrap_or_default();
-        let meta = tcu.meta.clone().unwrap_or_default();
+        let meta = Value::Object(tcu.meta.clone().unwrap_or_default());
+
+        // MCP-App identity arrives HERE, not on the tool_call frame: goose only
+        // knows a completed call produced an app (it hydrates `goose.mcpApp` onto
+        // the tool_call_update once the extension's ui:// resource resolved).
+        // Promote the plain chip the creation already announced.
+        if let Some(app) = meta.pointer("/goose/mcpApp") {
+            if let (Some(uri), Some(ext)) = (
+                app.get("resourceUri").and_then(Value::as_str),
+                app.get("extensionName").and_then(Value::as_str),
+            ) {
+                if !uri.is_empty() && !ext.is_empty() && status != "in_progress" {
+                    self.inner.store.tool_app(&id, uri, ext);
+                }
+            }
+        }
 
         // Streaming shell output rides _meta.toolNotification (live_output):
         // appends with live=true so the bubble ACCUMULATES instead of
@@ -1236,7 +1251,13 @@ fn install_crypto_provider() {
 
 /// The `initialize` params: protocolVersion 1 + the client capabilities the
 /// goosed server needs (fs, elicitation form, and the goose `_meta` gate for
-/// custom notifications + parameterized recipes).
+/// custom notifications + parameterized recipes + MCP-App hosting.
+///
+/// `mcpHostCapabilities.extensions["io.modelcontextprotocol/ui"]` is what makes
+/// the server's `host_supports_mcp_apps()` gate true over ACP; without it goose
+/// never hydrates a tool's `_meta.ui.resourceUri` into the trusted
+/// `_meta.goose.mcpApp` on the tool_call update, and every MCP App (the
+/// autovisualiser charts included) silently degrades to a plain tool chip.
 pub(crate) fn initialize_params() -> Value {
     json!({
         "protocolVersion": 1,
@@ -1247,7 +1268,14 @@ pub(crate) fn initialize_params() -> Value {
                 "goose": {
                     "customNotifications": true,
                     "recipeParameterRequests": true,
-                    "toolCallLabelEnrichment": true
+                    "toolCallLabelEnrichment": true,
+                    "mcpHostCapabilities": {
+                        "extensions": {
+                            "io.modelcontextprotocol/ui": {
+                                "mimeTypes": ["text/html;profile=mcp-app"]
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1526,6 +1554,24 @@ pub(crate) fn permission_option_kind_str(kind: &PermissionOptionKind) -> &'stati
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The initialize handshake MUST declare the MCP-Apps host capability:
+    /// goose gates `mcpApp` metadata hydration on the client listing
+    /// `io.modelcontextprotocol/ui` under `_meta.goose.mcpHostCapabilities.
+    /// extensions` — without it every MCP App (autovisualiser charts, custom
+    /// dashboards) silently degrades to a plain tool chip (2026-09-18).
+    #[test]
+    fn initialize_declares_mcp_apps_host_capability() {
+        let p = initialize_params();
+        assert_eq!(
+            p.pointer("/clientCapabilities/_meta/goose/mcpHostCapabilities/\
+                       extensions/io.modelcontextprotocol~1ui/mimeTypes/0")
+                .and_then(Value::as_str),
+            Some("text/html;profile=mcp-app"),
+            "lost the MCP-Apps capability declaration — the server will stop \
+             attaching _meta.goose.mcpApp to tool calls"
+        );
+    }
 
     /// Ordering/freshness must track MESSAGE activity (_meta.lastMessageAt),
     /// not open/select touch (updatedAt) — selecting a session must never

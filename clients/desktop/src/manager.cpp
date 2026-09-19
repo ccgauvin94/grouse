@@ -11,10 +11,12 @@
 
 #include <QDateTime>
 #include <QDir>
+#include <QDesktopServices>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QUrl>
 #include <QClipboard>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -2096,10 +2098,30 @@ void Manager::onChartToolCall(const QString &title, const QString &toolCallId, c
 void Manager::onMcpAppToolCall(const QString &title, const QString &toolCallId, const QString &appKey,
                                const QString &appUri, const QString &appExt, const QString &appInput)
 {
-    m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", "mcpapp"}, {"text", ""},
-                                       {"title", title}, {"detail", appInput}, {"appKey", appKey},
-                                       {"appHtml", QString()}, {"toolCallId", toolCallId},
-                                       {"status", "in_progress"}});
+    // Late hydration: the creation frame announced a Plain call (a chip row was
+    // appended then), and the core re-issues this ToolCall with the app kind when
+    // the completing update carries `goose.mcpApp`. Convert the existing chip in
+    // place so the transcript shows ONE row, not chip + app.
+    bool converted = false;
+    for (int i = m_messageModel->count() - 1; i >= 0 && !converted; --i) {
+        QVariantMap m = m_messageModel->row(i);
+        if (m.value("role").toString() == QLatin1String("tool")
+            && m.value("toolCallId").toString() == toolCallId) {
+            m["role"] = QStringLiteral("mcpapp");
+            m["appKey"] = appKey;
+            m["appHtml"] = QString();
+            if (!appInput.isEmpty())
+                m["detail"] = appInput;
+            m_messageModel->update(i, m);
+            converted = true;
+        }
+    }
+    if (!converted) {
+        m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", "mcpapp"}, {"text", ""},
+                                           {"title", title}, {"detail", appInput}, {"appKey", appKey},
+                                           {"appHtml", QString()}, {"toolCallId", toolCallId},
+                                           {"status", "in_progress"}});
+    }
     m_currentIndex = -1;
     if (m_bridge && m_bridge->isAvailable()) {
         const QByteArray sid = m_currentSessionId.toUtf8();
@@ -2113,6 +2135,8 @@ void Manager::onMcpAppToolCall(const QString &title, const QString &toolCallId, 
 
 void Manager::onAppResource(const QString &appKey, const QString &html)
 {
+    if (!html.isEmpty())
+        m_appHtml.insert(appKey, html);
     for (int i = m_messageModel->count() - 1; i >= 0; --i) {
         QVariantMap m = m_messageModel->row(i);
         if (m.value("role").toString() == "mcpapp" && m.value("appKey").toString() == appKey) {
@@ -2126,6 +2150,23 @@ void Manager::onAppResource(const QString &appKey, const QString &html)
     requestMessagesUpdate();
 }
 
+void Manager::openAppInHtml(const QString &appKey)
+{
+    const QString html = m_appHtml.value(appKey);
+    if (html.isEmpty())
+        return;
+    const QString path = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                             .filePath(QStringLiteral("grouse-app-%1.html")
+                                           .arg(qHash(appKey)));
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return;
+    f.write(html.toUtf8());
+    f.close();
+    // Same trust boundary as the in-app renderer: the document is server-supplied;
+    // the browser sandbox is the isolation. One-shot view of a snapshot.
+    QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+}
 void Manager::onCompactionStatus(const QString &message)
 {
     const QString m = message.toLower();

@@ -2004,6 +2004,13 @@ fn goose_meta() -> Map<String, Value> {
     goose.insert("customNotifications".into(), Value::Bool(true));
     goose.insert("recipeParameterRequests".into(), Value::Bool(true));
     goose.insert("toolCallLabelEnrichment".into(), Value::Bool(true));
+    // MCP-App hosting gate — see spine::initialize_params for why this must be
+    // declared or the server never emits the trusted `goose.mcpApp` meta.
+    goose.insert(
+        "mcpHostCapabilities".into(),
+        json!({ "extensions": { "io.modelcontextprotocol/ui": {
+            "mimeTypes": ["text/html;profile=mcp-app"] } } }),
+    );
     let mut meta = Map::new();
     meta.insert("goose".into(), Value::Object(goose));
     meta

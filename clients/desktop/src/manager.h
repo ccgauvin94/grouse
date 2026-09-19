@@ -369,6 +369,10 @@ private:
     void onMcpAppToolCall(const QString &title, const QString &toolCallId, const QString &appKey,
                           const QString &appUri, const QString &appExt, const QString &appInput);
     void onAppResource(const QString &appKey, const QString &html);
+    /// Open a fetched MCP-App template in the system browser (the org.kde.Platform
+    /// runtime has no QtWebEngine, so in-app interactive rendering is not possible;
+    /// the template is a self-contained HTML document).
+    Q_INVOKABLE void openAppInHtml(const QString &appKey);
     void onReady(const QString &sessionId);
     void onSessions(const QVariantList &sessions);
     void onProjects(const QVariantList &projects);
@@ -498,6 +502,8 @@ private:
     void persistCatalogs();
     /// Full tool catalog per discovered extension (extName -> tool names).
     QHash<QString, QStringList> m_toolCatalog;
+    /// Fetched MCP-App templates, keyed appKey ("<ext>|<uri>"), for openAppInHtml.
+    QHash<QString, QString> m_appHtml;
 
     /// Lookup by extension KEY (configKey/extensionKey), not display name.
     const ExtDef *extDef(const QString &key) const;

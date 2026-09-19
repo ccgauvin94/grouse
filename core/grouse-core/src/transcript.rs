@@ -424,6 +424,78 @@ impl TranscriptStore {
         }
     }
 
+    /// Promote a previously-plain tool call to an MCP App. The server does not
+    /// know a call is an app at `tool_call` time — it hydrates `_meta.goose.mcpApp`
+    /// onto the COMPLETING `tool_call_update` — so the core first announced a
+    /// Plain call, and the app identity arrives late.
+    ///
+    /// Clients learn via a RE-ISSUED `on_stream` ToolCall carrying `kind=McpApp`
+    /// for the same `tool_call_id` (desktop converts its chip in place; Android
+    /// re-stashes and the transcript rebuild flips the bubble role), followed by
+    /// the matching transcript Update — or Update+Append when the row is pulled
+    /// out of a collapsed toolgroup. Re-promoting is a no-op (replays re-issue
+    /// the update).
+    pub fn tool_app(&self, id: &str, uri: &str, extension: &str) {
+        let (title, detail, events) = {
+            let mut st = self.state.lock();
+            let Some(&idx) = st.tool_by_id.get(id) else { return };
+            if idx >= st.bubbles.len() {
+                return;
+            }
+            let row = match &st.bubbles[idx] {
+                Bubble::Tool(r) if r.tool_call_id == id => Some(r.clone()),
+                Bubble::ToolGroup(calls) => calls.iter().find(|c| c.tool_call_id == id).cloned(),
+                _ => None, // already an app/chart bubble, or a stale index
+            };
+            let Some(row) = row else { return };
+            let title = row.title.clone();
+            let detail = row.detail.clone();
+
+            if matches!(&st.bubbles[idx], Bubble::Tool(_)) {
+                st.bubbles[idx] = Bubble::McpApp(row);
+                (title, detail, vec![TranscriptEvent::Update { message: st.bubbles[idx].project() }])
+            } else {
+                let Bubble::ToolGroup(calls) = &st.bubbles[idx] else { unreachable!() };
+                let pos = calls.iter().position(|c| c.tool_call_id == id).unwrap();
+                let mut calls = calls.clone();
+                calls.remove(pos);
+                let events = if calls.is_empty() {
+                    st.bubbles[idx] = Bubble::McpApp(row);
+                    vec![TranscriptEvent::Update { message: st.bubbles[idx].project() }]
+                } else {
+                    st.bubbles[idx] = Bubble::ToolGroup(calls);
+                    st.bubbles.insert(idx + 1, Bubble::McpApp(row));
+                    for j in st.tool_by_id.values_mut() {
+                        if *j > idx {
+                            *j += 1;
+                        }
+                    }
+                    st.tool_by_id.insert(id.to_string(), idx + 1);
+                    vec![
+                        TranscriptEvent::Update { message: st.bubbles[idx].project() },
+                        TranscriptEvent::Append { message: st.bubbles[idx + 1].project() },
+                    ]
+                };
+                (title, detail, events)
+            }
+        };
+
+        self.listener.on_stream(StreamEvent::ToolCall {
+            title: title.clone(),
+            detail: detail.clone(),
+            tool_call_id: id.to_string(),
+            kind: ToolCallKind::McpApp {
+                app_key: format!("{extension}|{uri}"),
+                uri: uri.to_string(),
+                extension: extension.to_string(),
+                input: detail,
+            },
+        });
+        for evt in events {
+            self.listener.on_transcript(evt);
+        }
+    }
+
     /// Usage accounting (on_stream only — no transcript change).
     pub fn usage(&self, used: i64, size: i64, cost: f64, currency: &str) {
         self.listener.on_stream(StreamEvent::Usage {
@@ -758,6 +830,44 @@ mod tests {
                 ("agent".to_string(), "m1".to_string(), "done".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn tool_app_promotes_late_hydrated_calls() {
+        let (l, t_evts, s_evts) = listener();
+        let store = TranscriptStore::new(l);
+
+        // Standalone plain call promoted when the completing update carries mcpApp.
+        store.tool_call("Dashboard", "{}", "d1", ToolCallKind::Plain);
+        store.tool_app("d1", "ui://x/dashboard", "monitorext");
+        assert!(s_evts.lock().iter().any(|e| e == "toolcall:Dashboard:{}:d1:mcpapp"),
+                "re-issued stream ToolCall must carry McpApp kind: {:?}", s_evts.lock());
+        assert!(t_evts.lock().iter().any(|e| e.starts_with("update:tool:d1:")));
+        match &store.rows_for_test()[0] {
+            Bubble::McpApp(r) => assert_eq!(r.tool_call_id, "d1"),
+            other => panic!("expected McpApp bubble, got {other:?}"),
+        }
+
+        // Idempotent: replays re-issue the update; the stream must not re-announce.
+        let n = s_evts.lock().len();
+        store.tool_app("d1", "ui://x/dashboard", "monitorext");
+        assert_eq!(n, s_evts.lock().len(), "re-promote must be a no-op");
+
+        // Group extraction: a promoted call leaves the group and gets its own
+        // bubble (Append), and later status updates still find it.
+        let (l2, t2, s2) = listener();
+        let store2 = TranscriptStore::new(l2);
+        store2.tool_call("A", "x", "g1", ToolCallKind::Plain);
+        store2.tool_call("B", "y", "g2", ToolCallKind::Plain);
+        store2.tool_app("g2", "ui://b", "extb");
+        assert!(t2.lock().iter().any(|e| e.starts_with("append:tool:g2:B")));
+        match &store2.rows_for_test()[0] {
+            Bubble::ToolGroup(calls) => assert_eq!(calls.len(), 1),
+            other => panic!("group should shrink to one call, got {other:?}"),
+        }
+        s2.lock().clear(); t2.lock().clear();
+        store2.tool_update("g2", "completed", "out", false);
+        assert!(s2.lock().iter().any(|e| e.starts_with("toolupdate:g2:completed:")));
     }
 
     #[test]
