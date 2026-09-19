@@ -171,6 +171,12 @@ class SecureStore(context: Context) {
         get() = cfg.getString("projects_cache", "") ?: ""
         set(v) = cfg.edit().putString("projects_cache", v).apply()
 
+    /** Remembered extension-key -> full tool catalogue (see Wire.encodeToolCatalog),
+     *  so "does this row have >=2 sub-tools?" survives process death. Without it
+     *  every cold start re-arrowed every row, peeked or not. */
+    var toolCatalogCache: String
+        get() = cfg.getString("tool_catalog_cache", "") ?: ""
+        set(v) = cfg.edit().putString("tool_catalog_cache", v).apply()
     /** Last known cwd PER session id, merged from every session/list and every open. The resume
      *  path MUST hand session/load the session's REAL cwd — a wrong value silently REWRITES the
      *  session's working_dir server-side. The old global last_session_cwd fallback ("wrong here

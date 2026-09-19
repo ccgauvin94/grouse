@@ -5,9 +5,13 @@ package id.gauvin.grouse
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.jsonPrimitive
+
 import uniffi.grouse_core.ConfigOption as CoreConfigOption
 import uniffi.grouse_core.ProjectSummary
 import uniffi.grouse_core.SessionSummary
@@ -18,6 +22,25 @@ import uniffi.grouse_core.SessionSummary
  * pure, JVM-testable, and not buried in the god file. Same package, so the
  * in-class callers in `ConnectionManager` resolve these unqualified.
  */
+
+/** (De)serialise the remembered extension-key -> full-catalogue map (the same
+ *  thing toolCatalog holds in memory, and the desktop persists per session).
+ *  An EMPTY list is real knowledge — "this extension has no namespaced
+ *  sub-tools" — so it round-trips too; that is what keeps a bare-named
+ *  builtin's arrow from resurrecting on the next launch. */
+internal fun parseToolCatalogCache(json: String): Map<String, List<String>> {
+    if (json.isBlank()) return emptyMap()
+    val o = try { Json.parseToJsonElement(json) as? JsonObject } catch (e: Exception) { null } ?: return emptyMap()
+    return o.mapNotNull { (k, v) ->
+        val arr = v as? JsonArray ?: return@mapNotNull null
+        k to arr.mapNotNull { it.jsonPrimitive.contentOrNull }
+    }.toMap()
+}
+
+internal fun encodeToolCatalog(catalogs: Map<String, List<String>>): String =
+    buildJsonObject {
+        catalogs.forEach { (k, v) -> put(k, JsonArray(v.map { JsonPrimitive(it) })) }
+    }.toString()
 
 /** The four selectable config ids the app drives via `setConfigOption`. */
 internal val CONFIG_IDS = listOf("provider", "model", "mode", "thinking_effort")

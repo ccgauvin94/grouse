@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QHash>
+#include <QSet>
 #include <QJsonObject>
 #include <QSettings>
 #include <QVariant>
@@ -376,7 +377,12 @@ private:
     void onConfig(const QVariantList &config);
     void onTools(const QVariantList &tools);
     void onExtensions(const QVariantList &extensions);
-    void onSessionExtensions(const QStringList &names);
+    /// restricted = attached keys carrying a session-scoped available_tools
+    /// allowlist (their active tool set is NOT the full catalogue).
+    void onSessionExtensions(const QStringList &names, const QSet<QString> &restricted = {});
+    /// Merge a cached catalogue for this session's extensions into m_toolCatalog
+    /// (keys already known this run win — the file is best-effort memory).
+    void loadToolCache(const QString &sessionId);
     void onPermission(const QString &toolCallId, const QString &title,
                       const QString &detail, const QVariantList &options);
     void onError(const QString &text, bool background);
@@ -475,6 +481,11 @@ private:
     /// Extensions enabled in the CURRENT session (KEYS — extensionKey/configKey, not
     /// display names: "Extension Manager" is keyed "extensionmanager").
     QStringList m_sessionExts;
+    /// Keys of the attached rows that carry a session-scoped available_tools
+    /// ALLOWLIST. An attached row WITHOUT one runs its extension unfiltered, so
+    /// the session's active namespaced tools ARE its full catalogue — the
+    /// expander gate can then answer ">=2?" without a peek at all.
+    QSet<QString> m_sessionRestricted;
     /// Full tool catalog per discovered extension (extName -> tool names).
     QHash<QString, QStringList> m_toolCatalog;
 

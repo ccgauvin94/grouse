@@ -77,36 +77,52 @@ void TstManager::sessionExtensionsParseWrappedServerShape()
     // Current goose session/extensions/list WRAPS each entry:
     // {"extension": {...}, "extensionKey": "..."}. The display name can differ
     // from the key ("Extension Manager" is keyed extensionmanager) — the panel
-    // must key groups by extensionKey (enabled + the remove round-trip) while
-    // still showing the display name.
+    // keys groups by extensionKey (enabled + the remove round-trip) while still
+    // showing the display name.
+    //
+    // The expander rule under test: arrow iff >=2 sub-tools KNOWN — and the list
+    // is known WITHOUT a peek when the row is attached with no session allowlist
+    // (its active namespaced tools ARE the whole catalogue) or when cached.
+    // Unknown rows (detached, never peeked) stay peekable.
     Manager mgr;
-    // coreOn* are plain public methods (the bridge calls them directly), so no
-    // meta-object indirection needed here.
-    mgr.coreOnExtensions(QStringLiteral(
-        "[{\"extension\":{\"type\":\"platform\",\"name\":\"Extension Manager\"},"
-        "\"enabled\":true,\"configKey\":\"extensionmanager\"},"
-        "{\"extension\":{\"type\":\"mcp\",\"server\":{\"name\":\"fetch\"}},"
-        "\"enabled\":false,\"configKey\":\"fetch\"}]"));
-    mgr.coreOnSessionExtensions(QStringLiteral("s1"), QStringLiteral(
-        "[{\"extension\":{\"type\":\"platform\",\"name\":\"Extension Manager\"},"
-        "\"extensionKey\":\"extensionmanager\"}]"));
+    // coreOn* are plain public methods (the bridge calls them directly).
+    mgr.coreOnExtensions(QStringLiteral(R"JSON([
+        {"extension":{"type":"platform","name":"Extension Manager"},"enabled":true,"configKey":"extensionmanager"},
+        {"extension":{"type":"platform","name":"chatrecall"},"enabled":true,"configKey":"chatrecall"},
+        {"extension":{"type":"mcp","server":{"name":"fetch"}},"enabled":false,"configKey":"fetch"}
+    ])JSON"));
+    mgr.coreOnSessionExtensions(QStringLiteral("s1"), QStringLiteral(R"JSON([
+        {"extension":{"type":"platform","name":"Extension Manager"},"extensionKey":"extensionmanager"},
+        {"extension":{"type":"platform","name":"chatrecall"},"extensionKey":"chatrecall"}
+    ])JSON"));
+    mgr.coreOnTools(QStringLiteral("s1"), QStringLiteral(R"JSON([
+        "extensionmanager__a","extensionmanager__b","chatrecall__chatrecall"
+    ])JSON"));
+
     const QVariantList groups = mgr.toolGroups().toList();
-    QCOMPARE(groups.size(), 2);
-    const QVariantMap g = groups.first().toMap();
-    QCOMPARE(g.value("key").toString(), QStringLiteral("extensionmanager"));
-    QCOMPARE(g.value("name").toString(), QStringLiteral("Extension Manager"));
-    QVERIFY(g.value("enabled").toBool());
-    // The expander follows SUB-TOOL knowledge, not attachment: a row whose
-    // catalogue is still unknown is peekable (expandable), and peeking a
-    // detached row attaches it for one round-trip and detaches it again
-    // (see Manager::discoverToolGroup / onSessionExtensions).
-    QVERIFY(g.value("expandable").toBool());
-    // A DETACHED row with an unknown catalogue still gets the peek arrow —
-    // browsing lists must not require attaching the extension first.
-    const QVariantMap f = groups.at(1).toMap();
-    QCOMPARE(f.value("key").toString(), QStringLiteral("fetch"));
-    QVERIFY(!f.value("enabled").toBool());
-    QVERIFY(f.value("expandable").toBool());
+    auto byKey = [&groups](const QString &k) {
+        for (const auto &v : groups)
+            if (v.toMap().value("key").toString() == k)
+                return v.toMap();
+        return QVariantMap{};
+    };
+
+    const QVariantMap em = byKey(QStringLiteral("extensionmanager"));
+    QCOMPARE(em.value("name").toString(), QStringLiteral("Extension Manager"));
+    QVERIFY(em.value("enabled").toBool());
+    QVERIFY(em.value("known").toBool());        // derived from active tools
+    QVERIFY(em.value("expandable").toBool());   // 2 known sub-tools
+
+    const QVariantMap cr = byKey(QStringLiteral("chatrecall"));
+    QVERIFY(cr.value("known").toBool());
+    QVERIFY(!cr.value("expandable").toBool());  // ONE tool: no arrow, no peek
+
+    const QVariantMap fe = byKey(QStringLiteral("fetch"));
+    QVERIFY(!fe.value("enabled").toBool());
+    QVERIFY(!fe.value("known").toBool());
+    QVERIFY(fe.value("expandable").toBool());   // unknown: the peek arrow
+
+    QVERIFY(byKey(QStringLiteral("nothere")).isEmpty());
 }
 
 void TstManager::invokableSurfaceRunsWithoutCrash()

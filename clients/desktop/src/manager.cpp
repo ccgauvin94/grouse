@@ -346,7 +346,8 @@ void Manager::openRoamSession(const QString &label, const QString &sessionId, co
     m_tools.clear();
     m_extDefs.clear();
     m_sessionExts.clear();
-    m_toolCatalog.clear();
+    m_sessionRestricted.clear();
+    loadToolCache(sessionId);   // best-effort memory of last run's catalogues
     publishToolGroups();
     emit currentSessionChanged();
     emit toolsChanged();
@@ -371,7 +372,7 @@ void Manager::newRoamSession(const QString &label)
     m_tools.clear();
     m_extDefs.clear();
     m_sessionExts.clear();
-    m_toolCatalog.clear();
+    m_sessionRestricted.clear();
     publishToolGroups();
     m_messageModel->clear();
     m_currentIndex = -1;
@@ -397,7 +398,7 @@ void Manager::newRoamSessionIn(const QString &label, const QString &cwd)
     m_tools.clear();
     m_extDefs.clear();
     m_sessionExts.clear();
-    m_toolCatalog.clear();
+    m_sessionRestricted.clear();
     publishToolGroups();
     m_messageModel->clear();
     m_currentIndex = -1;
@@ -512,7 +513,8 @@ void Manager::openSession(const QString &sessionId)
     m_tools.clear();
     m_extDefs.clear();
     m_sessionExts.clear();
-    m_toolCatalog.clear();
+    m_sessionRestricted.clear();
+    loadToolCache(sessionId);
     publishToolGroups();
     m_messageModel->clear();
     m_currentIndex = -1;
@@ -540,7 +542,7 @@ void Manager::newChat()
     m_tools.clear();
     m_extDefs.clear();
     m_sessionExts.clear();
-    m_toolCatalog.clear();
+    m_sessionRestricted.clear();
     m_messageModel->clear();
     m_currentIndex = -1;
     publishToolGroups();
@@ -1162,11 +1164,18 @@ void Manager::setSessionExtensionEnabled(const QString &extName, bool enabled)
     if (enabled) {
         if (!m_sessionExts.contains(extName))
             m_sessionExts << extName;
+        // The optimistic attach carries whatever allowlist the global profile
+        // has, so the restriction set must match until the server re-lists.
+        if (d->raw.value(QStringLiteral("available_tools")).toArray().isEmpty())
+            m_sessionRestricted.remove(extName);
+        else
+            m_sessionRestricted.insert(extName);
         m_bridge->api().grouse_unstable_session_extensions_add(
             m_bridge->handle(), sid.constData(),
             QJsonDocument(d->raw).toJson(QJsonDocument::Compact).constData());
     } else {
         m_sessionExts.removeAll(extName);
+        m_sessionRestricted.remove(extName);
         m_bridge->api().grouse_unstable_session_extensions_remove(
             m_bridge->handle(), sid.constData(), d->key.toUtf8().constData());
     }
@@ -1193,6 +1202,7 @@ void Manager::setSessionToolEnabled(const QString &extName, const QString &toolN
             m_bridge->handle(), sid.constData(),
             QJsonDocument(scoped).toJson(QJsonDocument::Compact).constData());
         m_sessionExts << extName;
+        m_sessionRestricted.insert(extName);   // restricted to that one tool
         publishToolGroups();
         saveToolCache(m_currentSessionId);
         return;
@@ -1304,6 +1314,10 @@ void Manager::setSessionTools(const QString &extName, const QStringList &allowed
     for (const auto &t : list)
         arr.append(t.startsWith(strip) ? t.mid(strip.length()) : t);
     scoped.insert("available_tools", arr);
+    if (arr.isEmpty())
+        m_sessionRestricted.remove(extName);   // empty allowlist = unfiltered
+    else
+        m_sessionRestricted.insert(extName);
     m_discoveringExt.clear();
     const QByteArray sid = m_currentSessionId.toUtf8();
     m_bridge->api().grouse_unstable_session_extensions_remove(
@@ -1316,6 +1330,32 @@ void Manager::setSessionTools(const QString &extName, const QStringList &allowed
 void Manager::publishToolGroups()
 {
     emit toolGroupsChanged();
+}
+
+void Manager::loadToolCache(const QString &sessionId)
+{
+    // The catalogue is extension knowledge, not session state: reading it back
+    // is what lets "does this row have >=2 sub-tools?" survive a restart
+    // instead of re-arrowing every row on first open. Only keys not already
+    // learned this run are merged (live truth wins over memory).
+    if (sessionId.isEmpty())
+        return;
+    QString safe = sessionId;
+    safe.replace(QLatin1Char('/'), QLatin1Char('_'));
+    const QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    QFile f(base + QStringLiteral("/") + safe + QStringLiteral("-tools.json"));
+    if (!f.open(QIODevice::ReadOnly))
+        return;
+    const QJsonObject catalogs = QJsonDocument::fromJson(f.readAll()).object()
+                                   .value(QStringLiteral("catalog")).toObject();
+    for (auto it = catalogs.constBegin(); it != catalogs.constEnd(); ++it) {
+        if (m_toolCatalog.contains(it.key()))
+            continue;
+        QStringList tools;
+        for (const auto &v : it.value().toArray())
+            tools << v.toString();
+        m_toolCatalog.insert(it.key(), tools);   // an empty list is real knowledge too
+    }
 }
 
 void Manager::saveToolCache(const QString &sessionId) const
@@ -1826,6 +1866,7 @@ void Manager::coreOnSessionExtensions(const QString &sid, const QString &json)
     if (!m_currentSessionId.isEmpty() && sid != m_currentSessionId)
         return;
     QStringList names;
+    QSet<QString> restricted;
     for (const auto &el : parseArr(json)) {
         if (el.isObject()) {
             // Current goose WRAPS each entry: {"extension": {...}, "extensionKey": "..."}.
@@ -1842,15 +1883,21 @@ void Manager::coreOnSessionExtensions(const QString &sid, const QString &json)
                 key = inner.value("name").toString();
             if (key.isEmpty())
                 key = inner.value("server").toMap().value("name").toString();
-            if (!key.isEmpty())
+            if (!key.isEmpty()) {
                 names << key;
+                // A non-empty session allowlist means the ACTIVE prefix is not the
+                // whole list. Without one an attached extension runs unfiltered,
+                // so its active tools ARE the catalogue (see toolGroups).
+                if (!inner.value("available_tools").toList().isEmpty())
+                    restricted.insert(key);
+            }
         } else {
             const QString s = el.toString();
             if (!s.isEmpty())
                 names << s;
         }
     }
-    onSessionExtensions(names);
+    onSessionExtensions(names, restricted);
 }
 
 void Manager::coreOnConfigValue(const QString &key, const QString &value)
@@ -2250,9 +2297,10 @@ void Manager::onExtensions(const QVariantList &extensions)
     emit toolsChanged();
 }
 
-void Manager::onSessionExtensions(const QStringList &names)
+void Manager::onSessionExtensions(const QStringList &names, const QSet<QString> &restricted)
 {
     m_sessionExts = names;
+    m_sessionRestricted = restricted;
     // Deferred peek commit (see onTools): the re-list that always follows a
     // session/extensions/add decides whether the peeked row really attached.
     if (!m_discoveringExt.isEmpty()) {
@@ -2271,6 +2319,7 @@ void Manager::onSessionExtensions(const QStringList &names)
                 // It was detached before the peek — detach it again; its tool
                 // list is now known without having paid the context cost.
                 m_sessionExts.removeAll(target);
+                m_sessionRestricted.remove(target);
                 if (m_bridge && m_bridge->isAvailable()) {
                     const QByteArray sid = m_currentSessionId.toUtf8();
                     m_bridge->api().grouse_unstable_session_extensions_remove(
@@ -2435,24 +2484,35 @@ QVariant Manager::toolGroups() const
         group["key"] = key;
         const bool attrib = d && d->attrib;
         group["attrib"] = attrib;
-        group["enabled"] = enabled.contains(key);
-        const bool known = m_toolCatalog.contains(key);
-        group["known"] = known;
-        // The expander is about SUB-TOOLS, not attachment: any row whose
-        // catalogue is still unknown gets the arrow (clicking peeks the list
-        // without keeping the extension attached), and a known row keeps it
-        // only when it has >=2 sub-tools — one-tool and bare-named rows have
-        // nothing worth expanding.
-        group["expandable"] = known ? (m_toolCatalog.value(key).size() >= 2)
-                                    : true;
-        QVariantList tools;
+        const bool attached = enabled.contains(key);
+        group["enabled"] = attached;
         const QString prefix = key + QStringLiteral("__");
-        QStringList pool = m_toolCatalog.value(key);
+        QVariantList tools;
+        const bool cached = m_toolCatalog.contains(key);
+        QStringList pool = cached ? m_toolCatalog.value(key) : QStringList();
         if (pool.isEmpty()) {
             for (const auto &t : m_tools)
                 if (t.startsWith(prefix))
                     pool << t;
         }
+        // Is the sub-tool LIST fully known without a peek? Either yes (cached
+        // from a discovery this run — the catalog is kept across chats) or by
+        // derivation: an attached row with NO session allowlist runs
+        // unfiltered, so its active namespaced tools are the whole list. A
+        // zero-active derivation is only trusted for non-mcp rows — an mcp
+        // that has not finished starting also lists zero, and demoting it to
+        // "no sub-tools" would hide a real arrow.
+        const bool derivedComplete =
+            attached && !m_sessionRestricted.contains(key);
+        const bool derivedZeroUntrusted =
+            pool.isEmpty() && d && d->type == QLatin1String("mcp");
+        const bool known = cached || (derivedComplete && !derivedZeroUntrusted);
+        group["known"] = known;
+        // The expander is about SUB-TOOLS, not attachment: unknown rows get the
+        // arrow as a PEEK (list without keeping it attached); known rows keep it
+        // only at >=2 sub-tools — one-tool and bare-named rows have nothing to
+        // expand.
+        group["expandable"] = known ? (pool.size() >= 2) : true;
         for (const auto &t : pool) {
             tools << QVariantMap{{"name", t.mid(prefix.length())},
                                  {"on", active.contains(t)}};

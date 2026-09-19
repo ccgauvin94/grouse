@@ -259,6 +259,18 @@ class WireParserTest {
     }
 
     @Test
+    fun `tool catalogue cache round-trips and keeps empty lists as knowledge`() {
+        val maps = mapOf(
+            "nextcloud" to listOf("nextcloud__list", "nextcloud__get"),
+            "developer" to emptyList(),   // "known: no namespaced sub-tools"
+            "peer:Phaethon:kagi" to listOf("kagi__search"),
+        )
+        assertEquals(maps, parseToolCatalogCache(encodeToolCatalog(maps)))
+        assertEquals(emptyMap<String, List<String>>(), parseToolCatalogCache(""))
+        assertEquals(emptyMap<String, List<String>>(), parseToolCatalogCache("::"))
+    }
+
+    @Test
     fun `malformed extension payloads yield an empty list, never a throw`() {
         assertEquals(emptyList<ExtInfo>(), parseGlobalExtensions("::"))
         assertEquals(emptyList<ExtInfo>(), parseGlobalExtensions("[]"))

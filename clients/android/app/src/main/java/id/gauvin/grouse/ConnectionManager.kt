@@ -443,8 +443,9 @@ class ConnectionManager private constructor(context: Context) {
     val sessionTools = mutableStateOf<Map<String, List<String>>>(emptyMap())
     // Full tool catalogue per extension, i.e. what you'd get with no allowlist. Not obtainable
     // directly -- goose has no per-extension tools endpoint -- so it is discovered on demand by
-    // discoverTools() and cached here for the process lifetime. Absent = not discovered yet.
-    val toolCatalog = mutableStateOf<Map<String, List<String>>>(emptyMap())
+    // discoverTools() and cached here; the cache is persisted (toolCatalogCache) so a cold start
+    // does not re-arrow every row as if nothing were ever peeked. Absent = not discovered yet.
+    val toolCatalog = mutableStateOf(parseToolCatalogCache(store.toolCatalogCache))
     // Extension whose full catalogue is being discovered; its tools/list reply is the catalogue,
     // not the live set, so the Tools handler must not treat it as sessionTools.
     private var discovering: ExtInfo? = null
@@ -491,15 +492,23 @@ class ConnectionManager private constructor(context: Context) {
         names.filter { it.contains("__") }
             .groupBy({ it.substringBefore("__") }, { it.substringAfter("__") })
 
-    /** Whether the expander arrow shows. About SUB-TOOLS, not attachment: a row whose
-     *  catalogue is still UNKNOWN gets the arrow as a peek affordance (discoverTools
-     *  attaches the extension for one list round-trip and detaches it again, so reading
-     *  the list costs the session no context), and a KNOWN row keeps the arrow only with
-     *  >=2 sub-tools — one-tool and bare-named builtins (developer's shell/edit, summon's
-     *  delegate, skills' load_skill) have nothing worth expanding. */
+    /** Whether the expander arrow shows. About SUB-TOOLS, not attachment, and answered
+     *  WITHOUT a peek whenever the list is already known — cached (this run or a past
+     *  process) or DERIVED: an attached row with no session-scoped available_tools runs
+     *  unfiltered, so its active namespaced tools ARE the whole list (chatrecall's 1
+     *  tool, fetch's 1 tool: never arrowed, no peek paid). Unknown rows get the arrow as
+     *  a peek affordance (discoverTools attaches for one round-trip, detaches after);
+     *  a zero-active mcp stays unknown — an MCP that has not finished starting also
+     *  lists nothing, and hiding its arrow would be a lie about a real list. */
     fun toolsAttributable(e: ExtInfo): Boolean {
-        val catalog = catalogOf(e) ?: return true
-        return catalog.size >= 2 || sessionTools.value[e.configKey].orEmpty().size >= 2
+        catalogOf(e)?.let { return it.size >= 2 }
+        if (e.configKey !in sessionExtensionNames.value) return true
+        val restricted = (sessionExtensionInfos.value.firstOrNull { it.configKey == e.configKey }
+            ?.raw?.get("available_tools") as? JsonArray)?.isNotEmpty() == true
+        if (restricted) return true
+        val active = sessionTools.value[e.configKey].orEmpty()
+        if (active.isEmpty() && e.type == "mcp") return true
+        return active.size >= 2
     }
 
     /** Whether the full tool CATALOGUE is observable right now. It only is from inside a live
@@ -2126,6 +2135,7 @@ class ConnectionManager private constructor(context: Context) {
             val attachedNow = peeked.configKey in sessionExtensionNames.value
             if (attachedNow) {
                 toolCatalog.value = toolCatalog.value + (catKey(peeked) to full)
+                store.toolCatalogCache = encodeToolCatalog(toolCatalog.value)
                 if (wasAttached) {
                     // Restore the session's real restriction for the peeked row.
                     val allowed = (peeked.raw["available_tools"] as? JsonArray)
