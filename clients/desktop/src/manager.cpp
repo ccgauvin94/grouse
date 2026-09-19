@@ -1113,9 +1113,17 @@ void Manager::refreshToolGroups()
 {
     if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_ready(m_bridge->handle()))
         return;
-    const QByteArray sid = m_currentSessionId.toUtf8();
+    // The row catalog is the GLOBAL extension list; the switches are the CURRENT
+    // session's attached set; the tool checkboxes are the session's active tools.
+    // All three, every time — the switches used to refresh only as a side effect
+    // of an add's re-list, so opening a chat showed everything OFF until the user
+    // toggled one thing (which "fixed" the rest).
     m_bridge->api().grouse_unstable_list_global_extensions(m_bridge->handle());
+    const QByteArray sid = m_currentSessionId.toUtf8();
+    if (sid.isEmpty())
+        return;   // no session open: nothing session-scoped to pull
     m_bridge->api().grouse_unstable_list_tools(m_bridge->handle(), sid.constData());
+    m_bridge->api().grouse_unstable_session_extensions_list(m_bridge->handle(), sid.constData());
 }
 
 void Manager::discoverToolGroup(const QString &extName)
@@ -1387,6 +1395,9 @@ void Manager::coreOnStatus(const QString &json)
         refreshProjects();
         refreshRecipes();
         refreshProviders();
+        // Tool state must land WITH the session, not on the next toggle: global
+        // extension catalog + this session's active tools + attached extensions.
+        refreshToolGroups();
         if (!m_pendingProjectFiling.isEmpty()) {
             const QString proj = m_pendingProjectFiling;
             m_pendingProjectFiling.clear();
@@ -1784,7 +1795,10 @@ void Manager::coreOnExtensions(const QString &json)
 
 void Manager::coreOnSessionExtensions(const QString &sid, const QString &json)
 {
-    Q_UNUSED(sid);
+    // Stale replies from a session the user already left must not clobber the
+    // current sheet's switch state (Android's onSessionExtensions guards the same).
+    if (!m_currentSessionId.isEmpty() && sid != m_currentSessionId)
+        return;
     QStringList names;
     for (const auto &el : parseArr(json)) {
         if (el.isObject()) {

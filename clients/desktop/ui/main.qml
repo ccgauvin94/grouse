@@ -839,8 +839,12 @@ Controls.ApplicationWindow {
                     // built from the key prefix regardless of extension type), or a
                     // still-undiscovered mcp catalogue that could reveal more. Bare-named
                     // builtins (developer's shell/edit, summon's delegate) match neither.
+                    // AND the extension is attached to this chat — an unattached row has
+                    // nothing to expand, and discovering one would attach it as a side
+                    // effect (Android gates its arrow the same way: ToolList renders only
+                    // when the switch is on).
                     readonly property bool gHasTools: modelData.tools.length > 0
-                    readonly property bool gExpandable: gHasTools || (gAttrib && !gKnown)
+                    readonly property bool gExpandable: gEnabled && (gHasTools || (gAttrib && !gKnown))
 
                     RowLayout {
                         width: parent.width
