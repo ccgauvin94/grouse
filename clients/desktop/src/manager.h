@@ -453,6 +453,12 @@ private:
     int m_seq = 0;
     /// Name of the extension whose full tool catalog is currently being discovered.
     QString m_discoveringExt;
+    /// Catalog captured during a tool-group peek; committed only once the
+    /// session-extensions re-list proves the transient add actually attached
+    /// (a failed-to-start extension lists zero tools just like a bare-named
+    /// one does — the difference is whether it is in the session).
+    QStringList m_discoveringFull;
+    bool m_discoveringAttached = false;
 
     /// One configured extension's profile, as goose listed it (raw is the add-accept input).
     struct ExtDef {

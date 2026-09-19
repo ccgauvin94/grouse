@@ -84,16 +84,29 @@ void TstManager::sessionExtensionsParseWrappedServerShape()
     // meta-object indirection needed here.
     mgr.coreOnExtensions(QStringLiteral(
         "[{\"extension\":{\"type\":\"platform\",\"name\":\"Extension Manager\"},"
-        "\"enabled\":true,\"configKey\":\"extensionmanager\"}]"));
+        "\"enabled\":true,\"configKey\":\"extensionmanager\"},"
+        "{\"extension\":{\"type\":\"mcp\",\"server\":{\"name\":\"fetch\"}},"
+        "\"enabled\":false,\"configKey\":\"fetch\"}]"));
     mgr.coreOnSessionExtensions(QStringLiteral("s1"), QStringLiteral(
         "[{\"extension\":{\"type\":\"platform\",\"name\":\"Extension Manager\"},"
         "\"extensionKey\":\"extensionmanager\"}]"));
     const QVariantList groups = mgr.toolGroups().toList();
-    QCOMPARE(groups.size(), 1);
+    QCOMPARE(groups.size(), 2);
     const QVariantMap g = groups.first().toMap();
     QCOMPARE(g.value("key").toString(), QStringLiteral("extensionmanager"));
     QCOMPARE(g.value("name").toString(), QStringLiteral("Extension Manager"));
     QVERIFY(g.value("enabled").toBool());
+    // The expander follows SUB-TOOL knowledge, not attachment: a row whose
+    // catalogue is still unknown is peekable (expandable), and peeking a
+    // detached row attaches it for one round-trip and detaches it again
+    // (see Manager::discoverToolGroup / onSessionExtensions).
+    QVERIFY(g.value("expandable").toBool());
+    // A DETACHED row with an unknown catalogue still gets the peek arrow —
+    // browsing lists must not require attaching the extension first.
+    const QVariantMap f = groups.at(1).toMap();
+    QCOMPARE(f.value("key").toString(), QStringLiteral("fetch"));
+    QVERIFY(!f.value("enabled").toBool());
+    QVERIFY(f.value("expandable").toBool());
 }
 
 void TstManager::invokableSurfaceRunsWithoutCrash()

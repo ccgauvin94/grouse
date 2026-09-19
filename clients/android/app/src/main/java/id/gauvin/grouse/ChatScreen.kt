@@ -896,7 +896,12 @@ private fun ToolManagementBody(cm: ConnectionManager, title: String = "Tools for
                     onCheckedChange = { on -> cm.toggleSessionExtension(e, on) },
                 )
             }
-            if (isOn) ToolList(cm, e, cm.sessionTools.value[e.configKey].orEmpty().toSet()) {
+            // The expander is about SUB-TOOLS, not attachment: ToolList renders
+            // for detached rows too (its own gate, toolsAttributable, hides rows
+            // known to have <2 tools). Expanding a detached row peeks its list
+            // without keeping it in the session; ticking one tool attaches the
+            // extension restricted to that tool.
+            ToolList(cm, e, cm.sessionTools.value[e.configKey].orEmpty().toSet()) {
                 cm.setSessionTools(e, it)          // this chat only
             }
             HorizontalDivider()

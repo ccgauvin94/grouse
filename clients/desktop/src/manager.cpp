@@ -1129,17 +1129,26 @@ void Manager::refreshToolGroups()
 void Manager::discoverToolGroup(const QString &extName)
 {
     const ExtDef *d = extDef(extName);
-    if (!d || m_toolCatalog.contains(extName) || !m_bridge || !m_bridge->isAvailable())
+    if (!d || m_toolCatalog.contains(extName) || !m_bridge || !m_bridge->isAvailable()
+        || m_currentSessionId.isEmpty())   // a peek without an open session can never be confirmed
         return;
     QJsonObject unfiltered = d->raw;
     unfiltered.insert("available_tools", QJsonArray());
     m_discoveringExt = extName;
+    // Peek works for DETACHED rows too (that's the point: read the tool list
+    // without paying its context cost). goose only enumerates tools of a
+    // RUNNING extension, so the peek attaches it for one list round-trip —
+    // and detaches it again unless it was already in the session. A leading
+    // remove is only sent for an attached row (remove of a never-attached one
+    // is a server-side "not found" error).
+    m_discoveringAttached = m_sessionExts.contains(extName);
     const QByteArray sid = m_currentSessionId.toUtf8();
     const QByteArray ext = QJsonDocument(unfiltered).toJson(QJsonDocument::Compact);
-    m_bridge->api().grouse_unstable_session_extensions_remove(m_bridge->handle(), sid.constData(),
-                                                              d->key.toUtf8().constData());
+    if (m_discoveringAttached)
+        m_bridge->api().grouse_unstable_session_extensions_remove(m_bridge->handle(), sid.constData(),
+                                                                  d->key.toUtf8().constData());
     m_bridge->api().grouse_unstable_session_extensions_add(m_bridge->handle(), sid.constData(),
-                                                          ext.constData());
+                                                           ext.constData());
 }
 
 void Manager::setSessionExtensionEnabled(const QString &extName, bool enabled)
@@ -1171,6 +1180,23 @@ void Manager::setSessionToolEnabled(const QString &extName, const QString &toolN
     if (!d)
         return;
     const QString prefix = d->key + QStringLiteral("__");
+    if (!m_sessionExts.contains(extName)) {
+        // Ticking a tool on a DETACHED row attaches the extension restricted
+        // to exactly that tool — the whole point of letting you browse lists
+        // without attaching: you enable one tool, not all of them.
+        if (!on || !m_bridge || !m_bridge->isAvailable())
+            return;
+        QJsonObject scoped = d->raw;
+        scoped.insert("available_tools", QJsonArray{toolName});   // BARE name
+        const QByteArray sid = m_currentSessionId.toUtf8();
+        m_bridge->api().grouse_unstable_session_extensions_add(
+            m_bridge->handle(), sid.constData(),
+            QJsonDocument(scoped).toJson(QJsonDocument::Compact).constData());
+        m_sessionExts << extName;
+        publishToolGroups();
+        saveToolCache(m_currentSessionId);
+        return;
+    }
     QSet<QString> current;
     for (const auto &t : m_tools)
         if (t.startsWith(prefix))
@@ -2153,19 +2179,16 @@ void Manager::onTools(const QVariantList &tools)
         names << v.toString();
     m_tools = names;
     if (!m_discoveringExt.isEmpty()) {
+        // Stash only. The catalog commit + the restore/detach happen when the
+        // session-extensions re-list (which the core always sends after the
+        // peek's add, and always second) confirms whether the peeked extension
+        // is REALLY attached — a transient add that failed to start the
+        // extension lists nothing, indistinguishable from a genuinely
+        // tool-less/bare-named one except by the attach state.
         const QString prefix = m_discoveringExt + QStringLiteral("__");
-        QStringList full;
         for (const auto &n : std::as_const(names))
             if (n.startsWith(prefix))
-                full << n;
-        m_toolCatalog[m_discoveringExt] = full;
-        const QString target = m_discoveringExt;
-        m_discoveringExt.clear();
-        const ExtDef *e = extDef(target);
-        if (e) {
-            const QStringList allowed = e->availableTools;
-            setSessionTools(target, allowed.isEmpty() ? full : allowed);
-        }
+                m_discoveringFull << n;
     } else {
         publishToolGroups();
     }
@@ -2230,6 +2253,47 @@ void Manager::onExtensions(const QVariantList &extensions)
 void Manager::onSessionExtensions(const QStringList &names)
 {
     m_sessionExts = names;
+    // Deferred peek commit (see onTools): the re-list that always follows a
+    // session/extensions/add decides whether the peeked row really attached.
+    if (!m_discoveringExt.isEmpty()) {
+        const QString target = m_discoveringExt;
+        const bool attachedNow = names.contains(target);
+        const bool wasAttached = m_discoveringAttached;
+        m_discoveringExt.clear();
+        if (attachedNow) {
+            m_toolCatalog[target] = m_discoveringFull;
+            if (wasAttached) {
+                // Put the session's real restriction back (empty allowlist = all).
+                const ExtDef *d = extDef(target);
+                const QStringList allowed = d ? d->availableTools : QStringList();
+                setSessionTools(target, allowed.isEmpty() ? m_discoveringFull : allowed);
+            } else {
+                // It was detached before the peek — detach it again; its tool
+                // list is now known without having paid the context cost.
+                m_sessionExts.removeAll(target);
+                if (m_bridge && m_bridge->isAvailable()) {
+                    const QByteArray sid = m_currentSessionId.toUtf8();
+                    m_bridge->api().grouse_unstable_session_extensions_remove(
+                        m_bridge->handle(), sid.constData(), target.toUtf8().constData());
+                    // The peek's tools reply left the unfiltered set in m_tools
+                    // and remove re-lists nothing — re-pull the truth.
+                    m_bridge->api().grouse_unstable_list_tools(m_bridge->handle(), sid.constData());
+                }
+            }
+        } else if (wasAttached) {
+            // The peek's add failed (extension won't start here) but the peek
+            // had to remove it first — repair by re-adding the real profile.
+            const ExtDef *d = extDef(target);
+            if (d && m_bridge && m_bridge->isAvailable()) {
+                const QByteArray sid = m_currentSessionId.toUtf8();
+                m_bridge->api().grouse_unstable_session_extensions_add(
+                    m_bridge->handle(), sid.constData(),
+                    QJsonDocument(d->raw).toJson(QJsonDocument::Compact).constData());
+            }
+        }
+        m_discoveringFull.clear();
+        m_discoveringAttached = false;
+    }
     publishToolGroups();
     saveToolCache(m_currentSessionId);
 }
@@ -2358,6 +2422,7 @@ QVariant Manager::toolGroups() const
                                {"attrib", groupName != QStringLiteral("Built-in")},
                                {"enabled", true},
                                {"known", true},
+                               {"expandable", grouped.value(groupName).size() >= 2},
                                {"tools", grouped.value(groupName)}};
         }
         return out;
@@ -2371,7 +2436,15 @@ QVariant Manager::toolGroups() const
         const bool attrib = d && d->attrib;
         group["attrib"] = attrib;
         group["enabled"] = enabled.contains(key);
-        group["known"] = m_toolCatalog.contains(key);
+        const bool known = m_toolCatalog.contains(key);
+        group["known"] = known;
+        // The expander is about SUB-TOOLS, not attachment: any row whose
+        // catalogue is still unknown gets the arrow (clicking peeks the list
+        // without keeping the extension attached), and a known row keeps it
+        // only when it has >=2 sub-tools — one-tool and bare-named rows have
+        // nothing worth expanding.
+        group["expandable"] = known ? (m_toolCatalog.value(key).size() >= 2)
+                                    : true;
         QVariantList tools;
         const QString prefix = key + QStringLiteral("__");
         QStringList pool = m_toolCatalog.value(key);

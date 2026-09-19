@@ -448,6 +448,12 @@ class ConnectionManager private constructor(context: Context) {
     // Extension whose full catalogue is being discovered; its tools/list reply is the catalogue,
     // not the live set, so the Tools handler must not treat it as sessionTools.
     private var discovering: ExtInfo? = null
+    // The catalogue stashed from a peek's tools reply, committed only once the
+    // session-extensions re-list (always sent after the peek's add, second) proves
+    // the transient attach took — a failed-to-start extension lists nothing, exactly
+    // like a genuinely tool-less one. Was it attached before the peek?
+    private var pendingCatalog: Pair<ExtInfo, List<String>>? = null
+    private var discoveringWasAttached = false
 
     /** toolCatalog key. The tool-name prefix goose uses IS the extension key
      *  (`extensionmanager__list_resources`), and a peer's extension can share a name with
@@ -485,19 +491,16 @@ class ConnectionManager private constructor(context: Context) {
         names.filter { it.contains("__") }
             .groupBy({ it.substringBefore("__") }, { it.substringAfter("__") })
 
-    /** Whether this extension HAS sub-tools — drives the expander arrow so it shows on
-     *  rows that actually offer per-tool control and hides on the ones that don't. The
-     *  old rule was a type guess and it was wrong both ways: platform extensions DO
-     *  namespace their tools ("chatrecall__chatrecall", "extensionmanager__manage_extensions"),
-     *  while the HTTP MCP ones (kagi) report type "streamable_http", never "mcp" — so every
-     *  real row lost its arrow while nothing gained one. Data beats type: namespaced tools
-     *  observed in this session, a non-empty discovered catalogue, or a saved global
-     *  allowlist. Bare-named builtins (developer's shell/edit, summon's delegate, skills'
-     *  load_skill) can never be attributed, so none of the three ever lights up for them. */
-    fun toolsAttributable(e: ExtInfo): Boolean =
-        sessionTools.value.containsKey(e.configKey) ||
-            (catalogOf(e)?.isNotEmpty() == true) ||
-            ((e.raw["available_tools"] as? JsonArray)?.let { it.isNotEmpty() } == true)
+    /** Whether the expander arrow shows. About SUB-TOOLS, not attachment: a row whose
+     *  catalogue is still UNKNOWN gets the arrow as a peek affordance (discoverTools
+     *  attaches the extension for one list round-trip and detaches it again, so reading
+     *  the list costs the session no context), and a KNOWN row keeps the arrow only with
+     *  >=2 sub-tools — one-tool and bare-named builtins (developer's shell/edit, summon's
+     *  delegate, skills' load_skill) have nothing worth expanding. */
+    fun toolsAttributable(e: ExtInfo): Boolean {
+        val catalog = catalogOf(e) ?: return true
+        return catalog.size >= 2 || sessionTools.value[e.configKey].orEmpty().size >= 2
+    }
 
     /** Whether the full tool CATALOGUE is observable right now. It only is from inside a live
      *  session: `discoverTools` reads it by briefly running the extension unfiltered in the
@@ -512,6 +515,7 @@ class ConnectionManager private constructor(context: Context) {
      *  so this serves both main- and peer-owned sessions. */
     fun refreshTools() {
         discovering = null
+        pendingCatalog = null
         val sid = core.activeSessionId() ?: return
         io { unstable.listTools(sid) }
     }
@@ -525,10 +529,12 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     /** Discover an extension's FULL tool set. goose only reports ALLOWED tools, so the only way to
-     *  see what an allowlist is hiding is to briefly run the extension unfiltered: re-add it
+     *  see what an allowlist is hiding is to briefly run the extension unfiltered: add it
      *  session-scoped with an empty available_tools, list, then put the real setting back. Entirely
      *  session-local -- config.yaml is untouched -- and self-healing, since the restore re-applies
-     *  whatever the session should have. */
+     *  whatever the session should have. Works on DETACHED rows too: the peek attaches for one
+     *  round-trip and detaches again (commit logic in onSessionExtensions), which is what lets
+     *  you read a tool list without paying its context cost. */
     fun discoverTools(ext: ExtInfo) {
         // Catalogue is cached for the process lifetime, but sessionTools is NOT reliably fresh:
         // MCP extensions attach asynchronously after Ready, and the two listTools polls (0s/2.5s)
@@ -541,9 +547,14 @@ class ConnectionManager private constructor(context: Context) {
         val unfiltered = JsonObject(ext.raw.toMutableMap().apply {
             put("available_tools", JsonArray(emptyList()))
         })
+        // A remove of a never-attached extension is a server-side "not found"
+        // error, so only pre-remove rows that are actually in the session.
+        // Captured locally: the io{} lambda runs on a worker thread later.
+        val wasAttached = ext.configKey in sessionExtensionNames.value
+        discoveringWasAttached = wasAttached
         discovering = ext
         io {
-            unstable.sessionExtensionsRemove(sid, ext.configKey)
+            if (wasAttached) unstable.sessionExtensionsRemove(sid, ext.configKey)
             unstable.sessionExtensionsAdd(sid, toExtensionDto(unfiltered).toString())
         }
         // the add re-lists tools + session extensions (core side) -- see onTools
@@ -561,6 +572,14 @@ class ConnectionManager private constructor(context: Context) {
             put("available_tools", JsonArray(list.map { JsonPrimitive(it) }))
         })
         discovering = null
+        if (ext.configKey !in sessionExtensionNames.value) {
+            // Ticking tools on a DETACHED row attaches the extension restricted
+            // to exactly those tools -- enable one, not all.
+            if (list.isEmpty()) return
+            io { unstable.sessionExtensionsAdd(sid, toExtensionDto(scoped).toString()) }
+            sessionExtensionNames.value = sessionExtensionNames.value + ext.configKey
+            return
+        }
         io {
             unstable.sessionExtensionsRemove(sid, ext.configKey)
             unstable.sessionExtensionsAdd(sid, toExtensionDto(scoped).toString())
@@ -2065,14 +2084,16 @@ class ConnectionManager private constructor(context: Context) {
         val g = group(parseToolNames(toolsJson))
         val target = discovering
         if (target != null) {
-            // Catalogue read: record the full set, then restore the session's real
-            // setting by round-tripping the SAME ExtInfo the discovery ran with.
-            // The group key is the tool-name prefix, which is the extension KEY.
-            toolCatalog.value = toolCatalog.value + (catKey(target) to g[target.configKey].orEmpty())
+            // Catalogue read: STASH it (the group key is the tool-name prefix,
+            // which is the extension KEY). The commit + restore/detach waits for
+            // the session-extensions re-list the core always sends second after
+            // the peek's add -- only that proves the transient attach took. A
+            // peeked extension that failed to start lists nothing, exactly like
+            // a genuinely tool-less one; committing on the tools reply alone
+            // would strand a false "known: 0 tools" and kill a recoverable
+            // row's arrow forever.
+            pendingCatalog = target to g[target.configKey].orEmpty()
             discovering = null
-            val allowed = (target.raw["available_tools"] as? JsonArray)
-                ?.mapNotNull { it.jsonPrimitive.contentOrNull }?.toSet().orEmpty()
-            setSessionTools(target, if (allowed.isEmpty()) g[target.configKey].orEmpty().toSet() else allowed)
         } else if (sessionId == core.activeSessionId() || sessionId == currentSession.value) {
             sessionTools.value = g
         }
@@ -2094,6 +2115,40 @@ class ConnectionManager private constructor(context: Context) {
         sessionExtensionInfos.value = infos
         // A re-listed name is attached again; its detached-row copy is stale.
         detachedPeerExts.value = detachedPeerExts.value.filterNot { it.configKey in sessionExtensionNames.value.toSet() }
+        // Deferred peek commit (see onTools). This re-list always follows the
+        // peek's add and proves whether the transient attach took effect.
+        val pc = pendingCatalog
+        if (pc != null) {
+            pendingCatalog = null
+            val (peeked, full) = pc
+            val wasAttached = discoveringWasAttached
+            discoveringWasAttached = false
+            val attachedNow = peeked.configKey in sessionExtensionNames.value
+            if (attachedNow) {
+                toolCatalog.value = toolCatalog.value + (catKey(peeked) to full)
+                if (wasAttached) {
+                    // Restore the session's real restriction for the peeked row.
+                    val allowed = (peeked.raw["available_tools"] as? JsonArray)
+                        ?.mapNotNull { it.jsonPrimitive.contentOrNull }?.toSet().orEmpty()
+                    setSessionTools(peeked, if (allowed.isEmpty()) full.toSet() else allowed)
+                } else {
+                    // It was detached before the peek — detach it again and
+                    // re-pull the truth; the list is now known for free.
+                    val sid = core.activeSessionId()
+                    sessionExtensionNames.value = sessionExtensionNames.value - peeked.configKey
+                    if (sid != null) io { unstable.sessionExtensionsRemove(sid, peeked.configKey) }
+                    refreshTools()
+                }
+            } else if (wasAttached) {
+                // The peek removed an ATTACHED row whose add then failed (e.g.
+                // the server could not start the extension) — repair it. The
+                // catalogue stays unknown, so the arrow survives for a retry.
+                val sid = core.activeSessionId()
+                if (sid != null) io {
+                    unstable.sessionExtensionsAdd(sid, toExtensionDto(peeked.raw).toString())
+                }
+            }
+        }
     }
 
     private fun onConfigValue(key: String, value: String) {

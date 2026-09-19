@@ -834,17 +834,12 @@ Controls.ApplicationWindow {
                     readonly property bool gAttrib: modelData.attrib
                     readonly property bool gEnabled: modelData.enabled
                     readonly property bool gKnown: modelData.known
-                    // The expander shows only on rows that really have sub-tools:
-                    // namespaced tools observed in this session (the group's tool list is
-                    // built from the key prefix regardless of extension type), or a
-                    // still-undiscovered mcp catalogue that could reveal more. Bare-named
-                    // builtins (developer's shell/edit, summon's delegate) match neither.
-                    // AND the extension is attached to this chat — an unattached row has
-                    // nothing to expand, and discovering one would attach it as a side
-                    // effect (Android gates its arrow the same way: ToolList renders only
-                    // when the switch is on).
-                    readonly property bool gHasTools: modelData.tools.length > 0
-                    readonly property bool gExpandable: gEnabled && (gHasTools || (gAttrib && !gKnown))
+                    // The expander is about SUB-TOOLS, not attachment (Manager
+                    // computes it): unknown catalogues get a peek arrow (the peek
+                    // attaches the extension for one round-trip and detaches it —
+                    // seeing the list costs no context), known ones only if they
+                    // really have >=2 tools.
+                    readonly property bool gExpandable: modelData.expandable
 
                     RowLayout {
                         width: parent.width
@@ -859,7 +854,7 @@ Controls.ApplicationWindow {
                         visible: tdel.gExpandable
                         onClicked: {
                             tdel.expanded = !tdel.expanded
-                            if (tdel.expanded && tdel.gAttrib && !tdel.gKnown)
+                            if (tdel.expanded && !tdel.gKnown)
                                 Mgr.discoverToolGroup(tdel.gKey)
                         }
                     }
@@ -876,7 +871,7 @@ Controls.ApplicationWindow {
                         }
                     Controls.Label {
                         text: tdel.gExpandable
-                              ? ((tdel.gKnown || tdel.gHasTools)
+                              ? (tdel.gKnown
                                  ? (tdel.expanded ? "" : modelData.tools.length + qsTr(" tools"))
                                  : qsTr("…"))
                               : ""
@@ -897,7 +892,10 @@ Controls.ApplicationWindow {
                                 Controls.Switch {
                                     Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
                                     checked: modelData.on
-                                    enabled: tdel.gEnabled
+                                    // Ticking a tool on a detached row ATTACHES the
+                                    // extension restricted to that tool (see
+                                    // Manager::setSessionToolEnabled) — browsing the
+                                    // list and enabling one must not require enabling all.
                                     onToggled: Mgr.setSessionToolEnabled(tdel.gKey, modelData.name, checked)
                                 }
                                 Controls.Label {
