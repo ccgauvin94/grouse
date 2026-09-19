@@ -354,6 +354,7 @@ void Manager::openRoamSession(const QString &label, const QString &sessionId, co
     m_sessionExts.clear();
     m_sessionRestricted.clear();
     m_peekQueue.clear();
+    m_peekFailed.clear();
     loadToolCache(sessionId);   // best-effort memory of last run's catalogues
     publishToolGroups();
     emit currentSessionChanged();
@@ -381,6 +382,7 @@ void Manager::newRoamSession(const QString &label)
     m_sessionExts.clear();
     m_sessionRestricted.clear();
     m_peekQueue.clear();
+    m_peekFailed.clear();
     publishToolGroups();
     m_messageModel->clear();
     m_currentIndex = -1;
@@ -408,6 +410,7 @@ void Manager::newRoamSessionIn(const QString &label, const QString &cwd)
     m_sessionExts.clear();
     m_sessionRestricted.clear();
     m_peekQueue.clear();
+    m_peekFailed.clear();
     publishToolGroups();
     m_messageModel->clear();
     m_currentIndex = -1;
@@ -524,6 +527,7 @@ void Manager::openSession(const QString &sessionId)
     m_sessionExts.clear();
     m_sessionRestricted.clear();
     m_peekQueue.clear();
+    m_peekFailed.clear();
     loadToolCache(sessionId);
     publishToolGroups();
     m_messageModel->clear();
@@ -554,6 +558,7 @@ void Manager::newChat()
     m_sessionExts.clear();
     m_sessionRestricted.clear();
     m_peekQueue.clear();
+    m_peekFailed.clear();
     m_messageModel->clear();
     m_currentIndex = -1;
     publishToolGroups();
@@ -2407,6 +2412,13 @@ void Manager::onSessionExtensions(const QStringList &names, const QSet<QString> 
                     QJsonDocument(d->raw).toJson(QJsonDocument::Compact).constData());
             }
         }
+        if (!attachedNow) {
+            // A peek that never attached means the extension would not start —
+            // stop THIS session's sweep from re-dialing a dead endpoint every
+            // pass (one failed client-init per chat was the error-bubble bug).
+            // Manual clicks bypass the memo; a fresh chat gets one retry.
+            m_peekFailed.insert(target);
+        }
         m_discoveringFull.clear();
         m_discoveringAttached = false;
         persistCatalogs();
@@ -2429,7 +2441,14 @@ void Manager::buildPeekQueue()
     if (m_currentSessionId.isEmpty() || !m_activePeerLabel.isEmpty())
         return;                              // only the local chat can host a peek
     for (const auto &d : std::as_const(m_extDefs))
-        if (!m_toolCatalog.contains(d.key) && !m_sessionExts.contains(d.key))
+        // Only rows the server actually runs: a peek is a real session attach, so a
+        // GLOBALLY DISABLED extension (kwin's dead tailnet URI, say) must never be
+        // dialed just to learn its tool count — the server's failed client-init
+        // surfaces as an error bubble in the live chat (every chat, once per
+        // unknown disabled row). Manual arrow clicks still peek anything: that is
+        // an explicit request, and its failure is the user's to see.
+        if (d.enabled && !m_toolCatalog.contains(d.key) && !m_sessionExts.contains(d.key)
+            && !m_peekFailed.contains(d.key))
             m_peekQueue << d.key;
     if (!m_peekQueue.isEmpty())
         m_peekTimer->start(1500);

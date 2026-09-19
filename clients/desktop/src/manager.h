@@ -496,6 +496,11 @@ private:
     /// extension's full list is learned essentially once ever. This is what
     /// replaces the permanent "…" with a real "# tools" on every row.
     QStringList m_peekQueue;
+    /// Rows whose peek failed within the CURRENT session (extension would not
+    /// start) — the sweep stops hammering a down server every queue pass. Reset
+    /// with the session (a later chat may find it back up); a manual arrow click
+    /// always retries.
+    QSet<QString> m_peekFailed;
     QTimer *m_peekTimer = nullptr;
     void buildPeekQueue();
     void doPeekStep();
