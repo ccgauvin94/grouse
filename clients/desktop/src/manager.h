@@ -457,6 +457,8 @@ private:
     /// One configured extension's profile, as goose listed it (raw is the add-accept input).
     struct ExtDef {
         QString name;
+        QString key;                // configKey / extensionKey — the identity for
+                                    // sessionExts, tool prefixes, catalogs, and remove
         QString type;
         bool attrib = false;          // mcp-backed => tools are namespaced and individually toggleable
         bool enabled = true;          // global config.yaml enabled state (config/extensions/list)
@@ -464,12 +466,14 @@ private:
         QJsonObject raw;              // verbatim listed extension object
     };
     QList<ExtDef> m_extDefs;
-    /// Extensions enabled in the CURRENT session (names).
+    /// Extensions enabled in the CURRENT session (KEYS — extensionKey/configKey, not
+    /// display names: "Extension Manager" is keyed "extensionmanager").
     QStringList m_sessionExts;
     /// Full tool catalog per discovered extension (extName -> tool names).
     QHash<QString, QStringList> m_toolCatalog;
 
-    const ExtDef *extDef(const QString &name) const;
+    /// Lookup by extension KEY (configKey/extensionKey), not display name.
+    const ExtDef *extDef(const QString &key) const;
     void setSessionTools(const QString &extName, const QStringList &allowed);
     void publishToolGroups();
 

@@ -449,10 +449,12 @@ class ConnectionManager private constructor(context: Context) {
     // not the live set, so the Tools handler must not treat it as sessionTools.
     private var discovering: ExtInfo? = null
 
-    /** toolCatalog key. A peer's extension can share a name with a local one while exposing a
-     *  different tool set, so peer-sourced entries are namespaced by the owning peer. */
+    /** toolCatalog key. The tool-name prefix goose uses IS the extension key
+     *  (`extensionmanager__list_resources`), and a peer's extension can share a name with
+     *  a local one while exposing a different tool set, so peer-sourced entries are
+     *  namespaced by the owning peer. */
     fun catKey(e: ExtInfo): String =
-        if (e.fromPeer) "peer:${roamPeer(currentSession.value)}:${e.name}" else e.name
+        if (e.fromPeer) "peer:${roamPeer(currentSession.value)}:${e.configKey}" else e.configKey
 
     /** Discovered full tool set for this extension, or null if not discovered yet. */
     fun catalogOf(e: ExtInfo): List<String>? = toolCatalog.value[catKey(e)]
@@ -531,7 +533,7 @@ class ConnectionManager private constructor(context: Context) {
         })
         discovering = ext
         io {
-            unstable.sessionExtensionsRemove(sid, ext.name)
+            unstable.sessionExtensionsRemove(sid, ext.configKey)
             unstable.sessionExtensionsAdd(sid, toExtensionDto(unfiltered).toString())
         }
         // the add re-lists tools + session extensions (core side) -- see onTools
@@ -550,14 +552,14 @@ class ConnectionManager private constructor(context: Context) {
         })
         discovering = null
         io {
-            unstable.sessionExtensionsRemove(sid, ext.name)
+            unstable.sessionExtensionsRemove(sid, ext.configKey)
             unstable.sessionExtensionsAdd(sid, toExtensionDto(scoped).toString())
         }
     }
 
     /** Save `allowed` as the GLOBAL default for `ext` (config.yaml; applies to new chats). */
     fun setDefaultTools(ext: ExtInfo, allowed: Set<String>) {
-        val full = toolCatalog.value[ext.name].orEmpty()
+        val full = catalogOf(ext).orEmpty()
         val list = if (allowed.size >= full.size && full.isNotEmpty()) emptyList() else allowed.toList()
         val updated = JsonObject(ext.raw.toMutableMap().apply {
             put("available_tools", JsonArray(list.map { JsonPrimitive(it) }))
@@ -569,9 +571,9 @@ class ConnectionManager private constructor(context: Context) {
     /** Enable/disable an extension globally (affects new chats); the reply refreshes the list. */
     fun toggleExtension(e: ExtInfo, enabled: Boolean) {
         extensionsBusy.value = true
-        // The core's set-enabled takes the extension NAME (its wire param is `name`, not the
-        // config.yaml key the old client sent).
-        io { unstable.setExtensionEnabled(e.name, enabled) }
+        // The core's set-enabled takes the config KEY (wire param `configKey` since the
+        // goose rename; the display name is rejected).
+        io { unstable.setExtensionEnabled(e.configKey, enabled) }
     }
 
     /** Enable/disable one extension for just THIS session (session-scoped API — never touches
@@ -582,11 +584,11 @@ class ConnectionManager private constructor(context: Context) {
         val sid = core.activeSessionId() ?: return
         if (enabled) {
             io { unstable.sessionExtensionsAdd(sid, toExtensionDto(e.raw).toString()) }
-            sessionExtensionNames.value = sessionExtensionNames.value + e.name
-            detachedPeerExts.value = detachedPeerExts.value.filterNot { it.name == e.name }
+            sessionExtensionNames.value = sessionExtensionNames.value + e.configKey
+            detachedPeerExts.value = detachedPeerExts.value.filterNot { it.configKey == e.configKey }
         } else {
-            io { unstable.sessionExtensionsRemove(sid, e.name) }
-            sessionExtensionNames.value = sessionExtensionNames.value - e.name
+            io { unstable.sessionExtensionsRemove(sid, e.configKey) }
+            sessionExtensionNames.value = sessionExtensionNames.value - e.configKey
             // Keep the peer DTO so the row survives to be re-enabled; the peer's global
             // catalog can't be listed, so a dropped row would be gone until reopen.
             if (e.fromPeer) detachedPeerExts.value = detachedPeerExts.value + e
@@ -2055,11 +2057,12 @@ class ConnectionManager private constructor(context: Context) {
         if (target != null) {
             // Catalogue read: record the full set, then restore the session's real
             // setting by round-tripping the SAME ExtInfo the discovery ran with.
-            toolCatalog.value = toolCatalog.value + (catKey(target) to g[target.name].orEmpty())
+            // The group key is the tool-name prefix, which is the extension KEY.
+            toolCatalog.value = toolCatalog.value + (catKey(target) to g[target.configKey].orEmpty())
             discovering = null
             val allowed = (target.raw["available_tools"] as? JsonArray)
                 ?.mapNotNull { it.jsonPrimitive.contentOrNull }?.toSet().orEmpty()
-            setSessionTools(target, if (allowed.isEmpty()) g[target.name].orEmpty().toSet() else allowed)
+            setSessionTools(target, if (allowed.isEmpty()) g[target.configKey].orEmpty().toSet() else allowed)
         } else if (sessionId == core.activeSessionId() || sessionId == currentSession.value) {
             sessionTools.value = g
         }
@@ -2075,10 +2078,12 @@ class ConnectionManager private constructor(context: Context) {
         // not clobber the current sheet).
         if (sessionId != currentSession.value) return
         val infos = parseSessionExtensions(json, roamPeer(currentSession.value) != null)
-        sessionExtensionNames.value = infos.map { it.name }
+        // Key space, not display names: remove is keyed by extensionKey and the tool
+        // prefix is the key, so the whole sheet matches on configKey.
+        sessionExtensionNames.value = infos.map { it.configKey }
         sessionExtensionInfos.value = infos
         // A re-listed name is attached again; its detached-row copy is stale.
-        detachedPeerExts.value = detachedPeerExts.value.filterNot { it.name in sessionExtensionNames.value.toSet() }
+        detachedPeerExts.value = detachedPeerExts.value.filterNot { it.configKey in sessionExtensionNames.value.toSet() }
     }
 
     private fun onConfigValue(key: String, value: String) {

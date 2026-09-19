@@ -28,6 +28,7 @@ private slots:
     void invokableSurfaceRunsWithoutCrash();
     void bridgeLoadsWhenCorePresent();
     void turnOwnerMatches_ownerRule();
+    void sessionExtensionsParseWrappedServerShape();
 };
 
 void TstManager::modelAndStateInvariants()
@@ -69,6 +70,30 @@ void TstManager::turnOwnerMatches_ownerRule()
     QVERIFY(!turnOwnerMatches(QString(), chatB, chatA));
     // Nothing to release with no session at all.
     QVERIFY(!turnOwnerMatches(QString(), QString(), chatA));
+}
+
+void TstManager::sessionExtensionsParseWrappedServerShape()
+{
+    // Current goose session/extensions/list WRAPS each entry:
+    // {"extension": {...}, "extensionKey": "..."}. The display name can differ
+    // from the key ("Extension Manager" is keyed extensionmanager) — the panel
+    // must key groups by extensionKey (enabled + the remove round-trip) while
+    // still showing the display name.
+    Manager mgr;
+    // coreOn* are plain public methods (the bridge calls them directly), so no
+    // meta-object indirection needed here.
+    mgr.coreOnExtensions(QStringLiteral(
+        "[{\"extension\":{\"type\":\"platform\",\"name\":\"Extension Manager\"},"
+        "\"enabled\":true,\"configKey\":\"extensionmanager\"}]"));
+    mgr.coreOnSessionExtensions(QStringLiteral("s1"), QStringLiteral(
+        "[{\"extension\":{\"type\":\"platform\",\"name\":\"Extension Manager\"},"
+        "\"extensionKey\":\"extensionmanager\"}]"));
+    const QVariantList groups = mgr.toolGroups().toList();
+    QCOMPARE(groups.size(), 1);
+    const QVariantMap g = groups.first().toMap();
+    QCOMPARE(g.value("key").toString(), QStringLiteral("extensionmanager"));
+    QCOMPARE(g.value("name").toString(), QStringLiteral("Extension Manager"));
+    QVERIFY(g.value("enabled").toBool());
 }
 
 void TstManager::invokableSurfaceRunsWithoutCrash()

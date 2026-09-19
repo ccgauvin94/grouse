@@ -873,9 +873,10 @@ private fun ToolManagementBody(cm: ConnectionManager, title: String = "Tools for
             Text(stringResource(R.string.loading), style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline)
         }
+        // sessionExtensionNames holds extension KEYS (see onSessionExtensions).
         val active = cm.sessionExtensionNames.value.toSet()
         rows.forEach { e ->
-            val isOn = e.name in active
+            val isOn = e.configKey in active
             Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f).padding(end = 12.dp)) {
                     Text(e.name, style = MaterialTheme.typography.bodyLarge)
@@ -895,7 +896,7 @@ private fun ToolManagementBody(cm: ConnectionManager, title: String = "Tools for
                     onCheckedChange = { on -> cm.toggleSessionExtension(e, on) },
                 )
             }
-            if (isOn) ToolList(cm, e, cm.sessionTools.value[e.name].orEmpty().toSet()) {
+            if (isOn) ToolList(cm, e, cm.sessionTools.value[e.configKey].orEmpty().toSet()) {
                 cm.setSessionTools(e, it)          // this chat only
             }
             HorizontalDivider()

@@ -183,13 +183,18 @@ impl GrouseUnstable {
         self.relist_session_extensions(&*conn, &session_id);
     }
 
-    /// Remove an extension from THIS session. The paired add re-lists (desktop behavior).
-    pub fn session_extensions_remove(&self, session_id: String, name: String) {
+    /// Remove an extension from THIS session, identified by its `extensionKey`
+    /// (the key session/extensions/list reports and config/extensions/list calls
+    /// `configKey` — NOT the display name: "Extension Manager" is keyed
+    /// `extensionmanager`). Goose renamed the param from `name` to
+    /// `extensionKey` and now rejects the old shape outright.
+    /// The paired add re-lists (desktop behavior).
+    pub fn session_extensions_remove(&self, session_id: String, extension_key: String) {
         let Some(conn) = self.route(&session_id) else { return };
         self.call(
             &*conn,
             "_goose/unstable/session/extensions/remove",
-            json!({"sessionId": session_id, "name": name}),
+            json!({"sessionId": session_id, "extensionKey": extension_key}),
         );
     }
 
@@ -199,13 +204,16 @@ impl GrouseUnstable {
         self.relist_global_extensions(&*conn);
     }
 
-    /// Toggle a GLOBAL extension; re-lists so the UI reflects the new enabled state.
-    pub fn set_extension_enabled(&self, name: String, enabled: bool) {
+    /// Toggle a GLOBAL extension by its config KEY (the `configKey` from
+    /// `config/extensions/list` — goose renamed the wire param from `name` to
+    /// `configKey` and rejects the old shape). Re-lists so the UI reflects the
+    /// new enabled state.
+    pub fn set_extension_enabled(&self, config_key: String, enabled: bool) {
         let Some(conn) = spine::current_conn() else { return };
         self.call(
             &*conn,
             "_goose/unstable/config/extensions/set-enabled",
-            json!({"name": name, "enabled": enabled}),
+            json!({"configKey": config_key, "enabled": enabled}),
         );
         self.relist_global_extensions(&*conn);
     }
@@ -1199,7 +1207,7 @@ mod tests {
         assert_calls(
             &stub,
             &[
-                ("_goose/unstable/config/extensions/set-enabled", json!({"name": "dev", "enabled": false})),
+                ("_goose/unstable/config/extensions/set-enabled", json!({"configKey": "dev", "enabled": false})),
                 ("_goose/unstable/config/extensions/list", json!({})),
                 ("_goose/unstable/config/extensions/add", json!({"extension": {"name": "builtin://x"}, "enabled": true})),
                 ("_goose/unstable/config/extensions/list", json!({})),
@@ -1234,6 +1242,25 @@ mod tests {
                 ("_goose/unstable/tools/list", json!({"sessionId": "s1"})),
                 ("_goose/unstable/session/extensions/list", json!({"sessionId": "s1"})),
             ],
+        );
+    }
+
+    /// Pins the wire shape goose now requires: remove is keyed by `extensionKey`
+    /// (the old `name` param is rejected with "missing field `extensionKey`").
+    #[test]
+    fn session_extensions_remove_sends_extension_key() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        stub.script(vec![Ok(Value::Null)]);
+        let (g, rec) = harness(stub.clone());
+
+        g.session_extensions_remove("s1".to_string(), "extensionmanager".to_string());
+
+        assert!(rec.events().is_empty()); // remove does not re-list; the paired add does
+        assert_calls(
+            &stub,
+            &[("_goose/unstable/session/extensions/remove",
+               json!({"sessionId": "s1", "extensionKey": "extensionmanager"}))],
         );
     }
 

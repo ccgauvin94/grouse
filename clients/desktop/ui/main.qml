@@ -828,6 +828,9 @@ Controls.ApplicationWindow {
                     spacing: 2
                     property bool expanded: false
                     readonly property string gName: modelData.name
+                    // Session toggles/catalog discovery are keyed by extensionKey, not the
+                    // display name (see Manager::ExtDef.key).
+                    readonly property string gKey: modelData.key
                     readonly property bool gAttrib: modelData.attrib
                     readonly property bool gEnabled: modelData.enabled
                     readonly property bool gKnown: modelData.known
@@ -845,13 +848,13 @@ Controls.ApplicationWindow {
                             onClicked: {
                                 tdel.expanded = !tdel.expanded
                                 if (tdel.expanded && tdel.gAttrib && !tdel.gKnown)
-                                    Mgr.discoverToolGroup(tdel.gName)
+                                    Mgr.discoverToolGroup(tdel.gKey)
                             }
                         }
                         Controls.Switch {
                             Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
                             checked: tdel.gEnabled
-                            onToggled: Mgr.setSessionExtensionEnabled(tdel.gName, checked)
+                            onToggled: Mgr.setSessionExtensionEnabled(tdel.gKey, checked)
                         }
                         Controls.Label {
                             text: tdel.gName
@@ -879,7 +882,7 @@ Controls.ApplicationWindow {
                                     Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
                                     checked: modelData.on
                                     enabled: tdel.gEnabled
-                                    onToggled: Mgr.setSessionToolEnabled(tdel.gName, modelData.name, checked)
+                                    onToggled: Mgr.setSessionToolEnabled(tdel.gKey, modelData.name, checked)
                                 }
                                 Controls.Label {
                                     text: modelData.name

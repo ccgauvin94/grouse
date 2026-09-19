@@ -1129,9 +1129,9 @@ void Manager::discoverToolGroup(const QString &extName)
     const QByteArray sid = m_currentSessionId.toUtf8();
     const QByteArray ext = QJsonDocument(unfiltered).toJson(QJsonDocument::Compact);
     m_bridge->api().grouse_unstable_session_extensions_remove(m_bridge->handle(), sid.constData(),
-                                                              d->name.toUtf8().constData());
+                                                              d->key.toUtf8().constData());
     m_bridge->api().grouse_unstable_session_extensions_add(m_bridge->handle(), sid.constData(),
-                                                           ext.constData());
+                                                          ext.constData());
 }
 
 void Manager::setSessionExtensionEnabled(const QString &extName, bool enabled)
@@ -1151,7 +1151,7 @@ void Manager::setSessionExtensionEnabled(const QString &extName, bool enabled)
     } else {
         m_sessionExts.removeAll(extName);
         m_bridge->api().grouse_unstable_session_extensions_remove(
-            m_bridge->handle(), sid.constData(), extName.toUtf8().constData());
+            m_bridge->handle(), sid.constData(), d->key.toUtf8().constData());
     }
     publishToolGroups();
     saveToolCache(m_currentSessionId);
@@ -1162,7 +1162,7 @@ void Manager::setSessionToolEnabled(const QString &extName, const QString &toolN
     const ExtDef *d = extDef(extName);
     if (!d)
         return;
-    const QString prefix = extName + QStringLiteral("__");
+    const QString prefix = d->key + QStringLiteral("__");
     QSet<QString> current;
     for (const auto &t : m_tools)
         if (t.startsWith(prefix))
@@ -1181,15 +1181,16 @@ QVariant Manager::globalExtensions() const
     QVariantList out;
     for (const auto &d : m_extDefs) {
         QVariantMap group;
-        group["name"] = d.name;
+        group["name"] = d.name;   // display
+        group["key"] = d.key;     // identity: toggles + tool prefixes are keyed by configKey
         group["type"] = d.type;
         group["attrib"] = d.attrib;
         group["enabled"] = d.enabled;
         QVariantList tools;
-        const QString prefix = d.name + QStringLiteral("__");
+        const QString prefix = d.key + QStringLiteral("__");
         const QSet<QString> allowed(d.availableTools.constBegin(), d.availableTools.constEnd());
         if (allowed.isEmpty()) {
-            const QStringList full = m_toolCatalog.value(d.name);
+            const QStringList full = m_toolCatalog.value(d.key);
             for (const auto &t : full)
                 tools << QVariantMap{{"name", t.mid(prefix.length())}, {"on", true}};
         } else {
@@ -1210,15 +1211,15 @@ void Manager::refreshGlobalExtensions()
         m_bridge->api().grouse_unstable_list_global_extensions(m_bridge->handle());
 }
 
-void Manager::setGlobalExtensionEnabled(const QString &extName, bool enabled)
+void Manager::setGlobalExtensionEnabled(const QString &extKey, bool enabled)
 {
     if (!m_bridge || !m_bridge->isAvailable())
         return;
-    const ExtDef *d = extDef(extName);
+    const ExtDef *d = extDef(extKey);
     if (!d)
         return;
     m_bridge->api().grouse_unstable_set_extension_enabled(
-        m_bridge->handle(), extName.toUtf8().constData(), enabled ? 1 : 0);
+        m_bridge->handle(), d->key.toUtf8().constData(), enabled ? 1 : 0);
 }
 
 void Manager::setGlobalToolEnabled(const QString &extName, const QString &toolName, bool on)
@@ -1226,7 +1227,7 @@ void Manager::setGlobalToolEnabled(const QString &extName, const QString &toolNa
     const ExtDef *d = extDef(extName);
     if (!d)
         return;
-    const QString prefix = extName + QStringLiteral("__");
+    const QString prefix = d->key + QStringLiteral("__");
     QSet<QString> current(d->availableTools.constBegin(), d->availableTools.constEnd());
     if (on == current.contains(prefix + toolName))
         return;
@@ -1244,10 +1245,10 @@ void Manager::setGlobalToolEnabled(const QString &extName, const QString &toolNa
 
 // ---- tool-group plumbing ---------------------------------------------------
 
-const Manager::ExtDef *Manager::extDef(const QString &name) const
+const Manager::ExtDef *Manager::extDef(const QString &key) const
 {
     for (const auto &d : m_extDefs)
-        if (d.name == name)
+        if (d.key == key)
             return &d;
     return nullptr;
 }
@@ -1268,7 +1269,7 @@ void Manager::setSessionTools(const QString &extName, const QStringList &allowed
     m_discoveringExt.clear();
     const QByteArray sid = m_currentSessionId.toUtf8();
     m_bridge->api().grouse_unstable_session_extensions_remove(
-        m_bridge->handle(), sid.constData(), extName.toUtf8().constData());
+        m_bridge->handle(), sid.constData(), d->key.toUtf8().constData());
     m_bridge->api().grouse_unstable_session_extensions_add(
         m_bridge->handle(), sid.constData(),
         QJsonDocument(scoped).toJson(QJsonDocument::Compact).constData());
@@ -1783,16 +1784,26 @@ void Manager::coreOnSessionExtensions(const QString &sid, const QString &json)
     QStringList names;
     for (const auto &el : parseArr(json)) {
         if (el.isObject()) {
+            // Current goose WRAPS each entry: {"extension": {...}, "extensionKey": "..."}.
+            // Older servers sent the extension object bare. Resolve the KEY either way
+            // (extensionKey > extension.name > server.name) — remove is keyed by it, and
+            // display names ("Extension Manager") do not match the tool prefixes
+            // ("extensionmanager__…") that the catalog/pool grouping needs.
             const QVariantMap m = el.toObject().toVariantMap();
-            QString nm = m.value("name").toString();
-            // mcp/server-backed extensions omit top-level name (it lives in
-            // server.name); resolve it so enabled groups keep the same id the
-            // add/remove path uses — otherwise the toggle always reverts.
-            if (nm.isEmpty())
-                nm = m.value("server").toMap().value("name").toString();
-            names << nm;
+            QVariantMap inner = m.value("extension").toMap();
+            if (inner.isEmpty())
+                inner = m;
+            QString key = m.value("extensionKey").toString();
+            if (key.isEmpty())
+                key = inner.value("name").toString();
+            if (key.isEmpty())
+                key = inner.value("server").toMap().value("name").toString();
+            if (!key.isEmpty())
+                names << key;
         } else {
-            names << el.toString();
+            const QString s = el.toString();
+            if (!s.isEmpty())
+                names << s;
         }
     }
     onSessionExtensions(names);
@@ -2168,6 +2179,11 @@ void Manager::onExtensions(const QVariantList &extensions)
             extName = e.value("server").toMap().value("name").toString();
         ExtDef d;
         d.name = extName;
+        // Identity is the KEY (session list calls it extensionKey, global list
+        // configKey). The display name can differ: "Extension Manager" is keyed
+        // "extensionmanager", and remove/toggles only accept the key.
+        d.key = m.value("configKey").toString().isEmpty() ? extName
+                                                         : m.value("configKey").toString();
         d.type = e.value("type").toString();
         // mcp-backed extensions namespace their tools; mark them addable so the
         // panel offers the per-tool toggle the server's add/remove expects.
@@ -2297,16 +2313,17 @@ QVariant Manager::toolGroups() const
     QVariantList out;
     const QSet<QString> active(m_tools.constBegin(), m_tools.constEnd());
     const QSet<QString> enabled(m_sessionExts.constBegin(), m_sessionExts.constEnd());
-    QStringList allNames;
+    // Every identity here is the extension KEY; `name` is carried per group for display.
+    QStringList allKeys;
     for (const auto &d : m_extDefs)
-        allNames << d.name;
+        allKeys << d.key;
     for (const auto &n : m_sessionExts)
-        if (!allNames.contains(n))
-            allNames << n;
+        if (!allKeys.contains(n))
+            allKeys << n;
 
     // Some goose versions expose tools before extension profiles: group the
     // active names directly so the panel stays useful.
-    if (allNames.isEmpty() && !m_tools.isEmpty()) {
+    if (allKeys.isEmpty() && !m_tools.isEmpty()) {
         QHash<QString, QVariantList> grouped;
         QStringList groupNames;
         for (const auto &tool : m_tools) {
@@ -2319,6 +2336,7 @@ QVariant Manager::toolGroups() const
         }
         for (const auto &groupName : std::as_const(groupNames)) {
             out << QVariantMap{{"name", groupName},
+                               {"key", groupName},
                                {"attrib", groupName != QStringLiteral("Built-in")},
                                {"enabled", true},
                                {"known", true},
@@ -2327,17 +2345,18 @@ QVariant Manager::toolGroups() const
         return out;
     }
 
-    for (const auto &name : std::as_const(allNames)) {
+    for (const auto &key : std::as_const(allKeys)) {
         QVariantMap group;
-        group["name"] = name;
-        const ExtDef *d = extDef(name);
+        const ExtDef *d = extDef(key);
+        group["name"] = d ? d->name : key;
+        group["key"] = key;
         const bool attrib = d && d->attrib;
         group["attrib"] = attrib;
-        group["enabled"] = enabled.contains(name);
-        group["known"] = m_toolCatalog.contains(name);
+        group["enabled"] = enabled.contains(key);
+        group["known"] = m_toolCatalog.contains(key);
         QVariantList tools;
-        const QString prefix = name + QStringLiteral("__");
-        QStringList pool = m_toolCatalog.value(name);
+        const QString prefix = key + QStringLiteral("__");
+        QStringList pool = m_toolCatalog.value(key);
         if (pool.isEmpty()) {
             for (const auto &t : m_tools)
                 if (t.startsWith(prefix))

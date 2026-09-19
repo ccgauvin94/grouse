@@ -901,14 +901,16 @@ pub extern "C" fn grouse_unstable_session_extensions_add(h: *mut c_void, sid: *c
 }
 
 #[no_mangle]
-pub extern "C" fn grouse_unstable_session_extensions_remove(h: *mut c_void, sid: *const c_char, name: *const c_char) {
-    let (Some(sid), Some(name)) = (
+/// `extension_key` is the session list's `extensionKey` (= global `configKey`),
+/// NOT the display name — see CONTRACT.md.
+pub extern "C" fn grouse_unstable_session_extensions_remove(h: *mut c_void, sid: *const c_char, extension_key: *const c_char) {
+    let (Some(sid), Some(extension_key)) = (
         (unsafe { c_param(sid) }).map(str::to_owned),
-        (unsafe { c_param(name) }).map(str::to_owned),
+        (unsafe { c_param(extension_key) }).map(str::to_owned),
     ) else {
         return;
     };
-    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.session_extensions_remove(sid, name))).ok();
+    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.session_extensions_remove(sid, extension_key))).ok();
 }
 
 #[no_mangle]
@@ -917,9 +919,11 @@ pub extern "C" fn grouse_unstable_list_global_extensions(h: *mut c_void) {
 }
 
 #[no_mangle]
-pub extern "C" fn grouse_unstable_set_extension_enabled(h: *mut c_void, name: *const c_char, enabled: i32) {
-    let Some(name) = (unsafe { c_param(name) }).map(str::to_owned) else { return };
-    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.set_extension_enabled(name, enabled != 0))).ok();
+/// `config_key` is the global list's `configKey`, not the display name (goose renamed
+/// the wire param; see CONTRACT.md).
+pub extern "C" fn grouse_unstable_set_extension_enabled(h: *mut c_void, config_key: *const c_char, enabled: i32) {
+    let Some(config_key) = (unsafe { c_param(config_key) }).map(str::to_owned) else { return };
+    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.set_extension_enabled(config_key, enabled != 0))).ok();
 }
 
 #[no_mangle]

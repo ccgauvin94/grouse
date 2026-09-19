@@ -42,6 +42,9 @@ Controls.Dialog {
                 spacing: 2
                 property bool expanded: false
                 readonly property string eName: modelData.name
+                // Toggles are keyed by configKey, not display name ("Extension Manager"
+                // is keyed extensionmanager; see Manager::ExtDef).
+                readonly property string eKey: modelData.key
                 readonly property bool eAttrib: modelData.attrib
                 readonly property bool eEnabled: modelData.enabled
 
@@ -61,7 +64,7 @@ Controls.Dialog {
                     Controls.Switch {
                         Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
                         checked: edel.eEnabled
-                        onToggled: Mgr.setGlobalExtensionEnabled(edel.eName, checked)
+                        onToggled: Mgr.setGlobalExtensionEnabled(edel.eKey, checked)
                     }
                     Controls.Label {
                         text: edel.eName
@@ -87,7 +90,7 @@ Controls.Dialog {
                                 Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
                                 checked: modelData.on
                                 enabled: edel.eEnabled
-                                onToggled: Mgr.setGlobalToolEnabled(edel.eName, modelData.name, checked)
+                                onToggled: Mgr.setGlobalToolEnabled(edel.eKey, modelData.name, checked)
                             }
                             Controls.Label {
                                 text: modelData.name

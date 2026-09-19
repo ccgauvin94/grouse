@@ -223,6 +223,7 @@ class WireParserTest {
 
     @Test
     fun `session extensions parse and carry the fromPeer flag`() {
+        // Legacy bare shape (older goose): the element IS the extension object.
         val wire = """[{"type":"mcp","name":"kagi","description":"d"}]"""
         val local = parseSessionExtensions(wire, fromPeer = false)
         val peer = parseSessionExtensions(wire, fromPeer = true)
@@ -232,6 +233,29 @@ class WireParserTest {
         assertTrue(local[0].enabled)
         assertFalse(local[0].fromPeer)
         assertTrue(peer[0].fromPeer)
+    }
+
+    @Test
+    fun `session extensions parse the wrapped server shape and key by extensionKey`() {
+        // Current goose wraps each entry (captured live 2026-09): {"extension": ..., "extensionKey": ...}.
+        // The display name may differ from the key ("Extension Manager" is keyed
+        // extensionmanager) — matching and remove must use the key.
+        val wire = """
+            [ {"extension":{"type":"platform","name":"Extension Manager","description":"d","bundled":true},
+               "extensionKey":"extensionmanager"},
+              {"extension":{"type":"mcp","description":"d","server":{"name":"kagi","uri":"https://x"}},
+               "extensionKey":"kagi"},
+              {"extension":{"type":"platform","name":"memory","description":"d","bundled":true}} ]
+        """
+        val got = parseSessionExtensions(wire, fromPeer = false)
+        assertEquals(3, got.size)
+        assertEquals("Extension Manager", got[0].name)
+        assertEquals("extensionmanager", got[0].configKey)
+        // mcp entries carry no extension.name at all — the key/server name are the identity.
+        assertEquals("kagi", got[1].name)
+        assertEquals("kagi", got[1].configKey)
+        // Bare fallback: no extensionKey -> key is the resolved name.
+        assertEquals("memory", got[2].configKey)
     }
 
     @Test

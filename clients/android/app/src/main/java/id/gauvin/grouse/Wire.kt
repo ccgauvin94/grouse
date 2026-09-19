@@ -157,26 +157,32 @@ internal fun parseGlobalExtensions(json: String): List<ExtInfo> {
     }
 }
 
-/** Parse `_goose/unstable/session/extensions/list`: the array elements ARE the
- *  extension objects (goose's tagged union carries `name` at the top level), unlike
- *  config/extensions/list's wrap. `fromPeer` is supplied by the caller (instance state);
- *  the parsing itself is pure so it is JVM-testable. A malformed payload yields an
- *  empty list, never a throw. */
+/** Parse `_goose/unstable/session/extensions/list`. Current goose WRAPS each entry:
+ *  `{"extension": {...}, "extensionKey": "..."}` — the same wrap
+ *  config/extensions/list uses, with `extensionKey` where `configKey` is there.
+ *  An older server (and the raw tagged union some replies still carry) sends the
+ *  extension object bare; both shapes parse. Identity is the KEY, never
+ *  `extension.name` — "Extension Manager" is keyed `extensionmanager`, and only the
+ *  key round-trips through session/extensions/remove. `fromPeer` is supplied by the
+ *  caller (instance state); the parsing itself is pure so it is JVM-testable. A
+ *  malformed payload yields an empty list, never a throw. */
 internal fun parseSessionExtensions(json: String, fromPeer: Boolean): List<ExtInfo> {
     val arr = try {
         Json.parseToJsonElement(json) as? JsonArray
     } catch (e: Exception) { null } ?: return emptyList()
     return arr.mapNotNull { el ->
-        val ext = el as? JsonObject ?: return@mapNotNull null
+        val wrap = el as? JsonObject ?: return@mapNotNull null
+        val ext = (wrap["extension"] as? JsonObject) ?: wrap
         val name = ext["name"]?.jsonPrimitive?.contentOrNull
             ?: (ext["server"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
             ?: return@mapNotNull null
+        val key = wrap["extensionKey"]?.jsonPrimitive?.contentOrNull ?: name
         ExtInfo(
             name = name,
             enabled = true,   // attached to the session by definition
             type = ext["type"]?.jsonPrimitive?.contentOrNull ?: "",
             description = ext["description"]?.jsonPrimitive?.contentOrNull ?: "",
-            configKey = name,
+            configKey = key,
             bundled = ext["bundled"]?.jsonPrimitive?.booleanOrNull ?: false,
             raw = ext,
             fromPeer = fromPeer,
