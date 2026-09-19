@@ -167,7 +167,12 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
   then `ln -s /var/home/colin/flatpak-builder-host ~/.local/bin-shim/flatpak-builder`
   and put `~/.local/bin-shim` on PATH. Footgun: flatpak-builder can "check out
   last cache hit" and ship a bundle with STALE source (the export reports
-  `Content Written: 0`). If a rebuild seems to change nothing, delete the state
+  `Content Written: 0`). `build-flatpak.sh` now drops the app module's cached
+  build before every run (`rm -rf $STATE_DIR/builder-cache/build/grouse-desktop-*`)
+  so source edits always rebuild; to verify a deployed bundle is fresh, decompress
+  its zstd qrc frames and grep for a marker from the newest commit (plain `strings`
+  misses everything — Qt6 rcc compresses the QML). If a rebuild seems to change
+  nothing else, delete the state
   dir (`rm -rf ~/.cache/grouse-flatpak`) and rebuild. The builder cache now
   lives under the state dir, not the repo root.
 

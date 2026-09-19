@@ -44,6 +44,12 @@ mkdir -p grouse-core-prebuild
 cp ../../core/target/release/libgrouse_core.so grouse-core-prebuild/
 
 echo "== Building $APP_ID =="
+# The builder's module cache can MISS changes to the `type: dir` source (observed:
+# an edit to src/manager.cpp + ui/main.qml rebuilt nothing, and build-export's
+# "Content Written: 0" shipped a stale bundle under a fresh commit hash). Drop just
+# the app module's cached build so it always re-runs; the base/runtime layers stay
+# cached, so this costs ~1 min of cmake/ninja, not the SDK download.
+rm -rf "${STATE_DIR}/builder-cache/build/grouse-desktop-"*
 flatpak-builder \
     --user \
     --install-deps-from=flathub \
