@@ -15,6 +15,18 @@
 
 namespace {
 
+// All QML is embedded in the binary (qt_add_resources), so Qt's compiled-QML
+// disk cache has nothing legitimate to speed up here — and it is actively
+// unsafe: entries for qrc: URLs are keyed on timestamps rcc fixes at the
+// epoch, so replacing the Flatpak deploy in place never invalidates them.
+// A byte-verified-new binary then renders OLD QML from cache (2026-09-18:
+// the tool-panel fixes were "not working" for exactly this reason while two
+// windows on one desktop rendered the same qrc differently). Disable it.
+struct DisableQmlDiskCache {
+    DisableQmlDiskCache() { qputenv("QML_DISABLE_DISK_CACHE", "1"); }
+};
+const DisableQmlDiskCache disableQmlCacheEarly;
+
 // KRunner runs on the host, outside the flatpak sandbox, so the runner
 // plugin ships inside the app image (/app/lib/grouserunner.so) and is
 // installed here on first run — the user never touches the host. The

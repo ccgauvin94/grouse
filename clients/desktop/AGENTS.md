@@ -172,9 +172,18 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
   so source edits always rebuild; to verify a deployed bundle is fresh, decompress
   its zstd qrc frames and grep for a marker from the newest commit (plain `strings`
   misses everything — Qt6 rcc compresses the QML). If a rebuild seems to change
-  nothing else, delete the state
-  dir (`rm -rf ~/.cache/grouse-flatpak`) and rebuild. The builder cache now
-  lives under the state dir, not the repo root.
+  nothing else, delete the state dir (`rm -rf ~/.cache/grouse-flatpak`) and
+  rebuild. The builder cache now lives under the state dir, not the repo root.
+  SECOND, worse cache layer (2026-09-18): Qt's compiled-QML DISK cache
+  (`~/.var/app/id.gauvin.Grouse/cache/grouse/grouse-desktop/qmlcache`) keeps
+  bytecode for `qrc:/` URLs keyed on timestamps rcc fixes at the epoch — an
+  in-place flatpak update NEVER invalidates it, and the app renders OLD QML
+  from a byte-verified-NEW binary (symptom: "the fix isn't working" while a
+  host-built binary of the same source renders correctly on the same desktop).
+  `main.cpp` now sets `QML_DISABLE_DISK_CACHE=1` before QApplication (all QML
+  is embedded, so the cache had no upside). If you ever see stale QML again:
+  `rm -rf ~/.var/app/id.gauvin.Grouse/cache/grouse/grouse-desktop/qmlcache`
+  and restart.
 
 ## Code Conventions & Common Patterns
 
