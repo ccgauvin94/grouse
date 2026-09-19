@@ -3,6 +3,7 @@
 #include "manager.h"
 
 #include "corebridge.h"
+#include "appbridge.h"
 #include "markdown.h"
 #include "messagelistmodel.h"
 #include "notifier.h"
@@ -16,6 +17,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QStyleHints>
 #include <QUrl>
 #include <QClipboard>
 #include <QJsonArray>
@@ -2160,6 +2162,32 @@ void Manager::openAppInHtml(const QString &appKey)
     const QString html = m_appHtml.value(appKey);
     if (html.isEmpty())
         return;
+    // Preferred: serve the app over loopback so its bridge has a HOST to talk
+    // to (ui/initialize answered, ui/message lands back in this chat). The
+    // flatpak shares the host network namespace, so the user's browser reaches
+    // 127.0.0.1 fine. Fallback: plain temp-file handoff (view-only).
+    if (!m_appBridge) {
+        m_appBridge = new AppBridgeServer(this);
+        connect(m_appBridge, &AppBridgeServer::appMessage, this, &Manager::onAppMessage);
+    }
+    if (m_appBridge->running() || m_appBridge->start()) {
+        QString detail, output;
+        for (int i = m_messageModel->count() - 1; i >= 0; --i) {
+            const QVariantMap m = m_messageModel->row(i);
+            if (m.value("role").toString() == QLatin1String("mcpapp")
+                && m.value("appKey").toString() == appKey) {
+                detail = m.value("detail").toString();
+                output = m.value("output").toString();
+                break;
+            }
+        }
+        const QString token = QStringLiteral("t%1").arg(++m_appTokenSeq);
+        const bool dark = QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
+        m_appBridge->registerApp(token, m_currentSessionId, html, detail, output,
+                                 dark ? QStringLiteral("dark") : QStringLiteral("light"));
+        QDesktopServices::openUrl(QUrl(m_appBridge->urlFor(token)));
+        return;
+    }
     const QString path = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
                              .filePath(QStringLiteral("grouse-app-%1.html")
                                            .arg(qHash(appKey)));
@@ -2168,9 +2196,19 @@ void Manager::openAppInHtml(const QString &appKey)
         return;
     f.write(html.toUtf8());
     f.close();
-    // Same trust boundary as the in-app renderer: the document is server-supplied;
-    // the browser sandbox is the isolation. One-shot view of a snapshot.
+    // Trust boundary either way: the document is server-supplied; the browser
+    // sandbox is the isolation.
     QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+}
+
+void Manager::onAppMessage(const QString &sessionId, const QString &text)
+{
+    // "post straight into this chat": re-open the app's chat first if the user
+    // moved on (sendPrompt is queued until ready regardless, but the open makes
+    // the message visible where it belongs).
+    if (!sessionId.isEmpty() && sessionId != m_currentSessionId)
+        openSession(sessionId);
+    sendPrompt(text);
 }
 void Manager::onCompactionStatus(const QString &message)
 {

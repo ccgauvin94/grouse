@@ -11,7 +11,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Quick Qml QuickControls2 Widgets DBus)
+find_package(Qt6 REQUIRED COMPONENTS Quick Qml QuickControls2 Widgets DBus Network)
 find_package(ECM REQUIRED NO_MODULE)
 set(CMAKE_MODULE_PATH ${ECM_MODULE_PATH})
 find_package(KF6 REQUIRED COMPONENTS Kirigami CoreAddons)
@@ -23,6 +23,8 @@ qt_add_executable(grouse-desktop
     src/main.cpp
     src/dbusadapter.h
     src/dbusadapter.cpp
+    src/appbridge.h
+    src/appbridge.cpp
     src/corebridge.h
     src/corebridge.cpp
     src/roamlistmodel.h
@@ -49,6 +51,7 @@ target_link_libraries(grouse-desktop PRIVATE
     Qt6::QuickControls2
     Qt6::Widgets
     Qt6::DBus
+    Qt6::Network
     KF6::Kirigami
     KF6::CoreAddons
 )

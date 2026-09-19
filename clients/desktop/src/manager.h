@@ -9,6 +9,7 @@
 #include <QVariantList>
 
 class CoreBridge;
+class AppBridgeServer;
 class RoamListModel;
 class SessionListModel;
 class MessageListModel;
@@ -373,6 +374,8 @@ private:
     /// runtime has no QtWebEngine, so in-app interactive rendering is not possible;
     /// the template is a self-contained HTML document).
     Q_INVOKABLE void openAppInHtml(const QString &appKey);
+    /// A ui/message arrived from an app tab: post it into the chat the app came from.
+    void onAppMessage(const QString &sessionId, const QString &text);
     void onReady(const QString &sessionId);
     void onSessions(const QVariantList &sessions);
     void onProjects(const QVariantList &projects);
@@ -509,6 +512,9 @@ private:
     QHash<QString, QStringList> m_toolCatalog;
     /// Fetched MCP-App templates, keyed appKey ("<ext>|<uri>"), for openAppInHtml.
     QHash<QString, QString> m_appHtml;
+    /// Loopback host for apps opened in the browser (see appbridge.h).
+    AppBridgeServer *m_appBridge = nullptr;
+    int m_appTokenSeq = 0;
 
     /// Lookup by extension KEY (configKey/extensionKey), not display name.
     const ExtDef *extDef(const QString &key) const;

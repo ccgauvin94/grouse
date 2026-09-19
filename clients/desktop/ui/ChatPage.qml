@@ -935,10 +935,11 @@ Kirigami.Page {
                             width: parent.width
                             spacing: Kirigami.Units.smallSpacing
                             Controls.Label {
-                                // org.kde.Platform ships no QtWebEngine, so the app cannot
-                                // render in-page here (Android does). The template is
-                                // self-contained HTML — opening it is the honest bridge.
-                                text: qsTr("App template fetched; interactive in-chat rendering needs a web engine (see Android).")
+                                // org.kde.Platform ships no QtWebEngine, so the app renders
+                                // in the user's browser — but interactively: grouse serves the
+                                // page over loopback with a host shim (AppBridgeServer), so
+                                // ui/initialize resolves and ui/message posts back into this chat.
+                                text: qsTr("Opens in your browser with a live bridge back to this chat.")
                                 Layout.fillWidth: true
                                 wrapMode: Text.Wrap
                                 opacity: 0.6
