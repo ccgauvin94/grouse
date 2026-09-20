@@ -390,10 +390,14 @@ impl Core {
     pub fn new(listener: Box<dyn CoreListener>, cache_dir: String) -> Arc<Self> {
         let listener: Arc<dyn CoreListener> = Arc::from(listener);
         // The store shares one listener with the rest of the core; a tiny
-        // forwarder adapts the Box the store's seam asks for.
-        let store = Arc::new(TranscriptStore::new(Box::new(CoreListenerForwarder(
-            listener.clone(),
-        ))));
+        // forwarder adapts the Box the store's seam asks for AND carries the
+        // display-ownership gate (chat painting is suppressed while a roam
+        // peer owns the screen — see CoreListenerForwarder).
+        let active_peer_label = Arc::new(RwLock::new(None));
+        let store = Arc::new(TranscriptStore::new(Box::new(CoreListenerForwarder {
+            inner: listener.clone(),
+            active_peer: active_peer_label.clone(),
+        })));
         let cache_dir = if cache_dir.is_empty() {
             default_cache_dir()
         } else {
@@ -408,7 +412,7 @@ impl Core {
                 conn: Mutex::new(None),
                 conn_task: Mutex::new(None),
                 peers: Mutex::new(Vec::new()),
-                active_peer_label: Arc::new(RwLock::new(None)),
+                active_peer_label, // THE SAME Arc the store's forwarder holds — a second one would make the paint gate blind
             }),
         });
         // Seed the session directory from cache: the drawer renders the
@@ -461,6 +465,39 @@ impl Core {
             },
             false,
         );
+        self.wait_ready(ready_rx);
+    }
+
+    /// Connect and RESUME a specific session on the first handshake — the cold
+    /// start when the app already knows which chat to show. Where `connect()`
+    /// binds a throwaway `session/new` (which the deferred open then abandoned,
+    /// littering the server's list with an empty "New Chat" on every reopen),
+    /// this mints NO session: the target is bound directly via
+    /// `ConnectSpec::Resume`. It replays `open_session`'s pre-connect preamble
+    /// (paint the cached transcript now, decide suppression from freshness,
+    /// pre-bind) so the cold chat still paints instantly and a fresh cache
+    /// skips the wire replay — identical fast path, minus the orphan.
+    pub fn connect_resume(&self, config: ServerConfig, session_id: String) {
+        *self.inner.active_peer_label.write() = None;
+        self.reset_chat_state();
+        let cwd = self.resolve_cwd(&session_id);
+        let (suppress, cached) = match self.inner.cache.load_transcript(&session_id) {
+            Some((messages, cached_at)) => {
+                let fresh = self.transcript_is_fresh(&session_id, &cached_at);
+                (fresh, Some(messages))
+            }
+            None => (false, None),
+        };
+        match cached {
+            Some(messages) if suppress => self.inner.store.replace(messages),
+            Some(messages) => self.inner.store.replace_provisional(messages),
+            None => self.inner.store.clear(),
+        };
+        {
+            let mut state = self.inner.state.lock();
+            state.store_session_id = Some(session_id.clone());
+        }
+        let (_, ready_rx) = self.connect_impl(config, ConnectSpec::Resume { session_id, cwd }, suppress);
         self.wait_ready(ready_rx);
     }
 
@@ -1856,47 +1893,173 @@ fn default_cache_dir() -> PathBuf {
 
 /// Adapts the store's `Box<dyn CoreListener>` seam to the shared listener
 /// `Arc` the core keeps (the store emits `on_stream`/`on_transcript` through
-/// it; all methods forward).
-struct CoreListenerForwarder(Arc<dyn CoreListener>);
+/// it). The store speaks for the MAIN connection's session, and the app
+/// paints every transcript/stream event into its single on-screen transcript
+/// — so while a roam peer owns the display (`active_peer` is Some), the
+/// main connection's CHAT PAINTING must not emit, or a reply streaming in a
+/// backgrounded Main chat would render inside the peer's window. This mirrors
+/// the peer's own `is_active` gate at its seam (CONTRACT §6): the peer already
+/// suppresses backgrounded emissions, and the main side not doing the same was
+/// the asymmetry behind the "wrong conversation streams in" report.
+///
+/// Turn CONTROL is not painting: `RunEnded` always passes, so a backgrounded
+/// turn still drains its own per-chat queue wherever the user is looking (the
+/// same reasoning roam.rs applies at its run-end emit — gating that stranded
+/// a queue with busy=true). Directory/config/permission/status events are not
+/// session-painting either and pass through.
+struct CoreListenerForwarder {
+    inner: Arc<dyn CoreListener>,
+    active_peer: Arc<RwLock<Option<String>>>,
+}
+
+impl CoreListenerForwarder {
+    /// Is the MAIN connection's session what the UI is showing?
+    fn main_displayed(&self) -> bool {
+        self.active_peer.read().is_none()
+    }
+}
 
 impl CoreListener for CoreListenerForwarder {
     fn on_status(&self, status: ConnectionStatus) {
-        self.0.on_status(status);
+        self.inner.on_status(status);
     }
     fn on_sessions(&self, sessions: Vec<SessionSummary>) {
-        self.0.on_sessions(sessions);
+        self.inner.on_sessions(sessions);
     }
     fn on_transcript(&self, event: TranscriptEvent) {
-        self.0.on_transcript(event);
+        if self.main_displayed() {
+            self.inner.on_transcript(event);
+        }
     }
     fn on_stream(&self, event: StreamEvent) {
-        self.0.on_stream(event);
+        match event {
+            StreamEvent::RunEnded { .. } => self.inner.on_stream(event),
+            _ => {
+                if self.main_displayed() {
+                    self.inner.on_stream(event);
+                }
+            }
+        }
     }
     fn on_config(&self, options: Vec<ConfigOption>) {
-        self.0.on_config(options);
+        self.inner.on_config(options);
     }
     fn on_permission_request(&self, request: PermissionRequest) {
-        self.0.on_permission_request(request);
+        self.inner.on_permission_request(request);
     }
     fn on_session_touched(&self, session_id: String, title: String, updated_at: String) {
-        self.0.on_session_touched(session_id, title, updated_at);
+        self.inner.on_session_touched(session_id, title, updated_at);
     }
     fn on_projects(&self, projects: Vec<ProjectSummary>) {
-        self.0.on_projects(projects);
+        self.inner.on_projects(projects);
     }
     fn on_roam_peer_status(&self, label: String, status: String) {
-        self.0.on_roam_peer_status(label, status);
+        self.inner.on_roam_peer_status(label, status);
     }
     fn on_roam_sessions(&self, label: String, sessions: Vec<SessionSummary>) {
-        self.0.on_roam_sessions(label, sessions);
+        self.inner.on_roam_sessions(label, sessions);
     }
     fn on_peer_new_session(&self, label: String, session_id: String) {
-        self.0.on_peer_new_session(label, session_id);
+        self.inner.on_peer_new_session(label, session_id);
     }
     fn on_active_run(&self, session_id: String, run_id: String) {
-        self.0.on_active_run(session_id, run_id);
+        self.inner.on_active_run(session_id, run_id);
     }
     fn on_commands(&self, commands: Vec<String>) {
-        self.0.on_commands(commands);
+        self.inner.on_commands(commands);
+    }
+}
+
+#[cfg(test)]
+mod forwarder_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Records only the two painting channels (the gate's subject); the other
+    /// CoreListener methods are irrelevant to forwarding and stub out empty.
+    struct Recorder {
+        transcripts: Mutex<usize>,
+        streams: Mutex<Vec<String>>,
+    }
+    impl Recorder {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                transcripts: Mutex::new(0),
+                streams: Mutex::new(Vec::new()),
+            })
+        }
+        fn tag(e: &StreamEvent) -> &'static str {
+            match e {
+                StreamEvent::AgentChunk { .. } => "agent",
+                StreamEvent::UserChunk { .. } => "user",
+                StreamEvent::ThoughtChunk { .. } => "thought",
+                StreamEvent::ToolCall { .. } => "tool",
+                StreamEvent::ToolCallUpdate { .. } => "tool_update",
+                StreamEvent::Usage { .. } => "usage",
+                StreamEvent::RunEnded { .. } => "run_ended",
+            }
+        }
+    }
+    impl CoreListener for Recorder {
+        fn on_status(&self, _: ConnectionStatus) {}
+        fn on_sessions(&self, _: Vec<SessionSummary>) {}
+        fn on_transcript(&self, _: TranscriptEvent) {
+            *self.transcripts.lock().unwrap() += 1;
+        }
+        fn on_stream(&self, e: StreamEvent) {
+            self.streams.lock().unwrap().push(Self::tag(&e).to_string());
+        }
+        fn on_config(&self, _: Vec<ConfigOption>) {}
+        fn on_permission_request(&self, _: PermissionRequest) {}
+        fn on_session_touched(&self, _: String, _: String, _: String) {}
+        fn on_projects(&self, _: Vec<ProjectSummary>) {}
+        fn on_roam_peer_status(&self, _: String, _: String) {}
+        fn on_roam_sessions(&self, _: String, _: Vec<SessionSummary>) {}
+        fn on_peer_new_session(&self, _: String, _: String) {}
+        fn on_active_run(&self, _: String, _: String) {}
+        fn on_commands(&self, _: Vec<String>) {}
+    }
+
+    fn fwd(active: Arc<RwLock<Option<String>>>) -> (CoreListenerForwarder, Arc<Recorder>) {
+        let rec = Recorder::new();
+        (
+            CoreListenerForwarder { inner: rec.clone(), active_peer: active },
+            rec,
+        )
+    }
+
+    #[test]
+    fn painting_flows_when_main_owns_the_display() {
+        let active = Arc::new(RwLock::new(None));
+        let (f, rec) = fwd(active);
+        f.on_transcript(TranscriptEvent::Clear);
+        f.on_stream(StreamEvent::AgentChunk { text: "hi".into(), message_id: String::new() });
+        assert_eq!(*rec.transcripts.lock().unwrap(), 1);
+        assert_eq!(*rec.streams.lock().unwrap(), vec!["agent".to_string()]);
+    }
+
+    #[test]
+    fn painting_suppressed_while_a_peer_owns_the_display() {
+        // The reported bug: a backgrounded Main chat's reply streamed into the
+        // roam window. With a peer displayed, transcript + chunk painting must
+        // not reach the (single, on-screen) transcript.
+        let active = Arc::new(RwLock::new(Some("laptop".to_string())));
+        let (f, rec) = fwd(active);
+        f.on_transcript(TranscriptEvent::Clear);
+        f.on_stream(StreamEvent::AgentChunk { text: "hi".into(), message_id: String::new() });
+        f.on_stream(StreamEvent::Usage { used: 1, size: 2, cost: 0.0, currency: "x".into() });
+        assert_eq!(*rec.transcripts.lock().unwrap(), 0, "no painting while a peer owns the screen");
+        assert!(rec.streams.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn run_ended_always_flows_so_a_background_turn_drains_its_queue() {
+        // Turn CONTROL is not painting: a Main turn ending while a peer is shown
+        // must still emit RunEnded, or its per-chat queue strands with busy=true.
+        let active = Arc::new(RwLock::new(Some("laptop".to_string())));
+        let (f, rec) = fwd(active);
+        f.on_stream(StreamEvent::AgentChunk { text: "hi".into(), message_id: String::new() });
+        f.on_stream(StreamEvent::RunEnded { stop_reason: "end_turn".into() });
+        assert_eq!(*rec.streams.lock().unwrap(), vec!["run_ended".to_string()]);
     }
 }

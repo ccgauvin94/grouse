@@ -927,7 +927,17 @@ class ConnectionManager private constructor(context: Context) {
         if (!store.assistantEnabled) return
         val a = store.assistantSessionId
         if (a != null) openSession(a, knownKind = SessionKind.ASSISTANT)
-        else { pendingOpenAssistant = true; open(resume = null) }
+        else {
+            pendingOpenAssistant = true
+            // Bring the wire up on the last MAIN chat if we have one (not a
+            // roam-prefixed id — peers aren't dialled on a cold start), so we
+            // don't mint a throwaway "New Chat" that the deferred Assistant
+            // open then abandons. pendingOpenAssistant switches to the thread
+            // the instant the session list identifies it. Falls back to a
+            // fresh connect (one new session) only on a genuine first run.
+            val last = store.lastSessionId
+            open(resume = last?.takeIf { !it.startsWith("roam:") })
+        }
     }
 
     /** Save new credentials and connect fresh (from the Connect screen). */
@@ -1587,8 +1597,12 @@ class ConnectionManager private constructor(context: Context) {
             return
         }
         // A roam peer owns the chat: Ready here is the MAIN connection's — don't repoint the
-        // on-screen session at it.
-        if (currentRoamPeer == null) {
+        // on-screen session at it. AND: if the user is already explicitly looking at a
+        // different Main chat (currentSession set to another id), a late/other Ready must
+        // not steal the screen — that was the "opened a different chat, showing the wrong
+        // conversation" cold-start race. Adopt the wire's session only when nothing else is
+        // shown (cold start) or it already matches what's on screen (reconnect resume).
+        if (currentRoamPeer == null && (currentSession.value == null || currentSession.value == sid)) {
             lastSessionId = sid
             store.lastSessionId = sid
             currentSession.value = sid
@@ -2342,24 +2356,23 @@ class ConnectionManager private constructor(context: Context) {
         // is the one blocking core intent (bounded ≤15s), so it runs on a worker thread.
         if (lastConfig != base) {
             lastConfig = base
-            pendingResumeAfterConnect = resume
-            // Render the cached transcript NOW (before the connection
-            // establishes) so a reopened convo shows instantly instead of
-            // "Connecting…" over an empty chat, and warm the session list so
-            // the resume's freshness check (at Ready) can match the cache
-            // stamp when nothing changed — no replay on cold start.
-            if (resume != null) {
-                core.loadCachedTranscript(resume)
-                core.listSessions()
-            }
+            // Warm the freshness table + session dir so connect_resume's
+            // suppress-vs-replay decision can match the cache stamp (no wire
+            // replay on a cold start into an unchanged chat).
+            core.listSessions()
             // A recipe pending on a cold start rides the connect's session/new
             // (gap 4: the core's connect() takes initial_recipe_id), so the
             // transient session IS the recipe session — one session, no waste.
-            // Consumed here; the Ready handler's newSession branch then no-ops.
             val cfg = base.copy(initialRecipeId = pendingRecipeId)
             pendingRecipeId = null
+            val target = resume
             Thread({
-                core.connect(cfg)
+                // Resume the known chat directly. `connect()` would bind a
+                // throwaway `session/new` first and the deferred open then
+                // abandoned it — the empty "New Chat" the server listed on
+                // every reopen. connect_resume binds the target, no orphan.
+                if (target != null) core.connectResume(cfg, target)
+                else core.connect(cfg)
                 // connect() returned: either Ready arrived (fine) or the bounded wait timed
                 // out / the handshake failed (the core emits no error status for the
                 // never-connected case — surface it here so the UI doesn't hang on

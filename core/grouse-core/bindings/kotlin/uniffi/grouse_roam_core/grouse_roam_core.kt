@@ -846,28 +846,28 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if (lib.uniffi_grouse_roam_core_checksum_func_card_fingerprint() != 43506) {
+    if ((lib.uniffi_grouse_roam_core_checksum_func_card_fingerprint() and 0xFFFF) != 43506) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_roam_core_checksum_func_identity_generate() != 23772) {
+    if ((lib.uniffi_grouse_roam_core_checksum_func_identity_generate() and 0xFFFF) != 23772) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_roam_core_checksum_func_identity_public_key() != 41670) {
+    if ((lib.uniffi_grouse_roam_core_checksum_func_identity_public_key() and 0xFFFF) != 41670) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_roam_core_checksum_func_roam_connect() != 59991) {
+    if ((lib.uniffi_grouse_roam_core_checksum_func_roam_connect() and 0xFFFF) != 59991) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_roam_core_checksum_method_roamstream_cancel() != 56565) {
+    if ((lib.uniffi_grouse_roam_core_checksum_method_roamstream_cancel() and 0xFFFF) != 56565) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_roam_core_checksum_method_roamstream_read() != 13967) {
+    if ((lib.uniffi_grouse_roam_core_checksum_method_roamstream_read() and 0xFFFF) != 13967) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_roam_core_checksum_method_roamstream_shutdown() != 64956) {
+    if ((lib.uniffi_grouse_roam_core_checksum_method_roamstream_shutdown() and 0xFFFF) != 64956) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_roam_core_checksum_method_roamstream_write() != 58616) {
+    if ((lib.uniffi_grouse_roam_core_checksum_method_roamstream_write() and 0xFFFF) != 58616) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
