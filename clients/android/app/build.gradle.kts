@@ -31,8 +31,9 @@ android {
     }
 
     // Release signing, used ONLY when the four properties below are supplied (CI sets them from
-    // repo secrets; locally they come from ~/services/grouse/signing/grouse-release.env). Absent them the block
-    // is not created at all and `release` falls back to debug signing — see below.
+    // repo secrets; locally they come from the gitignored `.signing/grouse-release.env` at the
+    // repo root, or `~/services/grouse/signing/grouse-release.env` on the build host). Absent
+    // them the block is not created at all and `release` falls back to debug signing — see below.
     //
     // NEVER commit the keystore or these values. Losing the keystore is unrecoverable: Android
     // will not accept an update signed by a different key, so every installed user would have to

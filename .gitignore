@@ -30,3 +30,6 @@ flatpak-repo/
 .env
 .env.*
 .bash_history
+# Release signing material (keystore + passwords env). Kept in-tree for local
+# release builds; must never be committed. See clients/android/app/build.gradle.kts.
+.signing/
