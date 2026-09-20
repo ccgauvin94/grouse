@@ -58,6 +58,7 @@ import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -104,14 +105,21 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 
 @Composable
-fun MessageBubble(m: ChatMessage, streaming: Boolean = false, usage: AcpEvent.MessageUsage? = null) {
+fun MessageBubble(
+    m: ChatMessage,
+    streaming: Boolean = false,
+    usage: AcpEvent.MessageUsage? = null,
+    pinned: Boolean = false,
+    onPin: (() -> Unit)? = null,
+    onUnpin: (() -> Unit)? = null,
+) {
     when (m.role) {
         "user" -> UserBubble(m)
         "thought" -> ThoughtBubble(m.text)
         "tool" -> ToolChip(m)
         "error" -> ErrorBubble(m.text)
         "chart" -> ChartView(m.text)
-        "mcpapp" -> McpAppView(m)
+        "mcpapp" -> McpAppView(m, pinned, onPin, onUnpin)
         else -> AssistantBubble(m.text, streaming, usage)
     }
 }
@@ -132,49 +140,156 @@ fun MessageBubble(m: ChatMessage, streaming: Boolean = false, usage: AcpEvent.Me
  */
 @android.annotation.SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun McpAppView(m: ChatMessage) {
-    if (m.appHtml.isEmpty()) { ToolChip(m); return }   // fetch in flight, or failed: stay a tool row
-    val heightDp = remember(m.id) { androidx.compose.runtime.mutableIntStateOf(240) }
+private fun McpAppWeb(m: ChatMessage, fill: Boolean = false, scrollable: Boolean = false) {
+    // Keyed on the appKey, not the message id: a pinned pane re-resolves its backing message
+    // every recomposition (the synthetic one gets a fresh id each time), and an id key would
+    // reset the height state and rebuild the WebView on every frame.
+    val heightDp = remember(m.appKey.ifEmpty { m.id.toString() }) { androidx.compose.runtime.mutableIntStateOf(240) }
     val dark = androidx.compose.foundation.isSystemInDarkTheme()
+    // The JS bridge closes over the FIRST m; read the latest through a stable holder so a
+    // newer tool call for the same template updates toolInput without recreating the view.
+    val current = rememberUpdatedState(m)
+    AndroidView(
+        factory = { ctx ->
+            android.webkit.WebView(ctx).apply {
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                // A docked pane fills its slot and scrolls internally only if the app is
+                // taller than the screen; a transcript bubble grows to the reported height.
+                isVerticalScrollBarEnabled = scrollable
+                addJavascriptInterface(object {
+                    @android.webkit.JavascriptInterface fun guestHtml() = current.value.appHtml
+                    @android.webkit.JavascriptInterface fun toolInput() = current.value.detail.ifBlank { "{}" }
+                    @android.webkit.JavascriptInterface fun theme() = if (dark) "dark" else "light"
+                    @android.webkit.JavascriptInterface fun sizeChanged(h: Int) {
+                        if (fill) return   // the pane owns its height; ignore the guest's report
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            heightDp.intValue = h.coerceIn(120, 640)
+                        }
+                    }
+                    @android.webkit.JavascriptInterface fun log(msg: String) {
+                        android.util.Log.w("McpApp", msg)
+                    }
+                }, "GrouseHost")
+                // Guest console (iframe included) lands in logcat under "McpApp" too:
+                // adb logcat -s McpApp
+                webChromeClient = object : android.webkit.WebChromeClient() {
+                    override fun onConsoleMessage(c: android.webkit.ConsoleMessage): Boolean {
+                        android.util.Log.w("McpApp", "${c.messageLevel()} ${c.message()}")
+                        return true
+                    }
+                }
+                loadDataWithBaseURL(null, MCP_APP_HOST, "text/html", "utf-8", null)
+            }
+        },
+        modifier = if (fill) Modifier.fillMaxWidth().fillMaxHeight().padding(8.dp)
+                   else Modifier.fillMaxWidth().height(heightDp.intValue.dp).padding(8.dp)
+    )
+}
+
+@Composable
+internal fun McpAppView(
+    m: ChatMessage,
+    pinned: Boolean = false,
+    onPin: (() -> Unit)? = null,
+    onUnpin: (() -> Unit)? = null,
+) {
+    if (m.appHtml.isEmpty()) { ToolChip(m); return }   // fetch in flight, or failed: stay a tool row
+    // Pinned: the docked pane owns the one live view, so the transcript keeps a slim bar
+    // instead of a second WebView rendering the same template (two live views per app is
+    // real memory on a phone).
+    if (pinned && onUnpin != null) { PinnedAppBar(m, onUnpin); return }
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(10.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
     ) {
-        AndroidView(
-            factory = { ctx ->
-                android.webkit.WebView(ctx).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    isVerticalScrollBarEnabled = false
-                    addJavascriptInterface(object {
-                        @android.webkit.JavascriptInterface fun guestHtml() = m.appHtml
-                        @android.webkit.JavascriptInterface fun toolInput() = m.detail.ifBlank { "{}" }
-                        @android.webkit.JavascriptInterface fun theme() = if (dark) "dark" else "light"
-                        @android.webkit.JavascriptInterface fun sizeChanged(h: Int) {
-                            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                heightDp.intValue = h.coerceIn(120, 640)
-                            }
-                        }
-                        @android.webkit.JavascriptInterface fun log(msg: String) {
-                            android.util.Log.w("McpApp", msg)
-                        }
-                    }, "GrouseHost")
-                    // Guest console (iframe included) lands in logcat under "McpApp" too:
-                    // adb logcat -s McpApp
-                    webChromeClient = object : android.webkit.WebChromeClient() {
-                        override fun onConsoleMessage(c: android.webkit.ConsoleMessage): Boolean {
-                            android.util.Log.w("McpApp", "${c.messageLevel()} ${c.message()}")
-                            return true
-                        }
-                    }
-                    loadDataWithBaseURL(null, MCP_APP_HOST, "text/html", "utf-8", null)
+        Column {
+            McpAppHeader(m, pinned, onPin, onUnpin)
+            McpAppWeb(m)
+        }
+    }
+}
+
+/** Slim title row + pin toggle above a rendered app. */
+@Composable
+private fun McpAppHeader(
+    m: ChatMessage,
+    pinned: Boolean,
+    onPin: (() -> Unit)?,
+    onUnpin: (() -> Unit)?,
+) {
+    var menu by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 2.dp, top = 2.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Text(m.text.ifBlank { "MCP app" }, style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        Box {
+            IconButton(onClick = { menu = true }, modifier = Modifier.size(34.dp)) {
+                Icon(Icons.Filled.PushPin, contentDescription = "pin app",
+                    tint = if (pinned) MaterialTheme.colorScheme.primary
+                           else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(17.dp))
+            }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                if (pinned) {
+                    DropdownMenuItem(text = { Text("Unpin") },
+                        onClick = { menu = false; onUnpin?.invoke() })
+                } else {
+                    DropdownMenuItem(text = { Text("Pin") },
+                        onClick = { menu = false; onPin?.invoke() })
                 }
-            },
-            modifier = Modifier.fillMaxWidth().height(heightDp.intValue.dp).padding(8.dp)
-        )
+            }
+        }
+    }
+}
+
+/** Transcript stand-in for an app that lives in the dock: one line, not a second live view. */
+@Composable
+private fun PinnedAppBar(m: ChatMessage, onUnpin: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        shape = RoundedCornerShape(10.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+    ) {
+        Row(Modifier.padding(start = 12.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.PushPin, contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text(m.text.ifBlank { "MCP app" }, style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("Pinned", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline)
+            }
+            TextButton(onClick = onUnpin) { Text("Unpin") }
+        }
+    }
+}
+
+/** The docked app: fills the drawer's body so a dashboard shows without the drawer scrolling,
+ *  with internal scrolling only when the template is taller than the screen. */
+@Composable
+internal fun ColumnScope.PinnedAppPane(m: ChatMessage, onUnpin: () -> Unit) {
+    Column(Modifier.fillMaxWidth().weight(1f)) {
+        Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(m.text.ifBlank { "Pinned app" }, style = MaterialTheme.typography.titleSmall,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            TextButton(onClick = onUnpin) { Text("Unpin") }
+        }
+        if (m.appHtml.isEmpty()) {
+            Text("Loading template…", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline)
+        } else {
+            Surface(color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(10.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                modifier = Modifier.fillMaxWidth().weight(1f)) { McpAppWeb(m, fill = true, scrollable = true) }
+        }
     }
 }
 

@@ -677,9 +677,67 @@ class ConnectionManager private constructor(context: Context) {
 
     // MCP-App template cache: "$extension|$uri" -> HTML. Templates are static per server
     // version and shared across tools/messages/sessions, so one fetch serves everything —
-    // including transcript replays, which re-emit every historical tool_call.
-    private val appHtmlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    // including transcript replays, which re-emit every historical tool_call. Snapshot state
+    // (not a plain map) so a pinned pane recomposes when its template finally lands. Seeded
+    // from disk and written back on fetch: a pin persisted from a previous run then paints on
+    // a cold start instead of racing session activation (or wedging on a fetch that never
+    // routes). A cold-start pin has no transcript row to update and would otherwise sit on
+    // "Loading…".
+    private val appHtmlCache = mutableStateMapOf<String, String>().apply { putAll(store.appTemplates) }
     private val appFetchInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Per-session pinned MCP-App (one appKey per session). Seeded from disk; the UI observes
+     *  the CURRENT session's entry and the template is (re)fetched into appHtmlCache on demand. */
+    val pinnedApps = mutableStateMapOf<String, String>().apply { putAll(store.pinnedApps) }
+
+    private fun persistPins() { store.pinnedApps = pinnedApps.filterValues { it.isNotEmpty() } }
+
+    /** Pin `appKey` to the current session, replacing any previous pin. Pinning is per session:
+     *  the docked app belongs to the chat it was pinned in. */
+    fun pinApp(appKey: String) {
+        val session = currentSession.value ?: return
+        if (appKey.isEmpty()) return
+        pinnedApps[session] = appKey
+        persistPins()
+        ensurePinnedAppLoaded(appKey)
+    }
+
+    fun unpinApp() {
+        val session = currentSession.value ?: return
+        pinnedApps.remove(session)
+        persistPins()
+    }
+
+    /** (Re)fetch the current session's pinned template. The appKey IS "<extension>|<uri>", so
+     *  this needs no transcript row; a cached copy paints immediately and this refreshes it in
+     *  the background. Peer-owned chats can't route the unstable call. */
+    fun ensurePinnedLoaded() { ensurePinnedAppLoaded(pinnedApps[currentSession.value].orEmpty()) }
+
+    private fun ensurePinnedAppLoaded(appKey: String) {
+        if (appKey.isEmpty()) return
+        val session = currentSession.value ?: return
+        if (roamPeer(session) != null) return
+        // The read must route on the session the pin belongs to AND the core must have made
+        // that session active: during a switch activeSessionId() still names the previous
+        // session, and resources/read against a session it cannot route returns WITHOUT a
+        // callback (unstable.rs `route` else-return) — leaving the in-flight marker set and
+        // wedging the pin on "Loading template…" forever. onCoreReady retries once settled.
+        // A cached template still refreshes here (in the background): the persisted copy paints
+        // immediately, so a failed refresh can never blank the pane.
+        if (core.activeSessionId() != session) return
+        val sep = appKey.indexOf('|')
+        if (sep <= 0) return
+        if (!appFetchInFlight.add(appKey)) return
+        io { unstable.resourcesRead(session, appKey.substring(0, sep), appKey.substring(sep + 1)) }
+    }
+
+    /** The transcript message backing a pinned appKey (its tool input + fetched template),
+     *  or a synthetic message from the cache when the transcript no longer holds the call. */
+    fun pinnedMessage(appKey: String): ChatMessage? =
+        messages.lastOrNull { it.role == "mcpapp" && it.appKey == appKey && it.appHtml.isNotEmpty() }
+            ?: messages.lastOrNull { it.role == "mcpapp" && it.appKey == appKey }
+            ?: appHtmlCache[appKey]?.let { ChatMessage("mcpapp", "", appKey = appKey, appHtml = it) }
+
     private var live = false
     private var connecting = false
     private var lastSessionId: String? = null
@@ -694,6 +752,11 @@ class ConnectionManager private constructor(context: Context) {
     // history streams in. Without it a long replay sat on a static "Connecting…" and looked
     // hung; the count proves it is advancing.
     val replayProgress = mutableStateOf(0)
+
+    /** True while the chat's pinned-app dock is open. The shell suspends the main drawer's
+     *  swipe gesture on it: scrolling the dock's nested WebView leaks its horizontal component
+     *  to the drawer, which otherwise flings the left menu open over the dock. */
+    val pinnedDockOpen = mutableStateOf(false)
 
     /** Config option ids this client exposes — shared with Screens.kt so the same single
      *  list drives both the Settings picker and the saved-option restore. */
@@ -1633,6 +1696,10 @@ class ConnectionManager private constructor(context: Context) {
             io { unstable.listTools(sid) }
             main.postDelayed({ if (live && core.activeSessionId() == sid) io { unstable.listTools(sid) } }, 2500)
             io { unstable.sessionExtensionsList(sid) }
+            // A pin persisted from a previous run has no transcript row to fetch its template
+            // (a replay does not re-hydrate mcpApp), so fetch it here — this is the first point
+            // the core has an active session id for the unstable resources/read to route on.
+            ensurePinnedLoaded()
             // The global extension catalog (Tools sheet / + sheet rows). Without this the
             // catalog only loaded when a sheet happened to open after Ready — a sheet opened
             // during a reconnect window bailed on `!live` and stayed "loading" forever.
@@ -2233,6 +2300,8 @@ class ConnectionManager private constructor(context: Context) {
         appFetchInFlight.remove(key)
         if (html.isNotBlank()) {
             appHtmlCache[key] = html
+            // Persist so the next cold start paints the pin (and any replay) with no fetch.
+            store.appTemplates = appHtmlCache.filterValues { it.isNotEmpty() }
             for (i in messages.indices)
                 if (messages[i].role == "mcpapp" && messages[i].appKey == key && messages[i].appHtml.isEmpty())
                     messages[i] = messages[i].copy(appHtml = html)

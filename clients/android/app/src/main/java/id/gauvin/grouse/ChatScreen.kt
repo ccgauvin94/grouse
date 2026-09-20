@@ -16,6 +16,8 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
@@ -59,6 +61,7 @@ import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -345,6 +348,21 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
         },
     )
 
+    // --- pinned MCP-App end drawer ------------------------------------------
+    // Per-session dock: one pinned app (ConnectionManager.pinnedApps). The docked pane is the
+    // ONLY live view of a pinned app — its transcript bubble collapses to a slim bar — so this
+    // never doubles WebViews for one template.
+    var showPinned by remember { mutableStateOf(false) }
+    val session = cm.currentSession.value
+    val pins = if (session != null) cm.pinnedApps[session] else null
+    val pinCount = if (pins.isNullOrEmpty()) 0 else 1
+    LaunchedEffect(session, pins) { cm.ensurePinnedLoaded() }
+    LaunchedEffect(pinCount) { if (pinCount == 0) showPinned = false }
+    // Tell the shell a full-surface overlay is up so it suspends the main drawer's swipe
+    // gesture — a scroll in the dock's WebView otherwise flings the left menu open over it.
+    LaunchedEffect(showPinned) { cm.pinnedDockOpen.value = showPinned }
+    DisposableEffect(Unit) { onDispose { cm.pinnedDockOpen.value = false } }
+
     Scaffold(topBar = {
         Column {
         TopAppBar(
@@ -493,228 +511,300 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         }
         }
     }) { pad ->
-        Column(Modifier.padding(pad).padding(horizontal = 12.dp).fillMaxSize()) {
-            if (cm.onAssistant && !hintDismissed) AssistantHint {
-                hintDismissed = true; cm.store.assistantHintSeen = true
-            }
-            Box(Modifier.weight(1f).fillMaxWidth()) {
-                if (cm.messages.isEmpty() && !cm.busy.value && cm.replayActive.value) {
-                    // Opening an existing chat with nothing painted yet: the wire
-                    // is fetching it. The landing copy below would read as "this
-                    // chat is empty", which is the opposite of what is happening.
-                    Column(
-                        Modifier.fillMaxSize().padding(32.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
-                        Spacer(Modifier.height(14.dp))
-                        Text(stringResource(R.string.loading_conversation), style = MaterialTheme.typography.titleMedium)
-                        if (cm.replayProgress.value > 0) {
+        Box(Modifier.padding(pad).fillMaxSize()) {
+            Column(Modifier.padding(horizontal = 12.dp).fillMaxSize()) {
+                if (cm.onAssistant && !hintDismissed) AssistantHint {
+                    hintDismissed = true; cm.store.assistantHintSeen = true
+                }
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    if (cm.messages.isEmpty() && !cm.busy.value && cm.replayActive.value) {
+                        // Opening an existing chat with nothing painted yet: the wire
+                        // is fetching it. The landing copy below would read as "this
+                        // chat is empty", which is the opposite of what is happening.
+                        Column(
+                            Modifier.fillMaxSize().padding(32.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
+                            Spacer(Modifier.height(14.dp))
+                            Text(stringResource(R.string.loading_conversation), style = MaterialTheme.typography.titleMedium)
+                            if (cm.replayProgress.value > 0) {
+                                Spacer(Modifier.height(4.dp))
+                                Text("${cm.replayProgress.value} messages",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.outline)
+                            }
+                        }
+                    } else if (cm.messages.isEmpty() && !cm.busy.value) {
+                        Column(
+                            Modifier.fillMaxSize().padding(32.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(Icons.Filled.Psychology, contentDescription = null,
+                                modifier = Modifier.size(56.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.height(12.dp))
+                            Text(if (cm.online.value) "Ask Grouse anything" else "Connecting…",
+                                style = MaterialTheme.typography.titleMedium)
                             Spacer(Modifier.height(4.dp))
-                            Text("${cm.replayProgress.value} messages",
+                            Text(stringResource(R.string.wired_up_hint),
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.outline)
+                                color = MaterialTheme.colorScheme.outline, textAlign = TextAlign.Center)
                         }
-                    }
-                } else if (cm.messages.isEmpty() && !cm.busy.value) {
-                    Column(
-                        Modifier.fillMaxSize().padding(32.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Icon(Icons.Filled.Psychology, contentDescription = null,
-                            modifier = Modifier.size(56.dp), tint = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.height(12.dp))
-                        Text(if (cm.online.value) "Ask Grouse anything" else "Connecting…",
-                            style = MaterialTheme.typography.titleMedium)
-                        Spacer(Modifier.height(4.dp))
-                        Text(stringResource(R.string.wired_up_hint),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.outline, textAlign = TextAlign.Center)
-                    }
-                } else {
-                    // reverseLayout: index 0 renders at the BOTTOM. Typing indicator first (very
-                    // bottom), then messages newest→oldest upward. Bottom is always index 0, so
-                    // "open at bottom", "jump to bottom", and streaming-stays-pinned are trivial.
-                    LazyColumn(state = listState, reverseLayout = true, modifier = Modifier.fillMaxSize()) {
-                        if (cm.busy.value) item { TypingIndicator() }
-                        // Consecutive tool calls collapse into one dropdown (goose often fires a run of
-                        // 5-10 shell/read calls back to back — a wall of individual chips otherwise).
-                        // Grouped on the forward list so adjacency is chronological, then reversed for
-                        // display like the flat list was. NOT remembered on messages.size: the streaming
-                        // assistant message updates via .copy() (new object, same id, size unchanged), so
-                        // a size-keyed cache would go stale mid-stream. Grouping is O(#messages) — cheap.
-                        val grouped = groupChatItems(cm.messages).asReversed()
-                        // key on the stable id of the group's first message so a growing tool-call run
-                        // (or the streaming assistant bubble) reuses its composition instead of rebuilding;
-                        // i==0 is the newest item → mark an assistant Msg streaming so it renders as plain
-                        // text until the turn finishes (skips the per-token Markdown re-parse).
-                        itemsIndexed(grouped, key = { _, item -> item.firstId }) { i, item ->
-                            when (item) {
-                                is ChatItem.Tools -> ToolChipGroup(item.items)
-                                is ChatItem.Msg -> MessageBubble(
-                                    item.m, streaming = i == 0 && cm.busy.value && item.m.role == "assistant",
-                                    // Each message carries its own stats now, so an older reply
-                                    // long-presses to ITS numbers rather than the latest turn's.
-                                    usage = item.m.usage)
-                            }
-                        }
-                    }
-                    if (!atBottom) SmallFloatingActionButton(
-                        onClick = { scope.launch { listState.animateScrollToItem(0) } },
-                        modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp)
-                    ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "scroll to bottom") }
-                }
-            }
-
-            // Slash-command autocomplete (goose's available commands).
-            val slash = input.startsWith("/") && !input.contains(' ')
-            if (slash) {
-                val matches = cm.commands.value.filter { it.startsWith(input.drop(1), true) }.take(6)
-                if (matches.isNotEmpty()) Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column {
-                        matches.forEach { name ->
-                            Text("/$name", modifier = Modifier.fillMaxWidth()
-                                .clickable { input = "/$name " }.padding(horizontal = 12.dp, vertical = 8.dp),
-                                style = MaterialTheme.typography.bodyMedium)
-                        }
-                    }
-                }
-            }
-
-            if (attachments.isNotEmpty() || cm.draftFiles.isNotEmpty()) Row(Modifier.padding(vertical = 4.dp)) {
-                attachments.forEachIndexed { i, _ ->
-                    AssistChip(onClick = { attachments.removeAt(i) },
-                        label = { Text("image ${i + 1}") },
-                        trailingIcon = { Icon(Icons.Filled.Close, contentDescription = "remove",
-                            modifier = Modifier.size(16.dp)) },
-                        modifier = Modifier.padding(end = 6.dp))
-                }
-                cm.draftFiles.forEachIndexed { i, f ->
-                    AssistChip(onClick = { cm.draftFiles.removeAt(i) },
-                        label = { Text(f.name, maxLines = 1,
-                            overflow = TextOverflow.Ellipsis) },
-                        leadingIcon = { Icon(Icons.Filled.InsertDriveFile, contentDescription = null,
-                            modifier = Modifier.size(16.dp)) },
-                        trailingIcon = { Icon(Icons.Filled.Close, contentDescription = "remove",
-                            modifier = Modifier.size(16.dp)) },
-                        modifier = Modifier.padding(end = 6.dp))
-                }
-            }
-
-            // A queued message's bubble is identical to a sent one, so without this there is no way
-            // to tell "waiting its turn" from "silently dropped".
-            if (cm.queuedCount.value > 0) {
-                // Say WHY it is waiting. "will send when this turn finishes" is a lie when
-                // there is no wire — that turn can never finish — which is how a user came
-                // to believe their stop messages had been delivered (2026-09-16).
-                val willSteer = cm.activeRunIdState.value != null && cm.busy.value
-                Text(when {
-                        willSteer -> "${cm.queuedCount.value} queued — will steer into current turn"
-                        !cm.wireUpForCurrentChat ->
-                            "${cm.queuedCount.value} queued — not connected; will send when it reconnects"
-                        else -> "${cm.queuedCount.value} queued — will send when this turn finishes"
-                    },
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 4.dp, top = 2.dp))
-            }
-
-            // Composer modelled on Claude's: ONE rounded, outlined container holding the text
-            // field and the action row together, rather than a pill field with buttons floating
-            // underneath it. The container is the affordance -- everything inside belongs to the
-            // message you are composing.
-            //
-            // Send/stop is a single filled circle on the right that CHANGES MEANING with state
-            // (arrow to send, square to stop), which is why it reads at a glance. The previous
-            // layout showed stop and send as two separate square buttons simultaneously.
-            Surface(
-                shape = GrouseShapes.composer,
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
-            ) {
-                Column(Modifier.padding(start = 18.dp, end = 10.dp, top = 14.dp, bottom = 8.dp)) {
-                    // BasicTextField, not TextField: Material's own container/padding/indicator
-                    // would draw a second surface inside this one. Here the Surface IS the field.
-                    Box(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
-                        if (input.isEmpty()) {
-                            Text(
-                                when {
-                                    cm.busy.value && cm.activeRunIdState.value != null -> "Steer current turn…"
-                                    cm.busy.value -> "Queue message…"
-                                    else -> "Message Grouse…"
-                                },
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        BasicTextField(
-                            value = input,
-                            onValueChange = { input = it },
-                            textStyle = MaterialTheme.typography.bodyLarge.copy(
-                                color = MaterialTheme.colorScheme.onSurface),
-                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                            maxLines = 8,
-                            modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp),
-                        )
-                    }
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        // "+" pill, left -- Claude-style composer: attach (camera/photos/files),
-                        // the tool-approval mode, and the tools-for-this-chat list all live in
-                        // the bottom sheet it opens. The MODEL pill stays beside it (the model
-                        // you're about to prompt with, worth seeing at a glance while typing).
-                        Surface(
-                            shape = RoundedCornerShape(20.dp),
-                            color = MaterialTheme.colorScheme.surface,
-                            modifier = Modifier.clickable { showComposer = true },
-                        ) {
-                            Row(
-                                Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Icon(Icons.Filled.Add, contentDescription = "attach, mode, tools",
-                                    modifier = Modifier.size(18.dp),
-                                    tint = MaterialTheme.colorScheme.onSurface)
-                            }
-                        }
-                        Spacer(Modifier.width(6.dp))
-                        // MODEL pill, right beside "+": the model you're about to prompt with,
-                        // switchable without opening the Tune panel. Opens the full-width
-                        // source/model/effort sheet.
-                        val modelOpt = cm.config.value.firstOrNull { it.id == "model" }
-                        ModelPill(modelOpt, cm.knownModels.value, cm::setOption,
-                            onOpenSheet = { showModelSheet = true })
-                        Spacer(Modifier.weight(1f))
-                        // One circle, two states: stop while a turn runs, send when there is
-                        // text. Sending mid-turn queues, so the arrow is never wrong -- it just
-                        // may not go out immediately.
-                        val canSend = input.isNotBlank()
-                        FilledIconButton(
-                            onClick = { if (canSend) doSend() else if (cm.busy.value) cm.cancel() },
-                            enabled = canSend || cm.busy.value,
-                            modifier = Modifier.size(42.dp),
-                            colors = IconButtonDefaults.filledIconButtonColors(
-                                containerColor = if (canSend) MaterialTheme.colorScheme.primary
-                                                 else MaterialTheme.colorScheme.surface,
-                            ),
-                        ) {
-                            Icon(
-                                if (canSend) Icons.Filled.ArrowUpward else Icons.Filled.Stop,
-                                contentDescription = when {
-                                    canSend -> when {
-                                        cm.busy.value && cm.activeRunIdState.value != null -> "steer"
-                                        cm.busy.value -> "queue"
-                                        else -> "send"
+                    } else {
+                        // reverseLayout: index 0 renders at the BOTTOM. Typing indicator first (very
+                        // bottom), then messages newest→oldest upward. Bottom is always index 0, so
+                        // "open at bottom", "jump to bottom", and streaming-stays-pinned are trivial.
+                        LazyColumn(state = listState, reverseLayout = true, modifier = Modifier.fillMaxSize()) {
+                            if (cm.busy.value) item { TypingIndicator() }
+                            // Consecutive tool calls collapse into one dropdown (goose often fires a run of
+                            // 5-10 shell/read calls back to back — a wall of individual chips otherwise).
+                            // Grouped on the forward list so adjacency is chronological, then reversed for
+                            // display like the flat list was. NOT remembered on messages.size: the streaming
+                            // assistant message updates via .copy() (new object, same id, size unchanged), so
+                            // a size-keyed cache would go stale mid-stream. Grouping is O(#messages) — cheap.
+                            val grouped = groupChatItems(cm.messages).asReversed()
+                            // key on the stable id of the group's first message so a growing tool-call run
+                            // (or the streaming assistant bubble) reuses its composition instead of rebuilding;
+                            // i==0 is the newest item → mark an assistant Msg streaming so it renders as plain
+                            // text until the turn finishes (skips the per-token Markdown re-parse).
+                            itemsIndexed(grouped, key = { _, item -> item.firstId }) { i, item ->
+                                when (item) {
+                                    is ChatItem.Tools -> ToolChipGroup(item.items)
+                                    is ChatItem.Msg -> {
+                                        val pinned = item.m.role == "mcpapp" &&
+                                            item.m.appKey.isNotEmpty() && item.m.appKey == pins
+                                        MessageBubble(
+                                            item.m,
+                                            streaming = i == 0 && cm.busy.value && item.m.role == "assistant",
+                                            // Each message carries its own stats now, so an older reply
+                                            // long-presses to ITS numbers rather than the latest turn's.
+                                            usage = item.m.usage,
+                                            pinned = pinned,
+                                            onPin = { cm.pinApp(item.m.appKey) },
+                                            onUnpin = { cm.unpinApp() },
+                                        )
                                     }
-                                    else -> "stop"
-                                },
-                                modifier = Modifier.size(20.dp),
-                            )
+                                }
+                            }
+                        }
+                        if (!atBottom) SmallFloatingActionButton(
+                            onClick = { scope.launch { listState.animateScrollToItem(0) } },
+                            modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp)
+                        ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "scroll to bottom") }
+                    }
+                }
+
+                // Slash-command autocomplete (goose's available commands).
+                val slash = input.startsWith("/") && !input.contains(' ')
+                if (slash) {
+                    val matches = cm.commands.value.filter { it.startsWith(input.drop(1), true) }.take(6)
+                    if (matches.isNotEmpty()) Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column {
+                            matches.forEach { name ->
+                                Text("/$name", modifier = Modifier.fillMaxWidth()
+                                    .clickable { input = "/$name " }.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    style = MaterialTheme.typography.bodyMedium)
+                            }
                         }
                     }
+                }
+
+                if (attachments.isNotEmpty() || cm.draftFiles.isNotEmpty()) Row(Modifier.padding(vertical = 4.dp)) {
+                    attachments.forEachIndexed { i, _ ->
+                        AssistChip(onClick = { attachments.removeAt(i) },
+                            label = { Text("image ${i + 1}") },
+                            trailingIcon = { Icon(Icons.Filled.Close, contentDescription = "remove",
+                                modifier = Modifier.size(16.dp)) },
+                            modifier = Modifier.padding(end = 6.dp))
+                    }
+                    cm.draftFiles.forEachIndexed { i, f ->
+                        AssistChip(onClick = { cm.draftFiles.removeAt(i) },
+                            label = { Text(f.name, maxLines = 1,
+                                overflow = TextOverflow.Ellipsis) },
+                            leadingIcon = { Icon(Icons.Filled.InsertDriveFile, contentDescription = null,
+                                modifier = Modifier.size(16.dp)) },
+                            trailingIcon = { Icon(Icons.Filled.Close, contentDescription = "remove",
+                                modifier = Modifier.size(16.dp)) },
+                            modifier = Modifier.padding(end = 6.dp))
+                    }
+                }
+
+                // A queued message's bubble is identical to a sent one, so without this there is no way
+                // to tell "waiting its turn" from "silently dropped".
+                if (cm.queuedCount.value > 0) {
+                    // Say WHY it is waiting. "will send when this turn finishes" is a lie when
+                    // there is no wire — that turn can never finish — which is how a user came
+                    // to believe their stop messages had been delivered (2026-09-16).
+                    val willSteer = cm.activeRunIdState.value != null && cm.busy.value
+                    Text(when {
+                            willSteer -> "${cm.queuedCount.value} queued — will steer into current turn"
+                            !cm.wireUpForCurrentChat ->
+                                "${cm.queuedCount.value} queued — not connected; will send when it reconnects"
+                            else -> "${cm.queuedCount.value} queued — will send when this turn finishes"
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp, top = 2.dp))
+                }
+
+                // Composer modelled on Claude's: ONE rounded, outlined container holding the text
+                // field and the action row together, rather than a pill field with buttons floating
+                // underneath it. The container is the affordance -- everything inside belongs to the
+                // message you are composing.
+                //
+                // Send/stop is a single filled circle on the right that CHANGES MEANING with state
+                // (arrow to send, square to stop), which is why it reads at a glance. The previous
+                // layout showed stop and send as two separate square buttons simultaneously.
+                Surface(
+                    shape = GrouseShapes.composer,
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
+                ) {
+                    Column(Modifier.padding(start = 18.dp, end = 10.dp, top = 14.dp, bottom = 8.dp)) {
+                        // BasicTextField, not TextField: Material's own container/padding/indicator
+                        // would draw a second surface inside this one. Here the Surface IS the field.
+                        Box(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+                            if (input.isEmpty()) {
+                                Text(
+                                    when {
+                                        cm.busy.value && cm.activeRunIdState.value != null -> "Steer current turn…"
+                                        cm.busy.value -> "Queue message…"
+                                        else -> "Message Grouse…"
+                                    },
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            BasicTextField(
+                                value = input,
+                                onValueChange = { input = it },
+                                textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                    color = MaterialTheme.colorScheme.onSurface),
+                                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                maxLines = 8,
+                                modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp),
+                            )
+                        }
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            // "+" pill, left -- Claude-style composer: attach (camera/photos/files),
+                            // the tool-approval mode, and the tools-for-this-chat list all live in
+                            // the bottom sheet it opens. The MODEL pill stays beside it (the model
+                            // you're about to prompt with, worth seeing at a glance while typing).
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                modifier = Modifier.clickable { showComposer = true },
+                            ) {
+                                Row(
+                                    Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(Icons.Filled.Add, contentDescription = "attach, mode, tools",
+                                        modifier = Modifier.size(18.dp),
+                                        tint = MaterialTheme.colorScheme.onSurface)
+                                }
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            // MODEL pill, right beside "+": the model you're about to prompt with,
+                            // switchable without opening the Tune panel. Opens the full-width
+                            // source/model/effort sheet.
+                            val modelOpt = cm.config.value.firstOrNull { it.id == "model" }
+                            ModelPill(modelOpt, cm.knownModels.value, cm::setOption,
+                                onOpenSheet = { showModelSheet = true })
+                            Spacer(Modifier.weight(1f))
+                            // One circle, two states: stop while a turn runs, send when there is
+                            // text. Sending mid-turn queues, so the arrow is never wrong -- it just
+                            // may not go out immediately.
+                            val canSend = input.isNotBlank()
+                            FilledIconButton(
+                                onClick = { if (canSend) doSend() else if (cm.busy.value) cm.cancel() },
+                                enabled = canSend || cm.busy.value,
+                                modifier = Modifier.size(42.dp),
+                                colors = IconButtonDefaults.filledIconButtonColors(
+                                    containerColor = if (canSend) MaterialTheme.colorScheme.primary
+                                                     else MaterialTheme.colorScheme.surface,
+                                ),
+                            ) {
+                                Icon(
+                                    if (canSend) Icons.Filled.ArrowUpward else Icons.Filled.Stop,
+                                    contentDescription = when {
+                                        canSend -> when {
+                                            cm.busy.value && cm.activeRunIdState.value != null -> "steer"
+                                            cm.busy.value -> "queue"
+                                            else -> "send"
+                                        }
+                                        else -> "stop"
+                                    },
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            PinnedDock(cm, session, pins, pinCount, showPinned) { showPinned = it }
+        }
+    }
+}
+
+/** Right-hand dock for this session's pinned MCP app. Opened from an edge tab rather than a
+ *  screen-edge swipe: on gesture-nav Android the right edge IS the system Back gesture, so an
+ *  edge swipe would fight the OS. The docked pane renders the one live view of the pinned app;
+ *  its transcript bubble collapses to a bar. */
+@Composable
+private fun BoxScope.PinnedDock(
+    cm: ConnectionManager,
+    session: String?,
+    pins: String?,
+    count: Int,
+    open: Boolean,
+    onOpenChange: (Boolean) -> Unit,
+) {
+    if (session == null || count == 0) return
+    if (!open) {
+        Surface(
+            color = MaterialTheme.colorScheme.secondaryContainer,
+            shape = RoundedCornerShape(topStart = 14.dp, bottomStart = 14.dp),
+            tonalElevation = 3.dp,
+            modifier = Modifier.align(Alignment.CenterEnd).clickable { onOpenChange(true) },
+        ) {
+            Column(Modifier.padding(horizontal = 7.dp, vertical = 14.dp),
+                horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(Icons.Filled.PushPin, contentDescription = "open pinned apps",
+                    modifier = Modifier.size(18.dp))
+                Text("$count", style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+    AnimatedVisibility(visible = open, enter = fadeIn(), exit = fadeOut()) {
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f))
+            .clickable { onOpenChange(false) })
+    }
+    AnimatedVisibility(
+        visible = open,
+        enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
+        exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut(),
+        modifier = Modifier.align(Alignment.CenterEnd),
+    ) {
+        Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 4.dp,
+            modifier = Modifier.fillMaxHeight().fillMaxWidth(0.94f).widthIn(max = 520.dp)) {
+            // Tight edges: the pane is the point, so the header is a 34dp strip and the side
+            // padding is minimal. No verticalScroll — the pane fills the body and scrolls
+            // internally only when the template is taller than the screen.
+            Column(Modifier.fillMaxSize().padding(start = 6.dp, end = 6.dp, bottom = 6.dp)) {
+                Row(Modifier.fillMaxWidth().height(34.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Pinned", style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f).padding(start = 8.dp))
+                    IconButton(onClick = { onOpenChange(false) }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Filled.Close, contentDescription = "close", modifier = Modifier.size(18.dp))
+                    }
+                }
+                pins?.takeIf { it.isNotEmpty() }?.let { key ->
+                    cm.pinnedMessage(key)?.let { m -> PinnedAppPane(m) { cm.unpinApp() } }
                 }
             }
         }

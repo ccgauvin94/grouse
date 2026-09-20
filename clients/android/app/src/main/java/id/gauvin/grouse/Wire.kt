@@ -42,6 +42,49 @@ internal fun encodeToolCatalog(catalogs: Map<String, List<String>>): String =
         catalogs.forEach { (k, v) -> put(k, JsonArray(v.map { JsonPrimitive(it) })) }
     }.toString()
 
+/** (De)serialise the per-session pinned MCP-App (SecureStore's `pinned_apps`): one appKey
+ *  ("<extension>|<uri>") per session. Android pins a single app; the desktop's top/bottom
+ *  panes are its own store. Sessions with no pin are dropped, so unpinning removes the
+ *  entry rather than leaving an empty tombstone. */
+internal fun parsePinnedApps(json: String): Map<String, String> {
+    if (json.isBlank()) return emptyMap()
+    val o = try { Json.parseToJsonElement(json) as? JsonObject } catch (e: Exception) { null } ?: return emptyMap()
+    return o.mapNotNull { (session, v) ->
+        // A string is the current shape. An object is the earlier top/bottom build — read its
+        // slots so a pin made before this change survives instead of crashing the app on start.
+        val key = when (v) {
+            is JsonPrimitive -> v.contentOrNull.orEmpty()
+            is JsonObject -> v["top"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotEmpty() }
+                ?: v["bottom"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            else -> ""
+        }
+        if (key.isEmpty()) null else session to key
+    }.toMap()
+}
+
+internal fun encodePinnedApps(apps: Map<String, String>): String =
+    buildJsonObject {
+        apps.filterValues { it.isNotEmpty() }.forEach { (session, key) -> put(session, JsonPrimitive(key)) }
+    }.toString()
+
+/** (De)serialise the on-disk MCP-App template cache (SecureStore's `app_templates`):
+ *  appKey ("<extension>|<uri>") -> HTML. Templates are static per server version, so keeping
+ *  them means a pinned app (and a transcript replay) paints on a cold start with no fetch and
+ *  no dependence on when the session became active. Capped so prefs can't grow unbounded. */
+internal fun parseAppTemplates(json: String): Map<String, String> {
+    if (json.isBlank()) return emptyMap()
+    val o = try { Json.parseToJsonElement(json) as? JsonObject } catch (e: Exception) { null } ?: return emptyMap()
+    return o.mapNotNull { (k, v) ->
+        (v as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotEmpty() }?.let { k to it }
+    }.toMap()
+}
+
+internal fun encodeAppTemplates(templates: Map<String, String>, cap: Int = 32): String =
+    buildJsonObject {
+        templates.filterValues { it.isNotEmpty() }.toList().takeLast(cap)
+            .forEach { (k, v) -> put(k, JsonPrimitive(v)) }
+    }.toString()
+
 /** The four selectable config ids the app drives via `setConfigOption`. */
 internal val CONFIG_IDS = listOf("provider", "model", "mode", "thinking_effort")
 

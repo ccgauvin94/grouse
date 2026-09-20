@@ -276,4 +276,34 @@ class WireParserTest {
         assertEquals(emptyList<ExtInfo>(), parseGlobalExtensions("[]"))
         assertEquals(emptyList<ExtInfo>(), parseSessionExtensions("not json", fromPeer = false))
     }
+
+    @Test
+    fun `pinned apps round-trip per session and drop empty pins`() {
+        val pins = mapOf(
+            "20260912_61" to "assistantmonitor|ui://assistant-monitor/dashboard",
+            "chat-2" to "kagi|ui://kagi/chart",
+        )
+        assertEquals(pins, parsePinnedApps(encodePinnedApps(pins)))
+        // An empty pin must not persist a tombstone entry.
+        assertEquals(emptyMap<String, String>(),
+            parsePinnedApps(encodePinnedApps(mapOf("x" to ""))))
+        assertEquals(emptyMap<String, String>(), parsePinnedApps(""))
+        assertEquals(emptyMap<String, String>(), parsePinnedApps("::"))
+    }
+
+    @Test
+    fun `pinned apps migrates the earlier top-bottom object shape`() {
+        val old = """{"s1":{"top":"ext|ui://x","bottom":""},"s2":{"bottom":"ext|ui://y"}}"""
+        assertEquals(mapOf("s1" to "ext|ui://x", "s2" to "ext|ui://y"), parsePinnedApps(old))
+    }
+
+    @Test
+    fun `app template cache round-trips and honours its cap`() {
+        val t = mapOf("ext|ui://a" to "<html>a</html>", "ext|ui://b" to "<html>b</html>")
+        assertEquals(t, parseAppTemplates(encodeAppTemplates(t)))
+        assertEquals(emptyMap<String, String>(), parseAppTemplates(""))
+        assertEquals(emptyMap<String, String>(), parseAppTemplates("::"))
+        val many = (1..40).associate { "ext|ui://$it" to "<$it>" }
+        assertEquals(5, parseAppTemplates(encodeAppTemplates(many, cap = 5)).size)
+    }
 }

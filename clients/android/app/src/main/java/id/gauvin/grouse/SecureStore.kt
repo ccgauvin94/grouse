@@ -177,6 +177,19 @@ class SecureStore(context: Context) {
     var toolCatalogCache: String
         get() = cfg.getString("tool_catalog_cache", "") ?: ""
         set(v) = cfg.edit().putString("tool_catalog_cache", v).apply()
+
+    /** Per-session pinned MCP-App (one appKey per session), so a docked dashboard survives
+     *  process death. See Wire.parsePinnedApps/encodePinnedApps for the on-disk shape. */
+    var pinnedApps: Map<String, String>
+        get() = parsePinnedApps(cfg.getString("pinned_apps", "") ?: "")
+        set(v) = cfg.edit().putString("pinned_apps", encodePinnedApps(v)).apply()
+
+    /** Fetched MCP-App templates, appKey -> HTML (Wire.parseAppTemplates). Persisted so a
+     *  pinned app paints on a cold start instead of racing the session's activation. */
+    var appTemplates: Map<String, String>
+        get() = parseAppTemplates(cfg.getString("app_templates", "") ?: "")
+        set(v) = cfg.edit().putString("app_templates", encodeAppTemplates(v)).apply()
+
     /** Last known cwd PER session id, merged from every session/list and every open. The resume
      *  path MUST hand session/load the session's REAL cwd — a wrong value silently REWRITES the
      *  session's working_dir server-side. The old global last_session_cwd fallback ("wrong here
