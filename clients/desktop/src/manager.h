@@ -97,6 +97,10 @@ class Manager : public QObject
     Q_PROPERTY(QVariant skills READ skills NOTIFY skillsChanged)
 
 public:
+    /// Compiled-in QtWebEngine availability (main() sets it before the QML
+    /// engine loads; the UI reads it via Q_INVOKABLE inlineAppsEnabled()).
+    static void setInlineAppsSupported(bool on);
+    static bool inlineAppsSupported();
     explicit Manager(QObject *parent = nullptr);
 
     QString host() const;
@@ -376,6 +380,13 @@ private:
     Q_INVOKABLE void openAppInHtml(const QString &appKey);
     /// A ui/message arrived from an app tab: post it into the chat the app came from.
     void onAppMessage(const QString &sessionId, const QString &text);
+    /// Loopback URL serving this app's template with the host bridge (the URL
+    /// registers the app on demand; the inline WebEngineView and the external
+    /// browser open the SAME document with the SAME host shim).
+    Q_INVOKABLE QString appViewUrl(const QString &appKey);
+    /// True when QtWebEngine was compiled in: MCP Apps render inline in the
+    /// chat instead of browser-only. Set once from main() behind GROUSE_WEBENGINE.
+    Q_INVOKABLE bool inlineAppsEnabled() const;
     void onReady(const QString &sessionId);
     void onSessions(const QVariantList &sessions);
     void onProjects(const QVariantList &projects);
@@ -515,6 +526,10 @@ private:
     /// Loopback host for apps opened in the browser (see appbridge.h).
     AppBridgeServer *m_appBridge = nullptr;
     int m_appTokenSeq = 0;
+    /// appKey -> bridge URL (stable per appKey so the inline view reloads the
+    /// same document; token changes when the template refetches).
+    QHash<QString, QString> m_appUrls;
+    QHash<QString, QString> m_appTokens;
 
     /// Lookup by extension KEY (configKey/extensionKey), not display name.
     const ExtDef *extDef(const QString &key) const;

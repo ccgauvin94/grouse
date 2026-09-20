@@ -503,6 +503,9 @@ Kirigami.Page {
                 readonly property bool isError: mdel.messageRole === "error"
                 readonly property bool isChart: mdel.messageRole === "chart"
                 readonly property bool isMcpApp: mdel.messageRole === "mcpapp"
+                // True when QtWebEngine was compiled in: MCP Apps render inline
+                // (AppView) instead of the browser-handoff chip.
+                readonly property bool inlineApps: Mgr.inlineAppsEnabled()
 
                 // A native Canvas chart reserves ~220-266px depending on type + title.
                 readonly property real chartH: (function() {
@@ -879,9 +882,12 @@ Kirigami.Page {
                 }
 
                 // ---------------- MCP-App bubble ----------------
-                // A server-hosted HTML template ("ui://..." resource) would need a browser
-                // engine to render; the desktop shows the fetched template status and keeps
-                // the tool's input expandable instead (rendering is a follow-up decision).
+                // With QtWebEngine (flatpak base app / native package) the app renders
+                // inline in a WebEngineView on the loopback bridge URL. Without it the
+                // same URL (or a temp file) opens in the system browser instead, and
+                // this stays a chip. height: the view cannot size itself from content
+                // (size-changed relay is a follow-up), so a generous fixed frame with
+                // in-page scroll.
                 Rectangle {
                     id: mcpAppChip
                     visible: mdel.isMcpApp
@@ -889,15 +895,22 @@ Kirigami.Page {
                     anchors.left: parent.left
                     anchors.leftMargin: mdel.gap
                     width: Math.min(mdel.agentBubbleW * 0.78, 560)
-                    implicitHeight: mcpCol.implicitHeight + mdel.pad * 2
+                    // Inline when WebEngine is compiled in AND the template has
+                    // arrived; else the status chip (browser handoff on tap).
+                    property bool inlineShow: mdel.inlineApps && mdel.messageAppHtml.length > 0
+                    property real viewH: mcpAppView.item ? mcpAppView.item.implicitHeight : 420
+                    implicitHeight: inlineShow ? viewH + mdel.pad * 2
+                                               : mcpCol.implicitHeight + mdel.pad * 2
                     radius: Theme.radius.sm
                     color: Qt.lighter(Kirigami.Theme.backgroundColor, 1.18)
                     border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
                                                                 : Kirigami.Theme.disabledTextColor
                     border.width: 1
+                    clip: true
 
                     Column {
                         id: mcpCol
+                        visible: !mcpAppChip.inlineShow
                         anchors.fill: parent
                         anchors.margins: mdel.pad
                         spacing: 0
@@ -952,7 +965,25 @@ Kirigami.Page {
                             }
                         }
                     }
-                    TapHandler { onTapped: mdel.toolOpen = !mdel.toolOpen }
+
+                    Loader {
+                        id: mcpAppView
+                        anchors.fill: parent
+                        anchors.margins: mdel.pad
+                        // Loaded by source STRING, not a Component: when WebEngine
+                        // is compiled out (mgrInlineApps false) the loader is never
+                        // active, so AppView.qml — and its QtWebEngine import — is
+                        // never fetched. That would fail to load in the base
+                        // runtime without the base app.
+                        active: mcpAppChip.inlineShow
+                        source: "AppView.qml"
+                        onLoaded: if (item) item.appKey = mdel.messageAppKey
+                    }
+
+                    TapHandler {
+                        enabled: !mcpAppChip.inlineShow
+                        onTapped: mdel.toolOpen = !mdel.toolOpen
+                    }
                 }
 
                 // ---------------- collapsible thinking ----------------

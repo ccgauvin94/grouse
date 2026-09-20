@@ -2144,6 +2144,13 @@ void Manager::onAppResource(const QString &appKey, const QString &html)
 {
     if (!html.isEmpty())
         m_appHtml.insert(appKey, html);
+    if (!html.isEmpty() && m_appUrls.contains(appKey)) {
+        // Re-fetched template: invalidate the served URL so the next request
+        // (an Open-in-browser click, or a new view) registers fresh content.
+        // An already-rendered inline view keeps the first snapshot — reload on
+        // demand, not churn under the user.
+        m_appUrls.remove(appKey);
+    }
     for (int i = m_messageModel->count() - 1; i >= 0; --i) {
         QVariantMap m = m_messageModel->row(i);
         if (m.value("role").toString() == "mcpapp" && m.value("appKey").toString() == appKey) {
@@ -2157,37 +2164,57 @@ void Manager::onAppResource(const QString &appKey, const QString &html)
     requestMessagesUpdate();
 }
 
-void Manager::openAppInHtml(const QString &appKey)
+namespace { bool g_inlineApps = false; }
+
+QString Manager::appViewUrl(const QString &appKey)
 {
     const QString html = m_appHtml.value(appKey);
     if (html.isEmpty())
-        return;
-    // Preferred: serve the app over loopback so its bridge has a HOST to talk
-    // to (ui/initialize answered, ui/message lands back in this chat). The
-    // flatpak shares the host network namespace, so the user's browser reaches
-    // 127.0.0.1 fine. Fallback: plain temp-file handoff (view-only).
+        return {};
+    const QString existing = m_appUrls.value(appKey);
+    if (!existing.isEmpty())
+        return existing;   // stable URL per template (re-fetched templates are
+                           // re-registered: onAppResource clears the mapping)
     if (!m_appBridge) {
         m_appBridge = new AppBridgeServer(this);
         connect(m_appBridge, &AppBridgeServer::appMessage, this, &Manager::onAppMessage);
     }
-    if (m_appBridge->running() || m_appBridge->start()) {
-        QString detail, output;
-        for (int i = m_messageModel->count() - 1; i >= 0; --i) {
-            const QVariantMap m = m_messageModel->row(i);
-            if (m.value("role").toString() == QLatin1String("mcpapp")
-                && m.value("appKey").toString() == appKey) {
-                detail = m.value("detail").toString();
-                output = m.value("output").toString();
-                break;
-            }
+    if (!(m_appBridge->running() || m_appBridge->start()))
+        return {};
+    QString detail, output;
+    for (int i = m_messageModel->count() - 1; i >= 0; --i) {
+        const QVariantMap m = m_messageModel->row(i);
+        if (m.value("role").toString() == QLatin1String("mcpapp")
+            && m.value("appKey").toString() == appKey) {
+            detail = m.value("detail").toString();
+            output = m.value("output").toString();
+            break;
         }
-        const QString token = QStringLiteral("t%1").arg(++m_appTokenSeq);
-        const bool dark = QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
-        m_appBridge->registerApp(token, m_currentSessionId, html, detail, output,
-                                 dark ? QStringLiteral("dark") : QStringLiteral("light"));
-        QDesktopServices::openUrl(QUrl(m_appBridge->urlFor(token)));
+    }
+    const QString token = QStringLiteral("t%1").arg(++m_appTokenSeq);
+    const bool dark = QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
+    m_appBridge->registerApp(token, m_currentSessionId, html, detail, output,
+                             dark ? QStringLiteral("dark") : QStringLiteral("light"));
+    const QString url = m_appBridge->urlFor(token);
+    m_appTokens.insert(appKey, token);
+    m_appUrls.insert(appKey, url);
+    return url;
+}
+
+void Manager::openAppInHtml(const QString &appKey)
+{
+    // Serve through the loopback bridge so the tab gets a host (ui/initialize
+    // answered, ui/message lands back in this chat). The flatpak shares the
+    // host network namespace, so the browser reaches 127.0.0.1 fine.
+    const QString url = appViewUrl(appKey);
+    if (!url.isEmpty()) {
+        QDesktopServices::openUrl(QUrl(url));
         return;
     }
+    // Fallback: plain temp-file handoff (view-only — no host for the bridge).
+    const QString html = m_appHtml.value(appKey);
+    if (html.isEmpty())
+        return;
     const QString path = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
                              .filePath(QStringLiteral("grouse-app-%1.html")
                                            .arg(qHash(appKey)));
@@ -2199,6 +2226,21 @@ void Manager::openAppInHtml(const QString &appKey)
     // Trust boundary either way: the document is server-supplied; the browser
     // sandbox is the isolation.
     QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+}
+
+bool Manager::inlineAppsEnabled() const
+{
+    return g_inlineApps;
+}
+
+void Manager::setInlineAppsSupported(bool on)
+{
+    g_inlineApps = on;
+}
+
+bool Manager::inlineAppsSupported()
+{
+    return g_inlineApps;
 }
 
 void Manager::onAppMessage(const QString &sessionId, const QString &text)

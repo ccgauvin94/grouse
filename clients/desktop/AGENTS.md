@@ -159,13 +159,16 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
 ```
 - Flatpak bundle: `./build-flatpak.sh` → `grouse-desktop.flatpak` (state in
   `$XDG_CACHE_HOME/grouse-flatpak`, env-overridable
-  `STATE_DIR`/`BUILD_DIR`/`REPO_DIR`/`BUNDLE`). Run it on the HOST, not inside
-  the `kde-build` distrobox: nested flatpak-builder there breaks with a
-  bubblewrap `/oldroot/etc/resolv.conf` mount error. The host has no
-  `flatpak-builder` — copy it from the container first:
-  `distrobox enter kde-build -- bash -lc 'cp /usr/bin/flatpak-builder /var/home/colin/flatpak-builder-host'`
-  then `ln -s /var/home/colin/flatpak-builder-host ~/.local/bin-shim/flatpak-builder`
-  and put `~/.local/bin-shim` on PATH. Footgun: flatpak-builder can "check out
+  `STATE_DIR`/`BUILD_DIR`/`REPO_DIR`/`BUNDLE`). The script runs host-side steps
+  directly but invokes `flatpak-builder` INSIDE the `kde-build` distrobox on
+  purpose: the manifest's `base: io.qt.qtwebengine.BaseApp` makes the ostree
+  checkout restore SELinux labels the host user context cannot set (`build-init`
+  dies with `lsetxattr(security.selinux): Operation not supported`); the
+  container's `spc_t` domain can, and nested bwrap works on the current flatpak
+  generation (an older note about a `/oldroot/etc/resolv.conf` mount failure was
+  a previous container generation). The host's own `flatpak` is still what you
+  install/bundle with; only the builder needs the container. Footgun:
+  flatpak-builder can "check out
   last cache hit" and ship a bundle with STALE source (the export reports
   `Content Written: 0`). `build-flatpak.sh` now drops the app module's cached
   build before every run (`rm -rf $STATE_DIR/builder-cache/build/grouse-desktop-*`)

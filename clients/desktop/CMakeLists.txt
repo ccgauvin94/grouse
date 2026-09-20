@@ -16,6 +16,12 @@ find_package(ECM REQUIRED NO_MODULE)
 set(CMAKE_MODULE_PATH ${ECM_MODULE_PATH})
 find_package(KF6 REQUIRED COMPONENTS Kirigami CoreAddons)
 
+# Inline MCP-App rendering needs QtWebEngine — absent from the bare KDE
+# flatpak runtime, provided by the io.qt.qtwebengine.BaseApp base layer (and
+# by distrobox/Fedora via qt6-qtwebengine). Optional: when missing, the app
+# still serves MCP Apps through the loopback bridge in the system browser.
+find_package(Qt6 QUIET COMPONENTS WebEngineQuick)
+
 # KRunner integration plugin (host-side; OFF for the flatpak build).
 option(BUILD_KRUNNER "Build the KRunner session-search plugin" ON)
 
@@ -56,6 +62,16 @@ target_link_libraries(grouse-desktop PRIVATE
     KF6::CoreAddons
 )
 
+# Inline MCP-App rendering: WebEngine comes from the flatpak base app (or the
+# system package when built natively). Absent -> browser-handoff fallback only.
+if(Qt6WebEngineQuick_FOUND)
+    target_link_libraries(grouse-desktop PRIVATE Qt6::WebEngineQuick)
+    target_compile_definitions(grouse-desktop PRIVATE GROUSE_WEBENGINE=1)
+    message(STATUS "grouse-desktop: inline MCP-App rendering ENABLED (QtWebEngine)")
+else()
+    message(STATUS "grouse-desktop: QtWebEngine not found — MCP Apps open in the system browser")
+endif()
+
 qt_add_resources(grouse-desktop "app"
     PREFIX "/"
     BASE "${CMAKE_CURRENT_SOURCE_DIR}/ui"
@@ -64,6 +80,7 @@ qt_add_resources(grouse-desktop "app"
         ui/GrouseTheme.qml
         ui/ChatPage.qml
         ui/ChartBubble.qml
+        ui/AppView.qml
         ui/ConnectDialog.qml
         ui/SettingsDialog.qml
         ui/PermissionDialog.qml

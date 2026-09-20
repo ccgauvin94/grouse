@@ -50,21 +50,24 @@ echo "== Building $APP_ID =="
 # the app module's cached build so it always re-runs; the base/runtime layers stay
 # cached, so this costs ~1 min of cmake/ninja, not the SDK download.
 rm -rf "${STATE_DIR}/builder-cache/build/grouse-desktop-"*
-flatpak-builder \
-    --user \
-    --install-deps-from=flathub \
-    --ccache \
-    --force-clean \
-    --disable-rofiles-fuse \
-    --state-dir="${STATE_DIR}/builder-cache" \
-    --repo="${REPO_DIR}" \
-    "${BUILD_DIR}" \
-    "${MANIFEST}"
-
-echo "== Exporting =="
-flatpak build-export --files=files "${REPO_DIR}" "${BUILD_DIR}"
-
-echo "== Bundling =="
-flatpak build-bundle "${REPO_DIR}" "${BUNDLE}" "${APP_ID}"
+# Run the builder INSIDE the kde-build container: the manifest now has
+# base: io.qt.qtwebengine.BaseApp, and flatpak's ostree checkout of that base
+# restores SELinux labels the host's unprivileged context cannot set
+# (build-init dies with "lsetxattr(security.selinux): Operation not
+# supported"). The container runs in the permissive spc_t domain, and nested
+# bwrap works on this flatpak generation.
+distrobox enter kde-build -- bash -lc \
+    "cd '$PWD' && flatpak-builder \
+        --user \
+        --install-deps-from=flathub \
+        --ccache \
+        --force-clean \
+        --disable-rofiles-fuse \
+        --state-dir='${STATE_DIR}/builder-cache' \
+        --repo='${REPO_DIR}' \
+        '${BUILD_DIR}' \
+        '${MANIFEST}' \
+     && flatpak build-export --files=files '${REPO_DIR}' '${BUILD_DIR}' \
+     && flatpak build-bundle '${REPO_DIR}' '${BUNDLE}' '${APP_ID}'"
 
 echo "Done: ${BUNDLE}"

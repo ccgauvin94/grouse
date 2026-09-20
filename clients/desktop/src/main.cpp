@@ -9,6 +9,10 @@
 #include <QQuickWindow>
 #include <QtQml>
 
+#ifdef GROUSE_WEBENGINE
+#include <QtWebEngineQuick>
+#endif
+
 #include "dbusadapter.h"
 #include "manager.h"
 #include "pushclient.h"
@@ -74,6 +78,16 @@ void installHostIntegration()
 
 int main(int argc, char *argv[])
 {
+#ifdef GROUSE_WEBENGINE
+    // Both calls must precede the application object (Qt warns otherwise:
+    // "called with QCoreApplication object already created"). When
+    // QtWebEngineQuick is not available (no base app / no system package) this
+    // whole branch is compiled out and MCP Apps fall back to the loopback
+    // bridge in the external browser.
+    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+    QtWebEngineQuick::initialize();
+    Manager::setInlineAppsSupported(true);
+#endif
     // QApplication (not QGuiApplication): the native file picker for attachments
     // is a QFileDialog, which needs the widgets app object to host it.
     QApplication app(argc, argv);
