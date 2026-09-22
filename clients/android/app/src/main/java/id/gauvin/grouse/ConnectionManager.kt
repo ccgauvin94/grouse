@@ -30,7 +30,8 @@ import uniffi.grouse_core.PushKind
 import uniffi.grouse_core.decideNotify
 import uniffi.grouse_core.GrouseUnstable
 import uniffi.grouse_core.GrouseUnstableListener
-import uniffi.grouse_core.Message
+import uniffi.grouse_core.Item
+import uniffi.grouse_core.ItemKind
 import uniffi.grouse_core.PermissionOutcome
 import uniffi.grouse_core.PermissionRequest
 import uniffi.grouse_core.ProjectSummary
@@ -40,7 +41,6 @@ import uniffi.grouse_core.SendExpect
 import uniffi.grouse_core.ServerConfig
 import uniffi.grouse_core.SessionSummary
 import uniffi.grouse_core.StreamEvent
-import uniffi.grouse_core.ToolCallKind
 import uniffi.grouse_core.TranscriptEvent
 import uniffi.grouse_core.TranscriptOp
 import uniffi.grouse_roam_core.cardFingerprint
@@ -154,9 +154,9 @@ class ConnectionManager private constructor(context: Context) {
         override fun onSessions(sessions: List<SessionSummary>) { main.post { onCoreSessions(sessions) } }
         override fun onTranscript(event: TranscriptEvent) { main.post { onCoreTranscript(event) } }
         override fun onStream(event: StreamEvent) { main.post { onCoreStream(event) } }
-        // The rich item stream (docs/TRANSCRIPT_MODEL.md). Android still renders from
-        // on_transcript/on_stream; migration to the item store is a later phase.
-        override fun onItem(op: TranscriptOp) { }
+        // The rich item stream (docs/TRANSCRIPT_MODEL.md): the only transcript
+        // channel now. on_transcript/on_stream remain only for usage + run-ended.
+        override fun onItem(op: TranscriptOp) { main.post { onCoreItem(op) } }
         override fun onConfig(options: List<CoreConfigOption>) { main.post { onCoreConfig(options) } }
         override fun onPermissionRequest(request: PermissionRequest) { main.post { onCorePermission(request) } }
         override fun onSessionTouched(sessionId: String, title: String, updatedAt: String) {
@@ -1704,6 +1704,9 @@ class ConnectionManager private constructor(context: Context) {
             // (a replay does not re-hydrate mcpApp), so fetch it here — this is the first point
             // the core has an active session id for the unstable resources/read to route on.
             ensurePinnedLoaded()
+            // Transcript MCP-App rows whose template fetch was skipped because the
+            // paint landed before the wire rebinds: retry now the session is active.
+            refetchAppTemplates()
             // The global extension catalog (Tools sheet / + sheet rows). Without this the
             // catalog only loaded when a sheet happened to open after Ready — a sheet opened
             // during a reconnect window bailed on `!live` and stayed "loading" forever.
@@ -1767,153 +1770,156 @@ class ConnectionManager private constructor(context: Context) {
      *  (a fresh cached transcript arrives as Clear + nothing else; a live replay arrives as
      *  Clear + chunks). The app's bubbles are per-message ids allocated here; the core's
      *  message ids correlate Updates to the right bubble. */
+    /** Legacy channel (on_transcript): superseded by on_item (docs/TRANSCRIPT_MODEL.md
+     *  phase 3). The core still emits it, but every transcript row now comes from
+     *  the item stream, so there is nothing to reconcile here. */
     private fun onCoreTranscript(event: TranscriptEvent) {
-        when (event) {
-            is TranscriptEvent.Clear -> {
+        // no-op
+    }
+
+    /** Core item id -> app bubble id (the LazyColumn key). */
+    private val coreKeyToAppId = HashMap<String, Long>()
+    /** Older items collected during a loadOlder, prepended as one batch on Window. */
+    private val olderPending = mutableListOf<Pair<String, ChatMessage>>()
+    private var loadingOlder = false
+    /** True while the core can still emit items older than the painted window. */
+    val itemHasOlder = mutableStateOf(false)
+
+    private fun appIdFor(coreId: String): Long =
+        coreKeyToAppId.getOrPut(coreId) { chatMessageSeq.getAndIncrement() }
+
+    private fun rowIndexOf(coreId: String): Int {
+        val appId = coreKeyToAppId[coreId] ?: return -1
+        return messages.indexOfFirst { it.id == appId }
+    }
+
+    private fun onCoreItem(op: TranscriptOp) {
+        when (op) {
+            is TranscriptOp.Reset -> {
                 messages.clear()
                 coreKeyToAppId.clear()
-                pendingToolStash.clear()
+                olderPending.clear()
+                loadingOlder = false
                 if (pendingSends.isNotEmpty()) replayWiped = true
-                val snap = core.transcript()
-                snap.forEach { appendFromMessage(it) }
-                // Empty snapshot = a rebuild is about to stream (show "Loading… N"); a
-                // non-empty one is the instant cache paint (no loading state).
-                // For a brand-new chat the snapshot is also empty, but it must
-                // stay on the empty composer, not the spinner.
-                if (snap.isNotEmpty()) {
+                replayProgress.value = 0
+                // replayActive stays as openChat set it; a Window over a non-empty
+                // paint clears it (a cache paint needs no spinner).
+            }
+            is TranscriptOp.Upsert -> {
+                // A ToolGroup expands to one row per call: the chat UI groups
+                // consecutive "tool" rows itself and each call keeps a stable
+                // tool_call_id key.
+                val rows = itemRows(op.item)
+                if (loadingOlder) olderPending.addAll(rows)
+                else rows.forEach { (key, bubble) -> upsertBubble(key, bubble) }
+                if (replayActive.value) replayProgress.value++
+            }
+            is TranscriptOp.AppendText -> {
+                val idx = rowIndexOf(op.id)
+                if (idx >= 0) messages[idx] = messages[idx].copy(text = messages[idx].text + op.chunk)
+            }
+            is TranscriptOp.AppendOutput -> {
+                val idx = rowIndexOf(op.id)
+                if (idx >= 0) messages[idx] = messages[idx].let {
+                    // Live output appends (capped); the finalizing Upsert replaces.
+                    it.copy(output = (it.output + op.chunk).takeLast(4000))
+                }
+            }
+            is TranscriptOp.Remove -> {
+                val idx = rowIndexOf(op.id)
+                if (idx >= 0) messages.removeAt(idx)
+                coreKeyToAppId.remove(op.id)
+            }
+            is TranscriptOp.Window -> {
+                if (loadingOlder) {
+                    // Older items arrive oldest-first; insert them as one batch.
+                    olderPending.asReversed().forEach { (key, bubble) -> prependBubble(key, bubble) }
+                    olderPending.clear()
+                    loadingOlder = false
+                }
+                itemHasOlder.value = op.hasOlder
+                if (messages.isNotEmpty() && replayActive.value) {
                     replayActive.value = false
+                    replayDoneTick.value++   // new content -> snap to bottom
                 }
                 replayProgress.value = 0
             }
-            is TranscriptEvent.Append -> appendFromMessage(event.message)
-            is TranscriptEvent.Update -> updateFromMessage(event.message)
         }
     }
 
-    /** Core message id ("" for live bubbles, tool_call_id for tool rows) -> app bubble id. */
-    private val coreKeyToAppId = HashMap<String, Long>()
-    /** The on_stream ToolCall for a tool bubble arrives just before its on_transcript Append;
-     *  keyed by tool_call_id (== the Append's message id). */
-    private data class ToolCallStash(val kind: ToolCallKind?, val detail: String)
-    private val pendingToolStash = HashMap<String, ToolCallStash>()
-
-    private fun appendFromMessage(m: Message) {
-        val appId = chatMessageSeq.getAndIncrement()
-        val bubble = if (m.role == "tool") {
-            val stash = pendingToolStash.remove(m.id)
-            buildToolBubble(m, stash, appId)
-        } else {
-            ChatMessage(if (m.role == "agent") "assistant" else m.role, m.content, id = appId)
-        }
-        messages.add(bubble)
-        if (m.id.isNotEmpty()) coreKeyToAppId[m.id] = appId
-        if (replayActive.value) replayProgress.value++
-    }
-    private fun buildToolBubble(m: Message, stash: ToolCallStash?, appId: Long): ChatMessage {
-        val kind = stash?.kind
-        return when (kind) {
-            is ToolCallKind.Chart -> ChatMessage("chart", kind.spec, id = appId)
-            is ToolCallKind.McpApp -> ChatMessage(
-                "mcpapp", m.content, detail = kind.input, toolCallId = m.id,
-                appKey = kind.appKey, appHtml = appHtmlCache[kind.appKey] ?: "",
-                id = appId,
-            ).also {
-                // Fetch the template once per key; the bubble renders as a plain tool row
-                // until it lands. Peer-owned sessions can't fetch (unstable routes to the
-                // main connection), so they stay plain rows.
-                if (kind.appKey.isNotEmpty() && !appHtmlCache.containsKey(kind.appKey) &&
-                    appFetchInFlight.add(kind.appKey) && roamPeer(currentSession.value) == null
-                ) {
-                    core.activeSessionId()?.let { sid -> io { unstable.resourcesRead(sid, kind.uri, kind.extension) } }
-                }
-            }
-            else -> ChatMessage(
-                "tool", m.content,
-                detail = stash?.detail.orEmpty(),
-                toolCallId = m.id,
-                // The core delivers tool output separately (Message.output) now,
-                // matching serve's shape — a roam tool result lands in the chip's
-                // output, never glued into the header text.
-                output = m.output,
-                // Live calls stream with a lifecycle; a snapshot/rebuild (no stash) is
-                // finished history and renders as a plain wrench.
-                status = if (stash != null) "in_progress" else "",
-                id = appId,
-            )
-        }
+    /** Ask the core for older items (docs/TRANSCRIPT_MODEL.md). Outcomes arrive as
+     *  on_item Upserts + a Window; there is no client-side buffer. */
+    fun loadOlder(count: Int = 40) {
+        if (!itemHasOlder.value || loadingOlder) return
+        loadingOlder = true
+        core.loadOlder(count.toUInt())
     }
 
-    private fun updateFromMessage(m: Message) {
-        val idx = if (m.id.isNotEmpty()) {
-            coreKeyToAppId[m.id]?.let { appId -> messages.indexOfFirst { it.id == appId } } ?: -1
-        } else {
-            // Live stream bubble (empty key): target the LAST message of the SAME
-            // role as the incoming chunk. Roam interleaves agent/thought on the
-            // same empty-id stream; always grabbing `lastIndex` could hit the wrong
-            // bubble (thinking text appended to the assistant bubble, or an assistant
-            // bubble flipped to a thinking block mid stream).
-            messages.indexOfLast { it.role == (if (m.role == "agent") "assistant" else m.role) }
+    private fun upsertBubble(coreId: String, bubble: ChatMessage) {
+        val idx = rowIndexOf(coreId)
+        if (idx >= 0) messages[idx] = bubble else messages.add(bubble)
+    }
+
+    private fun prependBubble(coreId: String, bubble: ChatMessage) {
+        val idx = rowIndexOf(coreId)
+        if (idx >= 0) messages[idx] = bubble else messages.add(0, bubble)
+    }
+
+    /** One rich item as UI rows (a ToolGroup is one row per call). */
+    private fun itemRows(item: Item): List<Pair<String, ChatMessage>> = when (item.kind) {
+        ItemKind.TOOL_GROUP -> item.calls.map { c ->
+            c.id to ChatMessage("tool", c.title, detail = c.detail, toolCallId = c.id,
+                                status = c.status, output = c.output, id = appIdFor(c.id))
         }
-        if (idx < 0 || idx >= messages.size) return
-        val cur = messages[idx]
-        if (m.role == "tool") {
-            // Late MCP-App promotion: the core re-issues the ToolCall (stashed
-            // above) and then updates the transcript row. The chip was built as
-            // a plain tool; rebuild it from the upgraded kind (which also fires
-            // the template fetch). Extracted-from-group calls arrive as an
-            // Append instead and never reach here.
-            val stash = pendingToolStash[m.id]
-            if (stash?.kind is ToolCallKind.McpApp && cur.role == "tool") {
-                pendingToolStash.remove(m.id)
-                messages[idx] = buildToolBubble(m, stash, cur.id)
-                return
-            }
-        }
-        messages[idx] = cur.copy(
-            // NEVER reclassify an existing bubble's role from an update: a live
-            // roam stream interleaves AgentMessageChunk (assistant) and
-            // AgentThoughtChunk (thought) on the same empty-id stream, and a
-            // role overwrite here turned a streaming assistant bubble into a
-            // "thinking block mid stream". The role is decided at append time;
-            // an update only changes content/output/status.
-            role = cur.role,
-            // For tool role, NEVER clobber the existing label with an update's
-            // content — a tool bubble's title is set once at append time and is
-            // only ever changed by output/status. Some update paths (replay or a
-            // tool with no appended output) deliver an empty/partial content that
-            // would erase the just-painted name ("label shows then vanishes").
-            text = if (m.role == "tool") cur.text else m.content,
-            // Roam tool output arrives via the core's on_transcript update now
-            // (serve streams it separately); land it in the chip's output field.
-            output = if (m.role == "tool" && m.output.isNotEmpty()) m.output else cur.output,
-        )
+        ItemKind.CHART -> listOf(item.id to ChatMessage("chart", item.detail, id = appIdFor(item.id)))
+        ItemKind.MCP_APP -> listOf(item.id to ChatMessage(
+            "mcpapp", item.text, detail = item.detail, toolCallId = item.id,
+            appKey = item.appKey, appHtml = appHtmlCache[item.appKey] ?: "",
+            status = item.status, id = appIdFor(item.id),
+        ).also { fetchAppTemplate(item.appKey) })
+        ItemKind.TOOL -> listOf(item.id to ChatMessage(
+            itemRole(item.kind), item.text, detail = item.detail, toolCallId = item.id,
+            status = item.status, output = item.output, id = appIdFor(item.id)))
+        ItemKind.USER, ItemKind.THOUGHT, ItemKind.ERROR, ItemKind.AGENT ->
+            listOf(item.id to ChatMessage(itemRole(item.kind), item.text, id = appIdFor(item.id)))
+    }
+
+    /** Fetch an MCP-App template once per key; the bubble renders as a plain tool
+     *  row until it lands. Peer-owned sessions can't route the unstable call. */
+    private fun fetchAppTemplate(appKey: String) {
+        if (appKey.isEmpty() || appHtmlCache.containsKey(appKey)) return
+        if (roamPeer(currentSession.value) != null) return
+        val sep = appKey.indexOf('|')
+        if (sep <= 0) return
+        // The read must route on a session the core has actually made active:
+        // resources/read returns WITHOUT a callback otherwise (unstable.rs
+        // `route` else-return), wedging the in-flight marker.
+        val sid = core.activeSessionId() ?: return
+        if (!appFetchInFlight.add(appKey)) return
+        io { unstable.resourcesRead(sid, appKey.substring(sep + 1), appKey.substring(0, sep)) }
+    }
+
+    /** Retry template fetches skipped because no session was active yet (a paint
+     *  can land before the wire rebinds). Called once Ready settles. */
+    private fun refetchAppTemplates() {
+        messages.asSequence()
+            .filter { it.role == "mcpapp" && it.appKey.isNotEmpty() && it.appHtml.isEmpty() }
+            .map { it.appKey }
+            .distinct()
+            .forEach { fetchAppTemplate(it) }
     }
 
     private fun onCoreStream(event: StreamEvent) {
         when (event) {
-            is StreamEvent.ToolCall -> pendingToolStash[event.toolCallId] =
-                ToolCallStash(event.kind, event.detail)
-            is StreamEvent.ToolCallUpdate -> {
-                val i = messages.indexOfLast { it.toolCallId == event.id }
-                if (i >= 0) messages[i] = messages[i].copy(
-                    status = event.status.ifBlank { messages[i].status },
-                    // Live shell chunks APPEND (capped — a verbose build log must not grow
-                    // a transcript entry without bound); the final completion update still
-                    // replaces, so the finished chip shows the tool's real result.
-                    output = when {
-                        event.live -> (messages[i].output + event.output).takeLast(4000)
-                        event.output.isNotBlank() -> event.output
-                        else -> messages[i].output
-                    },
-                )
-            }
             is StreamEvent.Usage -> usage.value =
                 AcpEvent.Usage(event.used.toInt(), event.size.toInt(), event.cost, event.currency)
             is StreamEvent.RunEnded -> onRunEnded(event.stopReason)
-            // Text chunks are mirrored through on_transcript (Append/Update); nothing to do.
-            is StreamEvent.AgentChunk, is StreamEvent.UserChunk, is StreamEvent.ThoughtChunk -> {}
+            // Every transcript event (chunks, tool calls, output) arrives on
+            // on_item now; nothing here mirrors it.
+            else -> {}
         }
     }
+
 
     private fun onRunEnded(stopReason: String) {
         compacting.value = false

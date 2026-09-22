@@ -236,6 +236,19 @@ data class ChatMessage(
     val appHtml: String = "",
 )
 
+/** The UI role a rich transcript item renders as (docs/TRANSCRIPT_MODEL.md). A
+ *  ToolGroup is the exception: it expands to one `tool` row per call, so the chat
+ *  UI can keep grouping consecutive tool rows itself. */
+internal fun itemRole(kind: uniffi.grouse_core.ItemKind): String = when (kind) {
+    uniffi.grouse_core.ItemKind.USER -> "user"
+    uniffi.grouse_core.ItemKind.AGENT -> "assistant"
+    uniffi.grouse_core.ItemKind.THOUGHT -> "thought"
+    uniffi.grouse_core.ItemKind.ERROR -> "error"
+    uniffi.grouse_core.ItemKind.TOOL, uniffi.grouse_core.ItemKind.TOOL_GROUP -> "tool"
+    uniffi.grouse_core.ItemKind.CHART -> "chart"
+    uniffi.grouse_core.ItemKind.MCP_APP -> "mcpapp"
+}
+
 /** UI-facing event records translated from the grouse-core listeners. Only the shapes the
  *  Screens actually consume survive; everything wire-specific lives in the controller now. */
 sealed interface AcpEvent {

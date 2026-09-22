@@ -226,6 +226,20 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
         }
     }
 
+    // Scroll-back: ask the core for older items when the oldest end nears. With
+    // reverseLayout the oldest is the LAST index; the batch is prepended to the
+    // model (which is the far end of the reversed layout) and the LazyColumn keeps
+    // its position because every row is keyed by its stable id.
+    val shouldLoadOlder by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            cm.itemHasOlder.value && info.totalItemsCount > 0 &&
+                last >= info.totalItemsCount - 3
+        }
+    }
+    LaunchedEffect(shouldLoadOlder) { if (shouldLoadOlder) cm.loadOlder() }
+
     fun reallySend() {
         cm.send(input.trim(), attachments.toList(), cm.draftFiles.toList())
         input = ""; attachments.clear(); cm.draftFiles.clear()
