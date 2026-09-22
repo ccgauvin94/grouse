@@ -1464,7 +1464,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_grouse_core_checksum_method_core_respond_permission() != 49597) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_rich_transcript() != 39140) {
+    if (lib.uniffi_grouse_core_checksum_method_core_rich_transcript() != 64700) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_roam_connect() != 53647) {
@@ -2326,8 +2326,7 @@ public interface CoreInterface {
     
     /**
      * The rich item snapshot of the active session (docs/TRANSCRIPT_MODEL.md).
-     * Peer chats flatten to items (the peer's store is still `Message`-based);
-     * the main connection carries the full rich set.
+     * Both the main connection and roam peers hold rich items now.
      */
     fun `richTranscript`(): List<Item>
     
@@ -2851,8 +2850,7 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     
     /**
      * The rich item snapshot of the active session (docs/TRANSCRIPT_MODEL.md).
-     * Peer chats flatten to items (the peer's store is still `Message`-based);
-     * the main connection carries the full rich set.
+     * Both the main connection and roam peers hold rich items now.
      */override fun `richTranscript`(): List<Item> {
             return FfiConverterSequenceTypeItem.lift(
     callWithHandle {
