@@ -55,6 +55,19 @@ public:
     void append(const QVariantMap &message);
     /** Insert `messages` (oldest first) at the front, in one begin/endInsertRows. */
     void prepend(const QList<QVariantMap> &messages);
+
+    // -- item-stream API (docs/TRANSCRIPT_MODEL.md) -------------------------
+    // The model is the client's item store: rows are keyed by the core's item
+    // id, so a re-delivered item updates in place instead of appending.
+    /** Index of the row whose `id` is `id`, or -1. */
+    int indexForId(const QString &id) const;
+    /** Insert or replace by item id (the authoritative `Upsert`). */
+    void upsert(const QString &id, const QVariantMap &row);
+    void removeById(const QString &id);
+    /** Append a live text delta to an item's row (renders plain until finalized). */
+    void appendText(const QString &id, const QString &chunk);
+    /** Append a live tool-output delta to an item's row. */
+    void appendOutput(const QString &id, const QString &chunk);
     /** Replace row `index`'s data and notify QML of every role. */
     void update(int index, const QVariantMap &message);
     /** Flip a row's ExpandedRole (thinking bubble open/closed). Keyed by row index. */
@@ -76,7 +89,10 @@ signals:
 private:
     void commitDeferred();
 
+    void reindex();
+
     QList<QVariantMap> m_rows;
+    QHash<QString, int> m_rowById;   // item id -> row index (non-empty ids only)
     QList<int> m_dirtyRows;
     QHash<int, bool> m_expanded;   // row id -> user-expanded (thinking bubble)
     QTimer *m_deferTimer = nullptr;

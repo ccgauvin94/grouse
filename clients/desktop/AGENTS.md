@@ -61,11 +61,16 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
   `GrouseCoreListener` callback table. The library resolves via `GROUSE_CORE`,
   the app image's `../lib`, `/app/lib`, or the system path. Set `GROUSE_CORE`
   in tests/dev, bundle the .so for the flatpak.
-- Transcript rendering: the core owns the transcript and emits BOTH
-  `on_stream` (chunks) and `on_transcript` (full bubble Append/Update/Clear)
-  for the same content. To avoid double-render the desktop renders text
-  bubbles from `on_transcript` and tool/chart/MCP-App + usage/run-ended from
-  `on_stream`. Never republish a QVariantList to `MessageListModel` per event:
+- Transcript rendering: the core owns the transcript and emits it as **rich
+  items** on `on_item` (`Upsert` / `AppendText` / `AppendOutput` / `Remove` /
+  `Reset` / `Window`, docs/TRANSCRIPT_MODEL.md). The desktop renders from the
+  item stream alone — `Manager::coreOnItem` maps an item to a model row and the
+  model keys rows by item id, so a re-delivered item updates in place. Text
+  streams as `AppendText` deltas (rendered plain) and the core's finalizing
+  `Upsert` restores the markdown once per message. The core windows the paint
+  (newest ~60); `Mgr.loadOlder(n)` asks for older items and `coreOnItem`
+  prepends them. `on_stream` is now only usage + run-ended, and `on_transcript`
+  is a no-op. Never republish a QVariantList to `MessageListModel` per event:
   use the model's `insertRows`/`dataChanged` (coalesced via `requestMessagesUpdate`).
 - Per-session transcript/tool caches live in `QStandardPaths::CacheLocation`,
   keyed by sessionId. Reconnects use exponential backoff.

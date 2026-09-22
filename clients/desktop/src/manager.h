@@ -302,13 +302,9 @@ public:
     Q_PROPERTY(bool itemHasOlder READ itemHasOlder NOTIFY itemWindowChanged)
     bool itemHasOlder() const { return m_itemHasOlder; }
 
-    /// Older transcript rows held back from the painted window, prepended on
-    /// scroll-back so a long cached chat opens instantly instead of realizing
-    /// every delegate. Mirrors `itemHasOlder` but for the client-side buffer.
-    Q_PROPERTY(bool hasOlderRows READ hasOlderRows NOTIFY hasOlderRowsChanged)
-    bool hasOlderRows() const { return m_hasOlderRows; }
-    /// Prepend up to `count` buffered older rows to the model.
-    Q_INVOKABLE void loadOlderRows(int count);
+    /// Ask the core for older items (docs/TRANSCRIPT_MODEL.md). Outcomes arrive
+    /// as `on_item` Upserts + a refreshed `Window`; there is no client buffer.
+    Q_INVOKABLE void loadOlder(int count);
 
     int queuedCount() const { return m_pendingQueue.size(); }
     QString activeRunId() const { return m_activeRunId; }
@@ -380,13 +376,7 @@ signals:
     void itemWindowChanged();
     /** `count` older rows were prepended to the model; the view re-anchors. */
     void olderRowsPrepended(int count);
-    void hasOlderRowsChanged();
-    /** The transcript model is about to be cleared and rebuilt from the core's
-     *  item snapshot. The view should remember its scroll position; a rebuild
-     *  can arrive mid-playback (a tail merge completing), not only on a session
-     *  switch, and a bare clear would jump to the top. */
-    void transcriptWillRebuild();
-    void transcriptRebuilt();
+
     void permissionRequested();
     void landingChanged();
     void queuedChanged();
@@ -416,23 +406,11 @@ private:
     QString m_announcedTurnSession;
     qint64 m_announcedTurnAtMs = 0;
     void onSessionTouched(const QString &sid, const QString &title, const QString &updatedAt);
-    void appendChunk(const QString &role, const QString &text, const QString &messageId, bool thought);
-    void finalizeCurrentMessage();
-    void onAgentChunk(const QString &text, const QString &messageId);
-    void onUserChunk(const QString &text, const QString &messageId);
-    void onThoughtChunk(const QString &text);
-    void onToolCall(const QString &title, const QString &detail, const QString &toolCallId);
-    void onToolCallUpdate(const QString &toolCallId, const QString &status,
-                          const QString &output, bool live);
-    void onChartToolCall(const QString &title, const QString &toolCallId, const QString &chartSpec);
-    void onMcpAppToolCall(const QString &title, const QString &toolCallId, const QString &appKey,
-                          const QString &appUri, const QString &appExt, const QString &appInput);
     void onAppResource(const QString &appKey, const QString &html);
-    /// Rebuild the transcript model from the core's rich item snapshot
-    /// (docs/TRANSCRIPT_MODEL.md). The legacy Clear carries no rows — a Clear
-    /// means "rebuild from the store" — so a fresh-cache paint would otherwise
-    /// render an empty chat until a replay that may never come.
-    void rebuildFromRichTranscript();
+    /// One rich item (docs/TRANSCRIPT_MODEL.md) as a model row. Kinds become the
+    /// delegate's roles; a text row's html is computed once, when the core's
+    /// finalizing Upsert arrives.
+    QVariantMap rowFromItem(const QJsonObject &item);
     /// A ui/message arrived from an app tab: post it into the chat the app came from.
     void onAppMessage(const QString &sessionId, const QString &text);
     void onReady(const QString &sessionId);
@@ -606,9 +584,8 @@ private:
     QString m_pendingExportPath;            // where to write the next session/export reply
     QString m_itemOldestId;                 // item-window cursor (docs/TRANSCRIPT_MODEL.md)
     bool m_itemHasOlder = false;
-    QList<QVariantMap> m_olderRows;         // rows older than the painted window, oldest first
-    bool m_hasOlderRows = false;
-    QString m_olderRowsSession;             // session the buffer belongs to (a switch drops it)
+    QList<QVariantMap> m_olderPending;      // older items collected during a loadOlder
+    bool m_loadingOlder = false;
 
     // pending permission request
     QString m_permToolCallId;

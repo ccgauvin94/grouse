@@ -186,19 +186,10 @@ Kirigami.Page {
     property bool pendingRestore: false
     property bool pendingFirstScroll: false
     property int scrollApplyAttempts: 0
-    // A rebuild from the core's item snapshot clears the model; remember where
-    // the view was first and put it back. `rebuildValid` is false when the model
-    // was already empty (a session switch clears it before the core's Clear
-    // arrives, and the switch's own scroll logic owns that case).
-    property real rebuildY: 0
-    property bool rebuildAtEnd: true
-    property bool rebuildValid: false
-    property int rebuildAttempts: 0
-    property bool rebuilding: false
-    // Client-side windowing: the model holds only the last rows; older ones are
-    // prepended from Mgr's buffer as the user scrolls back. `olderAnchorIndex`
-    // is the top visible row captured before a prepend, re-positioned after it
-    // so the viewport does not jump.
+    // The CORE owns the transcript window (docs/TRANSCRIPT_MODEL.md): it paints
+    // the newest items and, on `Mgr.loadOlder()`, emits older ones to prepend.
+    // `olderAnchorIndex` is the top visible row captured before a prepend, so
+    // the viewport does not jump when they land.
     property bool loadingOlder: false
     property int olderAnchorIndex: -1
     // Whether the user is pinned to the end of the transcript. Updated only on
@@ -215,8 +206,6 @@ Kirigami.Page {
             page.keepScrolled()
             page.applySessionScroll()
         }
-        function onTranscriptWillRebuild() { page.captureRebuildScroll() }
-        function onTranscriptRebuilt() { page.applyRebuildScroll() }
         function onOlderRowsPrepended(n) {
             Qt.callLater(function() {
                 if (page.olderAnchorIndex >= 0)
@@ -258,60 +247,20 @@ Kirigami.Page {
         }
     }
 
-    // A mid-playback rebuild (a tail merge finishing) must not jump the view to
-    // the top; capture and restore around it.
-    function captureRebuildScroll() {
-        page.rebuilding = true
-        page.rebuildValid = Mgr.messageModel.count > 0
-        page.rebuildY = list.contentY
-        page.rebuildAtEnd = list.atYEnd
-        page.rebuildAttempts = 0
-    }
-
-    // Scroll-back: pull buffered older rows in when the view nears the top.
+    // Scroll-back: ask the core for older items when the view nears the top.
     function maybeLoadOlder() {
-        if (page.loadingOlder || page.rebuilding || !Mgr.hasOlderRows)
+        if (page.loadingOlder || !Mgr.itemHasOlder)
             return
         if (page.pendingFirstScroll || page.pendingRestore)
             return
         if (list.contentY > 160 || list.contentHeight <= list.height)
             return
         const top = list.indexAt(2, Math.max(0, list.contentY) + 4)
-        if (top <= 0)
+        if (top < 0)
             return
         page.olderAnchorIndex = top
         page.loadingOlder = true
-        Mgr.loadOlderRows(40)
-    }
-
-    function applyRebuildScroll() {
-        page.rebuilding = false
-        if (!page.rebuildValid)
-            return
-        Qt.callLater(function() {
-            // Wait through the model reset and its layout passes (same dance as
-            // applySessionScroll: contentHeight lags the new transcript).
-            if (page.rebuildAttempts < 4) {
-                ++page.rebuildAttempts
-                page.applyRebuildScroll()
-                return
-            }
-            if (Mgr.messageModel.count > 0 && list.contentHeight <= 0
-                && page.rebuildAttempts < 20) {
-                ++page.rebuildAttempts
-                page.applyRebuildScroll()
-                return
-            }
-            page.rebuildAttempts = 0
-            if (page.rebuildAtEnd) {
-                list.positionViewAtEnd()
-                page.pinnedToEnd = true
-            } else {
-                const maxY = Math.max(0, list.contentHeight - list.height)
-                list.contentY = Math.min(page.rebuildY, maxY)
-                page.pinnedToEnd = list.atYEnd
-            }
-        })
+        Mgr.loadOlder(40)
     }
 
     function applySessionScroll() {

@@ -4,6 +4,7 @@
 
 #include "corebridge.h"
 #include "manager.h"
+#include "messagelistmodel.h"
 
 /**
  * Thin-client Manager tests.
@@ -29,7 +30,57 @@ private slots:
     void bridgeLoadsWhenCorePresent();
     void turnOwnerMatches_ownerRule();
     void sessionExtensionsParseWrappedServerShape();
+    void itemStreamDrivesTheModel();
 };
+
+/**
+ * The item stream is the only transcript channel now (docs/TRANSCRIPT_MODEL.md
+ * phase 2). This pins the mapping: kinds become delegate roles, deltas append in
+ * place, an Upsert for a known id updates rather than duplicating, and the
+ * finalizing Upsert restores the rendered markdown.
+ */
+void TstManager::itemStreamDrivesTheModel()
+{
+    Manager mgr;
+    auto *m = qobject_cast<MessageListModel *>(mgr.messageModel());
+    QVERIFY(m != nullptr);
+
+    mgr.coreOnItem(QStringLiteral(R"({"Reset":{"session_id":"s1"}})"));
+    mgr.coreOnItem(QStringLiteral(
+        R"({"Upsert":{"item":{"id":"m1","kind":"User","text":"hi","detail":"","output":"","status":"","app_key":"","calls":[]}}})"));
+    mgr.coreOnItem(QStringLiteral(
+        R"({"Upsert":{"item":{"id":"t1","kind":"Chart","text":"Sankey","detail":"{\"a\":1}","output":"","status":"completed","app_key":"","calls":[]}}})"));
+    mgr.coreOnItem(QStringLiteral(R"({"Window":{"oldest_id":"m1","has_older":true}})"));
+
+    QCOMPARE(m->count(), 2);
+    QCOMPARE(m->row(0).value("role").toString(), QStringLiteral("user"));
+    QCOMPARE(m->row(0).value("text").toString(), QStringLiteral("hi"));
+    QVERIFY(!m->row(0).value("html").toString().isEmpty());
+    QCOMPARE(m->row(1).value("role").toString(), QStringLiteral("chart"));
+    QCOMPARE(m->row(1).value("chartData").toString(), QStringLiteral("{\"a\":1}"));
+    QCOMPARE(m->indexForId(QStringLiteral("m1")), 0);
+    QVERIFY(mgr.itemHasOlder());
+
+    // A live delta appends to the text and drops the html (plain while
+    // streaming); the finalizing Upsert restores the markdown.
+    mgr.coreOnItem(QStringLiteral(R"({"AppendText":{"id":"m1","chunk":" there"}})"));
+    QCOMPARE(m->row(0).value("text").toString(), QStringLiteral("hi there"));
+    QVERIFY(m->row(0).value("html").toString().isEmpty());
+    mgr.coreOnItem(QStringLiteral(
+        R"({"Upsert":{"item":{"id":"m1","kind":"User","text":"hi there","detail":"","output":"","status":"","app_key":"","calls":[]}}})"));
+    QVERIFY(!m->row(0).value("html").toString().isEmpty());
+
+    // An Upsert for a known id updates in place (a re-delivered item must not
+    // duplicate the row).
+    mgr.coreOnItem(QStringLiteral(
+        R"({"Upsert":{"item":{"id":"t1","kind":"Chart","text":"Sankey","detail":"{}","output":"","status":"failed","app_key":"","calls":[]}}})"));
+    QCOMPARE(m->count(), 2);
+    QCOMPARE(m->row(1).value("status").toString(), QStringLiteral("failed"));
+
+    mgr.coreOnItem(QStringLiteral(R"({"Remove":{"id":"t1"}})"));
+    QCOMPARE(m->count(), 1);
+    QCOMPARE(m->indexForId(QStringLiteral("t1")), -1);
+}
 
 void TstManager::modelAndStateInvariants()
 {
