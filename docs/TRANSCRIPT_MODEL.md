@@ -20,10 +20,19 @@ normative surface.
   append / remove; scroll-back calls `load_older()` and prepends the batch. The
   legacy `on_transcript`/`on_stream` handlers remain only for usage and
   run-ended, and the client-side transcript buffer/reconciliation is gone.
+- **Android (phase 3):** the same — `onCoreItem` maps items to `ChatMessage`
+  rows keyed by item id (a ToolGroup expands to one `tool` row per call so the
+  chat UI keeps grouping them), and the list asks for older items on scroll-back.
+- **Roam peers (pulled forward from phase 4):** both clients render items now,
+  so `RoamPeer` bridges its legacy `Clear`/chunks/tools onto `on_item` at its
+  emit funnels (a `Clear` paints the peer's transcript; live text mints a
+  stable id, Upserts once, then deltas; a tool carries its kind). The peer's
+  own store is still flat `Message`s, so a peer's chart/app kind comes from the
+  live `ToolCall` and can degrade to a tool row on a cache-only paint until the
+  peer holds items itself.
 
-Still to come: the Android migration (phase 3), and deleting
-`on_transcript`/`on_stream`/the flat `Message`/the provisional-merge machinery
-and moving roam peers onto items (phase 4).
+Still to come: deleting `on_transcript`/`on_stream`/the flat `Message`/the
+provisional-merge machinery, and giving `RoamPeer` an item store of its own.
 
 ## Why we want to replace the current model
 

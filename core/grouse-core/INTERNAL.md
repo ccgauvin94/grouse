@@ -42,7 +42,11 @@ unstable.rs    the GrouseUnstable impl (the 35 shim methods) — each is
                #[uniffi::export] re-export and note it.
 roam.rs        the peer registry: RoamPeer { label, client, sessions },
                browse mode, roam_connect/disconnect/open_session. Parallel
-               connections; Core's roam intents are thin wrappers here.
+               connections; Core's roam intents are thin wrappers here. Its
+               transcript is still flat `Message`s, but the emit funnels bridge
+               onto `on_item` (docs/TRANSCRIPT_MODEL.md) so item-only clients
+               render peer chats; the mirror is gated on the peer being the
+               active display.
 ```
 
 ## Pinned seams (the contract between slices)

@@ -211,8 +211,12 @@ Rules:
 - `load_older(count)` walks the window back over the store's in-memory rows —
   no cache read and no wire call. A stock server has no history cursor, so once
   the store's start is reached `has_older` is `false`.
-- **Roam peer** transcripts are still `Message`-based and flatten to items at
-  the seam (roam parity is a later phase).
+- **Roam peers** emit the item stream too: `RoamPeer` bridges its legacy
+  `Clear`/chunks/tools onto `on_item` at its emit funnels (gated on the peer
+  being the active display, since the item client no longer rebuilds from a
+  getter). The peer's own store is still `Message`-based, so a peer's
+  chart/MCP-app kind rides the live `ToolCall` and can degrade to a tool row on
+  a cache-only paint until the peer holds items itself (phase 4).
 
 ---
 

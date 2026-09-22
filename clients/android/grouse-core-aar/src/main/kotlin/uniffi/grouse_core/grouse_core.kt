@@ -1446,7 +1446,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_grouse_core_checksum_method_core_load_cached_transcript() != 50836) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_load_older() != 58013) {
+    if (lib.uniffi_grouse_core_checksum_method_core_load_older() != 38303) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_new_session() != 50585) {
@@ -2285,11 +2285,11 @@ public interface CoreInterface {
     fun `loadCachedTranscript`(`sessionId`: kotlin.String)
     
     /**
-     * Extend the client's window backward by `count` items, cache-first
-     * (docs/TRANSCRIPT_MODEL.md). Emits `Upsert` per older item + a refreshed
-     * `Window`; `has_older: false` means the cache does not reach further (a
-     * stock server has no older cursor, so the caller falls back to a full
-     * load if it wants more).
+     * Extend the client's window backward by `count` items
+     * (docs/TRANSCRIPT_MODEL.md). The store keeps the whole transcript, so the
+     * items come from memory — no cache read and no wire call. Emits `Upsert`
+     * per older item (oldest-first) + a refreshed `Window`; `has_older: false`
+     * means there is nothing further back.
      */
     fun `loadOlder`(`count`: kotlin.UInt)
     
@@ -2742,11 +2742,11 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
-     * Extend the client's window backward by `count` items, cache-first
-     * (docs/TRANSCRIPT_MODEL.md). Emits `Upsert` per older item + a refreshed
-     * `Window`; `has_older: false` means the cache does not reach further (a
-     * stock server has no older cursor, so the caller falls back to a full
-     * load if it wants more).
+     * Extend the client's window backward by `count` items
+     * (docs/TRANSCRIPT_MODEL.md). The store keeps the whole transcript, so the
+     * items come from memory — no cache read and no wire call. Emits `Upsert`
+     * per older item (oldest-first) + a refreshed `Window`; `has_older: false`
+     * means there is nothing further back.
      */override fun `loadOlder`(`count`: kotlin.UInt)
         = 
     callWithHandle {
