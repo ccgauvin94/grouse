@@ -934,9 +934,8 @@ impl TranscriptStore {
         let (session_id, batch, oldest, has_older) = {
             let mut st = self.state.lock();
             let from = st.emitted_from.saturating_sub(count);
-            if from == st.emitted_from {
-                return;
-            }
+            // An empty batch (nothing older) is NOT an early return: the client's
+            // in-flight load needs the refreshed Window to settle.
             let batch: Vec<Item> =
                 st.bubbles[from..st.emitted_from].iter().map(Bubble::item).collect();
             st.emitted_from = from;
@@ -2097,6 +2096,19 @@ mod tests {
         // The store (and so the cache and the flat projection) is NOT truncated.
         assert_eq!(store.rich_transcript().len(), 100);
         assert!(store.window().has_older);
+
+        // Walking to the start: the last load returns nothing older but STILL
+        // answers with a Window, so a client's in-flight load settles.
+        i_evts.lock().clear();
+        store.load_older(1000);
+        let ops = i_evts.lock().clone();
+        assert_eq!(ops.iter().filter(|o| o.starts_with("upsert:")).count(), 20);
+        assert_eq!(ops.last().unwrap(), "window:m0:false");
+        assert!(!store.window().has_older);
+
+        i_evts.lock().clear();
+        store.load_older(40);
+        assert_eq!(&*i_evts.lock(), &["window:m0:false"], "an empty load still answers");
     }
 
     #[test]
