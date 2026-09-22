@@ -194,6 +194,13 @@ Kirigami.Page {
     property bool rebuildAtEnd: true
     property bool rebuildValid: false
     property int rebuildAttempts: 0
+    property bool rebuilding: false
+    // Client-side windowing: the model holds only the last rows; older ones are
+    // prepended from Mgr's buffer as the user scrolls back. `olderAnchorIndex`
+    // is the top visible row captured before a prepend, re-positioned after it
+    // so the viewport does not jump.
+    property bool loadingOlder: false
+    property int olderAnchorIndex: -1
     // Whether the user is pinned to the end of the transcript. Updated only on
     // real user scrolls (drag/flick), never on the programmatic ListView reset
     // that follows each messagesChanged — so a reset can't silently unpin us.
@@ -210,6 +217,14 @@ Kirigami.Page {
         }
         function onTranscriptWillRebuild() { page.captureRebuildScroll() }
         function onTranscriptRebuilt() { page.applyRebuildScroll() }
+        function onOlderRowsPrepended(n) {
+            Qt.callLater(function() {
+                if (page.olderAnchorIndex >= 0)
+                    list.positionViewAtIndex(page.olderAnchorIndex + n, ListView.Beginning)
+                page.olderAnchorIndex = -1
+                page.loadingOlder = false
+            })
+        }
         function onOnlineChanged() { page.keepScrolled(); page.updateSlashPopup() }
         function onPromptingChanged() { page.keepScrolled() }
     }
@@ -246,13 +261,31 @@ Kirigami.Page {
     // A mid-playback rebuild (a tail merge finishing) must not jump the view to
     // the top; capture and restore around it.
     function captureRebuildScroll() {
+        page.rebuilding = true
         page.rebuildValid = Mgr.messageModel.count > 0
         page.rebuildY = list.contentY
         page.rebuildAtEnd = list.atYEnd
         page.rebuildAttempts = 0
     }
 
+    // Scroll-back: pull buffered older rows in when the view nears the top.
+    function maybeLoadOlder() {
+        if (page.loadingOlder || page.rebuilding || !Mgr.hasOlderRows)
+            return
+        if (page.pendingFirstScroll || page.pendingRestore)
+            return
+        if (list.contentY > 160 || list.contentHeight <= list.height)
+            return
+        const top = list.indexAt(2, Math.max(0, list.contentY) + 4)
+        if (top <= 0)
+            return
+        page.olderAnchorIndex = top
+        page.loadingOlder = true
+        Mgr.loadOlderRows(40)
+    }
+
     function applyRebuildScroll() {
+        page.rebuilding = false
         if (!page.rebuildValid)
             return
         Qt.callLater(function() {
@@ -562,6 +595,7 @@ Kirigami.Page {
             onContentYChanged: {
                 if (list.moving)
                     pinnedToEnd = list.atYEnd
+                page.maybeLoadOlder()
             }
             onCountChanged: page.applySessionScroll()
             onContentHeightChanged: page.applySessionScroll()

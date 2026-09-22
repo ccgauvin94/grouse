@@ -98,6 +98,19 @@ void MessageListModel::append(const QVariantMap &message)
     emit countChanged();
 }
 
+void MessageListModel::prepend(const QList<QVariantMap> &messages)
+{
+    if (messages.isEmpty())
+        return;
+    // Present the rows oldest-first at the front: prepending the tail first
+    // leaves `messages` in order.
+    beginInsertRows(QModelIndex(), 0, messages.size() - 1);
+    for (int i = messages.size() - 1; i >= 0; --i)
+        m_rows.prepend(messages.at(i));
+    endInsertRows();
+    emit countChanged();
+}
+
 void MessageListModel::toggleExpanded(int row)
 {
     if (row < 0 || row >= m_rows.size())

@@ -53,6 +53,8 @@ public:
 
     void clear();
     void append(const QVariantMap &message);
+    /** Insert `messages` (oldest first) at the front, in one begin/endInsertRows. */
+    void prepend(const QList<QVariantMap> &messages);
     /** Replace row `index`'s data and notify QML of every role. */
     void update(int index, const QVariantMap &message);
     /** Flip a row's ExpandedRole (thinking bubble open/closed). Keyed by row index. */

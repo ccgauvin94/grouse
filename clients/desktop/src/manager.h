@@ -302,6 +302,14 @@ public:
     Q_PROPERTY(bool itemHasOlder READ itemHasOlder NOTIFY itemWindowChanged)
     bool itemHasOlder() const { return m_itemHasOlder; }
 
+    /// Older transcript rows held back from the painted window, prepended on
+    /// scroll-back so a long cached chat opens instantly instead of realizing
+    /// every delegate. Mirrors `itemHasOlder` but for the client-side buffer.
+    Q_PROPERTY(bool hasOlderRows READ hasOlderRows NOTIFY hasOlderRowsChanged)
+    bool hasOlderRows() const { return m_hasOlderRows; }
+    /// Prepend up to `count` buffered older rows to the model.
+    Q_INVOKABLE void loadOlderRows(int count);
+
     int queuedCount() const { return m_pendingQueue.size(); }
     QString activeRunId() const { return m_activeRunId; }
     bool compacting() const { return m_compacting; }
@@ -370,6 +378,9 @@ signals:
     void pinnedAppsChanged();
     /** The item window's cursor changed (oldest id / has_older). */
     void itemWindowChanged();
+    /** `count` older rows were prepended to the model; the view re-anchors. */
+    void olderRowsPrepended(int count);
+    void hasOlderRowsChanged();
     /** The transcript model is about to be cleared and rebuilt from the core's
      *  item snapshot. The view should remember its scroll position; a rebuild
      *  can arrive mid-playback (a tail merge completing), not only on a session
@@ -595,6 +606,9 @@ private:
     QString m_pendingExportPath;            // where to write the next session/export reply
     QString m_itemOldestId;                 // item-window cursor (docs/TRANSCRIPT_MODEL.md)
     bool m_itemHasOlder = false;
+    QList<QVariantMap> m_olderRows;         // rows older than the painted window, oldest first
+    bool m_hasOlderRows = false;
+    QString m_olderRowsSession;             // session the buffer belongs to (a switch drops it)
 
     // pending permission request
     QString m_permToolCallId;
