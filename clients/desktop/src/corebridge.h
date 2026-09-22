@@ -69,6 +69,11 @@ public:
         char *(*grouse_active_session_id)(void *h);
         char *(*grouse_sessions)(void *h);
         char *(*grouse_transcript)(void *h);
+        // rich item model (docs/TRANSCRIPT_MODEL.md)
+        char *(*grouse_transcript_rich)(void *h);
+        char *(*grouse_item)(void *h, const char *id);
+        char *(*grouse_window)(void *h);
+        void (*grouse_load_older)(void *h, unsigned int count);
         char *(*grouse_config)(void *h);
         // roam
         void (*grouse_roam_connect)(void *h, const char *card, const char *label);
@@ -178,6 +183,7 @@ struct GrouseCoreListener {
     void (*on_sessions)(void *, const char *);
     void (*on_transcript)(void *, const char *);
     void (*on_stream)(void *, const char *);
+    void (*on_item)(void *, const char *);
     void (*on_config)(void *, const char *);
     void (*on_permission_request)(void *, const char *);
     void (*on_session_touched)(void *, const char *, const char *, const char *);

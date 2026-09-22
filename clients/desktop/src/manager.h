@@ -295,6 +295,13 @@ public:
     /// "top" | "bottom" | "" — which slot holds `appKey` for the current session.
     Q_INVOKABLE QString pinnedSlot(const QString &appKey) const;
 
+    /// The item window's pagination cursor (docs/TRANSCRIPT_MODEL.md): the id of
+    /// the oldest item the core has emitted, and whether it can produce older
+    /// ones. Phase 2 drives "load earlier"; the property exists so the UI can
+    /// already bind to it.
+    Q_PROPERTY(bool itemHasOlder READ itemHasOlder NOTIFY itemWindowChanged)
+    bool itemHasOlder() const { return m_itemHasOlder; }
+
     int queuedCount() const { return m_pendingQueue.size(); }
     QString activeRunId() const { return m_activeRunId; }
     bool compacting() const { return m_compacting; }
@@ -312,6 +319,7 @@ public:
     void coreOnSessions(const QString &json);
     void coreOnTranscript(const QString &json);
     void coreOnStream(const QString &json);
+    void coreOnItem(const QString &json);
     void coreOnConfig(const QString &json);
     void coreOnPermission(const QString &json);
     void coreOnSessionTouched(const QString &sid, const QString &title, const QString &u);
@@ -360,6 +368,8 @@ signals:
     void currentSessionChanged();
     /** The current session's pinned MCP-App dock changed (pin/unpin/resize). */
     void pinnedAppsChanged();
+    /** The item window's cursor changed (oldest id / has_older). */
+    void itemWindowChanged();
     void permissionRequested();
     void landingChanged();
     void queuedChanged();
@@ -401,6 +411,11 @@ private:
     void onMcpAppToolCall(const QString &title, const QString &toolCallId, const QString &appKey,
                           const QString &appUri, const QString &appExt, const QString &appInput);
     void onAppResource(const QString &appKey, const QString &html);
+    /// Rebuild the transcript model from the core's rich item snapshot
+    /// (docs/TRANSCRIPT_MODEL.md). The legacy Clear carries no rows — a Clear
+    /// means "rebuild from the store" — so a fresh-cache paint would otherwise
+    /// render an empty chat until a replay that may never come.
+    void rebuildFromRichTranscript();
     /// A ui/message arrived from an app tab: post it into the chat the app came from.
     void onAppMessage(const QString &sessionId, const QString &text);
     void onReady(const QString &sessionId);
@@ -572,6 +587,8 @@ private:
     QVariantList m_supportedModels;
     QVariantList m_skills;
     QString m_pendingExportPath;            // where to write the next session/export reply
+    QString m_itemOldestId;                 // item-window cursor (docs/TRANSCRIPT_MODEL.md)
+    bool m_itemHasOlder = false;
 
     // pending permission request
     QString m_permToolCallId;

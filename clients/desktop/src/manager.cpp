@@ -1579,9 +1579,11 @@ void Manager::coreOnTranscript(const QString &json)
 {
     QJsonObject root = parseObj(json);
     if (root.contains(QStringLiteral("Clear"))) {
-        m_messageModel->clear();
-        m_currentIndex = -1;
-        requestMessagesUpdate();
+        // A Clear means "the store was replaced; rebuild from it". The rich
+        // snapshot is the only projection that keeps a chart's spec / an MCP
+        // app's key / a toolgroup's children, so a cache paint or a fresh-cache
+        // open renders without waiting on a replay.
+        rebuildFromRichTranscript();
         return;
     }
     QString tag = root.contains(QStringLiteral("Append")) ? QStringLiteral("Append")
@@ -1995,6 +1997,30 @@ void Manager::coreOnError(const QString &method, const QString &message)
 }
 
 // ---------------------------------------------------------------------------
+// The item stream (on_item): the core's single rich mutation channel
+// (docs/TRANSCRIPT_MODEL.md). The desktop still renders from on_transcript /
+// on_stream; the item store lands in migration phase 2, so this is a no-op
+// except for recording the pagination cursor.
+// ---------------------------------------------------------------------------
+
+void Manager::coreOnItem(const QString &json)
+{
+    const QJsonObject root = parseObj(json);
+    const QJsonObject win = root.contains(QStringLiteral("Window"))
+                                ? root.value(QStringLiteral("Window")).toObject()
+                                : QJsonObject();
+    if (!win.isEmpty()) {
+        const QString oldest = win.value(QStringLiteral("oldest_id")).toString();
+        const bool hasOlder = win.value(QStringLiteral("has_older")).toBool();
+        if (oldest != m_itemOldestId || hasOlder != m_itemHasOlder) {
+            m_itemOldestId = oldest;
+            m_itemHasOlder = hasOlder;
+            emit itemWindowChanged();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Streaming (on_stream): tool/chart/MCP-App bubbles + usage + run-ended.
 // Text bubbles are rendered via on_transcript (see coreOnTranscript).
 // ---------------------------------------------------------------------------
@@ -2048,6 +2074,91 @@ void Manager::coreOnStream(const QString &json)
 // ---------------------------------------------------------------------------
 // Model-update handlers (called by the coreOn* entry points above)
 // ---------------------------------------------------------------------------
+
+void Manager::rebuildFromRichTranscript()
+{
+    m_messageModel->clear();
+    m_currentIndex = -1;
+    if (!m_bridge || !m_bridge->isAvailable()) {
+        requestMessagesUpdate();
+        return;
+    }
+    const QString json =
+        m_bridge->takeString(m_bridge->api().grouse_transcript_rich(m_bridge->handle()));
+    const QJsonArray items = QJsonDocument::fromJson(json.toUtf8()).array();
+    QSet<QString> fetchApps;
+    for (const QJsonValue &v : items) {
+        const QJsonObject o = v.toObject();
+        const QString kind = o.value(QStringLiteral("kind")).toString();
+        const QString id = o.value(QStringLiteral("id")).toString();
+        const QString text = o.value(QStringLiteral("text")).toString();
+        const QString detail = o.value(QStringLiteral("detail")).toString();
+        const QString output = o.value(QStringLiteral("output")).toString();
+        const QString status = o.value(QStringLiteral("status")).toString();
+        if (kind == QLatin1String("Tool")) {
+            m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", "tool"}, {"text", ""},
+                                               {"html", ""}, {"title", text}, {"detail", detail},
+                                               {"output", output}, {"status", status},
+                                               {"toolCallId", id}});
+        } else if (kind == QLatin1String("ToolGroup")) {
+            // One row per call, matching how the live stream renders plain calls
+            // (and keeping the adjacent-row grouping the delegate draws).
+            for (const QJsonValue &cv : o.value(QStringLiteral("calls")).toArray()) {
+                const QJsonObject c = cv.toObject();
+                m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", "tool"}, {"text", ""},
+                                                   {"html", ""}, {"title", c.value("title").toString()},
+                                                   {"detail", c.value("detail").toString()},
+                                                   {"output", c.value("output").toString()},
+                                                   {"status", c.value("status").toString()},
+                                                   {"toolCallId", c.value("id").toString()}});
+            }
+        } else if (kind == QLatin1String("Chart")) {
+            m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", "chart"}, {"text", ""},
+                                               {"title", text}, {"chartData", detail},
+                                               {"toolCallId", id}, {"status", status}});
+        } else if (kind == QLatin1String("McpApp")) {
+            const QString appKey = o.value(QStringLiteral("app_key")).toString();
+            m_messageModel->append(QVariantMap{{"id", m_seq++}, {"role", "mcpapp"}, {"text", ""},
+                                               {"title", text}, {"detail", detail},
+                                               {"appKey", appKey},
+                                               {"appHtml", m_appHtml.value(appKey)},
+                                               {"toolCallId", id}, {"status", status}});
+            if (!appKey.isEmpty() && !m_appHtml.contains(appKey))
+                fetchApps.insert(appKey);
+        } else {
+            const QString role = kind == QLatin1String("User")     ? QStringLiteral("user")
+                                 : kind == QLatin1String("Thought") ? QStringLiteral("thought")
+                                 : kind == QLatin1String("Error")   ? QStringLiteral("error")
+                                                                    : QStringLiteral("agent");
+            // A core-assigned "@n" id has no server message_id; the legacy
+            // Update stream keys an id-less live bubble on the empty string.
+            const QString rowId = id.startsWith(QLatin1Char('@')) ? QString() : id;
+            QVariantMap row{{"id", rowId}, {"role", role}, {"text", text}, {"output", output}};
+            if (role == "thought")
+                row["thought"] = true;
+            else if (role == "error")
+                row["html"] = QStringLiteral("<div>") + text + QStringLiteral("</div>");
+            else
+                row["html"] = markdownToHtml(text);
+            m_messageModel->append(row);
+        }
+    }
+    requestMessagesUpdate();
+    // Apps whose html is not in the in-memory cache are re-fetched. The core
+    // routes resources_read by the session CURRENTLY bound to the connection,
+    // so this only lands once the open has settled (the caller guarded Open's
+    // own fetch the same way).
+    for (const QString &key : fetchApps) {
+        const int bar = key.indexOf(QLatin1Char('|'));
+        if (bar <= 0)
+            continue;
+        const QByteArray ext = key.left(bar).toUtf8();
+        const QByteArray uri = key.mid(bar + 1).toUtf8();
+        const QByteArray sid = m_currentSessionId.toUtf8();
+        m_bridge->api().grouse_unstable_resources_read(m_bridge->handle(), sid.constData(),
+                                                       uri.constData(), ext.constData());
+    }
+}
 
 void Manager::appendChunk(const QString &role, const QString &text, const QString &messageId, bool thought)
 {

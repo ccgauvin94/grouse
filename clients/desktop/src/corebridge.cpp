@@ -101,6 +101,10 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_active_session_id);
     RESOLVE(grouse_sessions);
     RESOLVE(grouse_transcript);
+    RESOLVE(grouse_transcript_rich);
+    RESOLVE(grouse_item);
+    RESOLVE(grouse_window);
+    RESOLVE(grouse_load_older);
     RESOLVE(grouse_config);
     RESOLVE(grouse_roam_connect);
     RESOLVE(grouse_roam_disconnect);
@@ -214,6 +218,7 @@ static void cb_on_status(void *u, const char *json) { const QString s = copyStr(
 static void cb_on_sessions(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnSessions(s); }); }
 static void cb_on_transcript(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnTranscript(s); }); }
 static void cb_on_stream(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnStream(s); }); }
+static void cb_on_item(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnItem(s); }); }
 static void cb_on_config(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnConfig(s); }); }
 static void cb_on_permission(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnPermission(s); }); }
 static void cb_on_session_touched(void *u, const char *a, const char *b, const char *c) {
@@ -293,6 +298,7 @@ void CoreBridge::installListener()
         cb_on_sessions,
         cb_on_transcript,
         cb_on_stream,
+        cb_on_item,
         cb_on_config,
         cb_on_permission,
         cb_on_session_touched,
