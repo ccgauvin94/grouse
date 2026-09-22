@@ -1125,39 +1125,18 @@ impl Core {
         self.inner.store.window()
     }
 
-    /// Extend the client's window backward by `count` items, cache-first
-    /// (docs/TRANSCRIPT_MODEL.md). Emits `Upsert` per older item + a refreshed
-    /// `Window`; `has_older: false` means the cache does not reach further (a
-    /// stock server has no older cursor, so the caller falls back to a full
-    /// load if it wants more).
+    /// Extend the client's window backward by `count` items
+    /// (docs/TRANSCRIPT_MODEL.md). The store keeps the whole transcript, so the
+    /// items come from memory — no cache read and no wire call. Emits `Upsert`
+    /// per older item (oldest-first) + a refreshed `Window`; `has_older: false`
+    /// means there is nothing further back.
     pub fn load_older(&self, count: u32) {
-        // Peers carry their own (flat) transcript and no cache; the window is
-        // main-connection only for now.
+        // Peers carry their own (flat) transcript and no window; the item window
+        // is main-connection only for now.
         if self.active_peer().is_some() {
             return;
         }
-        let Some(session_id) = self.active_session_id() else { return };
-        let oldest = self.inner.store.oldest_id();
-        if oldest.is_empty() {
-            return;
-        }
-        let Some((items, _)) = self.inner.cache.load_transcript(&session_id) else {
-            self.inner.store.set_has_older(false);
-            return;
-        };
-        let Some(end) = items.iter().position(|i| i.id == oldest) else {
-            // The window's oldest is not in the cache: nothing older to give.
-            self.inner.store.set_has_older(false);
-            return;
-        };
-        let take = (count as usize).min(end);
-        let start = end - take;
-        if take == 0 {
-            self.inner.store.set_has_older(false);
-            return;
-        }
-        let slice: Vec<Item> = items[start..end].to_vec();
-        self.inner.store.prepend_items(slice, start > 0);
+        self.inner.store.load_older(count as usize);
     }
 
     pub fn config(&self) -> Vec<ConfigOption> {

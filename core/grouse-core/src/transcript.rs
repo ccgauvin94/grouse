@@ -237,6 +237,11 @@ struct State {
     merge_overlap: bool,
     /// The session these rows belong to, stamped on `Reset` ops.
     session_id: String,
+    /// Index of the OLDEST bubble the client currently holds. The store keeps
+    /// the whole transcript (for the cache and the legacy flat projection), but
+    /// the item stream paints only `bubbles[emitted_from..]` — the window
+    /// (docs/TRANSCRIPT_MODEL.md). `load_older` walks this back.
+    emitted_from: usize,
     /// Whether the cache can still produce items older than `oldest_id` (the
     /// client's `load_older` cursor). Set by the core when it paints a window.
     has_older: bool,
@@ -250,6 +255,12 @@ struct State {
 /// (bulk, to a ¾ mark) so a pathological session cannot grow memory without
 /// bound. Far above any realistic screenful.
 const MAX_BUBBLES: usize = 2000;
+
+/// How many newest items a paint emits up front. The rest stay in the store
+/// (and the cache) and arrive as the client asks for them via `load_older`.
+/// See docs/TRANSCRIPT_MODEL.md ("Windows"). A client that paints a long chat
+/// in full pays for every delegate on every open; the window bounds that.
+const CLIENT_WINDOW: usize = 60;
 
 /// Rebuild `tool_by_id` from scratch — used after a bulk eviction or rebuild,
 /// when the surviving bubbles' absolute indices have shifted.
@@ -281,6 +292,8 @@ impl State {
         let keep = MAX_BUBBLES - MAX_BUBBLES / 4;
         let drop = self.bubbles.len() - keep;
         self.bubbles.drain(0..drop);
+        // The window's origin shifts with the surviving rows.
+        self.emitted_from = self.emitted_from.saturating_sub(drop);
         self.tool_by_id.clear();
         index_bubbles(&mut self.tool_by_id, &self.bubbles);
         self.stream_idx = None;
@@ -299,6 +312,7 @@ impl State {
         self.stream_idx = None;
         self.stream_role.clear();
         self.stream_msg_id.clear();
+        self.emitted_from = 0;
         self.provisional = false;
         self.merging = false;
         self.merge_anchored = false;
@@ -468,6 +482,7 @@ impl TranscriptStore {
                 merge_anchored: false,
                 merge_overlap: false,
                 session_id: String::new(),
+                emitted_from: 0,
                 has_older: false,
                 next_uid: 0,
             }),
@@ -503,6 +518,14 @@ impl TranscriptStore {
                     && message_id != Some(st.stream_msg_id.as_str()));
 
             let idx = if fresh {
+                // The previous streamed bubble is done: emit its authoritative
+                // final state (the delta-only stream never did), so a client can
+                // render its markdown once instead of per chunk.
+                if let Some(prev) = st.stream_idx {
+                    if let Some(b) = st.bubbles.get(prev) {
+                        ops.push(TranscriptOp::Upsert { item: b.item() });
+                    }
+                }
                 let uid = match message_id.filter(|m| !m.is_empty()) {
                     Some(m) => m.to_string(),
                     None => st.new_uid(),
@@ -581,6 +604,12 @@ impl TranscriptStore {
             let mut ops = Vec::new();
             if st.supersede_provisional() {
                 ops.push(TranscriptOp::Reset { session_id: st.session_id.clone() });
+            }
+            // A tool call ends the text stream: finalize the pending bubble.
+            if let Some(prev) = st.stream_idx {
+                if let Some(b) = st.bubbles.get(prev) {
+                    ops.push(TranscriptOp::Upsert { item: b.item() });
+                }
             }
             let mut row = ToolRow::new(title, detail, tool_call_id);
             // Retain the payload the flat Message projection drops, so the cache
@@ -838,9 +867,19 @@ impl TranscriptStore {
         });
     }
 
-    /// A turn finished (on_stream only — no transcript change; the desktop's
-    /// markdown finalisation has no core equivalent).
+    /// A turn finished. The last text bubble is final: emit its authoritative
+    /// `Upsert` (the streaming deltas never carried a completion) so a client
+    /// renders the markdown once, then end the turn on the stream.
     pub fn run_ended(&self, stop_reason: &str) {
+        let op = {
+            let st = self.state.lock();
+            st.stream_idx
+                .and_then(|idx| st.bubbles.get(idx))
+                .map(|b| TranscriptOp::Upsert { item: b.item() })
+        };
+        if let Some(op) = op {
+            self.listener.on_item(op);
+        }
         self.listener.on_stream(StreamEvent::RunEnded { stop_reason: stop_reason.to_string() });
     }
 
@@ -865,10 +904,10 @@ impl TranscriptStore {
         self.state.lock().session_id = session_id.to_string();
     }
 
-    /// The id of the oldest held item (empty when the store is empty).
+    /// The id of the oldest item the CLIENT holds (the window's origin).
     pub fn oldest_id(&self) -> String {
         let st = self.state.lock();
-        st.bubbles.first().map(bubble_uid).unwrap_or_default()
+        st.bubbles.get(st.emitted_from).map(bubble_uid).unwrap_or_default()
     }
 
     /// The id of the newest held item (empty when the store is empty).
@@ -882,19 +921,34 @@ impl TranscriptStore {
     pub fn window(&self) -> TranscriptWindow {
         let st = self.state.lock();
         TranscriptWindow {
-            oldest_id: st.bubbles.first().map(bubble_uid).unwrap_or_default(),
+            oldest_id: st.bubbles.get(st.emitted_from).map(bubble_uid).unwrap_or_default(),
             newest_id: st.bubbles.last().map(bubble_uid).unwrap_or_default(),
             has_older: st.has_older,
         }
     }
 
-    /// Set the `has_older` cursor without repainting, and announce it.
-    pub fn set_has_older(&self, has_older: bool) {
-        let oldest = {
+    /// Walk the window back by `count` items: emit them oldest-first as
+    /// `Upsert`s, then a refreshed `Window`. The client prepends them, so they
+    /// keep the transcript's order (see docs/TRANSCRIPT_MODEL.md).
+    pub fn load_older(&self, count: usize) {
+        let (session_id, batch, oldest, has_older) = {
             let mut st = self.state.lock();
-            st.has_older = has_older;
-            st.bubbles.first().map(bubble_uid).unwrap_or_default()
+            let from = st.emitted_from.saturating_sub(count);
+            if from == st.emitted_from {
+                return;
+            }
+            let batch: Vec<Item> =
+                st.bubbles[from..st.emitted_from].iter().map(Bubble::item).collect();
+            st.emitted_from = from;
+            st.has_older = from > 0;
+            let oldest = st.bubbles.get(from).map(bubble_uid).unwrap_or_default();
+            let has_older = st.has_older;
+            (st.session_id.clone(), batch, oldest, has_older)
         };
+        let _ = session_id; // no Reset: the client keeps its window and prepends
+        for item in batch {
+            self.listener.on_item(TranscriptOp::Upsert { item });
+        }
         self.listener.on_item(TranscriptOp::Window { oldest_id: oldest, has_older });
     }
 
@@ -1071,7 +1125,7 @@ impl TranscriptStore {
                 return;
             }
         }
-        let (session_id, oldest) = {
+        let (session_id, window, oldest, has_older) = {
             let mut st = self.state.lock();
             st.reset();
             for it in &items {
@@ -1083,51 +1137,27 @@ impl TranscriptStore {
             st.tool_by_id.clear();
             index_bubbles(&mut st.tool_by_id, &st.bubbles);
             st.provisional = provisional;
-            st.has_older = has_older;
             st.trim();
-            (st.session_id.clone(), st.bubbles.first().map(bubble_uid).unwrap_or_default())
+            // Paint only the newest CLIENT_WINDOW items; the store keeps all (for
+            // the cache and the legacy flat projection), load_older walks back.
+            st.emitted_from = st.bubbles.len().saturating_sub(CLIENT_WINDOW);
+            let has_older = st.emitted_from > 0;
+            st.has_older = has_older;
+            let window: Vec<Item> =
+                st.bubbles[st.emitted_from..].iter().map(Bubble::item).collect();
+            let oldest = window.first().map(|i| i.id.clone()).unwrap_or_default();
+            (st.session_id.clone(), window, oldest, has_older)
         };
         self.listener.on_transcript(TranscriptEvent::Clear);
         self.listener.on_item(TranscriptOp::Reset { session_id });
-        for it in &items {
-            self.listener.on_item(TranscriptOp::Upsert { item: it.clone() });
-        }
-        self.listener.on_item(TranscriptOp::Window { oldest_id: oldest, has_older });
-    }
-
-    /// Prepend older items (the `load_older` path), oldest-first: each is
-    /// Upserted and a refreshed `Window` announces the new cursor. The flat
-    /// `on_transcript` channel is deliberately NOT used — an Append would put
-    /// them at the wrong end.
-    pub fn prepend_items(&self, items: Vec<Item>, has_older: bool) {
-        let (session_id, oldest) = {
-            let mut st = self.state.lock();
-            let mut rebuilt: Vec<Bubble> = Vec::with_capacity(items.len());
-            for it in &items {
-                if let Some(b) = bubble_from_item(it) {
-                    rebuilt.push(b);
-                }
-            }
-            for b in rebuilt.into_iter().rev() {
-                st.bubbles.insert(0, b);
-            }
-            let st = &mut *st;
-            st.tool_by_id.clear();
-            index_bubbles(&mut st.tool_by_id, &st.bubbles);
-            st.has_older = has_older;
-            st.trim();
-            (st.session_id.clone(), st.bubbles.first().map(bubble_uid).unwrap_or_default())
-        };
-        // Tell the client to drop nothing (no Reset) but to prepend.
-        let _ = session_id;
-        for it in &items {
-            self.listener.on_item(TranscriptOp::Upsert { item: it.clone() });
+        for item in window {
+            self.listener.on_item(TranscriptOp::Upsert { item });
         }
         self.listener.on_item(TranscriptOp::Window { oldest_id: oldest, has_older });
     }
 
     fn replace_inner(&self, messages: Vec<Message>, provisional: bool) {
-        let (session_id, oldest, items) = {
+        let (session_id, oldest, items, has_older) = {
             let mut st = self.state.lock();
             let same = {
                 let cur = st.bubbles.iter().map(Bubble::project);
@@ -1176,19 +1206,20 @@ impl TranscriptStore {
                 }
             }
             st.provisional = provisional;
-            let items: Vec<Item> = st.bubbles.iter().map(Bubble::item).collect();
-            let oldest = st.bubbles.first().map(bubble_uid).unwrap_or_default();
-            (st.session_id.clone(), oldest, items)
+            st.emitted_from = st.bubbles.len().saturating_sub(CLIENT_WINDOW);
+            let has_older = st.emitted_from > 0;
+            st.has_older = has_older;
+            let items: Vec<Item> =
+                st.bubbles[st.emitted_from..].iter().map(Bubble::item).collect();
+            let oldest = items.first().map(|i| i.id.clone()).unwrap_or_default();
+            (st.session_id.clone(), oldest, items, has_older)
         };
         self.listener.on_transcript(TranscriptEvent::Clear);
         self.listener.on_item(TranscriptOp::Reset { session_id });
-        for it in &items {
-            self.listener.on_item(TranscriptOp::Upsert { item: it.clone() });
+        for item in items {
+            self.listener.on_item(TranscriptOp::Upsert { item });
         }
-        self.listener.on_item(TranscriptOp::Window {
-            oldest_id: oldest,
-            has_older: false,
-        });
+        self.listener.on_item(TranscriptOp::Window { oldest_id: oldest, has_older });
     }
 
     /// Test-only view of the rich rows (outputs/statuses are not visible
@@ -1924,12 +1955,29 @@ mod tests {
                 "upsert:m1:Agent:Hel:",
                 // …then cheap deltas.
                 "text:m1:lo",
+                // The tool call ends the text stream: finalize it.
+                "upsert:m1:Agent:Hello:",
                 "upsert:t1:Tool:Bash:in_progress",
                 // Live tool output is a delta…
                 "output:t1:out1",
                 // …and the completion is the authoritative Upsert that replaces.
                 "upsert:t1:Tool:Bash:completed",
             ]
+        );
+    }
+
+    #[test]
+    fn a_turn_end_finalizes_the_streamed_row() {
+        let (l, _t, _s, i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("agent", "Hel", Some("m1"), false);
+        store.append_chunk("agent", "lo", Some("m1"), false);
+        store.run_ended("end_turn");
+        // The deltas never carried the completion; run_ended emits it once so a
+        // client renders markdown a single time.
+        assert_eq!(
+            &*i_evts.lock(),
+            &["upsert:m1:Agent:Hel:", "text:m1:lo", "upsert:m1:Agent:Hello:"]
         );
     }
 
@@ -2014,42 +2062,41 @@ mod tests {
 
         assert_eq!(store.window().oldest_id, "m1");
         assert_eq!(store.window().newest_id, "t1");
-        assert!(store.window().has_older);
+        // A short transcript fits the whole window: nothing older.
+        assert!(!store.window().has_older);
     }
 
     #[test]
-    fn prepend_items_extends_the_window_backward() {
+    fn a_paint_emits_only_the_window_and_load_older_walks_back() {
         let (l, _t, _s, i_evts) = listener();
         let store = TranscriptStore::new(l);
         store.set_session("s1");
-        store.replace_rich(
-            vec![text_item("m2", ItemKind::Agent, "recent"), text_item("m3", ItemKind::User, "newest")],
-            false,
-            true,
-        );
-        assert_eq!(store.window().oldest_id, "m2");
+        let items: Vec<Item> = (0..100)
+            .map(|n| {
+                let kind = if n % 2 == 0 { ItemKind::User } else { ItemKind::Agent };
+                text_item(&format!("m{n}"), kind, &format!("t{n}"))
+            })
+            .collect();
+        store.replace_rich(items, false, false);
+
+        // A paint emits Reset + only the newest CLIENT_WINDOW items + Window.
+        let ops = i_evts.lock().clone();
+        assert_eq!(ops.first().unwrap(), "reset");
+        assert_eq!(ops.iter().filter(|o| o.starts_with("upsert:")).count(), 60);
+        assert_eq!(ops.last().unwrap(), "window:m40:true");
+        assert_eq!(store.window().oldest_id, "m40");
+        assert!(store.window().has_older);
+
         i_evts.lock().clear();
+        store.load_older(20);
+        let ops = i_evts.lock().clone();
+        assert_eq!(ops.iter().filter(|o| o.starts_with("upsert:")).count(), 20);
+        assert_eq!(ops.last().unwrap(), "window:m20:true");
+        assert_eq!(store.window().oldest_id, "m20");
 
-        store.prepend_items(
-            vec![text_item("m1", ItemKind::User, "older"), text_item("@1", ItemKind::Thought, "hmm")],
-            false,
-        );
-
-        let items = store.rich_transcript();
-        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, vec!["m1", "@1", "m2", "m3"], "older rows land in front");
-        assert_eq!(store.window().oldest_id, "m1");
-        assert!(!store.window().has_older);
-        // Each older row is an Upsert, then the refreshed cursor. No Reset: the
-        // client keeps what it has and prepends.
-        assert_eq!(
-            &*i_evts.lock(),
-            &[
-                "upsert:m1:User:older:",
-                "upsert:@1:Thought:hmm:",
-                "window:m1:false",
-            ]
-        );
+        // The store (and so the cache and the flat projection) is NOT truncated.
+        assert_eq!(store.rich_transcript().len(), 100);
+        assert!(store.window().has_older);
     }
 
     #[test]

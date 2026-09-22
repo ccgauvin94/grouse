@@ -193,19 +193,24 @@ Rules:
 
 - **`Upsert` is idempotent and authoritative**; the `Append*` ops are O(chunk)
   streaming shortcuts, so a dropped delta still converges on the next `Upsert`.
-- **A fresh text row emits `Upsert` first**, then `AppendText` deltas. A live
-  tool output emits `AppendOutput`; the completion update emits `Upsert`.
+- **A fresh text row emits `Upsert` first**, then `AppendText` deltas. The
+  stream's end (a new bubble, a tool call, or the turn ending) emits one
+  authoritative `Upsert` with the final text — so a client renders markdown a
+  single time, never per chunk. A live tool output emits `AppendOutput`; the
+  completion update emits `Upsert`.
 - **`Window` is the pagination cursor**: `oldest_id` is the oldest item the core
   has emitted and `has_older` says whether `load_older` can still produce more.
 - Rich items make the cache and any rebuild lossless: a chart keeps its spec, an
   MCP app keeps `app_key`, a toolgroup keeps its children. `TRANSCRIPT_CACHE_VERSION`
   is bumped so a pre-rich cache reads as absent and is rewritten by the replay.
-- A **cache paint** rebuilds the store from rich items and emits `Reset` + one
-  `Upsert` per item + `Window`; a `session/load` replay then continues the same
-  id-keyed stream.
-- `load_older` extends backward **cache-first**; a stock server has no history
-  cursor, so when the cache does not reach the start it reports
-  `has_older: false` (the caller may fall back to a full load).
+- A **cache paint** rebuilds the store from rich items and emits `Reset` + the
+  newest `WINDOW` (60) items + `Window`. The **store keeps the whole transcript**
+  (the cache and the legacy flat projection are unaffected); only the item
+  stream is windowed, so a long chat does not realize every delegate on open.
+  A `session/load` replay then continues the same id-keyed stream.
+- `load_older(count)` walks the window back over the store's in-memory rows —
+  no cache read and no wire call. A stock server has no history cursor, so once
+  the store's start is reached `has_older` is `false`.
 - **Roam peer** transcripts are still `Message`-based and flatten to items at
   the seam (roam parity is a later phase).
 

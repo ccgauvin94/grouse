@@ -6,12 +6,24 @@ How a conversation is represented in the core and drawn by the clients.
 > stable ids, in *windows*. The clients draw items; they never reconcile two
 > streams, never rebuild on a "clear", and never re-render the whole history.
 
-**Status.** Phase 1 (the core API alongside the legacy events, plus the rich,
-versioned cache) is implemented — `core/CONTRACT.md` §3.5 is the normative
-surface. The item stream (`on_item`), `rich_transcript()` / `item()` /
-`window()`, and `load_older()` all exist; `on_transcript` / `on_stream` /
-`Message` still drive today's clients until the platform migrations land
-(phases 2–4 below). Windowing is not yet enforced on the paint path.
+**Status.** Phases 1 and 2 are implemented; `core/CONTRACT.md` §3.5 is the
+normative surface.
+
+- **Core (phase 1):** `on_item` alongside the legacy events, the rich versioned
+  cache, `rich_transcript()` / `item()` / `window()` / `load_older()`, and a
+  stale-cache open that merges a bounded `replayTail`.
+- **Core windowing:** the store keeps the whole transcript but emits only the
+  newest `CLIENT_WINDOW` (60) items on a paint; `load_older` walks the window
+  back from memory (no cache read, no wire call). A streamed text row is
+  finalized with one authoritative `Upsert` when it ends.
+- **Desktop (phase 2):** renders from `on_item` alone — id-keyed upsert /
+  append / remove; scroll-back calls `load_older()` and prepends the batch. The
+  legacy `on_transcript`/`on_stream` handlers remain only for usage and
+  run-ended, and the client-side transcript buffer/reconciliation is gone.
+
+Still to come: the Android migration (phase 3), and deleting
+`on_transcript`/`on_stream`/the flat `Message`/the provisional-merge machinery
+and moving roam peers onto items (phase 4).
 
 ## Why we want to replace the current model
 

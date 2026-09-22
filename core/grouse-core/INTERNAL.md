@@ -63,10 +63,13 @@ roam.rs        the peer registry: RoamPeer { label, client, sessions },
    - `clear()`, `transcript() -> Vec<Message>`, `replace(&self, Vec<Message>)`
      (used by replay/load: clear + rebuild, emitting TranscriptEvent::Clear once)
    - Rich seam (docs/TRANSCRIPT_MODEL.md): `rich_transcript() -> Vec<Item>`,
-     `item(id)`, `replace_rich(items, provisional, has_older)`,
-     `prepend_items(items, has_older)`, `set_session(id)`, `set_has_older(bool)`,
-     `window() -> TranscriptWindow`. A paint emits Reset + Upsert-per-item +
-     Window; a provisional drop emits Reset before the replay's Upserts.
+     `item(id)`, `replace_rich(items, provisional)`, `load_older(count)`,
+     `set_session(id)`, `window() -> TranscriptWindow`. The store keeps the whole
+     transcript but emits only `bubbles[emitted_from..]` (the `CLIENT_WINDOW`
+     newest on a paint); `load_older` walks `emitted_from` back. A streamed text
+     row is finalized with an authoritative Upsert when it ends (new bubble,
+     tool call, or `run_ended`). A provisional drop emits Reset before the
+     replay's Upserts.
    - owns the toolgroup collapse (consecutive tool calls) and the live-output
      append/replace rule.
 3. **CacheStore** (cache.rs):
