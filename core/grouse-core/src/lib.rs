@@ -584,7 +584,7 @@ impl Core {
         let merge = cached.is_some() && !suppress;
         self.inner.store.set_session(&session_id);
         match cached {
-            Some(items) if suppress => self.inner.store.replace_rich(items, false, false),
+            Some(items) if suppress => self.inner.store.replace_rich(items, false),
             Some(items) => self.inner.store.replace_rich_for_merge(items),
             None => self.inner.store.clear(),
         };
@@ -729,7 +729,7 @@ impl Core {
         let merge = cached.is_some() && !suppress;
         self.inner.store.set_session(&session_id);
         match cached {
-            Some(items) if suppress => self.inner.store.replace_rich(items, false, false),
+            Some(items) if suppress => self.inner.store.replace_rich(items, false),
             Some(items) => self.inner.store.replace_rich_for_merge(items),
             None => self.inner.store.clear(),
         };
@@ -800,7 +800,7 @@ impl Core {
             // resume) repaints with the provisional mode it decides on, and
             // `replace` adopts that mode when the content is identical.
             self.inner.store.set_session(&session_id);
-            self.inner.store.replace_rich(items, false, false);
+            self.inner.store.replace_rich(items, false);
             // These rows are this session's, whatever session the connection
             // that follows happens to bind first (see `store_session_id`).
             self.inner.state.lock().store_session_id = Some(session_id);

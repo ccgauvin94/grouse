@@ -355,6 +355,9 @@ impl State {
         self.merge_anchored = true;
         if let Some(k) = self.bubbles.iter().position(|b| bubble_owns(b, id)) {
             self.bubbles.truncate(k);
+            // The window's origin is an index into the bubbles; truncation can
+            // move it past the end.
+            self.emitted_from = self.emitted_from.min(self.bubbles.len());
             self.tool_by_id.clear();
             index_bubbles(&mut self.tool_by_id, &self.bubbles);
             self.stream_idx = None;
@@ -1059,7 +1062,7 @@ impl TranscriptStore {
 
     /// The rich counterpart of [`Self::replace_for_merge`].
     pub fn replace_rich_for_merge(&self, items: Vec<Item>) {
-        self.replace_rich(items, false, false);
+        self.replace_rich(items, false);
         let mut st = self.state.lock();
         st.merging = true;
         st.merge_anchored = false;
@@ -1090,16 +1093,41 @@ impl TranscriptStore {
             )
         };
         if !merged_session.is_empty() {
+            // The legacy channel rebuilds from the store (the flat projection is
+            // whole); the item channel needs the repaint, since a Reset alone
+            // would leave the client empty until some later event.
             self.listener.on_transcript(TranscriptEvent::Clear);
-            self.listener.on_item(TranscriptOp::Reset { session_id: merged_session });
+            self.repaint_window();
         }
         gap
     }
 
+    /// Reset the item client and re-paint the current window from the store.
+    /// Used when the store was reconciled in place (a replay merge) rather than
+    /// wholesale replaced.
+    fn repaint_window(&self) {
+        let (session_id, window, oldest, has_older) = {
+            let mut st = self.state.lock();
+            st.emitted_from = st.bubbles.len().saturating_sub(CLIENT_WINDOW);
+            let has_older = st.emitted_from > 0;
+            st.has_older = has_older;
+            let window: Vec<Item> =
+                st.bubbles[st.emitted_from..].iter().map(Bubble::item).collect();
+            let oldest = window.first().map(|i| i.id.clone()).unwrap_or_default();
+            (st.session_id.clone(), window, oldest, has_older)
+        };
+        self.listener.on_item(TranscriptOp::Reset { session_id });
+        for item in window {
+            self.listener.on_item(TranscriptOp::Upsert { item });
+        }
+        self.listener.on_item(TranscriptOp::Window { oldest_id: oldest, has_older });
+    }
+
+
     /// Rebuild the transcript from a rich snapshot (the rich cache paint):
     /// clear + rebuild, emitting Clear + `Reset` + one `Upsert` per item + a
     /// `Window`. Full fidelity — charts, MCP apps and toolgroups survive.
-    pub fn replace_rich(&self, items: Vec<Item>, provisional: bool, has_older: bool) {
+    pub fn replace_rich(&self, items: Vec<Item>, provisional: bool) {
         {
             // Identical paint (the cold-start paint followed by the open's own):
             // skip the Clear, or the list empties and re-paints on every open
@@ -1120,7 +1148,7 @@ impl TranscriptStore {
             };
             if same {
                 st.provisional = provisional;
-                st.has_older = has_older;
+                st.has_older = st.emitted_from > 0;
                 return;
             }
         }
@@ -2047,7 +2075,7 @@ mod tests {
                 ],
             },
         ];
-        store.replace_rich(items.clone(), false, true);
+        store.replace_rich(items.clone(), false);
 
         // The rebuild is faithful (kind + payload), so a cache paint no longer
         // degrades charts/apps.
@@ -2066,6 +2094,29 @@ mod tests {
     }
 
     #[test]
+    fn a_merge_repaints_the_window_for_the_item_client() {
+        let (l, _t, _s, i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.set_session("s1");
+        store.replace_for_merge(vec![
+            Message { id: "old".into(), role: "user".into(), content: "ancient".into(), output: String::new() },
+            Message { id: "m1".into(), role: "agent".into(), content: "hello".into(), output: String::new() },
+        ]);
+        // The bounded tail anchors on the cached m1 and re-delivers it.
+        store.append_chunk("agent", "hi", Some("m1"), false);
+        i_evts.lock().clear();
+        assert!(!store.end_merge(), "the tail overlapped the cache");
+
+        // A merge reconciles the store IN PLACE, so the client must be told to
+        // rebuild — a bare Reset would leave it empty (there is no getter
+        // rebuild on the client anymore).
+        let ops = i_evts.lock().clone();
+        assert!(ops.first().unwrap().starts_with("reset"), "{ops:?}");
+        assert!(ops.iter().any(|o| o.starts_with("upsert:")), "{ops:?}");
+        assert!(ops.last().unwrap().starts_with("window:"), "{ops:?}");
+    }
+
+    #[test]
     fn a_paint_emits_only_the_window_and_load_older_walks_back() {
         let (l, _t, _s, i_evts) = listener();
         let store = TranscriptStore::new(l);
@@ -2076,7 +2127,7 @@ mod tests {
                 text_item(&format!("m{n}"), kind, &format!("t{n}"))
             })
             .collect();
-        store.replace_rich(items, false, false);
+        store.replace_rich(items, false);
 
         // A paint emits Reset + only the newest CLIENT_WINDOW items + Window.
         let ops = i_evts.lock().clone();
