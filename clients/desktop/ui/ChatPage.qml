@@ -186,6 +186,14 @@ Kirigami.Page {
     property bool pendingRestore: false
     property bool pendingFirstScroll: false
     property int scrollApplyAttempts: 0
+    // A rebuild from the core's item snapshot clears the model; remember where
+    // the view was first and put it back. `rebuildValid` is false when the model
+    // was already empty (a session switch clears it before the core's Clear
+    // arrives, and the switch's own scroll logic owns that case).
+    property real rebuildY: 0
+    property bool rebuildAtEnd: true
+    property bool rebuildValid: false
+    property int rebuildAttempts: 0
     // Whether the user is pinned to the end of the transcript. Updated only on
     // real user scrolls (drag/flick), never on the programmatic ListView reset
     // that follows each messagesChanged — so a reset can't silently unpin us.
@@ -200,6 +208,8 @@ Kirigami.Page {
             page.keepScrolled()
             page.applySessionScroll()
         }
+        function onTranscriptWillRebuild() { page.captureRebuildScroll() }
+        function onTranscriptRebuilt() { page.applyRebuildScroll() }
         function onOnlineChanged() { page.keepScrolled(); page.updateSlashPopup() }
         function onPromptingChanged() { page.keepScrolled() }
     }
@@ -231,6 +241,44 @@ Kirigami.Page {
             pendingFirstScroll = true
             pinnedToEnd = true
         }
+    }
+
+    // A mid-playback rebuild (a tail merge finishing) must not jump the view to
+    // the top; capture and restore around it.
+    function captureRebuildScroll() {
+        page.rebuildValid = Mgr.messageModel.count > 0
+        page.rebuildY = list.contentY
+        page.rebuildAtEnd = list.atYEnd
+        page.rebuildAttempts = 0
+    }
+
+    function applyRebuildScroll() {
+        if (!page.rebuildValid)
+            return
+        Qt.callLater(function() {
+            // Wait through the model reset and its layout passes (same dance as
+            // applySessionScroll: contentHeight lags the new transcript).
+            if (page.rebuildAttempts < 4) {
+                ++page.rebuildAttempts
+                page.applyRebuildScroll()
+                return
+            }
+            if (Mgr.messageModel.count > 0 && list.contentHeight <= 0
+                && page.rebuildAttempts < 20) {
+                ++page.rebuildAttempts
+                page.applyRebuildScroll()
+                return
+            }
+            page.rebuildAttempts = 0
+            if (page.rebuildAtEnd) {
+                list.positionViewAtEnd()
+                page.pinnedToEnd = true
+            } else {
+                const maxY = Math.max(0, list.contentHeight - list.height)
+                list.contentY = Math.min(page.rebuildY, maxY)
+                page.pinnedToEnd = list.atYEnd
+            }
+        })
     }
 
     function applySessionScroll() {

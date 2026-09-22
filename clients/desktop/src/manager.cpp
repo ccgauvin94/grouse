@@ -2077,10 +2077,16 @@ void Manager::coreOnStream(const QString &json)
 
 void Manager::rebuildFromRichTranscript()
 {
+    // Let the view capture where it is. A rebuild also lands mid-playback when a
+    // tail merge finishes (the core emits Clear once the painted prefix and the
+    // replayed tail have been reconciled), and clearing without telling the view
+    // leaves it scrolled to the top.
+    emit transcriptWillRebuild();
     m_messageModel->clear();
     m_currentIndex = -1;
     if (!m_bridge || !m_bridge->isAvailable()) {
         requestMessagesUpdate();
+        emit transcriptRebuilt();
         return;
     }
     const QString json =
@@ -2144,6 +2150,7 @@ void Manager::rebuildFromRichTranscript()
         }
     }
     requestMessagesUpdate();
+    emit transcriptRebuilt();
     // Apps whose html is not in the in-memory cache are re-fetched. The core
     // routes resources_read by the session CURRENTLY bound to the connection,
     // so this only lands once the open has settled (the caller guarded Open's

@@ -370,6 +370,12 @@ signals:
     void pinnedAppsChanged();
     /** The item window's cursor changed (oldest id / has_older). */
     void itemWindowChanged();
+    /** The transcript model is about to be cleared and rebuilt from the core's
+     *  item snapshot. The view should remember its scroll position; a rebuild
+     *  can arrive mid-playback (a tail merge completing), not only on a session
+     *  switch, and a bare clear would jump to the top. */
+    void transcriptWillRebuild();
+    void transcriptRebuilt();
     void permissionRequested();
     void landingChanged();
     void queuedChanged();
