@@ -67,7 +67,13 @@ window.addEventListener('message',function(ev){
     if(m.id!=null)reply(m.id,{});
     return;
   }
-  if(String(m.method).indexOf('ui/notifications/')===0)return;
+  if(String(m.method).indexOf('ui/notifications/')===0){
+    if(m.method==='ui/notifications/size-changed'){
+      var h=(m.params&&m.params.height)||0;
+      if(h>0)document.documentElement.setAttribute('data-grouse-height',String(Math.round(h)));
+    }
+    return;
+  }
   if(m.id!=null)host({jsonrpc:'2.0',id:m.id,error:{code:-32601,message:'Method not found'}});
 },true);
 })();

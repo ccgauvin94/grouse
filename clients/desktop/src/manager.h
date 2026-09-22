@@ -270,6 +270,31 @@ public:
     Q_INVOKABLE QString permissionTitle() const { return m_permTitle; }
     Q_INVOKABLE QVariantList permissionOptions() const { return m_permOptions; }
 
+    /// MCP-App surface. These MUST be public: QML only resolves a context-property
+    /// method when the meta-object marks it public. All three were originally under
+    /// `private:`, so QML reported "Property 'inlineAppsEnabled' … is not a function"
+    /// (and appViewUrl/openAppInHtml silently failed) and every MCP App fell back to
+    /// the browser-handoff chip.
+    Q_INVOKABLE void openAppInHtml(const QString &appKey);
+    Q_INVOKABLE QString appViewUrl(const QString &appKey);
+    Q_INVOKABLE bool inlineAppsEnabled() const;
+
+    /// Per-session MCP-App dock for the CURRENT chat: a map with keys
+    /// "top"/"bottom" (appKey, empty when the slot is free) and
+    /// "topRatio"/"bottomRatio" (pane height as a fraction of the chat column).
+    /// Persisted per session in QSettings; the UI re-reads it whenever the
+    /// session changes (the binding also depends on currentSessionId).
+    Q_PROPERTY(QVariant pinnedApps READ pinnedApps NOTIFY pinnedAppsChanged)
+    QVariant pinnedApps() const;
+    /// Dock `appKey` in `slot` ("top"/"bottom"), replacing the occupant.
+    Q_INVOKABLE void pinApp(const QString &appKey, const QString &slot);
+    Q_INVOKABLE void unpinApp(const QString &slot);
+    Q_INVOKABLE void setPinRatio(const QString &slot, qreal ratio);
+    /// Is `appKey` docked (in either slot) for the current session?
+    Q_INVOKABLE bool appPinned(const QString &appKey) const;
+    /// "top" | "bottom" | "" — which slot holds `appKey` for the current session.
+    Q_INVOKABLE QString pinnedSlot(const QString &appKey) const;
+
     int queuedCount() const { return m_pendingQueue.size(); }
     QString activeRunId() const { return m_activeRunId; }
     bool compacting() const { return m_compacting; }
@@ -333,6 +358,8 @@ signals:
     void toolGroupsChanged();
     void globalExtensionsChanged();
     void currentSessionChanged();
+    /** The current session's pinned MCP-App dock changed (pin/unpin/resize). */
+    void pinnedAppsChanged();
     void permissionRequested();
     void landingChanged();
     void queuedChanged();
@@ -374,19 +401,8 @@ private:
     void onMcpAppToolCall(const QString &title, const QString &toolCallId, const QString &appKey,
                           const QString &appUri, const QString &appExt, const QString &appInput);
     void onAppResource(const QString &appKey, const QString &html);
-    /// Open a fetched MCP-App template in the system browser (the org.kde.Platform
-    /// runtime has no QtWebEngine, so in-app interactive rendering is not possible;
-    /// the template is a self-contained HTML document).
-    Q_INVOKABLE void openAppInHtml(const QString &appKey);
     /// A ui/message arrived from an app tab: post it into the chat the app came from.
     void onAppMessage(const QString &sessionId, const QString &text);
-    /// Loopback URL serving this app's template with the host bridge (the URL
-    /// registers the app on demand; the inline WebEngineView and the external
-    /// browser open the SAME document with the SAME host shim).
-    Q_INVOKABLE QString appViewUrl(const QString &appKey);
-    /// True when QtWebEngine was compiled in: MCP Apps render inline in the
-    /// chat instead of browser-only. Set once from main() behind GROUSE_WEBENGINE.
-    Q_INVOKABLE bool inlineAppsEnabled() const;
     void onReady(const QString &sessionId);
     void onSessions(const QVariantList &sessions);
     void onProjects(const QVariantList &projects);

@@ -360,6 +360,7 @@ void Manager::openRoamSession(const QString &label, const QString &sessionId, co
     loadToolCache(sessionId);   // best-effort memory of last run's catalogues
     publishToolGroups();
     emit currentSessionChanged();
+    emit pinnedAppsChanged();
     emit toolsChanged();
     setStatus(QStringLiteral("loading…"));
     m_lastCwd = cwd.isEmpty() ? workingDir() : cwd;
@@ -389,6 +390,7 @@ void Manager::newRoamSession(const QString &label)
     m_messageModel->clear();
     m_currentIndex = -1;
     emit currentSessionChanged();
+    emit pinnedAppsChanged();
     emit toolsChanged();
     emit messagesChanged();
     setStatus(QStringLiteral("connecting…"));
@@ -417,6 +419,7 @@ void Manager::newRoamSessionIn(const QString &label, const QString &cwd)
     m_messageModel->clear();
     m_currentIndex = -1;
     emit currentSessionChanged();
+    emit pinnedAppsChanged();
     emit toolsChanged();
     emit messagesChanged();
     setStatus(QStringLiteral("connecting…"));
@@ -535,6 +538,7 @@ void Manager::openSession(const QString &sessionId)
     m_messageModel->clear();
     m_currentIndex = -1;
     emit currentSessionChanged();
+    emit pinnedAppsChanged();
     emit toolsChanged();
     emit messagesChanged();
     setStatus(QStringLiteral("loading…"));
@@ -565,6 +569,7 @@ void Manager::newChat()
     m_currentIndex = -1;
     publishToolGroups();
     emit currentSessionChanged();
+    emit pinnedAppsChanged();
     emit toolsChanged();
     emit messagesChanged();
     setStatus(QStringLiteral("connecting…"));
@@ -1020,6 +1025,7 @@ void Manager::deleteSession(const QString &sessionId)
         emit landingChanged();
         emit messagesChanged();
         emit currentSessionChanged();
+    emit pinnedAppsChanged();
         emit toolsChanged();
     }
 }
@@ -1796,6 +1802,7 @@ void Manager::coreOnPeerNewSession(const QString &label, const QString &sid)
         m_currentSessionId = sid;
         m_currentSessionTitle.clear();
         emit currentSessionChanged();
+    emit pinnedAppsChanged();
     }
 }
 
@@ -2008,8 +2015,11 @@ void Manager::coreOnStream(const QString &json)
             onChartToolCall(title, id, kind.value("Chart").toObject().value("spec").toString());
         } else if (kind.contains(QStringLiteral("McpApp"))) {
             const QJsonObject m = kind.value("McpApp").toObject();
-            onMcpAppToolCall(title, id,
-                             QStringLiteral("%1|%2").arg(m.value("app_key").toString(), m.value("uri").toString()),
+            // `app_key` is ALREADY "<extension>|<uri>" (core's ToolCallKind::McpApp);
+            // re-appending the uri here produced "<ext>|<uri>|<uri>", which never
+            // matched the key on_app_resource arrives under — so appHtml stayed
+            // empty and the bubble fell back to the chip (Android reads it raw).
+            onMcpAppToolCall(title, id, m.value("app_key").toString(),
                              m.value("uri").toString(), m.value("extension").toString(),
                              m.value("input").toString());
         } else {
@@ -2241,6 +2251,89 @@ void Manager::setInlineAppsSupported(bool on)
 bool Manager::inlineAppsSupported()
 {
     return g_inlineApps;
+}
+
+// ---- per-session MCP-App dock ------------------------------------------------
+namespace {
+const QString kPinsKey = QStringLiteral("pinned_apps");
+}
+
+QVariant Manager::pinnedApps() const
+{
+    if (m_currentSessionId.isEmpty())
+        return QVariantMap{};
+    return m_store.value(kPinsKey).toMap().value(m_currentSessionId).toMap();
+}
+
+void Manager::pinApp(const QString &appKey, const QString &slot)
+{
+    if (m_currentSessionId.isEmpty() || appKey.isEmpty())
+        return;
+    const QString key = slot == QLatin1String("bottom") ? QStringLiteral("bottom")
+                                                        : QStringLiteral("top");
+    QVariantMap pins = pinnedApps().toMap();
+    pins[key] = appKey;
+    QVariantMap all = m_store.value(kPinsKey).toMap();
+    all[m_currentSessionId] = pins;
+    m_store.setValue(kPinsKey, all);
+    emit pinnedAppsChanged();
+    // The docked pane is a live view; make sure its template is on hand (a pin
+    // restored on a cold start has no transcript row that fetched it).
+    if (!m_appHtml.contains(appKey) && m_bridge && m_bridge->isAvailable()) {
+        const int sep = appKey.indexOf(QLatin1Char('|'));
+        if (sep > 0) {
+            const QByteArray sid = m_currentSessionId.toUtf8();
+            const QByteArray uri = appKey.mid(sep + 1).toUtf8();
+            const QByteArray ext = appKey.left(sep).toUtf8();
+            m_bridge->api().grouse_unstable_resources_read(m_bridge->handle(),
+                sid.constData(), uri.constData(), ext.constData());
+        }
+    }
+}
+
+void Manager::unpinApp(const QString &slot)
+{
+    if (m_currentSessionId.isEmpty())
+        return;
+    const QString key = slot == QLatin1String("bottom") ? QStringLiteral("bottom")
+                                                        : QStringLiteral("top");
+    QVariantMap pins = pinnedApps().toMap();
+    pins[key] = QString();
+    QVariantMap all = m_store.value(kPinsKey).toMap();
+    all[m_currentSessionId] = pins;
+    m_store.setValue(kPinsKey, all);
+    emit pinnedAppsChanged();
+}
+
+void Manager::setPinRatio(const QString &slot, qreal ratio)
+{
+    if (m_currentSessionId.isEmpty())
+        return;
+    const QString key = slot == QLatin1String("bottom") ? QStringLiteral("bottomRatio")
+                                                        : QStringLiteral("topRatio");
+    QVariantMap pins = pinnedApps().toMap();
+    pins[key] = qBound(0.15, ratio, 0.85);
+    QVariantMap all = m_store.value(kPinsKey).toMap();
+    all[m_currentSessionId] = pins;
+    m_store.setValue(kPinsKey, all);
+    emit pinnedAppsChanged();
+}
+
+bool Manager::appPinned(const QString &appKey) const
+{
+    return !pinnedSlot(appKey).isEmpty();
+}
+
+QString Manager::pinnedSlot(const QString &appKey) const
+{
+    if (appKey.isEmpty())
+        return QString();
+    const QVariantMap pins = pinnedApps().toMap();
+    if (pins.value(QStringLiteral("top")).toString() == appKey)
+        return QStringLiteral("top");
+    if (pins.value(QStringLiteral("bottom")).toString() == appKey)
+        return QStringLiteral("bottom");
+    return QString();
 }
 
 void Manager::onAppMessage(const QString &sessionId, const QString &text)

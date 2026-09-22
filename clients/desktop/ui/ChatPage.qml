@@ -55,6 +55,10 @@ Kirigami.Page {
     property var pendingFiles: []
     property var slashMatches: []
 
+    /// The current session's MCP-App dock: { top, bottom, topRatio, bottomRatio }.
+    /// Referencing currentSessionId keeps the binding correct when the chat switches.
+    readonly property var pins: { Mgr.currentSessionId; return Mgr.pinnedApps }
+
     // Pretty names for the autonomy-mode values the mode pill cycles through.
     function modePrettyName(v) {
         if (v === "auto") return "Auto"
@@ -377,6 +381,93 @@ Kirigami.Page {
         Kirigami.Separator {
             Layout.fillWidth: true
             visible: contextRow.visible
+        }
+
+        // Pinned MCP-App dock (top): the app's one live view while pinned. The
+        // divider on its bottom edge drags to resize (live), ratio persisted per
+        // session.
+        Item {
+            id: topDock
+            Layout.fillWidth: true
+            readonly property string appKey: page.pins && page.pins.top !== undefined ? page.pins.top : ""
+            visible: appKey.length > 0
+            property real ratio: 0.35
+            readonly property real persistedRatio: page.pins && page.pins.topRatio !== undefined
+                                                    ? page.pins.topRatio : 0.35
+            Component.onCompleted: ratio = persistedRatio
+            onPersistedRatioChanged: if (!topDrag.active) ratio = persistedRatio
+            Layout.preferredHeight: visible ? Math.round(ratio * pageColumn.height) : 0
+
+            Rectangle { anchors.fill: parent; color: Kirigami.Theme.alternateBackgroundColor }
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.bottomMargin: topHandle.height
+                spacing: 2
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: Kirigami.Units.smallSpacing
+                    Layout.rightMargin: Kirigami.Units.smallSpacing
+                    Layout.topMargin: Kirigami.Units.smallSpacing
+                    Controls.Label {
+                        text: qsTr("Pinned · top")
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                        color: Kirigami.Theme.disabledTextColor
+                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
+                    }
+                    Controls.Button { text: qsTr("Unpin"); onClicked: Mgr.unpinApp("top") }
+                }
+                Loader {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    active: topDock.visible
+                    source: "AppView.qml"
+                    onLoaded: if (item) item.appKey = topDock.appKey
+                }
+            }
+
+            Rectangle {
+                id: topHandle
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 12
+                color: "transparent"
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: 1
+                    color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
+                                                         : Kirigami.Theme.disabledTextColor
+                }
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 44
+                    height: 5
+                    radius: height / 2
+                    color: topHover.hovered || topDrag.active
+                           ? Kirigami.Theme.highlightColor : Kirigami.Theme.disabledTextColor
+                    opacity: topHover.hovered || topDrag.active ? 1 : 0.55
+                }
+                property real lastY: 0
+                HoverHandler { id: topHover; cursorShape: Qt.SizeVerCursor }
+                DragHandler {
+                    id: topDrag
+                    target: null
+                    onActiveChanged: {
+                        if (active) topHandle.lastY = centroid.scenePosition.y
+                        else Mgr.setPinRatio("top", topDock.ratio)
+                    }
+                    onCentroidChanged: if (active) {
+                        var y = centroid.scenePosition.y
+                        topDock.ratio = Math.max(0.15, Math.min(0.85,
+                            topDock.ratio + (y - topHandle.lastY) / pageColumn.height))
+                        topHandle.lastY = y
+                    }
+                }
+            }
         }
 
         Column {
@@ -894,12 +985,28 @@ Kirigami.Page {
                     anchors.top: parent.top
                     anchors.left: parent.left
                     anchors.leftMargin: mdel.gap
-                    width: Math.min(mdel.agentBubbleW * 0.78, 560)
+                    // Use the whole chat column (capped on an ultrawide window) so a
+                    // dashboard isn't squeezed into a phone-width strip.
+                    width: Math.min(mdel.maxW, 900)
                     // Inline when WebEngine is compiled in AND the template has
-                    // arrived; else the status chip (browser handoff on tap).
-                    property bool inlineShow: mdel.inlineApps && mdel.messageAppHtml.length > 0
-                    property real viewH: mcpAppView.item ? mcpAppView.item.implicitHeight : 420
-                    implicitHeight: inlineShow ? viewH + mdel.pad * 2
+                    // arrived; else the status chip (browser handoff on tap). A
+                    // pinned app is not drawn here at all — its live view is the
+                    // docked pane, so the row collapses to a slim bar.
+                    // Reactive on page.pins: a bare Mgr.appPinned() call has no
+                    // signal dependency, so the chip never re-evaluated after an
+                    // unpin and stayed stuck on "Unpin".
+                    readonly property string pinnedSlot: page.pins
+                        ? (page.pins.top === mdel.messageAppKey ? "top"
+                           : (page.pins.bottom === mdel.messageAppKey ? "bottom" : ""))
+                        : ""
+                    readonly property bool pinned: pinnedSlot.length > 0
+                    property bool inlineShow: !pinned && mdel.inlineApps && mdel.messageAppHtml.length > 0
+                    // Fill the chat viewport: the app uses the window, scrolling in
+                    // place when its content is taller.
+                    readonly property real maxViewH: Math.max(240, list.height - 32)
+                    property real viewH: maxViewH
+                    implicitHeight: pinned ? pinnedBar.implicitHeight + mdel.pad * 2
+                                  : inlineShow ? viewH + mdel.pad * 2
                                                : mcpCol.implicitHeight + mdel.pad * 2
                     radius: Theme.radius.sm
                     color: Qt.lighter(Kirigami.Theme.backgroundColor, 1.18)
@@ -908,9 +1015,28 @@ Kirigami.Page {
                     border.width: 1
                     clip: true
 
+                    // Pinned stand-in: one line, not a second live view.
+                    RowLayout {
+                        id: pinnedBar
+                        visible: mcpAppChip.pinned
+                        anchors.fill: parent
+                        anchors.margins: mdel.pad
+                        Controls.Label {
+                            text: qsTr("Pinned") + " · " + mdel.pinnedSlot
+                                  + ": " + (mdel.messageTitle || qsTr("MCP app"))
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                            color: Kirigami.Theme.disabledTextColor
+                        }
+                        Controls.Button {
+                            text: qsTr("Unpin")
+                            onClicked: Mgr.unpinApp(mdel.pinnedSlot)
+                        }
+                    }
+
                     Column {
                         id: mcpCol
-                        visible: !mcpAppChip.inlineShow
+                        visible: !mcpAppChip.inlineShow && !mcpAppChip.pinned
                         anchors.fill: parent
                         anchors.margins: mdel.pad
                         spacing: 0
@@ -980,8 +1106,32 @@ Kirigami.Page {
                         onLoaded: if (item) item.appKey = mdel.messageAppKey
                     }
 
+                    // Floating pin control. Composited over the WebEngine texture,
+                    // so it stays clickable; pinning moves the live view to the dock.
+                    Controls.ToolButton {
+                        visible: mcpAppChip.inlineShow
+                        anchors.top: parent.top
+                        anchors.right: parent.right
+                        anchors.margins: 4
+                        icon.name: "window-pin"
+                        onClicked: pinMenu.open()
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Pin this app to the top or bottom")
+                        Menu {
+                            id: pinMenu
+                            MenuItem {
+                                text: qsTr("Pin to top")
+                                onTriggered: Mgr.pinApp(mdel.messageAppKey, "top")
+                            }
+                            MenuItem {
+                                text: qsTr("Pin to bottom")
+                                onTriggered: Mgr.pinApp(mdel.messageAppKey, "bottom")
+                            }
+                        }
+                    }
+
                     TapHandler {
-                        enabled: !mcpAppChip.inlineShow
+                        enabled: !mcpAppChip.inlineShow && !mcpAppChip.pinned
                         onTapped: mdel.toolOpen = !mdel.toolOpen
                     }
                 }
@@ -1064,6 +1214,91 @@ Kirigami.Page {
                 }
             }
 
+        }
+
+        // Pinned MCP-App dock (bottom): same as the top dock, divider on its top
+        // edge (dragging up grows it).
+        Item {
+            id: bottomDock
+            Layout.fillWidth: true
+            readonly property string appKey: page.pins && page.pins.bottom !== undefined ? page.pins.bottom : ""
+            visible: appKey.length > 0
+            property real ratio: 0.35
+            readonly property real persistedRatio: page.pins && page.pins.bottomRatio !== undefined
+                                                    ? page.pins.bottomRatio : 0.35
+            Component.onCompleted: ratio = persistedRatio
+            onPersistedRatioChanged: if (!bottomDrag.active) ratio = persistedRatio
+            Layout.preferredHeight: visible ? Math.round(ratio * pageColumn.height) : 0
+
+            Rectangle { anchors.fill: parent; color: Kirigami.Theme.alternateBackgroundColor }
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.topMargin: bottomHandle.height
+                spacing: 2
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: Kirigami.Units.smallSpacing
+                    Layout.rightMargin: Kirigami.Units.smallSpacing
+                    Controls.Label {
+                        text: qsTr("Pinned · bottom")
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                        color: Kirigami.Theme.disabledTextColor
+                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
+                    }
+                    Controls.Button { text: qsTr("Unpin"); onClicked: Mgr.unpinApp("bottom") }
+                }
+                Loader {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    active: bottomDock.visible
+                    source: "AppView.qml"
+                    onLoaded: if (item) item.appKey = bottomDock.appKey
+                }
+            }
+
+            Rectangle {
+                id: bottomHandle
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: 12
+                color: "transparent"
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: 1
+                    color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
+                                                         : Kirigami.Theme.disabledTextColor
+                }
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 44
+                    height: 5
+                    radius: height / 2
+                    color: bottomHover.hovered || bottomDrag.active
+                           ? Kirigami.Theme.highlightColor : Kirigami.Theme.disabledTextColor
+                    opacity: bottomHover.hovered || bottomDrag.active ? 1 : 0.55
+                }
+                property real lastY: 0
+                HoverHandler { id: bottomHover; cursorShape: Qt.SizeVerCursor }
+                DragHandler {
+                    id: bottomDrag
+                    target: null
+                    onActiveChanged: {
+                        if (active) bottomHandle.lastY = centroid.scenePosition.y
+                        else Mgr.setPinRatio("bottom", bottomDock.ratio)
+                    }
+                    onCentroidChanged: if (active) {
+                        var y = centroid.scenePosition.y
+                        bottomDock.ratio = Math.max(0.15, Math.min(0.85,
+                            bottomDock.ratio - (y - bottomHandle.lastY) / pageColumn.height))
+                        bottomHandle.lastY = y
+                    }
+                }
+            }
         }
 
         // Pending file attachments: removable chips above the input. Images
