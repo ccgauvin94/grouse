@@ -100,6 +100,7 @@ pub trait CoreListener {
     fn on_sessions(&self, sessions: Vec<SessionSummary>);
     fn on_transcript(&self, event: TranscriptEvent);       // append / update / clear
     fn on_stream(&self, event: StreamEvent);               // chunk, tool_call, tool_update, usage
+    fn on_item(&self, op: TranscriptOp);                   // the rich item stream (§3.5)
     fn on_config(&self, options: Vec<ConfigOption>);
     fn on_permission_request(&self, request: PermissionRequest);
     fn on_session_touched(&self, session_id: String, title: String, updated_at: String);
@@ -125,9 +126,14 @@ pub trait CoreListener {
   not a drop — is how a UI distinguishes archived chats and restores them via
   `unarchive_session`).
 - `transcript(): Vec<Message>` — the accumulated active-session transcript
+- `rich_transcript(): Vec<Item>` — the same transcript as rich items (§3.5)
+- `item(id): Option<Item>` — one item by id
+- `window(): TranscriptWindow` — the pagination cursor
 - `config(): Vec<ConfigOption>` — carries id, value, name, and the choices
   list for dropdowns (empty on the config_option_update path; the schema
   has no choices there).
+- `load_older(count: u32)` — an **intent**: extend the window backward by
+  `count` items, cache-first; outcomes arrive as `on_item` ops (§3.5).
 
 ### 3.4 Stream event enum (what `on_stream` carries)
 
@@ -147,6 +153,61 @@ was inside a collapsed toolgroup). Clients must treat a re-issued ToolCall as a
 CONVERT-IN-PLACE instruction (match on `tool_call_id`; desktop rewrites the chip
 row, Android rebuilds the bubble from the re-stashed kind) — appending blindly
 duplicates the row. A second promotion of the same id is a core-side no-op.
+
+### 3.5 Rich items (the transcript model, phase 1)
+
+`docs/TRANSCRIPT_MODEL.md` is the design. Phase 1 lands the core surface
+**alongside** the legacy `on_transcript` / `on_stream` / `Message`: both are
+emitted from the same store, so today's clients keep working while the item
+store is adopted platform by platform.
+
+```rust
+pub enum ItemKind { User, Agent, Thought, Tool, ToolGroup, Chart, McpApp, Error }
+
+pub struct ToolCall { id, title, detail, output, status }
+
+pub struct Item {
+    id: String,          // message_id (text) / tool_call_id, or a core "@n"
+    kind: ItemKind,
+    text: String,        // body / tool-app-chart TITLE
+    detail: String,      // tool input / chart spec / app input
+    output: String,      // tool result
+    status: String,      // tool lifecycle
+    app_key: String,     // McpApp: "<extension>|<uri>"
+    calls: Vec<ToolCall>,// ToolGroup children
+}
+
+pub enum TranscriptOp {
+    Reset  { session_id: String },      // the window was replaced wholesale
+    Upsert { item: Item },              // insert or replace by id (authoritative)
+    AppendText   { id: String, chunk: String },
+    AppendOutput { id: String, chunk: String },
+    Remove { id: String },
+    Window { oldest_id: String, has_older: bool },
+}
+
+pub struct TranscriptWindow { oldest_id: String, newest_id: String, has_older: bool }
+```
+
+Rules:
+
+- **`Upsert` is idempotent and authoritative**; the `Append*` ops are O(chunk)
+  streaming shortcuts, so a dropped delta still converges on the next `Upsert`.
+- **A fresh text row emits `Upsert` first**, then `AppendText` deltas. A live
+  tool output emits `AppendOutput`; the completion update emits `Upsert`.
+- **`Window` is the pagination cursor**: `oldest_id` is the oldest item the core
+  has emitted and `has_older` says whether `load_older` can still produce more.
+- Rich items make the cache and any rebuild lossless: a chart keeps its spec, an
+  MCP app keeps `app_key`, a toolgroup keeps its children. `TRANSCRIPT_CACHE_VERSION`
+  is bumped so a pre-rich cache reads as absent and is rewritten by the replay.
+- A **cache paint** rebuilds the store from rich items and emits `Reset` + one
+  `Upsert` per item + `Window`; a `session/load` replay then continues the same
+  id-keyed stream.
+- `load_older` extends backward **cache-first**; a stock server has no history
+  cursor, so when the cache does not reach the start it reports
+  `has_older: false` (the caller may fall back to a full load).
+- **Roam peer** transcripts are still `Message`-based and flatten to items at
+  the seam (roam parity is a later phase).
 
 ---
 

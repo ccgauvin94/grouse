@@ -132,11 +132,94 @@ pub struct Message {
 }
 
 /// Transcript mutation carried by `CoreListener::on_transcript` (CONTRACT §3.2).
+///
+/// **Legacy.** Superseded by [`TranscriptOp`] / `CoreListener::on_item`; kept
+/// until every client has moved (docs/TRANSCRIPT_MODEL.md, migration phase 4).
 #[derive(uniffi::Enum, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum TranscriptEvent {
     Append { message: Message },
     Update { message: Message },
     Clear,
+}
+
+/// The kind of a rich transcript [`Item`] (docs/TRANSCRIPT_MODEL.md). One
+/// variant per thing a client draws, so a chart stays a chart and an MCP app
+/// keeps its identity through replay and restart.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ItemKind {
+    User,
+    Agent,
+    Thought,
+    Tool,
+    ToolGroup,
+    Chart,
+    McpApp,
+    Error,
+}
+
+/// One tool call inside a [`ItemKind::ToolGroup`] item.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub title: String,
+    /// The tool's input/arguments (desktop "detail").
+    pub detail: String,
+    pub output: String,
+    pub status: String,
+}
+
+/// A rich transcript item — the unit the new clients render
+/// (docs/TRANSCRIPT_MODEL.md). Self-describing and round-trips through the
+/// cache, so an MCP app or chart restores with full fidelity.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Item {
+    /// Stable key: the server `message_id` for text, the `tool_call_id` for
+    /// tool-ish rows, or a core-assigned `@n` for a text row the server sent
+    /// without an id.
+    pub id: String,
+    pub kind: ItemKind,
+    /// Body text; the tool/app/chart TITLE for tool-ish rows.
+    pub text: String,
+    /// Tool input, chart spec, or MCP-app input.
+    pub detail: String,
+    /// Tool result.
+    pub output: String,
+    /// Tool lifecycle (`in_progress` / `completed` / `failed`).
+    pub status: String,
+    /// `ItemKind::McpApp` only: `<extension>|<uri>`, the resource-read key.
+    pub app_key: String,
+    /// `ItemKind::ToolGroup` only: the collapsed calls.
+    pub calls: Vec<ToolCall>,
+}
+
+/// One transcript mutation carried by `CoreListener::on_item`
+/// (docs/TRANSCRIPT_MODEL.md). The single stream: `Upsert` is authoritative and
+/// idempotent, the `Append*` ops are O(chunk) streaming shortcuts.
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum TranscriptOp {
+    /// The window is being replaced wholesale (session switch, cache paint, or
+    /// a replay that could not merge). Clients clear their item store.
+    Reset { session_id: String },
+    /// Insert or replace by id (system of record).
+    Upsert { item: Item },
+    /// Live text delta appended to an existing item.
+    AppendText { id: String, chunk: String },
+    /// Live tool-output delta appended to an existing item.
+    AppendOutput { id: String, chunk: String },
+    /// Drop an item by id.
+    Remove { id: String },
+    /// The pagination cursor: the oldest item the client holds, and whether the
+    /// core can still produce older items (`load_older`).
+    Window { oldest_id: String, has_older: bool },
+}
+
+/// The core's window over the active session's transcript
+/// (docs/TRANSCRIPT_MODEL.md). `oldest_id` is empty when the window is empty.
+#[derive(uniffi::Record, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TranscriptWindow {
+    pub oldest_id: String,
+    pub newest_id: String,
+    pub has_older: bool,
 }
 
 /// The flat stream event `CoreListener::on_stream` carries (CONTRACT §3.4).
@@ -247,6 +330,10 @@ pub trait CoreListener: Send + Sync {
     fn on_sessions(&self, sessions: Vec<SessionSummary>);
     fn on_transcript(&self, event: TranscriptEvent);
     fn on_stream(&self, event: StreamEvent);
+    /// The item stream (docs/TRANSCRIPT_MODEL.md). Replaces `on_transcript` +
+    /// the tool half of `on_stream`; both are still emitted alongside it until
+    /// every client has moved.
+    fn on_item(&self, op: TranscriptOp);
     fn on_config(&self, options: Vec<ConfigOption>);
     fn on_permission_request(&self, request: PermissionRequest);
     fn on_session_touched(&self, session_id: String, title: String, updated_at: String);
@@ -464,6 +551,7 @@ impl Core {
                 recipe_id: config.initial_recipe_id.clone(),
             },
             false,
+            false,
         );
         self.wait_ready(ready_rx);
     }
@@ -488,16 +576,28 @@ impl Core {
             }
             None => (false, None),
         };
+        // The cache is now the rich item list (`docs/TRANSCRIPT_MODEL.md`), so a
+        // paint keeps charts/apps/toolgroups intact. A fresh cache suppresses the
+        // replay outright; a STALE one paints and asks the server for a bounded
+        // tail that merges into the paint, so opening a long chat no longer
+        // re-streams the whole history.
+        let merge = cached.is_some() && !suppress;
+        self.inner.store.set_session(&session_id);
         match cached {
-            Some(messages) if suppress => self.inner.store.replace(messages),
-            Some(messages) => self.inner.store.replace_provisional(messages),
+            Some(items) if suppress => self.inner.store.replace_rich(items, false, false),
+            Some(items) => self.inner.store.replace_rich_for_merge(items),
             None => self.inner.store.clear(),
         };
         {
             let mut state = self.inner.state.lock();
             state.store_session_id = Some(session_id.clone());
         }
-        let (_, ready_rx) = self.connect_impl(config, ConnectSpec::Resume { session_id, cwd }, suppress);
+        let (_, ready_rx) = self.connect_impl(
+            config,
+            ConnectSpec::Resume { session_id, cwd },
+            suppress,
+            merge,
+        );
         self.wait_ready(ready_rx);
     }
 
@@ -562,7 +662,7 @@ impl Core {
                         }
                         Err(_) => {
                             let _ =
-                                this.connect_impl(cfg, ConnectSpec::New { recipe_id: rid }, false);
+                                this.connect_impl(cfg, ConnectSpec::New { recipe_id: rid }, false, false);
                         }
                     }
                 });
@@ -570,7 +670,7 @@ impl Core {
             }
         }
         let (_, _rx) =
-            self.connect_impl(config, ConnectSpec::New { recipe_id }, false);
+            self.connect_impl(config, ConnectSpec::New { recipe_id }, false, false);
     }
 
     /// Whether the cached transcript for a session is up to date with the
@@ -622,9 +722,15 @@ impl Core {
         // real row of the replay this load owes drops it wholesale — the replay
         // APPENDS, so painted rows left in place would be followed by replayed
         // ones. The store owns that handoff (`replace_provisional`).
+        //
+        // A fresh cache suppresses the replay; a stale one paints and merges a
+        // bounded tail (see `connect_resume`). `end_merge` emits one Clear so the
+        // rebuild drops any stale suffix the anchor truncated.
+        let merge = cached.is_some() && !suppress;
+        self.inner.store.set_session(&session_id);
         match cached {
-            Some(messages) if suppress => self.inner.store.replace(messages),
-            Some(messages) => self.inner.store.replace_provisional(messages),
+            Some(items) if suppress => self.inner.store.replace_rich(items, false, false),
+            Some(items) => self.inner.store.replace_rich_for_merge(items),
             None => self.inner.store.clear(),
         };
         let config = {
@@ -643,7 +749,7 @@ impl Core {
                 let c = cwd.clone();
                 let cfg = config.clone();
                 crate::roam::runtime().spawn(async move {
-                    if conn.live_load_session_async(sid.clone(), c.clone(), suppress).await.is_ok() {
+                    if conn.live_load_session_async(sid.clone(), c.clone(), suppress, merge).await.is_ok() {
                         // Live reuse doesn't go through the handshake's
                         // on_ready → on_conn_status(Ready) path, so without this
                         // the UI stayed in `Loading…` (replayActive never
@@ -670,13 +776,13 @@ impl Core {
                             }
                         }
                     }
-                    let _ = this.connect_impl(cfg, ConnectSpec::Resume { session_id: sid, cwd: c }, suppress);
+                    let _ = this.connect_impl(cfg, ConnectSpec::Resume { session_id: sid, cwd: c }, suppress, merge);
                 });
                 return;
             }
         }
         let (_, _rx) =
-            self.connect_impl(config, ConnectSpec::Resume { session_id, cwd }, suppress);
+            self.connect_impl(config, ConnectSpec::Resume { session_id, cwd }, suppress, merge);
     }
 
     /// Render the cached transcript for a session WITHOUT connecting (cold
@@ -685,7 +791,7 @@ impl Core {
     /// the same `Clear` the open path would; the later open is a no-op when
     /// the cache is fresh.
     pub fn load_cached_transcript(&self, session_id: String) {
-        if let Some((messages, _)) = self.inner.cache.load_transcript(&session_id) {
+        if let Some((items, _)) = self.inner.cache.load_transcript(&session_id) {
             // Authoritative, NOT provisional: this is the cold-start
             // placeholder for the chat the user was last in, painted before any
             // connect. `connect()` binds a throwaway session first and the app
@@ -693,7 +799,8 @@ impl Core {
             // path that DOES owe one (`open_session`, and the reconnect's stale
             // resume) repaints with the provisional mode it decides on, and
             // `replace` adopts that mode when the content is identical.
-            self.inner.store.replace(messages);
+            self.inner.store.set_session(&session_id);
+            self.inner.store.replace_rich(items, false, false);
             // These rows are this session's, whatever session the connection
             // that follows happens to bind first (see `store_session_id`).
             self.inner.state.lock().store_session_id = Some(session_id);
@@ -998,9 +1105,122 @@ impl Core {
         self.inner.store.transcript()
     }
 
+    /// The rich item snapshot of the active session (docs/TRANSCRIPT_MODEL.md).
+    /// Peer chats flatten to items (the peer's store is still `Message`-based);
+    /// the main connection carries the full rich set.
+    pub fn rich_transcript(&self) -> Vec<Item> {
+        if let Some(peer) = self.active_peer() {
+            return messages_to_items(&peer.transcript());
+        }
+        self.inner.store.rich_transcript()
+    }
+
+    /// One rich item by id from the main store.
+    pub fn item(&self, id: String) -> Option<Item> {
+        self.inner.store.item(&id)
+    }
+
+    /// The pagination cursor for the active session.
+    pub fn window(&self) -> TranscriptWindow {
+        self.inner.store.window()
+    }
+
+    /// Extend the client's window backward by `count` items, cache-first
+    /// (docs/TRANSCRIPT_MODEL.md). Emits `Upsert` per older item + a refreshed
+    /// `Window`; `has_older: false` means the cache does not reach further (a
+    /// stock server has no older cursor, so the caller falls back to a full
+    /// load if it wants more).
+    pub fn load_older(&self, count: u32) {
+        // Peers carry their own (flat) transcript and no cache; the window is
+        // main-connection only for now.
+        if self.active_peer().is_some() {
+            return;
+        }
+        let Some(session_id) = self.active_session_id() else { return };
+        let oldest = self.inner.store.oldest_id();
+        if oldest.is_empty() {
+            return;
+        }
+        let Some((items, _)) = self.inner.cache.load_transcript(&session_id) else {
+            self.inner.store.set_has_older(false);
+            return;
+        };
+        let Some(end) = items.iter().position(|i| i.id == oldest) else {
+            // The window's oldest is not in the cache: nothing older to give.
+            self.inner.store.set_has_older(false);
+            return;
+        };
+        let take = (count as usize).min(end);
+        let start = end - take;
+        if take == 0 {
+            self.inner.store.set_has_older(false);
+            return;
+        }
+        let slice: Vec<Item> = items[start..end].to_vec();
+        self.inner.store.prepend_items(slice, start > 0);
+    }
+
     pub fn config(&self) -> Vec<ConfigOption> {
         self.inner.state.lock().config.clone()
     }
+}
+
+/// Best-effort rich `Item` → flat `Message` mapping (the roam peer's store is
+/// still `Message`-based). Charts/apps/toolgroups degrade to the "tool" umbrella.
+pub(crate) fn items_to_messages(items: &[Item]) -> Vec<Message> {
+    items
+        .iter()
+        .map(|it| {
+            let role = match it.kind {
+                ItemKind::User => "user",
+                ItemKind::Agent => "agent",
+                ItemKind::Thought => "thought",
+                ItemKind::Error => "error",
+                _ => "tool",
+            };
+            let (id, content) = match it.kind {
+                ItemKind::ToolGroup => match it.calls.first() {
+                    Some(c) => (c.id.clone(), c.title.clone()),
+                    None => (String::new(), String::new()),
+                },
+                _ => (it.id.clone(), it.text.clone()),
+            };
+            Message {
+                id,
+                role: role.to_string(),
+                content,
+                output: it.output.clone(),
+            }
+        })
+        .collect()
+}
+
+/// Best-effort flat `Message` → rich `Item` mapping (peers, and any caller that
+/// only has the legacy projection). Charts/apps/toolgroups are already lost at
+/// this point, so they degrade to plain tool items.
+pub(crate) fn messages_to_items(messages: &[Message]) -> Vec<Item> {
+    messages
+        .iter()
+        .map(|m| {
+            let (kind, text) = match m.role.as_str() {
+                "user" => (ItemKind::User, m.content.clone()),
+                "thought" => (ItemKind::Thought, m.content.clone()),
+                "error" => (ItemKind::Error, m.content.clone()),
+                "tool" => (ItemKind::Tool, m.content.clone()),
+                _ => (ItemKind::Agent, m.content.clone()),
+            };
+            Item {
+                id: if m.id.is_empty() { format!("@flat:{}", m.content.len()) } else { m.id.clone() },
+                kind,
+                text,
+                detail: String::new(),
+                output: m.output.clone(),
+                status: String::new(),
+                app_key: String::new(),
+                calls: Vec::new(),
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,6 +1251,7 @@ impl Core {
         config: ServerConfig,
         spec: ConnectSpec,
         suppress_replay: bool,
+        merge_replay: bool,
     ) -> (Arc<crate::spine::Conn>, oneshot::Receiver<Result<(), String>>) {
         let gen = {
             let mut state = self.inner.state.lock();
@@ -1052,6 +1273,7 @@ impl Core {
             spec,
         );
         conn.set_suppress_replay(suppress_replay);
+        conn.set_merge_replay(merge_replay);
         conn.set_on_status(self.status_hook());
         conn.set_on_touched(self.touched_hook());
         conn.set_on_active_run(self.active_run_hook());
@@ -1276,6 +1498,7 @@ impl Core {
             config,
             ConnectSpec::Resume { session_id: resume, cwd },
             suppress,
+            false,
         );
     }
 
@@ -1485,7 +1708,7 @@ impl Core {
         if self.inner.state.lock().store_session_id.as_deref() != Some(session_id.as_str()) {
             return;
         }
-        let messages = self.inner.store.transcript();
+        let items = self.inner.store.rich_transcript();
         let updated_at = self
             .inner
             .state
@@ -1494,7 +1717,7 @@ impl Core {
             .get(&session_id)
             .cloned()
             .unwrap_or_default();
-        self.inner.cache.save_transcript(&session_id, &messages, &updated_at);
+        self.inner.cache.save_transcript(&session_id, &items, &updated_at);
     }
 
     fn on_sessions_reply(&self, reply: Value) {
@@ -1941,6 +2164,11 @@ impl CoreListener for CoreListenerForwarder {
             }
         }
     }
+    fn on_item(&self, op: TranscriptOp) {
+        if self.main_displayed() {
+            self.inner.on_item(op);
+        }
+    }
     fn on_config(&self, options: Vec<ConfigOption>) {
         self.inner.on_config(options);
     }
@@ -1980,12 +2208,14 @@ mod forwarder_tests {
     struct Recorder {
         transcripts: Mutex<usize>,
         streams: Mutex<Vec<String>>,
+        items: Mutex<usize>,
     }
     impl Recorder {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 transcripts: Mutex::new(0),
                 streams: Mutex::new(Vec::new()),
+                items: Mutex::new(0),
             })
         }
         fn tag(e: &StreamEvent) -> &'static str {
@@ -2008,6 +2238,9 @@ mod forwarder_tests {
         }
         fn on_stream(&self, e: StreamEvent) {
             self.streams.lock().unwrap().push(Self::tag(&e).to_string());
+        }
+        fn on_item(&self, _: TranscriptOp) {
+            *self.items.lock().unwrap() += 1;
         }
         fn on_config(&self, _: Vec<ConfigOption>) {}
         fn on_permission_request(&self, _: PermissionRequest) {}
@@ -2034,8 +2267,10 @@ mod forwarder_tests {
         let (f, rec) = fwd(active);
         f.on_transcript(TranscriptEvent::Clear);
         f.on_stream(StreamEvent::AgentChunk { text: "hi".into(), message_id: String::new() });
+        f.on_item(TranscriptOp::Reset { session_id: "s".into() });
         assert_eq!(*rec.transcripts.lock().unwrap(), 1);
         assert_eq!(*rec.streams.lock().unwrap(), vec!["agent".to_string()]);
+        assert_eq!(*rec.items.lock().unwrap(), 1);
     }
 
     #[test]
@@ -2048,8 +2283,10 @@ mod forwarder_tests {
         f.on_transcript(TranscriptEvent::Clear);
         f.on_stream(StreamEvent::AgentChunk { text: "hi".into(), message_id: String::new() });
         f.on_stream(StreamEvent::Usage { used: 1, size: 2, cost: 0.0, currency: "x".into() });
+        f.on_item(TranscriptOp::Reset { session_id: "s".into() });
         assert_eq!(*rec.transcripts.lock().unwrap(), 0, "no painting while a peer owns the screen");
         assert!(rec.streams.lock().unwrap().is_empty());
+        assert_eq!(*rec.items.lock().unwrap(), 0);
     }
 
     #[test]

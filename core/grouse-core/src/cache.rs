@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Message, SessionSummary};
+use crate::{Item, SessionSummary};
 
 /// Transcript-cache format version.
 ///
@@ -37,7 +37,12 @@ use crate::{Message, SessionSummary};
 /// MIS-ORDERED, so it must not be trusted even when its stamp matches: reading
 /// it returns `None` and the next open takes the replay path, which rewrites it
 /// in the server's order. This is what self-heals caches already on disk.
-pub const TRANSCRIPT_CACHE_VERSION: u64 = 2;
+/// Bumped to 3 when the cache became the RICH item list
+/// (`docs/TRANSCRIPT_MODEL.md`): a v2 file holds the lossy flat `Message`
+/// projection, which cannot restore a chart's spec, an MCP app's key, or a
+/// toolgroup's children. Reading a v2 file would silently degrade those rows, so
+/// it returns `None` and the next open replays and rewrites in the rich shape.
+pub const TRANSCRIPT_CACHE_VERSION: u64 = 3;
 
 /// The tool catalog cache, mirroring the desktop's tool-cache JSON.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -88,51 +93,34 @@ impl CacheStore {
         self.cache_dir.join(format!("{}-tools.json", escape(session_id)))
     }
 
-    /// Persist a session transcript. Mirrors the desktop: an empty transcript
+    /// Persist a session transcript as the RICH item list. An empty transcript
     /// (or empty session id) is not cached, so `load_transcript` reports
     /// `None` for it. Returns whether the file was written.
-    pub fn save_transcript(&self, session_id: &str, messages: &[Message], updated_at: &str) -> bool {
-        if session_id.is_empty() || messages.is_empty() {
+    pub fn save_transcript(&self, session_id: &str, items: &[Item], updated_at: &str) -> bool {
+        if session_id.is_empty() || items.is_empty() {
             return true;
         }
-        let mut arr = Vec::with_capacity(messages.len());
-        for m in messages {
-            let mut o = serde_json::json!({
-                "id": m.id,
-                "role": m.role,
-                "text": m.content,
-                "html": "",
-            });
-            if m.role == "thought" {
-                o["thought"] = serde_json::json!(true);
-            }
-            if m.role == "tool" {
-                // The flat projection carries the tool title in `content`;
-                // write it into the desktop's `title` field, `text` stays "".
-                o["title"] = serde_json::json!(m.content);
-                o["text"] = serde_json::json!("");
-            }
-            arr.push(o);
-        }
+        let Ok(arr) = serde_json::to_value(items) else {
+            return false;
+        };
         let root = serde_json::json!({
             "v": TRANSCRIPT_CACHE_VERSION,
             "updatedAt": updated_at,
-            "messages": arr,
+            "items": arr,
         });
         write_json(&self.transcript_path(session_id), &root)
     }
 
-    /// Load a session transcript. Returns `(messages, updatedAt)`; the caller
-    /// compares `updatedAt` against the session list for freshness. `None`
-    /// when the file is missing, corrupt, or holds no messages (desktop
-    /// `loadCache` semantics).
-    pub fn load_transcript(&self, session_id: &str) -> Option<(Vec<Message>, String)> {
+    /// Load a session transcript as the rich item list. Returns `(items,
+    /// updatedAt)`; the caller compares `updatedAt` against the session list for
+    /// freshness. `None` when the file is missing, corrupt, or holds no items
+    /// (desktop `loadCache` semantics).
+    pub fn load_transcript(&self, session_id: &str) -> Option<(Vec<Item>, String)> {
         let bytes = fs::read(self.transcript_path(session_id)).ok()?;
         let root: Value = serde_json::from_slice(&bytes).ok()?;
-        // A pre-fix cache may be mis-ordered (see TRANSCRIPT_CACHE_VERSION) and
-        // its own stamp can make it look fresh, so treat it as absent: the
-        // caller then replays and rewrites it. One-time; the format is stamped
-        // from here on.
+        // A pre-rich cache is lossy (see TRANSCRIPT_CACHE_VERSION) and its own
+        // stamp can make it look fresh, so treat it as absent: the caller then
+        // replays and rewrites it. One-time; the format is stamped from here on.
         if root.get("v").and_then(Value::as_u64) != Some(TRANSCRIPT_CACHE_VERSION) {
             return None;
         }
@@ -141,12 +129,18 @@ impl CacheStore {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let arr = root.get("messages")?.as_array()?;
+        let arr = root.get("items")?.as_array()?;
         if arr.is_empty() {
             return None;
         }
-        let messages = arr.iter().map(message_from_json).collect();
-        Some((messages, updated_at))
+        let items: Vec<Item> = arr
+            .iter()
+            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .collect();
+        if items.is_empty() {
+            return None;
+        }
+        Some((items, updated_at))
     }
 
     /// Persist the session directory (the drawer's names + the per-session
@@ -289,62 +283,13 @@ pub(crate) fn make_private(path: &Path) {
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
-/// Map one desktop-format cache row to a flat `Message`.
-///
-/// - text rows (user/agent/thought/error): `text` → `content`; the desktop
-///   cache carries no bubble keys, so `id` is empty unless our extra `id`
-///   key is present.
-/// - tool rows: the title lives in `title` with `text` empty (both our own
-///   cache and the desktop's) → `content` = title, `id` = `toolCallId`.
-/// - chart/mcpapp rows: same, flattened to role "tool" (the CONTRACT umbrella).
-/// - toolgroup rows: flattened to ONE tool message anchored on the first call
-///   (matching how the live toolgroup projects to the transcript).
-fn message_from_json(el: &Value) -> Message {
-    // Desktop chart/mcp-app rows flatten to the CONTRACT's "tool" umbrella,
-    // exactly like the live projection does.
-    let role = match el.get("role").and_then(Value::as_str).unwrap_or("") {
-        "chart" | "mcpapp" => "tool",
-        r => r,
-    }
-    .to_string();
-    let text = el.get("text").and_then(Value::as_str).unwrap_or("").to_string();
-    let id = el.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-    let tool_call_id = el.get("toolCallId").and_then(Value::as_str).unwrap_or("").to_string();
-
-    if role == "toolgroup" {
-        if let Some(first) = el
-            .get("calls")
-            .and_then(Value::as_array)
-            .and_then(|calls| calls.first())
-        {
-            let title = first.get("title").and_then(Value::as_str).unwrap_or("");
-            let cid = first.get("toolCallId").and_then(Value::as_str).unwrap_or("");
-            return Message {
-                id: cid.to_string(),
-                role: "tool".to_string(),
-                content: title.to_string(),
-                output: String::new(),
-            };
-        }
-        return Message { id: String::new(), role: "tool".to_string(), content: String::new(), output: String::new() };
-    }
-
-    let content = if (role == "tool" || role == "chart" || role == "mcpapp") && text.is_empty() {
-        el.get("title").and_then(Value::as_str).unwrap_or("").to_string()
-    } else {
-        text
-    };
-    let id = if id.is_empty() && !tool_call_id.is_empty() { tool_call_id } else { id };
-    Message { id, role, content, output: String::new() }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::SessionSummary;
     use std::collections::BTreeMap;
     use std::fs;
 
-    use crate::Message;
+    use crate::{Item, ItemKind, ToolCall};
 
     use super::{CacheStore, ExtensionDef, ToolCache};
 
@@ -356,29 +301,44 @@ mod tests {
         dir
     }
 
-    fn msgs(messages: &[Message]) -> Vec<(String, String, String)> {
-        messages
-            .iter()
-            .map(|m| (m.role.clone(), m.id.clone(), m.content.clone()))
-            .collect()
+    fn text(id: &str, kind: ItemKind, t: &str) -> Item {
+        Item {
+            id: id.into(),
+            kind,
+            text: t.into(),
+            detail: String::new(),
+            output: String::new(),
+            status: String::new(),
+            app_key: String::new(),
+            calls: Vec::new(),
+        }
     }
 
     #[test]
     fn cache_transcript_round_trip() {
         let dir = temp_cache_dir("roundtrip");
         let store = CacheStore::new(dir.clone());
-        let messages = vec![
-            Message { id: "m1".into(), role: "user".into(), content: "hi".into() , output: String::new(), },
-            Message { id: "m2".into(), role: "agent".into(), content: "hello there".into() , output: String::new(), },
-            Message { id: "t1".into(), role: "tool".into(), content: "Bash".into() , output: String::new(), },
-            Message { id: String::new(), role: "thought".into(), content: "hmm".into() , output: String::new(), },
+        let items = vec![
+            text("m1", ItemKind::User, "hi"),
+            text("m2", ItemKind::Agent, "hello there"),
+            Item {
+                id: "t1".into(),
+                kind: ItemKind::Tool,
+                text: "Bash".into(),
+                detail: "ls".into(),
+                output: "out".into(),
+                status: "completed".into(),
+                app_key: String::new(),
+                calls: Vec::new(),
+            },
+            text("@1", ItemKind::Thought, "hmm"),
         ];
 
-        assert!(store.save_transcript("sess/1", &messages, "2026-08-12T10:00:00Z"));
+        assert!(store.save_transcript("sess/1", &items, "2026-08-12T10:00:00Z"));
         let (loaded, updated_at) =
             store.load_transcript("sess/1").expect("cache must load back");
         assert_eq!(updated_at, "2026-08-12T10:00:00Z");
-        assert_eq!(msgs(&loaded), msgs(&messages));
+        assert_eq!(loaded, items, "the rich snapshot must round-trip exactly");
 
         // Desktop file naming: `/` escaped to `_`, `.json` suffix.
         assert!(dir.join("sess_1.json").exists());
@@ -391,35 +351,90 @@ mod tests {
     }
 
     #[test]
-    fn pre_fix_transcript_caches_are_never_trusted() {
-        // Written before the ordering fix, so it may hold painted rows followed by
-        // replayed ones. Its stamp EQUALS the server's here — which is exactly the
-        // trap: the old client stamped the file with its own last-known updatedAt,
-        // so a mis-ordered cache compared fresh forever and suppressed the replay
-        // that would have corrected it. It must read as absent even then.
+    fn rich_cache_round_trips_charts_apps_and_toolgroups() {
+        // The whole point of the rich cache: a chart keeps its spec, an MCP app
+        // keeps its key, and a collapsed toolgroup keeps its children — none of
+        // which the old flat `Message` projection could carry.
+        let dir = temp_cache_dir("rich");
+        let store = CacheStore::new(dir.clone());
+        let items = vec![
+            Item {
+                id: "c1".into(),
+                kind: ItemKind::Chart,
+                text: "Sankey".into(),
+                detail: r#"{"nodes":[]}"#.into(),
+                output: String::new(),
+                status: "completed".into(),
+                app_key: String::new(),
+                calls: Vec::new(),
+            },
+            Item {
+                id: "a1".into(),
+                kind: ItemKind::McpApp,
+                text: "Dashboard".into(),
+                detail: r#"{"range":"7d"}"#.into(),
+                output: String::new(),
+                status: "completed".into(),
+                app_key: "assistantmonitor|ui://x/dashboard".into(),
+                calls: Vec::new(),
+            },
+            Item {
+                id: "t1".into(),
+                kind: ItemKind::ToolGroup,
+                text: String::new(),
+                detail: String::new(),
+                output: String::new(),
+                status: String::new(),
+                app_key: String::new(),
+                calls: vec![
+                    ToolCall {
+                        id: "t1".into(),
+                        title: "Bash".into(),
+                        detail: "ls".into(),
+                        output: "a".into(),
+                        status: "completed".into(),
+                    },
+                    ToolCall {
+                        id: "t2".into(),
+                        title: "Read".into(),
+                        detail: "f".into(),
+                        output: "b".into(),
+                        status: "completed".into(),
+                    },
+                ],
+            },
+        ];
+        assert!(store.save_transcript("s1", &items, "2026-08-12T10:00:00Z"));
+        let (loaded, _) = store.load_transcript("s1").unwrap();
+        assert_eq!(loaded, items);
+        assert_eq!(loaded[1].app_key, "assistantmonitor|ui://x/dashboard");
+        assert_eq!(loaded[2].calls.len(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pre_rich_transcript_caches_are_never_trusted() {
+        // A v2 file holds the lossy flat projection (its own stamp can make it
+        // look fresh) and cannot restore charts/apps, so it must read as absent
+        // and force the replay that rewrites it in the rich shape.
         let dir = temp_cache_dir("version");
         let store = CacheStore::new(dir.clone());
         fs::write(
             dir.join("s1.json"),
-            r#"{"updatedAt":"2026-08-12T10:00:00Z","messages":[{"id":"m1","role":"agent","text":"old","html":""}]}"#,
+            r#"{"v":2,"updatedAt":"2026-08-12T10:00:00Z","messages":[{"id":"m1","role":"agent","text":"old","html":""}]}"#,
         )
         .unwrap();
         assert!(
             store.load_transcript("s1").is_none(),
-            "a pre-fix cache must force a replay, not be trusted"
+            "a pre-rich cache must force a replay, not be trusted"
         );
 
         // The current format is trusted, and carries the stamp through.
-        let messages = vec![Message {
-            id: "m1".into(),
-            role: "agent".into(),
-            content: "new".into(),
-            output: String::new(),
-        }];
-        assert!(store.save_transcript("s1", &messages, "2026-08-12T10:00:00Z"));
-        let (loaded, updated_at) = store.load_transcript("s1").expect("v2 cache loads");
+        let items = vec![text("m1", ItemKind::Agent, "new")];
+        assert!(store.save_transcript("s1", &items, "2026-08-12T10:00:00Z"));
+        let (loaded, updated_at) = store.load_transcript("s1").expect("v3 cache loads");
         assert_eq!(updated_at, "2026-08-12T10:00:00Z");
-        assert_eq!(msgs(&loaded), msgs(&messages));
+        assert_eq!(loaded, items);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -428,10 +443,9 @@ mod tests {
     fn cache_freshness_is_the_callers_job() {
         let dir = temp_cache_dir("fresh");
         let store = CacheStore::new(dir.clone());
-        let messages =
-            vec![Message { id: "m1".into(), role: "user".into(), content: "hi".into() , output: String::new(), }];
+        let items = vec![text("m1", ItemKind::User, "hi")];
 
-        store.save_transcript("s1", &messages, "2026-08-12T09:00:00Z");
+        store.save_transcript("s1", &items, "2026-08-12T09:00:00Z");
         let (_, updated_at) = store.load_transcript("s1").unwrap();
 
         // The store is dumb I/O: the caller compares the cached stamp against
@@ -443,7 +457,7 @@ mod tests {
         assert!(!is_fresh(&updated_at, server_updated_at));
 
         // Re-saving with the server stamp makes the cache fresh again.
-        store.save_transcript("s1", &messages, server_updated_at);
+        store.save_transcript("s1", &items, server_updated_at);
         let (_, updated_at) = store.load_transcript("s1").unwrap();
         assert!(is_fresh(&updated_at, server_updated_at));
 
@@ -451,60 +465,8 @@ mod tests {
         assert!(store.load_transcript("nope").is_none());
         fs::write(dir.join("corrupt.json"), b"not json").unwrap();
         assert!(store.load_transcript("corrupt").is_none());
-        fs::write(dir.join("emptyarr.json"), r#"{"updatedAt":"x","messages":[]}"#).unwrap();
+        fs::write(dir.join("emptyarr.json"), r#"{"v":3,"updatedAt":"x","items":[]}"#).unwrap();
         assert!(store.load_transcript("emptyarr").is_none());
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn reads_desktop_cache_format() {
-        let dir = temp_cache_dir("desktop");
-        // The richer row shapes a cache can carry: tool rows, a collapsed
-        // toolgroup with nested calls, a chart row — no `id` keys anywhere. The
-        // reader must map them (a file WITHOUT the current `v` is rejected
-        // outright instead — see `pre_fix_transcript_caches_are_never_trusted`).
-        let desktop = serde_json::json!({
-            "v": super::TRANSCRIPT_CACHE_VERSION,
-            "updatedAt": "2026-08-12T10:00:00Z",
-            "messages": [
-                {"role": "user", "text": "hello", "html": "<p>hello</p>"},
-                {"role": "agent", "text": "hi there", "html": "<p>hi there</p>"},
-                {"role": "tool", "text": "", "html": "", "title": "Bash",
-                 "detail": "ls", "output": "out", "status": "completed", "toolCallId": "t1"},
-                {"role": "toolgroup", "text": "", "html": "", "calls": [
-                    {"title": "Bash", "detail": "ls", "output": "out",
-                     "status": "completed", "toolCallId": "t1"},
-                    {"title": "Read", "detail": "file.txt", "output": "",
-                     "status": "completed", "toolCallId": "t2"}
-                ]},
-                {"role": "chart", "text": "", "title": "Sankey",
-                 "chartData": "{}", "toolCallId": "c1"}
-            ]
-        });
-        fs::write(
-            dir.join("s9.json"),
-            serde_json::to_vec(&desktop).unwrap(),
-        )
-        .unwrap();
-
-        let store = CacheStore::new(dir.clone());
-        let (messages, updated_at) = store.load_transcript("s9").unwrap();
-        assert_eq!(updated_at, "2026-08-12T10:00:00Z");
-        assert_eq!(
-            msgs(&messages),
-            vec![
-                // text rows: no ids in a desktop cache
-                ("user".to_string(), String::new(), "hello".to_string()),
-                ("agent".to_string(), String::new(), "hi there".to_string()),
-                // tool row: title → content, toolCallId → id
-                ("tool".to_string(), "t1".to_string(), "Bash".to_string()),
-                // toolgroup: ONE message anchored on its first call
-                ("tool".to_string(), "t1".to_string(), "Bash".to_string()),
-                // chart row flattened under the "tool" umbrella
-                ("tool".to_string(), "c1".to_string(), "Sankey".to_string()),
-            ]
-        );
 
         let _ = fs::remove_dir_all(&dir);
     }

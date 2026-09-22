@@ -64,6 +64,11 @@ pub use agent_client_protocol::Error as AcpError;
 /// The seam the unstable shim codes against: any live connection (the spine's
 /// [`Conn`], or a stub in tests) exposes the synchronous RPC and the bound
 /// session.
+/// Bounded replay window for a stale-cache open: the server is asked for the
+/// last `REPLAY_TAIL` messages and the store merges them into the painted cache
+/// (see `TranscriptStore::replace_for_merge`). Mirrors the roam peer's window.
+const REPLAY_TAIL: usize = 100;
+
 pub trait RpcConn: Send + Sync {
     /// Synchronous request/reply: `block_task` driven on the core runtime.
     fn rpc(&self, method: &str, params: Value) -> Result<Value, AcpError>;
@@ -277,6 +282,10 @@ struct ConnInner {
     active_run_id: Mutex<Option<String>>,
     /// Fresh-cache opens suppress the replayed stream; cleared on ready.
     suppress_replay: AtomicBool,
+    /// Stale-cache opens ask for a bounded TAIL and merge it into the painted
+    /// cache (the store anchors the overlap) instead of replaying everything.
+    /// Cleared on ready.
+    merge_replay: AtomicBool,
     /// `session/load` replay (open + resync): thought chunks are dropped so a
     /// replayed reasoning trail does not double up (desktop `m_replaying`).
     replaying: AtomicBool,
@@ -343,6 +352,7 @@ impl Conn {
                 closing: AtomicBool::new(false),
                 active_run_id: Mutex::new(None),
                 suppress_replay: AtomicBool::new(false),
+                merge_replay: AtomicBool::new(false),
                 replaying: AtomicBool::new(false),
                 ready: Mutex::new(Some(ready_tx)),
                 shutdown_rx: Mutex::new(Some(shutdown_rx)),
@@ -426,6 +436,10 @@ impl Conn {
 
     pub(crate) fn set_suppress_replay(&self, suppress: bool) {
         self.inner.suppress_replay.store(suppress, Ordering::SeqCst);
+    }
+
+    pub(crate) fn set_merge_replay(&self, merge: bool) {
+        self.inner.merge_replay.store(merge, Ordering::SeqCst);
     }
 
     pub(crate) fn set_replaying(&self, replaying: bool) {
@@ -580,6 +594,7 @@ impl Conn {
 
     fn on_ready(&self) {
         self.inner.suppress_replay.store(false, Ordering::SeqCst);
+        self.inner.merge_replay.store(false, Ordering::SeqCst);
         self.inner.replaying.store(false, Ordering::SeqCst);
         // Still armed here => the replay produced nothing, so the server's copy
         // of this session is empty and the painted rows are gone from it.
@@ -634,6 +649,11 @@ impl Conn {
                 // replay in full, which suppression absorbs as before.
                 if self.inner.suppress_replay.load(Ordering::SeqCst) {
                     params["_meta"] = json!({ "replayTail": 1 });
+                } else if self.inner.merge_replay.load(Ordering::SeqCst) {
+                    // Stale cache: replay only the tail and merge it into the
+                    // painted prefix (the store anchors the overlap) instead of
+                    // streaming the whole session from the top.
+                    params["_meta"] = json!({ "replayTail": REPLAY_TAIL });
                 }
                 match cx
                     .send_request(UntypedMessage::new("session/load", params)?)
@@ -641,6 +661,21 @@ impl Conn {
                     .await
                 {
                     Ok(reply) => {
+                        // Merge gap: the tail started past the cached prefix, so
+                        // extending the cache would leave a hole. Clear and load
+                        // the whole transcript now.
+                        if self.inner.store.end_merge() {
+                            self.inner.store.clear();
+                            let full = json!({
+                                "sessionId": session_id,
+                                "cwd": cwd,
+                                "mcpServers": [],
+                            });
+                            let _ = cx
+                                .send_request(UntypedMessage::new("session/load", full)?)
+                                .block_task()
+                                .await;
+                        }
                         *self.inner.session_id.lock() = Some(session_id);
                         self.emit_config(&reply);
                     }
@@ -790,9 +825,11 @@ impl Conn {
         session_id: String,
         cwd: String,
         suppress_replay: bool,
+        merge_replay: bool,
     ) -> Result<(), AcpError> {
         self.inner.session_id.lock().replace(session_id.clone());
         self.inner.suppress_replay.store(suppress_replay, Ordering::SeqCst);
+        self.inner.merge_replay.store(merge_replay, Ordering::SeqCst);
         let mut params = json!({
             "sessionId": session_id,
             "cwd": cwd,
@@ -800,8 +837,21 @@ impl Conn {
         });
         if suppress_replay {
             params["_meta"] = json!({ "replayTail": 1 });
+        } else if merge_replay {
+            params["_meta"] = json!({ "replayTail": REPLAY_TAIL });
         }
         let reply: Value = self.rpc_async("session/load", params).await?;
+        // Merge gap: the tail started past the cached prefix — clear and reload
+        // the whole transcript (see the handshake Resume branch).
+        if self.inner.store.end_merge() {
+            self.inner.store.clear();
+            let full = json!({
+                "sessionId": session_id,
+                "cwd": cwd,
+                "mcpServers": [],
+            });
+            let _ = self.rpc_async("session/load", full).await;
+        }
         *self.inner.session_id.lock() = Some(session_id);
         self.emit_config(&reply);
         Ok(())

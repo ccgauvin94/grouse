@@ -20,6 +20,7 @@ use futures::stream::StreamExt;
 use grouse_core::{
     ConfigOption, ConnectionStatus, Core, CoreListener, PermissionRequest, ProjectSummary, Prompt,
     ConfigChoice, PromptBlock, SendExpect, SessionSummary, StreamEvent, TranscriptEvent,
+    TranscriptOp,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -38,6 +39,7 @@ enum Ev {
     Sessions(Vec<SessionSummary>),
     Transcript(TranscriptEvent),
     Stream(StreamEvent),
+    Item(TranscriptOp),
     Config(Vec<ConfigOption>),
     Permission(PermissionRequest),
     Touched(String, String, String),
@@ -72,6 +74,9 @@ impl CoreListener for RecordingListener {
     fn on_stream(&self, event: StreamEvent) {
         let _ = self.tx.send(Ev::Stream(event));
     }
+    fn on_item(&self, op: TranscriptOp) {
+        let _ = self.tx.send(Ev::Item(op));
+    }
     fn on_config(&self, options: Vec<ConfigOption>) {
         let _ = self.tx.send(Ev::Config(options));
     }
@@ -98,6 +103,20 @@ impl CoreListener for RecordingListener {
     }
     fn on_active_run(&self, session_id: String, run_id: String) {
         let _ = self.tx.send(Ev::ActiveRun(session_id, run_id));
+    }
+}
+
+/// A rich cache-seed item (the cache is the item list now).
+fn item(id: &str, kind: grouse_core::ItemKind, text: &str) -> grouse_core::Item {
+    grouse_core::Item {
+        id: id.into(),
+        kind,
+        text: text.into(),
+        detail: String::new(),
+        output: String::new(),
+        status: String::new(),
+        app_key: String::new(),
+        calls: Vec::new(),
     }
 }
 
@@ -414,12 +433,7 @@ fn resume_replay_persists_the_fresh_cache() {
     std::env::set_var("XDG_DATA_HOME", &data_dir);
     // Seed a STALE cache: old content, old updatedAt.
     let cache = grouse_core::cache::CacheStore::new(data_dir.join("grouse"));
-    let stale = vec![grouse_core::Message {
-        id: "m-old".into(),
-        role: "user".into(),
-        content: "stale cached line".into(),
-        output: String::new(),
-    }];
+    let stale = vec![item("m-old", grouse_core::ItemKind::User, "stale cached line")];
     assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z"));
 
     let (port_tx, port_rx) = mpsc::channel();
@@ -453,7 +467,7 @@ fn resume_replay_persists_the_fresh_cache() {
     // next open is fresh across restarts.
     let (messages, updated_at) = {
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut last: Option<(Vec<grouse_core::Message>, String)> = None;
+        let mut last: Option<(Vec<grouse_core::Item>, String)> = None;
         while Instant::now() < deadline {
             if let Some(v) = cache.load_transcript("sess-r") {
                 last = Some(v.clone());
@@ -464,7 +478,7 @@ fn resume_replay_persists_the_fresh_cache() {
         last.expect("cache written after the replay")
     };
     assert_eq!(updated_at, "2026-08-12T13:00:00.000Z", "cache stamped from the session/info probe");
-    let text: String = messages.iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("");
+    let text: String = messages.iter().map(|m| m.text.clone()).collect::<Vec<_>>().join("");
     assert!(text.contains("replayed line one and two"), "cache holds the replayed content: {text}");
 
     core.disconnect();
@@ -909,12 +923,7 @@ fn stale_cache_is_painted_then_replaced_not_appended() {
         std::env::temp_dir().join(format!("grouse-paint-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&data_dir);
     let cache = grouse_core::cache::CacheStore::new(data_dir.clone());
-    let stale = vec![grouse_core::Message {
-        id: "m-old".into(),
-        role: "agent".into(),
-        content: "STALE-MARKER".into(),
-        output: String::new(),
-    }];
+    let stale = vec![item("m-old", grouse_core::ItemKind::Agent, "STALE-MARKER")];
     // An updatedAt the server will not agree with => stale => the load replays.
     assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z"));
 
@@ -984,6 +993,139 @@ fn stale_cache_is_painted_then_replaced_not_appended() {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 1: the rich item transcript paints the cache, then the replay replaces
+// it — with the row's KIND intact (a paint is lossless now).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rich_transcript_paints_and_replaces_on_a_stale_open() {
+    let data_dir =
+        std::env::temp_dir().join(format!("grouse-rich-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let cache = grouse_core::cache::CacheStore::new(data_dir.clone());
+    let stale = vec![item("m-old", grouse_core::ItemKind::Agent, "STALE-MARKER")];
+    assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z"));
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let _server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        data_dir.to_string_lossy().to_string(),
+    );
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
+
+    core.open_session("sess-r".to_string());
+    // The paint is synchronous: the rich snapshot carries the item's kind, and
+    // the window cursor points at it.
+    let painted = core.rich_transcript();
+    assert_eq!(painted.len(), 1, "one painted item");
+    assert_eq!(painted[0].kind, grouse_core::ItemKind::Agent);
+    assert_eq!(painted[0].text, "STALE-MARKER");
+    assert_eq!(core.window().oldest_id, "m-old");
+    assert!(!core.window().has_older, "the whole cache is the window for now");
+
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "resume ready");
+
+    let items = core.rich_transcript();
+    let text: String = items.iter().map(|i| i.text.clone()).collect::<Vec<_>>().join("");
+    assert!(text.contains("replayed line one and two"), "replay lands: {text}");
+    assert!(!text.contains("STALE-MARKER"), "paint replaced, not appended: {text}");
+    // item(id) resolves the row from the id index.
+    let replayed = items.iter().find(|i| i.text.contains("replayed line one")).unwrap();
+    assert_eq!(core.item(replayed.id.clone()).unwrap().kind, grouse_core::ItemKind::Agent);
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: a stale cache is caught up with a BOUNDED TAIL that merges into the
+// painted prefix, instead of replaying the whole session from the top.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stale_cache_tail_merge_keeps_the_older_prefix() {
+    // Same harness as stale_cache_is_painted_then_replaced_not_appended, but the
+    // cache CONTAINS the replay's first id, so the bounded tail anchors into it:
+    // the older prefix survives and the replayed row lands exactly once.
+    let data_dir =
+        std::env::temp_dir().join(format!("grouse-merge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let cache = grouse_core::cache::CacheStore::new(data_dir.clone());
+    let stale = vec![
+        item("old-1", grouse_core::ItemKind::User, "VERY-OLD-PREFIX"),
+        item("r-1", grouse_core::ItemKind::Agent, "replayed line one and two"),
+    ];
+    assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z"));
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        data_dir.to_string_lossy().to_string(),
+    );
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
+
+    core.open_session("sess-r".to_string());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "resume ready");
+
+    // The open asked for the bounded tail, not a full replay.
+    let loads = server.frames_for("session/load");
+    assert!(
+        loads.iter().any(|f| {
+            f.pointer("/params/_meta/replayTail").and_then(Value::as_u64) == Some(100)
+        }),
+        "a stale-cache open must request the bounded tail: {loads:?}"
+    );
+
+    let rows: Vec<String> = core.transcript().iter().map(|m| m.content.clone()).collect();
+    let joined = rows.join(" | ");
+    assert!(joined.contains("VERY-OLD-PREFIX"), "the older prefix must survive: {joined}");
+    assert!(joined.contains("replayed line one and two"), "the tail must land: {joined}");
+    assert_eq!(
+        joined.matches("replayed line one").count(),
+        1,
+        "the replayed row must not duplicate: {joined}"
+    );
+    let prefix = rows.iter().position(|t| t.contains("VERY-OLD-PREFIX"));
+    let tail = rows.iter().position(|t| t.contains("replayed line one"));
+    assert!(prefix < tail, "the older prefix must precede the tail: {joined}");
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+// ---------------------------------------------------------------------------
 // Cold start: the painted cache belongs to the session it came from, NOT to the
 // throwaway session the first connect creates on the way to resuming it.
 // ---------------------------------------------------------------------------
@@ -996,12 +1138,7 @@ fn cold_start_paint_is_not_filed_under_the_transient_session() {
         std::env::temp_dir().join(format!("grouse-owner-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cache_dir);
     let cache = grouse_core::cache::CacheStore::new(cache_dir.clone());
-    let seeded = vec![grouse_core::Message {
-        id: "m-1".into(),
-        role: "agent".into(),
-        content: "OWNED-BY-SESS-R".into(),
-        output: String::new(),
-    }];
+    let seeded = vec![item("m-1", grouse_core::ItemKind::Agent, "OWNED-BY-SESS-R")];
     assert!(cache.save_transcript("sess-r", &seeded, "2026-01-01T00:00:00.000Z"));
 
     let (port_tx, port_rx) = mpsc::channel();

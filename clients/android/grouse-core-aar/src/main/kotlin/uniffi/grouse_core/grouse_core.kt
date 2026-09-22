@@ -663,30 +663,33 @@ internal interface UniffiCallbackInterfaceCoreListenerMethod3 : com.sun.jna.Call
     fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCoreListenerMethod4 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`options`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`op`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCoreListenerMethod5 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`request`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`options`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCoreListenerMethod6 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`updatedAt`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`request`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCoreListenerMethod7 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`projects`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`updatedAt`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCoreListenerMethod8 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`label`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`projects`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCoreListenerMethod9 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`label`: RustBuffer.ByValue,`sessions`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`label`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCoreListenerMethod10 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`label`: RustBuffer.ByValue,`sessionId`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`label`: RustBuffer.ByValue,`sessions`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCoreListenerMethod11 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`runId`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`label`: RustBuffer.ByValue,`sessionId`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCoreListenerMethod12 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`runId`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceCoreListenerMethod13 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`commands`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod0 : com.sun.jna.Callback {
@@ -746,7 +749,7 @@ internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod17 : com.s
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod18 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`method`: RustBuffer.ByValue,`message`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "onStatus", "onSessions", "onTranscript", "onStream", "onConfig", "onPermissionRequest", "onSessionTouched", "onProjects", "onRoamPeerStatus", "onRoamSessions", "onPeerNewSession", "onActiveRun", "onCommands")
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onStatus", "onSessions", "onTranscript", "onStream", "onItem", "onConfig", "onPermissionRequest", "onSessionTouched", "onProjects", "onRoamPeerStatus", "onRoamSessions", "onPeerNewSession", "onActiveRun", "onCommands")
 internal open class UniffiVTableCallbackInterfaceCoreListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
     @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
@@ -754,15 +757,16 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
     @JvmField internal var `onSessions`: UniffiCallbackInterfaceCoreListenerMethod1? = null,
     @JvmField internal var `onTranscript`: UniffiCallbackInterfaceCoreListenerMethod2? = null,
     @JvmField internal var `onStream`: UniffiCallbackInterfaceCoreListenerMethod3? = null,
-    @JvmField internal var `onConfig`: UniffiCallbackInterfaceCoreListenerMethod4? = null,
-    @JvmField internal var `onPermissionRequest`: UniffiCallbackInterfaceCoreListenerMethod5? = null,
-    @JvmField internal var `onSessionTouched`: UniffiCallbackInterfaceCoreListenerMethod6? = null,
-    @JvmField internal var `onProjects`: UniffiCallbackInterfaceCoreListenerMethod7? = null,
-    @JvmField internal var `onRoamPeerStatus`: UniffiCallbackInterfaceCoreListenerMethod8? = null,
-    @JvmField internal var `onRoamSessions`: UniffiCallbackInterfaceCoreListenerMethod9? = null,
-    @JvmField internal var `onPeerNewSession`: UniffiCallbackInterfaceCoreListenerMethod10? = null,
-    @JvmField internal var `onActiveRun`: UniffiCallbackInterfaceCoreListenerMethod11? = null,
-    @JvmField internal var `onCommands`: UniffiCallbackInterfaceCoreListenerMethod12? = null,
+    @JvmField internal var `onItem`: UniffiCallbackInterfaceCoreListenerMethod4? = null,
+    @JvmField internal var `onConfig`: UniffiCallbackInterfaceCoreListenerMethod5? = null,
+    @JvmField internal var `onPermissionRequest`: UniffiCallbackInterfaceCoreListenerMethod6? = null,
+    @JvmField internal var `onSessionTouched`: UniffiCallbackInterfaceCoreListenerMethod7? = null,
+    @JvmField internal var `onProjects`: UniffiCallbackInterfaceCoreListenerMethod8? = null,
+    @JvmField internal var `onRoamPeerStatus`: UniffiCallbackInterfaceCoreListenerMethod9? = null,
+    @JvmField internal var `onRoamSessions`: UniffiCallbackInterfaceCoreListenerMethod10? = null,
+    @JvmField internal var `onPeerNewSession`: UniffiCallbackInterfaceCoreListenerMethod11? = null,
+    @JvmField internal var `onActiveRun`: UniffiCallbackInterfaceCoreListenerMethod12? = null,
+    @JvmField internal var `onCommands`: UniffiCallbackInterfaceCoreListenerMethod13? = null,
 ) : Structure() {
     class UniffiByValue(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -771,16 +775,17 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
         `onSessions`: UniffiCallbackInterfaceCoreListenerMethod1? = null,
         `onTranscript`: UniffiCallbackInterfaceCoreListenerMethod2? = null,
         `onStream`: UniffiCallbackInterfaceCoreListenerMethod3? = null,
-        `onConfig`: UniffiCallbackInterfaceCoreListenerMethod4? = null,
-        `onPermissionRequest`: UniffiCallbackInterfaceCoreListenerMethod5? = null,
-        `onSessionTouched`: UniffiCallbackInterfaceCoreListenerMethod6? = null,
-        `onProjects`: UniffiCallbackInterfaceCoreListenerMethod7? = null,
-        `onRoamPeerStatus`: UniffiCallbackInterfaceCoreListenerMethod8? = null,
-        `onRoamSessions`: UniffiCallbackInterfaceCoreListenerMethod9? = null,
-        `onPeerNewSession`: UniffiCallbackInterfaceCoreListenerMethod10? = null,
-        `onActiveRun`: UniffiCallbackInterfaceCoreListenerMethod11? = null,
-        `onCommands`: UniffiCallbackInterfaceCoreListenerMethod12? = null,
-    ): UniffiVTableCallbackInterfaceCoreListener(`uniffiFree`,`uniffiClone`,`onStatus`,`onSessions`,`onTranscript`,`onStream`,`onConfig`,`onPermissionRequest`,`onSessionTouched`,`onProjects`,`onRoamPeerStatus`,`onRoamSessions`,`onPeerNewSession`,`onActiveRun`,`onCommands`,), Structure.ByValue
+        `onItem`: UniffiCallbackInterfaceCoreListenerMethod4? = null,
+        `onConfig`: UniffiCallbackInterfaceCoreListenerMethod5? = null,
+        `onPermissionRequest`: UniffiCallbackInterfaceCoreListenerMethod6? = null,
+        `onSessionTouched`: UniffiCallbackInterfaceCoreListenerMethod7? = null,
+        `onProjects`: UniffiCallbackInterfaceCoreListenerMethod8? = null,
+        `onRoamPeerStatus`: UniffiCallbackInterfaceCoreListenerMethod9? = null,
+        `onRoamSessions`: UniffiCallbackInterfaceCoreListenerMethod10? = null,
+        `onPeerNewSession`: UniffiCallbackInterfaceCoreListenerMethod11? = null,
+        `onActiveRun`: UniffiCallbackInterfaceCoreListenerMethod12? = null,
+        `onCommands`: UniffiCallbackInterfaceCoreListenerMethod13? = null,
+    ): UniffiVTableCallbackInterfaceCoreListener(`uniffiFree`,`uniffiClone`,`onStatus`,`onSessions`,`onTranscript`,`onStream`,`onItem`,`onConfig`,`onPermissionRequest`,`onSessionTouched`,`onProjects`,`onRoamPeerStatus`,`onRoamSessions`,`onPeerNewSession`,`onActiveRun`,`onCommands`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceCoreListener) {
         `uniffiFree` = other.`uniffiFree`
@@ -789,6 +794,7 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
         `onSessions` = other.`onSessions`
         `onTranscript` = other.`onTranscript`
         `onStream` = other.`onStream`
+        `onItem` = other.`onItem`
         `onConfig` = other.`onConfig`
         `onPermissionRequest` = other.`onPermissionRequest`
         `onSessionTouched` = other.`onSessionTouched`
@@ -919,9 +925,13 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_flush_caches(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_item(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_list_sessions(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_load_cached_transcript(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_core_load_older(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_new_session(
     ): Int
@@ -932,6 +942,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_grouse_core_checksum_method_core_rename_session(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_respond_permission(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_core_rich_transcript(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_roam_connect(
     ): Int
@@ -956,6 +968,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_grouse_core_checksum_method_core_transcript_is_fresh(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_unarchive_session(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_core_window(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_add_extension(
     ): Int
@@ -1038,6 +1052,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_grouse_core_checksum_method_corelistener_on_transcript(
     ): Int
     external fun uniffi_grouse_core_checksum_method_corelistener_on_stream(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_corelistener_on_item(
     ): Int
     external fun uniffi_grouse_core_checksum_method_corelistener_on_config(
     ): Int
@@ -1139,9 +1155,13 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_flush_caches(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_core_item(`ptr`: Long,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_list_sessions(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_load_cached_transcript(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_core_load_older(`ptr`: Long,`count`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_new_session(`ptr`: Long,`recipeId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1153,6 +1173,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_respond_permission(`ptr`: Long,`toolCallId`: RustBuffer.ByValue,`outcome`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_core_rich_transcript(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_roam_connect(`ptr`: Long,`card`: RustBuffer.ByValue,`label`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_roam_disconnect(`ptr`: Long,`label`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1177,6 +1199,8 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_grouse_core_fn_method_core_unarchive_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_core_window(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_clone_grouseunstable(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_grouse_core_fn_free_grouseunstable(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1380,301 +1404,316 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if ((lib.uniffi_grouse_core_checksum_func_decide_notify() and 0xFFFF) != 46161) {
+    if (lib.uniffi_grouse_core_checksum_func_decide_notify() != 46161) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_func_parse_push() and 0xFFFF) != 24581) {
+    if (lib.uniffi_grouse_core_checksum_func_parse_push() != 24581) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_active_session_id() and 0xFFFF) != 8270) {
+    if (lib.uniffi_grouse_core_checksum_method_core_active_session_id() != 8270) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_archive_session() and 0xFFFF) != 46828) {
+    if (lib.uniffi_grouse_core_checksum_method_core_archive_session() != 46828) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_cancel() and 0xFFFF) != 53904) {
+    if (lib.uniffi_grouse_core_checksum_method_core_cancel() != 53904) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_config() and 0xFFFF) != 53322) {
+    if (lib.uniffi_grouse_core_checksum_method_core_config() != 53322) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_connect() and 0xFFFF) != 62952) {
+    if (lib.uniffi_grouse_core_checksum_method_core_connect() != 62952) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_connect_resume() and 0xFFFF) != 29319) {
+    if (lib.uniffi_grouse_core_checksum_method_core_connect_resume() != 29319) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_delete_session() and 0xFFFF) != 3698) {
+    if (lib.uniffi_grouse_core_checksum_method_core_delete_session() != 3698) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_disconnect() and 0xFFFF) != 29396) {
+    if (lib.uniffi_grouse_core_checksum_method_core_disconnect() != 29396) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_flush_caches() and 0xFFFF) != 885) {
+    if (lib.uniffi_grouse_core_checksum_method_core_flush_caches() != 885) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_list_sessions() and 0xFFFF) != 33034) {
+    if (lib.uniffi_grouse_core_checksum_method_core_item() != 5029) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_load_cached_transcript() and 0xFFFF) != 50836) {
+    if (lib.uniffi_grouse_core_checksum_method_core_list_sessions() != 33034) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_new_session() and 0xFFFF) != 50585) {
+    if (lib.uniffi_grouse_core_checksum_method_core_load_cached_transcript() != 50836) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_open_session() and 0xFFFF) != 21069) {
+    if (lib.uniffi_grouse_core_checksum_method_core_load_older() != 58013) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_ready() and 0xFFFF) != 64347) {
+    if (lib.uniffi_grouse_core_checksum_method_core_new_session() != 50585) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_rename_session() and 0xFFFF) != 51923) {
+    if (lib.uniffi_grouse_core_checksum_method_core_open_session() != 21069) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_respond_permission() and 0xFFFF) != 49597) {
+    if (lib.uniffi_grouse_core_checksum_method_core_ready() != 64347) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_roam_connect() and 0xFFFF) != 53647) {
+    if (lib.uniffi_grouse_core_checksum_method_core_rename_session() != 51923) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_roam_disconnect() and 0xFFFF) != 55425) {
+    if (lib.uniffi_grouse_core_checksum_method_core_respond_permission() != 49597) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_roam_new_session() and 0xFFFF) != 41163) {
+    if (lib.uniffi_grouse_core_checksum_method_core_rich_transcript() != 39140) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_roam_new_session_in() and 0xFFFF) != 18714) {
+    if (lib.uniffi_grouse_core_checksum_method_core_roam_connect() != 53647) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_roam_open_session() and 0xFFFF) != 26278) {
+    if (lib.uniffi_grouse_core_checksum_method_core_roam_disconnect() != 55425) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_send_prompt() and 0xFFFF) != 38382) {
+    if (lib.uniffi_grouse_core_checksum_method_core_roam_new_session() != 41163) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_sessions() and 0xFFFF) != 51807) {
+    if (lib.uniffi_grouse_core_checksum_method_core_roam_new_session_in() != 18714) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_set_config_option() and 0xFFFF) != 58160) {
+    if (lib.uniffi_grouse_core_checksum_method_core_roam_open_session() != 26278) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_status() and 0xFFFF) != 4077) {
+    if (lib.uniffi_grouse_core_checksum_method_core_send_prompt() != 38382) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_transcript() and 0xFFFF) != 31384) {
+    if (lib.uniffi_grouse_core_checksum_method_core_sessions() != 51807) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_transcript_is_fresh() and 0xFFFF) != 53914) {
+    if (lib.uniffi_grouse_core_checksum_method_core_set_config_option() != 58160) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_unarchive_session() and 0xFFFF) != 51838) {
+    if (lib.uniffi_grouse_core_checksum_method_core_status() != 4077) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_add_extension() and 0xFFFF) != 24761) {
+    if (lib.uniffi_grouse_core_checksum_method_core_transcript() != 31384) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_read() and 0xFFFF) != 16179) {
+    if (lib.uniffi_grouse_core_checksum_method_core_transcript_is_fresh() != 53914) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_upsert() and 0xFFFF) != 60061) {
+    if (lib.uniffi_grouse_core_checksum_method_core_unarchive_session() != 51838) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_export_session() and 0xFFFF) != 58199) {
+    if (lib.uniffi_grouse_core_checksum_method_core_window() != 50229) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_list_global_extensions() and 0xFFFF) != 49157) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_add_extension() != 24761) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_list_tools() and 0xFFFF) != 33901) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_config_read() != 16179) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_providers_list() and 0xFFFF) != 51277) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_config_upsert() != 60061) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_delete() and 0xFFFF) != 16293) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_export_session() != 58199) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_list() and 0xFFFF) != 48625) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_list_global_extensions() != 49157) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_save() and 0xFFFF) != 668) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_list_tools() != 33901) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_schedule() and 0xFFFF) != 23344) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_providers_list() != 51277) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_resources_read() and 0xFFFF) != 22648) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_delete() != 16293) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_respond_elicitation() and 0xFFFF) != 4683) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_list() != 48625) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_respond_recipe_params() and 0xFFFF) != 15384) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_save() != 668) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_delete() and 0xFFFF) != 63227) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_recipes_schedule() != 23344) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_list() and 0xFFFF) != 26010) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_resources_read() != 22648) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_pause() and 0xFFFF) != 41835) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_respond_elicitation() != 4683) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_run_now() and 0xFFFF) != 17186) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_respond_recipe_params() != 15384) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_unpause() and 0xFFFF) != 19929) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_delete() != 63227) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_update() and 0xFFFF) != 60402) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_list() != 26010) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_session_extensions_add() and 0xFFFF) != 20738) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_pause() != 41835) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_session_extensions_list() and 0xFFFF) != 46861) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_run_now() != 17186) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_session_extensions_remove() and 0xFFFF) != 56058) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_unpause() != 19929) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_session_info() and 0xFFFF) != 30682) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_update() != 60402) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_session_project() and 0xFFFF) != 5880) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_session_extensions_add() != 20738) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_set_extension_enabled() and 0xFFFF) != 32807) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_session_extensions_list() != 46861) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_create() and 0xFFFF) != 38698) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_session_extensions_remove() != 56058) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_create_skill_for_project() and 0xFFFF) != 17478) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_session_info() != 30682) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_delete() and 0xFFFF) != 59905) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_session_project() != 5880) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_list() and 0xFFFF) != 62916) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_set_extension_enabled() != 32807) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_update() and 0xFFFF) != 58766) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_create() != 38698) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_steer() and 0xFFFF) != 56880) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_create_skill_for_project() != 17478) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_supported_models() and 0xFFFF) != 34598) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_delete() != 59905) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_tools_call() and 0xFFFF) != 444) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_list() != 62916) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_working_dir_update() and 0xFFFF) != 28181) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_update() != 58766) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_constructor_core_new() and 0xFFFF) != 23476) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_steer() != 56880) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_constructor_grouseunstable_new() and 0xFFFF) != 25278) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_supported_models() != 34598) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_status() and 0xFFFF) != 32576) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_tools_call() != 444) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_sessions() and 0xFFFF) != 13238) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstable_working_dir_update() != 28181) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_transcript() and 0xFFFF) != 27010) {
+    if (lib.uniffi_grouse_core_checksum_constructor_core_new() != 23476) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_stream() and 0xFFFF) != 33084) {
+    if (lib.uniffi_grouse_core_checksum_constructor_grouseunstable_new() != 25278) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_config() and 0xFFFF) != 19331) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_status() != 32576) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_permission_request() and 0xFFFF) != 48981) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_sessions() != 13238) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_session_touched() and 0xFFFF) != 60888) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_transcript() != 27010) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_projects() and 0xFFFF) != 61380) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_stream() != 33084) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_roam_peer_status() and 0xFFFF) != 44730) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_item() != 31949) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_roam_sessions() and 0xFFFF) != 29410) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_config() != 15290) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_peer_new_session() and 0xFFFF) != 3019) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_permission_request() != 63565) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_active_run() and 0xFFFF) != 17853) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_session_touched() != 16613) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_commands() and 0xFFFF) != 60486) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_projects() != 37961) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export() and 0xFFFF) != 3482) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_roam_peer_status() != 14048) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_recipe_params() and 0xFFFF) != 65119) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_roam_sessions() != 42205) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_elicitation() and 0xFFFF) != 60546) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_peer_new_session() != 7025) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_compaction_status() and 0xFFFF) != 2189) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_active_run() != 39465) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_message_usage() and 0xFFFF) != 9674) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_commands() != 60050) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_app_resource() and 0xFFFF) != 53354) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export() != 3482) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_recipes() and 0xFFFF) != 13751) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_recipe_params() != 65119) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_schedules() and 0xFFFF) != 5241) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_elicitation() != 60546) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_projects() and 0xFFFF) != 55532) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_compaction_status() != 2189) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_skills() and 0xFFFF) != 60517) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_message_usage() != 9674) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_tools() and 0xFFFF) != 58067) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_app_resource() != 53354) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_extensions() and 0xFFFF) != 59080) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_recipes() != 13751) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_session_extensions() and 0xFFFF) != 41133) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_schedules() != 5241) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_config_value() and 0xFFFF) != 12996) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_projects() != 55532) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_supported_models() and 0xFFFF) != 63648) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_skills() != 60517) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_providers() and 0xFFFF) != 13817) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_tools() != 58067) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_session_probe() and 0xFFFF) != 9033) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_extensions() != 59080) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_tool_result() and 0xFFFF) != 29014) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_session_extensions() != 41133) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_error() and 0xFFFF) != 25867) {
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_config_value() != 12996) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_supported_models() != 63648) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_providers() != 13817) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_session_probe() != 9033) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_tool_result() != 29014) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_error() != 25867) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -2227,6 +2266,11 @@ public interface CoreInterface {
     fun `flushCaches`()
     
     /**
+     * One rich item by id from the main store.
+     */
+    fun `item`(`id`: kotlin.String): Item?
+    
+    /**
      * Refresh `session/list` (reply → `on_sessions`).
      */
     fun `listSessions`()
@@ -2239,6 +2283,15 @@ public interface CoreInterface {
      * the cache is fresh.
      */
     fun `loadCachedTranscript`(`sessionId`: kotlin.String)
+    
+    /**
+     * Extend the client's window backward by `count` items, cache-first
+     * (docs/TRANSCRIPT_MODEL.md). Emits `Upsert` per older item + a refreshed
+     * `Window`; `has_older: false` means the cache does not reach further (a
+     * stock server has no older cursor, so the caller falls back to a full
+     * load if it wants more).
+     */
+    fun `loadOlder`(`count`: kotlin.UInt)
     
     /**
      * `session/new` with `_meta.client` + cwd; replaces the current wire.
@@ -2270,6 +2323,13 @@ public interface CoreInterface {
      * when one owns the chat.
      */
     fun `respondPermission`(`toolCallId`: kotlin.String, `outcome`: PermissionOutcome)
+    
+    /**
+     * The rich item snapshot of the active session (docs/TRANSCRIPT_MODEL.md).
+     * Peer chats flatten to items (the peer's store is still `Message`-based);
+     * the main connection carries the full rich set.
+     */
+    fun `richTranscript`(): List<Item>
     
     /**
      * Connect a roam peer in browse mode (CONTRACT §6). The peer's identity
@@ -2340,6 +2400,11 @@ public interface CoreInterface {
      * Restore an archived session; re-lists.
      */
     fun `unarchiveSession`(`sessionId`: kotlin.String)
+    
+    /**
+     * The pagination cursor for the active session.
+     */
+    fun `window`(): TranscriptWindow
     
     companion object
 }
@@ -2625,6 +2690,23 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
+     * One rich item by id from the main store.
+     */override fun `item`(`id`: kotlin.String): Item? {
+            return FfiConverterOptionalTypeItem.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_item(
+        it,
+        
+        FfiConverterString.lower(`id`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Refresh `session/list` (reply → `on_sessions`).
      */override fun `listSessions`()
         = 
@@ -2653,6 +2735,26 @@ open class Core: Disposable, AutoCloseable, CoreInterface
         it,
         
         FfiConverterString.lower(`sessionId`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Extend the client's window backward by `count` items, cache-first
+     * (docs/TRANSCRIPT_MODEL.md). Emits `Upsert` per older item + a refreshed
+     * `Window`; `has_older: false` means the cache does not reach further (a
+     * stock server has no older cursor, so the caller falls back to a full
+     * load if it wants more).
+     */override fun `loadOlder`(`count`: kotlin.UInt)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_load_older(
+        it,
+        
+        FfiConverterUInt.lower(`count`),_status)
 }
     }
     
@@ -2744,6 +2846,24 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 }
     }
     
+    
+
+    
+    /**
+     * The rich item snapshot of the active session (docs/TRANSCRIPT_MODEL.md).
+     * Peer chats flatten to items (the peer's store is still `Message`-based);
+     * the main connection carries the full rich set.
+     */override fun `richTranscript`(): List<Item> {
+            return FfiConverterSequenceTypeItem.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_rich_transcript(
+        it,
+        _status)
+}
+    }
+    )
+    }
     
 
     
@@ -2953,6 +3073,22 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 }
     }
     
+    
+
+    
+    /**
+     * The pagination cursor for the active session.
+     */override fun `window`(): TranscriptWindow {
+            return FfiConverterTypeTranscriptWindow.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_window(
+        it,
+        _status)
+}
+    }
+    )
+    }
     
 
     
@@ -4189,6 +4325,102 @@ public object FfiConverterTypeConfigOption: FfiConverterRustBuffer<ConfigOption>
 
 
 /**
+ * A rich transcript item — the unit the new clients render
+ * (docs/TRANSCRIPT_MODEL.md). Self-describing and round-trips through the
+ * cache, so an MCP app or chart restores with full fidelity.
+ */
+data class Item (
+    /**
+     * Stable key: the server `message_id` for text, the `tool_call_id` for
+     * tool-ish rows, or a core-assigned `@n` for a text row the server sent
+     * without an id.
+     */
+    var `id`: kotlin.String
+    , 
+    var `kind`: ItemKind
+    , 
+    /**
+     * Body text; the tool/app/chart TITLE for tool-ish rows.
+     */
+    var `text`: kotlin.String
+    , 
+    /**
+     * Tool input, chart spec, or MCP-app input.
+     */
+    var `detail`: kotlin.String
+    , 
+    /**
+     * Tool result.
+     */
+    var `output`: kotlin.String
+    , 
+    /**
+     * Tool lifecycle (`in_progress` / `completed` / `failed`).
+     */
+    var `status`: kotlin.String
+    , 
+    /**
+     * `ItemKind::McpApp` only: `<extension>|<uri>`, the resource-read key.
+     */
+    var `appKey`: kotlin.String
+    , 
+    /**
+     * `ItemKind::ToolGroup` only: the collapsed calls.
+     */
+    var `calls`: List<ToolCall>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
+    override fun read(buf: ByteBuffer): Item {
+        return Item(
+            FfiConverterString.read(buf),
+            FfiConverterTypeItemKind.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterSequenceTypeToolCall.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: Item) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterTypeItemKind.allocationSize(value.`kind`) +
+            FfiConverterString.allocationSize(value.`text`) +
+            FfiConverterString.allocationSize(value.`detail`) +
+            FfiConverterString.allocationSize(value.`output`) +
+            FfiConverterString.allocationSize(value.`status`) +
+            FfiConverterString.allocationSize(value.`appKey`) +
+            FfiConverterSequenceTypeToolCall.allocationSize(value.`calls`)
+    )
+
+    override fun write(value: Item, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterTypeItemKind.write(value.`kind`, buf)
+            FfiConverterString.write(value.`text`, buf)
+            FfiConverterString.write(value.`detail`, buf)
+            FfiConverterString.write(value.`output`, buf)
+            FfiConverterString.write(value.`status`, buf)
+            FfiConverterString.write(value.`appKey`, buf)
+            FfiConverterSequenceTypeToolCall.write(value.`calls`, buf)
+    }
+}
+
+
+
+/**
  * One accumulated transcript bubble (CONTRACT §3.3/§4.3).
  */
 data class Message (
@@ -4873,6 +5105,112 @@ public object FfiConverterTypeSessionSummary: FfiConverterRustBuffer<SessionSumm
 
 
 /**
+ * One tool call inside a [`ItemKind::ToolGroup`] item.
+ */
+data class ToolCall (
+    var `id`: kotlin.String
+    , 
+    var `title`: kotlin.String
+    , 
+    /**
+     * The tool's input/arguments (desktop "detail").
+     */
+    var `detail`: kotlin.String
+    , 
+    var `output`: kotlin.String
+    , 
+    var `status`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeToolCall: FfiConverterRustBuffer<ToolCall> {
+    override fun read(buf: ByteBuffer): ToolCall {
+        return ToolCall(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ToolCall) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`title`) +
+            FfiConverterString.allocationSize(value.`detail`) +
+            FfiConverterString.allocationSize(value.`output`) +
+            FfiConverterString.allocationSize(value.`status`)
+    )
+
+    override fun write(value: ToolCall, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`title`, buf)
+            FfiConverterString.write(value.`detail`, buf)
+            FfiConverterString.write(value.`output`, buf)
+            FfiConverterString.write(value.`status`, buf)
+    }
+}
+
+
+
+/**
+ * The core's window over the active session's transcript
+ * (docs/TRANSCRIPT_MODEL.md). `oldest_id` is empty when the window is empty.
+ */
+data class TranscriptWindow (
+    var `oldestId`: kotlin.String
+    , 
+    var `newestId`: kotlin.String
+    , 
+    var `hasOlder`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTranscriptWindow: FfiConverterRustBuffer<TranscriptWindow> {
+    override fun read(buf: ByteBuffer): TranscriptWindow {
+        return TranscriptWindow(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TranscriptWindow) = (
+            FfiConverterString.allocationSize(value.`oldestId`) +
+            FfiConverterString.allocationSize(value.`newestId`) +
+            FfiConverterBoolean.allocationSize(value.`hasOlder`)
+    )
+
+    override fun write(value: TranscriptWindow, buf: ByteBuffer) {
+            FfiConverterString.write(value.`oldestId`, buf)
+            FfiConverterString.write(value.`newestId`, buf)
+            FfiConverterBoolean.write(value.`hasOlder`, buf)
+    }
+}
+
+
+
+/**
  * Connection lifecycle (CONTRACT §3.3).
  */
 sealed class ConnectionStatus {
@@ -4983,6 +5321,51 @@ public object FfiConverterTypeConnectionStatus : FfiConverterRustBuffer<Connecti
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
+ * The kind of a rich transcript [`Item`] (docs/TRANSCRIPT_MODEL.md). One
+ * variant per thing a client draws, so a chart stays a chart and an MCP app
+ * keeps its identity through replay and restart.
+ */
+
+enum class ItemKind {
+    
+    USER,
+    AGENT,
+    THOUGHT,
+    TOOL,
+    TOOL_GROUP,
+    CHART,
+    MCP_APP,
+    ERROR;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeItemKind: FfiConverterRustBuffer<ItemKind> {
+    override fun read(buf: ByteBuffer) = try {
+        ItemKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ItemKind) = 4UL
+
+    override fun write(value: ItemKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 
@@ -5599,6 +5982,9 @@ public object FfiConverterTypeToolCallKind : FfiConverterRustBuffer<ToolCallKind
 
 /**
  * Transcript mutation carried by `CoreListener::on_transcript` (CONTRACT §3.2).
+ *
+ * **Legacy.** Superseded by [`TranscriptOp`] / `CoreListener::on_item`; kept
+ * until every client has moved (docs/TRANSCRIPT_MODEL.md, migration phase 4).
  */
 sealed class TranscriptEvent {
     
@@ -5697,6 +6083,222 @@ public object FfiConverterTypeTranscriptEvent : FfiConverterRustBuffer<Transcrip
 
 
 
+/**
+ * One transcript mutation carried by `CoreListener::on_item`
+ * (docs/TRANSCRIPT_MODEL.md). The single stream: `Upsert` is authoritative and
+ * idempotent, the `Append*` ops are O(chunk) streaming shortcuts.
+ */
+sealed class TranscriptOp {
+    
+    /**
+     * The window is being replaced wholesale (session switch, cache paint, or
+     * a replay that could not merge). Clients clear their item store.
+     */
+    data class Reset(
+        val `sessionId`: kotlin.String) : TranscriptOp()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * Insert or replace by id (system of record).
+     */
+    data class Upsert(
+        val `item`: uniffi.grouse_core.Item) : TranscriptOp()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * Live text delta appended to an existing item.
+     */
+    data class AppendText(
+        val `id`: kotlin.String, 
+        val `chunk`: kotlin.String) : TranscriptOp()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * Live tool-output delta appended to an existing item.
+     */
+    data class AppendOutput(
+        val `id`: kotlin.String, 
+        val `chunk`: kotlin.String) : TranscriptOp()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * Drop an item by id.
+     */
+    data class Remove(
+        val `id`: kotlin.String) : TranscriptOp()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * The pagination cursor: the oldest item the client holds, and whether the
+     * core can still produce older items (`load_older`).
+     */
+    data class Window(
+        val `oldestId`: kotlin.String, 
+        val `hasOlder`: kotlin.Boolean) : TranscriptOp()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTranscriptOp : FfiConverterRustBuffer<TranscriptOp>{
+    override fun read(buf: ByteBuffer): TranscriptOp {
+        return when(buf.getInt()) {
+            1 -> TranscriptOp.Reset(
+                FfiConverterString.read(buf),
+                )
+            2 -> TranscriptOp.Upsert(
+                FfiConverterTypeItem.read(buf),
+                )
+            3 -> TranscriptOp.AppendText(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                )
+            4 -> TranscriptOp.AppendOutput(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                )
+            5 -> TranscriptOp.Remove(
+                FfiConverterString.read(buf),
+                )
+            6 -> TranscriptOp.Window(
+                FfiConverterString.read(buf),
+                FfiConverterBoolean.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: TranscriptOp): ULong = when(value) {
+        is TranscriptOp.Reset -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`sessionId`)
+            )
+        }
+        is TranscriptOp.Upsert -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeItem.allocationSize(value.`item`)
+            )
+        }
+        is TranscriptOp.AppendText -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterString.allocationSize(value.`chunk`)
+            )
+        }
+        is TranscriptOp.AppendOutput -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterString.allocationSize(value.`chunk`)
+            )
+        }
+        is TranscriptOp.Remove -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+            )
+        }
+        is TranscriptOp.Window -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`oldestId`)
+                + FfiConverterBoolean.allocationSize(value.`hasOlder`)
+            )
+        }
+    }
+
+    override fun write(value: TranscriptOp, buf: ByteBuffer) {
+        when(value) {
+            is TranscriptOp.Reset -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`sessionId`, buf)
+                Unit
+            }
+            is TranscriptOp.Upsert -> {
+                buf.putInt(2)
+                FfiConverterTypeItem.write(value.`item`, buf)
+                Unit
+            }
+            is TranscriptOp.AppendText -> {
+                buf.putInt(3)
+                FfiConverterString.write(value.`id`, buf)
+                FfiConverterString.write(value.`chunk`, buf)
+                Unit
+            }
+            is TranscriptOp.AppendOutput -> {
+                buf.putInt(4)
+                FfiConverterString.write(value.`id`, buf)
+                FfiConverterString.write(value.`chunk`, buf)
+                Unit
+            }
+            is TranscriptOp.Remove -> {
+                buf.putInt(5)
+                FfiConverterString.write(value.`id`, buf)
+                Unit
+            }
+            is TranscriptOp.Window -> {
+                buf.putInt(6)
+                FfiConverterString.write(value.`oldestId`, buf)
+                FfiConverterBoolean.write(value.`hasOlder`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
 
 
 /**
@@ -5711,6 +6313,13 @@ public interface CoreListener {
     fun `onTranscript`(`event`: TranscriptEvent)
     
     fun `onStream`(`event`: StreamEvent)
+    
+    /**
+     * The item stream (docs/TRANSCRIPT_MODEL.md). Replaces `on_transcript` +
+     * the tool half of `on_stream`; both are still emitted alongside it until
+     * every client has moved.
+     */
+    fun `onItem`(`op`: TranscriptOp)
     
     fun `onConfig`(`options`: List<ConfigOption>)
     
@@ -5802,7 +6411,19 @@ internal object uniffiCallbackInterfaceCoreListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onConfig`: UniffiCallbackInterfaceCoreListenerMethod4 {
+    internal object `onItem`: UniffiCallbackInterfaceCoreListenerMethod4 {
+        override fun callback(`uniffiHandle`: Long,`op`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onItem`(
+                    FfiConverterTypeTranscriptOp.lift(`op`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+    internal object `onConfig`: UniffiCallbackInterfaceCoreListenerMethod5 {
         override fun callback(`uniffiHandle`: Long,`options`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
@@ -5814,7 +6435,7 @@ internal object uniffiCallbackInterfaceCoreListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onPermissionRequest`: UniffiCallbackInterfaceCoreListenerMethod5 {
+    internal object `onPermissionRequest`: UniffiCallbackInterfaceCoreListenerMethod6 {
         override fun callback(`uniffiHandle`: Long,`request`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
@@ -5826,7 +6447,7 @@ internal object uniffiCallbackInterfaceCoreListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onSessionTouched`: UniffiCallbackInterfaceCoreListenerMethod6 {
+    internal object `onSessionTouched`: UniffiCallbackInterfaceCoreListenerMethod7 {
         override fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`updatedAt`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
@@ -5840,7 +6461,7 @@ internal object uniffiCallbackInterfaceCoreListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onProjects`: UniffiCallbackInterfaceCoreListenerMethod7 {
+    internal object `onProjects`: UniffiCallbackInterfaceCoreListenerMethod8 {
         override fun callback(`uniffiHandle`: Long,`projects`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
@@ -5852,7 +6473,7 @@ internal object uniffiCallbackInterfaceCoreListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onRoamPeerStatus`: UniffiCallbackInterfaceCoreListenerMethod8 {
+    internal object `onRoamPeerStatus`: UniffiCallbackInterfaceCoreListenerMethod9 {
         override fun callback(`uniffiHandle`: Long,`label`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
@@ -5865,7 +6486,7 @@ internal object uniffiCallbackInterfaceCoreListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onRoamSessions`: UniffiCallbackInterfaceCoreListenerMethod9 {
+    internal object `onRoamSessions`: UniffiCallbackInterfaceCoreListenerMethod10 {
         override fun callback(`uniffiHandle`: Long,`label`: RustBuffer.ByValue,`sessions`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
@@ -5878,7 +6499,7 @@ internal object uniffiCallbackInterfaceCoreListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onPeerNewSession`: UniffiCallbackInterfaceCoreListenerMethod10 {
+    internal object `onPeerNewSession`: UniffiCallbackInterfaceCoreListenerMethod11 {
         override fun callback(`uniffiHandle`: Long,`label`: RustBuffer.ByValue,`sessionId`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
@@ -5891,7 +6512,7 @@ internal object uniffiCallbackInterfaceCoreListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onActiveRun`: UniffiCallbackInterfaceCoreListenerMethod11 {
+    internal object `onActiveRun`: UniffiCallbackInterfaceCoreListenerMethod12 {
         override fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`runId`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
@@ -5904,7 +6525,7 @@ internal object uniffiCallbackInterfaceCoreListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onCommands`: UniffiCallbackInterfaceCoreListenerMethod12 {
+    internal object `onCommands`: UniffiCallbackInterfaceCoreListenerMethod13 {
         override fun callback(`uniffiHandle`: Long,`commands`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
@@ -5936,6 +6557,7 @@ internal object uniffiCallbackInterfaceCoreListener {
         `onSessions`,
         `onTranscript`,
         `onStream`,
+        `onItem`,
         `onConfig`,
         `onPermissionRequest`,
         `onSessionTouched`,
@@ -6381,6 +7003,38 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeItem: FfiConverterRustBuffer<Item?> {
+    override fun read(buf: ByteBuffer): Item? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeItem.read(buf)
+    }
+
+    override fun allocationSize(value: Item?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeItem.allocationSize(value)
+        }
+    }
+
+    override fun write(value: Item?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeItem.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeSendExpect: FfiConverterRustBuffer<SendExpect?> {
     override fun read(buf: ByteBuffer): SendExpect? {
         if (buf.get().toInt() == 0) {
@@ -6497,6 +7151,34 @@ public object FfiConverterSequenceTypeConfigOption: FfiConverterRustBuffer<List<
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeItem: FfiConverterRustBuffer<List<Item>> {
+    override fun read(buf: ByteBuffer): List<Item> {
+        val len = buf.getInt()
+        return List<Item>(len) {
+            FfiConverterTypeItem.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<Item>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeItem.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<Item>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeItem.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeMessage: FfiConverterRustBuffer<List<Message>> {
     override fun read(buf: ByteBuffer): List<Message> {
         val len = buf.getInt()
@@ -6599,6 +7281,34 @@ public object FfiConverterSequenceTypeSessionSummary: FfiConverterRustBuffer<Lis
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeSessionSummary.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeToolCall: FfiConverterRustBuffer<List<ToolCall>> {
+    override fun read(buf: ByteBuffer): List<ToolCall> {
+        val len = buf.getInt()
+        return List<ToolCall>(len) {
+            FfiConverterTypeToolCall.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ToolCall>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeToolCall.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ToolCall>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeToolCall.write(it, buf)
         }
     }
 }

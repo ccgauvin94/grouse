@@ -39,7 +39,7 @@ use crate::unstable::GrouseUnstable;
 use crate::{
     ConfigOption, ConnectionStatus, Core, CoreListener, GrouseUnstableListener,
     PermissionOutcome, PermissionRequest, ProjectSummary, Prompt, SendExpect, ServerConfig,
-    SessionSummary, StreamEvent, TranscriptEvent,
+    SessionSummary, StreamEvent, TranscriptEvent, TranscriptOp,
 };
 
 /// malloc-allocated UTF-8 copy of `s`; NULL when the input contains an interior
@@ -145,6 +145,9 @@ pub struct GrouseCoreListener {
     pub on_transcript: Option<extern "C" fn(*mut c_void, *const c_char)>,
     /// `event` serialized as JSON (`StreamEvent`).
     pub on_stream: Option<extern "C" fn(*mut c_void, *const c_char)>,
+    /// `op` serialized as JSON (`TranscriptOp`) — the rich item stream
+    /// (docs/TRANSCRIPT_MODEL.md).
+    pub on_item: Option<extern "C" fn(*mut c_void, *const c_char)>,
     /// `options` serialized as a JSON array of `ConfigOption`.
     pub on_config: Option<extern "C" fn(*mut c_void, *const c_char)>,
     /// `request` serialized as JSON (`PermissionRequest`).
@@ -348,6 +351,16 @@ impl CoreListener for CoreCallbackForwarder {
         unsafe {
             let table = &*self.table;
             if let Some(f) = table.on_stream {
+                f(self.user_data, p);
+            }
+            grouse_string_free(p);
+        }
+    }
+    fn on_item(&self, op: TranscriptOp) {
+        let p = c_json(&op);
+        unsafe {
+            let table = &*self.table;
+            if let Some(f) = table.on_item {
                 f(self.user_data, p);
             }
             grouse_string_free(p);
@@ -722,6 +735,45 @@ pub extern "C" fn grouse_sessions(h: *mut c_void) -> *mut c_char {
 #[no_mangle]
 pub extern "C" fn grouse_transcript(h: *mut c_void) -> *mut c_char {
     catch_unwind(AssertUnwindSafe(|| c_json(&handle(h).core.transcript()))).unwrap_or(std::ptr::null_mut())
+}
+
+/// The rich item snapshot (docs/TRANSCRIPT_MODEL.md): a JSON array of `Item`.
+/// The desktop rebuilds its model from this on Clear, so charts / MCP apps /
+/// toolgroups survive a replayed or cache-painted transcript.
+#[no_mangle]
+pub extern "C" fn grouse_transcript_rich(h: *mut c_void) -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| c_json(&handle(h).core.rich_transcript())))
+        .unwrap_or(std::ptr::null_mut())
+}
+
+/// One item by id, as a JSON `Item`; NULL when the id is not held.
+#[no_mangle]
+pub extern "C" fn grouse_item(h: *mut c_void, id: *const c_char) -> *mut c_char {
+    let Some(id) = (unsafe { c_param(id) }).map(str::to_owned) else {
+        return std::ptr::null_mut();
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        handle(h)
+            .core
+            .item(id)
+            .map(|item| c_json(&item))
+            .unwrap_or(std::ptr::null_mut())
+    }))
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// The pagination cursor, as a JSON `TranscriptWindow`.
+#[no_mangle]
+pub extern "C" fn grouse_window(h: *mut c_void) -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| c_json(&handle(h).core.window())))
+        .unwrap_or(std::ptr::null_mut())
+}
+
+/// Extend the window backward by `count` items (cache-first; see
+/// `Core::load_older`). Outcomes arrive as `on_item` ops.
+#[no_mangle]
+pub extern "C" fn grouse_load_older(h: *mut c_void, count: u32) {
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.load_older(count))).ok();
 }
 
 #[no_mangle]

@@ -775,7 +775,8 @@ impl RoamPeer {
             .map(|s| s.updated_at.clone())
             .unwrap_or_default();
         drop(inner);
-        self.cache.save_transcript(&key, &transcript, &updated);
+        let items = crate::messages_to_items(&transcript);
+        self.cache.save_transcript(&key, &items, &updated);
     }
 
     /// How many trailing messages `session/load` should replay for this
@@ -1241,8 +1242,14 @@ impl RoamPeer {
                     continue;
                 }
                 let key = self.cache_key(&raw);
-                if let Some((messages, _)) = self.cache.load_transcript(&key) {
-                    inner.staging.insert(raw, StagedSession { messages, has_new: false });
+                if let Some((items, _)) = self.cache.load_transcript(&key) {
+                    inner.staging.insert(
+                        raw,
+                        StagedSession {
+                            messages: crate::items_to_messages(&items),
+                            has_new: false,
+                        },
+                    );
                 }
             }
             // The peer's list only contains sessions that HAVE messages (goose's
@@ -1305,7 +1312,7 @@ impl RoamPeer {
         let cached = self
             .cache
             .load_transcript(&self.cache_key(&raw_session_id))
-            .map(|(messages, _)| messages);
+            .map(|(items, _)| crate::items_to_messages(&items));
         {
             let mut inner = self.inner.lock();
             inner.open_session_id.take();
@@ -2138,6 +2145,18 @@ mod tests {
         }
     }
 
+    fn item_op_name(op: &crate::TranscriptOp) -> &'static str {
+        use crate::TranscriptOp as Op;
+        match op {
+            Op::Reset { .. } => "Reset",
+            Op::Upsert { .. } => "Upsert",
+            Op::AppendText { .. } => "AppendText",
+            Op::AppendOutput { .. } => "AppendOutput",
+            Op::Remove { .. } => "Remove",
+            Op::Window { .. } => "Window",
+        }
+    }
+
     impl CoreListener for RecordingListener {
         fn on_status(&self, status: ConnectionStatus) {
             self.events
@@ -2166,6 +2185,9 @@ mod tests {
                 other => format!("stream {}", stream_name(other)),
             };
             self.events.lock().push(line);
+        }
+        fn on_item(&self, op: crate::TranscriptOp) {
+            self.events.lock().push(format!("item {}", item_op_name(&op)));
         }
         fn on_config(&self, options: Vec<crate::ConfigOption>) {
             self.events
@@ -2399,16 +2421,20 @@ mod tests {
 
     #[test]
     fn apply_sessions_seeds_staging_from_cache() {
-        use crate::Message;
+        use crate::{Item, ItemKind};
         let listener = test_listener();
         let (peer, _) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
         // Persist a transcript for s1 under the prefixed cache key, then list:
         // apply_sessions must seed it into staging so open() paints instantly.
-        let m = Message {
+        let m = Item {
             id: "msg1".to_string(),
-            role: "agent".to_string(),
-            content: "hello".to_string(),
+            kind: ItemKind::Agent,
+            text: "hello".to_string(),
+            detail: String::new(),
             output: String::new(),
+            status: String::new(),
+            app_key: String::new(),
+            calls: Vec::new(),
         };
         assert!(peer.cache.save_transcript("roam:laptop:s1", &[m], "2026-01-01T00:00:00Z"));
         peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
@@ -2424,14 +2450,18 @@ mod tests {
 
     #[test]
     fn open_emits_cached_snapshot_instantly() {
-        use crate::Message;
+        use crate::{Item, ItemKind};
         let listener = test_listener();
         let (peer, _) = offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
-        let m = Message {
+        let m = Item {
             id: "msg1".to_string(),
-            role: "agent".to_string(),
-            content: "hello".to_string(),
+            kind: ItemKind::Agent,
+            text: "hello".to_string(),
+            detail: String::new(),
             output: String::new(),
+            status: String::new(),
+            app_key: String::new(),
+            calls: Vec::new(),
         };
         assert!(peer.cache.save_transcript("roam:laptop:s1", &[m], "2026-01-01T00:00:00Z"));
         peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
@@ -2455,14 +2485,18 @@ mod tests {
     /// read on open, not only when apply_sessions seeds staging.
     #[test]
     fn open_paints_from_cache_before_any_session_list() {
-        use crate::Message;
+        use crate::{Item, ItemKind};
         let listener = test_listener();
         let (peer, _) = offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
-        let m = Message {
+        let m = Item {
             id: "msg1".to_string(),
-            role: "agent".to_string(),
-            content: "from the cache".to_string(),
+            kind: ItemKind::Agent,
+            text: "from the cache".to_string(),
+            detail: String::new(),
             output: String::new(),
+            status: String::new(),
+            app_key: String::new(),
+            calls: Vec::new(),
         };
         assert!(peer.cache.save_transcript("roam:laptop:s9", &[m], "2026-01-01T00:00:00Z"));
         // NO apply_sessions call: nothing has been staged for s9.

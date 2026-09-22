@@ -36,6 +36,7 @@ impl CoreListener for L {
     }
     fn on_transcript(&self, _e: grouse_core::TranscriptEvent) {}
     fn on_stream(&self, _e: grouse_core::StreamEvent) {}
+    fn on_item(&self, _op: grouse_core::TranscriptOp) {}
     fn on_config(&self, _o: Vec<grouse_core::ConfigOption>) {}
     fn on_permission_request(&self, _r: grouse_core::PermissionRequest) {}
     fn on_projects(&self, _p: Vec<grouse_core::ProjectSummary>) {}

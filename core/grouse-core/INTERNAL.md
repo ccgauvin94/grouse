@@ -29,10 +29,13 @@ transport.rs   WsTransport (DONE) — ConnectTo<Client>, X-Secret-Key + WebPKI-v
 spine.rs       the live connection: owns the SDK Client + WsTransport, the
                initialize → new/resume handshake, the notification dispatch
                (SessionNotification → seams below), and server-request answers.
-transcript.rs  TranscriptStore: chunk accumulation → Message bubbles; emits
-               on_stream + on_transcript. NO network.
-cache.rs       CacheStore: per-session transcript + tools, freshness check,
-               under the UI-supplied CacheDir. NO network.
+transcript.rs  TranscriptStore: chunk accumulation → bubbles; emits
+               on_stream + on_transcript (legacy) AND on_item (the rich item
+               stream, docs/TRANSCRIPT_MODEL.md). Also owns the window cursor
+               (oldest_id / has_older) and the rich snapshot/rebuild. NO network.
+cache.rs       CacheStore: per-session RICH item list + tools, freshness check,
+               under the UI-supplied CacheDir. TRANSCRIPT_CACHE_VERSION gates
+               the format; a pre-rich file reads absent. NO network.
 unstable.rs    the GrouseUnstable impl (the 35 shim methods) — each is
                conn.rpc + a reply handler (re-list pattern). Owns its own file;
                if uniffi rejects cross-file impl blocks, export via a single
@@ -59,12 +62,17 @@ roam.rs        the peer registry: RoamPeer { label, client, sessions },
    - `usage(&self, used, size, cost, currency)`, `run_ended(&self, stop_reason)`
    - `clear()`, `transcript() -> Vec<Message>`, `replace(&self, Vec<Message>)`
      (used by replay/load: clear + rebuild, emitting TranscriptEvent::Clear once)
+   - Rich seam (docs/TRANSCRIPT_MODEL.md): `rich_transcript() -> Vec<Item>`,
+     `item(id)`, `replace_rich(items, provisional, has_older)`,
+     `prepend_items(items, has_older)`, `set_session(id)`, `set_has_older(bool)`,
+     `window() -> TranscriptWindow`. A paint emits Reset + Upsert-per-item +
+     Window; a provisional drop emits Reset before the replay's Upserts.
    - owns the toolgroup collapse (consecutive tool calls) and the live-output
      append/replace rule.
 3. **CacheStore** (cache.rs):
    - `CacheStore::new(cache_dir: PathBuf)`
-   - `load_transcript(session_id) -> Option<(Vec<Message>, String /*updatedAt*/)>`
-   - `save_transcript(session_id, Vec<Message>, updated_at)`
+   - `load_transcript(session_id) -> Option<(Vec<Item>, String /*updatedAt*/)>`
+   - `save_transcript(session_id, Vec<Item>, updated_at)`
    - `load_tools(session_id) -> Option<...>` / `save_tools(session_id, ...)`
    - freshness is the CALLER's job (compare updatedAt); the store is dumb I/O.
 4. **Roam** (roam.rs):

@@ -42,6 +42,7 @@ import uniffi.grouse_core.SessionSummary
 import uniffi.grouse_core.StreamEvent
 import uniffi.grouse_core.ToolCallKind
 import uniffi.grouse_core.TranscriptEvent
+import uniffi.grouse_core.TranscriptOp
 import uniffi.grouse_roam_core.cardFingerprint
 import uniffi.grouse_roam_core.identityGenerate
 import uniffi.grouse_roam_core.identityPublicKey
@@ -153,6 +154,9 @@ class ConnectionManager private constructor(context: Context) {
         override fun onSessions(sessions: List<SessionSummary>) { main.post { onCoreSessions(sessions) } }
         override fun onTranscript(event: TranscriptEvent) { main.post { onCoreTranscript(event) } }
         override fun onStream(event: StreamEvent) { main.post { onCoreStream(event) } }
+        // The rich item stream (docs/TRANSCRIPT_MODEL.md). Android still renders from
+        // on_transcript/on_stream; migration to the item store is a later phase.
+        override fun onItem(op: TranscriptOp) { }
         override fun onConfig(options: List<CoreConfigOption>) { main.post { onCoreConfig(options) } }
         override fun onPermissionRequest(request: PermissionRequest) { main.post { onCorePermission(request) } }
         override fun onSessionTouched(sessionId: String, title: String, updatedAt: String) {
