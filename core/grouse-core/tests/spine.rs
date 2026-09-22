@@ -1126,6 +1126,80 @@ fn stale_cache_tail_merge_keeps_the_older_prefix() {
 }
 
 // ---------------------------------------------------------------------------
+// Session switch: opening A, then B, then back to A must reuse A's cache and
+// merge a bounded tail — re-streaming the whole chat from the top is the bug.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reopening_a_cached_session_merges_a_tail_instead_of_full_replay() {
+    let data_dir =
+        std::env::temp_dir().join(format!("grouse-switch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        data_dir.to_string_lossy().to_string(),
+    );
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
+
+    // Open A (no cache yet → the first load may be a full replay); its transcript
+    // is cached on Ready.
+    core.open_session("sess-a".to_string());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "A ready");
+    assert!(
+        data_dir.join("sess-a.json").exists(),
+        "opening a session must persist its transcript for the next open"
+    );
+
+    // Away to B, then back to A.
+    core.open_session("sess-b".to_string());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "B ready");
+
+    core.open_session("sess-a".to_string());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "A again ready");
+
+    // The reopen asked for the bounded tail, NOT a full replay.
+    let last = server
+        .frames_for("session/load")
+        .last()
+        .cloned()
+        .expect("a session/load for the reopen");
+    assert_eq!(
+        last.pointer("/params/_meta/replayTail").and_then(Value::as_u64),
+        Some(100),
+        "reopening a cached session must merge a bounded tail, not replay from the top: {last:?}"
+    );
+    // And it still shows the conversation.
+    let text: String = core
+        .rich_transcript()
+        .iter()
+        .map(|i| i.text.clone())
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(text.contains("replayed line one and two"), "reopen shows content: {text}");
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+// ---------------------------------------------------------------------------
 // Cold start: the painted cache belongs to the session it came from, NOT to the
 // throwaway session the first connect creates on the way to resuming it.
 // ---------------------------------------------------------------------------
