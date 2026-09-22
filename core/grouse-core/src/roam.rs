@@ -350,8 +350,8 @@ struct PeerInner {
     replaying: bool,
     /// The SDK connection handle, set once `initialize` succeeds.
     conn: Option<agent_client_protocol::ConnectionTo<Agent>>,
-    /// Peer-owned transcript of the open session (never cached).
-    transcript: Vec<Message>,
+    /// Peer-owned rich transcript of the open session (docs/TRANSCRIPT_MODEL.md).
+    store: PeerStore,
     /// In-flight `session/request_permission` responder, answered via
     /// [`RoamPeer::respond_permission`] (single slot, like the desktop).
     pending_permission: Option<Responder<RequestPermissionResponse>>,
@@ -360,22 +360,6 @@ struct PeerInner {
     /// Set by [`RoamPeer::close`] so a teardown that races the dial or a
     /// transport error is not reported as a failure.
     closing: bool,
-    // -- item-stream bridge (docs/TRANSCRIPT_MODEL.md) ----------------------
-    // The peer's store is flat `Message`s, but clients render from `on_item`
-    // now, so the emit funnels translate. Roam parity proper (the peer holding
-    // items) is phase 4; this keeps peer chats working until then.
-    /// Monotonic id for a live text bubble the server sent without one.
-    item_seq: u64,
-    /// Live text bubble id per role (the peer's `accumulate` only ever appends
-    /// to the last empty-id bubble of a role, so one slot per role is exact).
-    live_item: HashMap<String, String>,
-    /// Live item id -> its kind, for the turn-end finalize.
-    live_kind: HashMap<String, ItemKind>,
-    /// Last full text emitted per item id (delta + finalize).
-    item_text: HashMap<String, String>,
-    /// Last known item per tool_call_id, so a `ToolCallUpdate` (which carries
-    /// only id/status/output) can rebuild the full item.
-    tool_items: HashMap<String, Item>,
     /// True once the CURRENT attempt's handshake reached Ready
     /// (`apply_sessions`). The supervisor uses it to decide the retry
     /// posture: a peer that was live and then dropped earns a fresh budget
@@ -390,11 +374,324 @@ struct PeerInner {
     staging: HashMap<String, StagedSession>,
 }
 
-/// One backgrounded session's staged transcript + dot state.
+/// One backgrounded session's staged transcript + dot state. A full rich store,
+/// so staged charts/apps survive promotion and the live-stream cursor is kept
+/// across chunks (a plain `Vec` would restart the bubble every chunk).
 #[derive(Default)]
 struct StagedSession {
-    messages: Vec<Message>,
+    store: PeerStore,
     has_new: bool,
+}
+
+/// A store mutation's two projections. `legacy` is the pre-items channel the
+/// peer still emits for its own tests; `item` is what clients render.
+#[derive(Default)]
+struct Mutation {
+    legacy: Option<TranscriptEvent>,
+    item: Option<TranscriptOp>,
+}
+
+impl Mutation {
+    fn none() -> Self {
+        Self::default()
+    }
+    fn both(legacy: TranscriptEvent, item: TranscriptOp) -> Self {
+        Self { legacy: Some(legacy), item: Some(item) }
+    }
+}
+
+/// The flat `Message` role a kind maps back to (the inverse of
+/// [`kind_for_role`]).
+fn role_for_kind(kind: ItemKind) -> String {
+    match kind {
+        ItemKind::User => "user",
+        ItemKind::Agent => "agent",
+        ItemKind::Thought => "thought",
+        ItemKind::Error => "error",
+        ItemKind::Tool | ItemKind::Chart | ItemKind::McpApp | ItemKind::ToolGroup => "tool",
+    }
+    .to_string()
+}
+
+/// A flat `Message` for a text item (the legacy projection).
+fn text_message(item: &Item) -> Message {
+    Message {
+        id: item.id.clone(),
+        role: role_for_kind(item.kind),
+        content: item.text.clone(),
+        output: item.output.clone(),
+    }
+}
+
+/// The peer's rich transcript store (docs/TRANSCRIPT_MODEL.md roam parity).
+///
+/// Same item semantics as the main `TranscriptStore`, but with the peer's own
+/// replay dedupe (a `session/load` re-delivers staged content) and no toolgroup
+/// collapsing — the clients group consecutive tool rows themselves.
+#[derive(Default)]
+struct PeerStore {
+    items: Vec<Item>,
+    /// tool_call_id -> index, for O(1) updates.
+    tool_idx: HashMap<String, usize>,
+    /// The live text bubble currently accumulating: (index, role, item id).
+    stream: Option<(usize, String, String)>,
+    next_uid: u64,
+    /// Oldest item the client holds (the window origin).
+    emitted_from: usize,
+}
+
+impl PeerStore {
+    /// A store seeded from items (a cache/staging promotion).
+    fn from_items(items: Vec<Item>) -> Self {
+        let mut store = Self { items, ..Self::default() };
+        store.cap();
+        store.reindex();
+        store
+    }
+
+    fn replace(&mut self, items: Vec<Item>) {
+        self.items = items;
+        self.stream = None;
+        self.emitted_from = 0;
+        self.cap();
+        self.reindex();
+    }
+
+    fn reindex(&mut self) {
+        self.tool_idx.clear();
+        for (i, it) in self.items.iter().enumerate() {
+            match it.kind {
+                ItemKind::Tool | ItemKind::Chart | ItemKind::McpApp => {
+                    self.tool_idx.insert(it.id.clone(), i);
+                }
+                ItemKind::ToolGroup => {
+                    for c in &it.calls {
+                        self.tool_idx.insert(c.id.clone(), i);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Evict the oldest items past the cap (bulk, to a watermark) so a
+    /// pathological peer session cannot grow memory without bound.
+    fn cap(&mut self) {
+        const MAX: usize = 2000;
+        if self.items.len() <= MAX {
+            return;
+        }
+        let keep = MAX - MAX / 4;
+        let drop = self.items.len() - keep;
+        self.items.drain(0..drop);
+        self.emitted_from = self.emitted_from.saturating_sub(drop);
+        self.stream = None;
+        self.reindex();
+    }
+
+    fn messages(&self) -> Vec<Message> {
+        self.items.iter().map(text_message).collect()
+    }
+
+    /// A mutation for the item at `idx`: the item op is emitted only when the row
+    /// is inside the client's window. A replay can touch rows older than the
+    /// paint (the peer asks for a 100-message tail but paints 60); emitting their
+    /// Upserts would append them at the client's end. The legacy event still
+    /// flows, and `load_older` re-reads the store so the update is not lost.
+    fn at(&self, idx: usize, legacy: TranscriptEvent, item: TranscriptOp) -> Mutation {
+        if idx >= self.emitted_from {
+            Mutation::both(legacy, item)
+        } else {
+            Mutation { legacy: Some(legacy), item: None }
+        }
+    }
+
+    /// Append a text chunk (the peer's `accumulate`). `message_id` empty means
+    /// a live stream bubble; `replaying` enables the replay dedupe.
+    fn accumulate_text(
+        &mut self,
+        role: &str,
+        text: &str,
+        message_id: &str,
+        replaying: bool,
+    ) -> Mutation {
+        let kind = kind_for_role(role);
+        if !message_id.is_empty() {
+            // A replayed id: append into that item, deduped against what a
+            // staging promotion already put on screen.
+            if let Some(idx) = self.items.iter().position(|i| i.id == message_id) {
+                let it = &mut self.items[idx];
+                if replaying && it.text.contains(text) {
+                    return Mutation::none();
+                }
+                it.text.push_str(text);
+                let item = it.clone();
+                return self.at(
+                    idx,
+                    TranscriptEvent::Update { message: text_message(&item) },
+                    TranscriptOp::Upsert { item },
+                );
+            }
+            // No item for this id yet: a fresh bubble.
+            let item = Item {
+                id: message_id.to_string(),
+                kind,
+                text: text.to_string(),
+                ..empty_item()
+            };
+            self.items.push(item.clone());
+            self.stream = None;
+            self.cap();
+            let idx = self.items.len() - 1;
+            return self.at(
+                idx,
+                TranscriptEvent::Append { message: text_message(&item) },
+                TranscriptOp::Upsert { item },
+            );
+        }
+        // No server id: the live stream. Append to the open bubble of this role
+        // if there is one (the peer's "last empty-id bubble" rule).
+        if let Some((idx, srole, sid)) = self.stream.clone() {
+            if srole == role && idx < self.items.len() && self.items[idx].id == sid {
+                let it = &mut self.items[idx];
+                // Serve parity: a live chunk normally appends, but a stalled
+                // stream re-delivering the shown tail must not restart the
+                // paragraph.
+                if (replaying && it.text.contains(text))
+                    || (!replaying && it.text.ends_with(text) && it.text != text)
+                {
+                    return Mutation::none();
+                }
+                it.text.push_str(text);
+                let id = it.id.clone();
+                let full = it.text.clone();
+                return self.at(
+                    idx,
+                    TranscriptEvent::Update {
+                        message: Message {
+                            id: id.clone(),
+                            role: role.to_string(),
+                            content: full,
+                            output: String::new(),
+                        },
+                    },
+                    TranscriptOp::AppendText { id, chunk: text.to_string() },
+                );
+            }
+        }
+        self.next_uid += 1;
+        let id = format!("roam-item-{}", self.next_uid);
+        self.items.push(Item {
+            id: id.clone(),
+            kind,
+            text: text.to_string(),
+            ..empty_item()
+        });
+        self.stream = Some((self.items.len() - 1, role.to_string(), id));
+        self.cap();
+        let idx = self.items.len() - 1;
+        let item = self.items[idx].clone();
+        self.at(
+            idx,
+            TranscriptEvent::Append { message: text_message(&item) },
+            TranscriptOp::Upsert { item },
+        )
+    }
+
+    /// Create or replace a tool row (the peer's `accumulate_tool`). The kind is
+    /// preserved, so a chart/app survives the cache and staging.
+    fn tool_call(&mut self, id: &str, title: &str, detail: &str, kind: &ToolCallKind) -> Mutation {
+        let item = item_for_tool(kind, title, detail, id, "", "in_progress");
+        let is_new = match self.tool_idx.get(id).copied() {
+            Some(idx) => {
+                self.items[idx] = item.clone();
+                false
+            }
+            None => {
+                self.items.push(item.clone());
+                self.tool_idx.insert(id.to_string(), self.items.len() - 1);
+                true
+            }
+        };
+        // A tool call closes the text stream (the next chunk opens a bubble).
+        self.stream = None;
+        self.cap();
+        let idx = self.tool_idx.get(id).copied().unwrap_or(0);
+        let msg = Message {
+            id: id.to_string(),
+            role: "tool".to_string(),
+            content: title.to_string(),
+            output: String::new(),
+        };
+        let legacy = if is_new {
+            TranscriptEvent::Append { message: msg }
+        } else {
+            TranscriptEvent::Update { message: msg }
+        };
+        self.at(idx, legacy, TranscriptOp::Upsert { item })
+    }
+
+    /// A tool lifecycle update (the peer's `accumulate_tool[_append]`). The
+    /// TITLE never changes (the client renders the title from the call); only
+    /// status and output do.
+    fn tool_update(&mut self, id: &str, status: &str, output: &str, live: bool) -> Mutation {
+        let Some(&idx) = self.tool_idx.get(id) else {
+            return Mutation::none();
+        };
+        let item = {
+            let it = &mut self.items[idx];
+            it.status = status.to_string();
+            // Chart/app rows take status only (desktop parity).
+            if matches!(it.kind, ItemKind::Tool | ItemKind::McpApp) && !output.is_empty() {
+                if live {
+                    it.output.push_str(output);
+                } else {
+                    it.output = output.to_string();
+                }
+            }
+            it.clone()
+        };
+        let legacy = TranscriptEvent::Update { message: text_message(&item) };
+        let item_op = if live && !output.is_empty() && matches!(item.kind, ItemKind::Tool) {
+            TranscriptOp::AppendOutput { id: id.to_string(), chunk: output.to_string() }
+        } else {
+            TranscriptOp::Upsert { item }
+        };
+        self.at(idx, legacy, item_op)
+    }
+
+    /// The paint ops for a session switch / cache paint: Reset, the newest
+    /// window of items, and the cursor.
+    fn paint(&mut self, session_id: &str) -> Vec<TranscriptOp> {
+        self.stream = None;
+        self.emitted_from = self
+            .items
+            .len()
+            .saturating_sub(crate::transcript::CLIENT_WINDOW);
+        let has_older = self.emitted_from > 0;
+        let window: Vec<Item> = self.items[self.emitted_from..].to_vec();
+        let oldest = window.first().map(|i| i.id.clone()).unwrap_or_default();
+        let mut ops = Vec::with_capacity(window.len() + 2);
+        ops.push(TranscriptOp::Reset { session_id: session_id.to_string() });
+        for item in window {
+            ops.push(TranscriptOp::Upsert { item });
+        }
+        ops.push(TranscriptOp::Window { oldest_id: oldest, has_older });
+        ops
+    }
+
+    /// Walk the window back by `count` items (the peer's `load_older`).
+    fn load_older(&mut self, count: usize) -> Vec<TranscriptOp> {
+        let from = self.emitted_from.saturating_sub(count);
+        let batch: Vec<Item> = self.items[from..self.emitted_from].to_vec();
+        self.emitted_from = from;
+        let has_older = from > 0;
+        let oldest = self.items.get(from).map(|i| i.id.clone()).unwrap_or_default();
+        let mut ops: Vec<TranscriptOp> =
+            batch.into_iter().map(|item| TranscriptOp::Upsert { item }).collect();
+        ops.push(TranscriptOp::Window { oldest_id: oldest, has_older });
+        ops
+    }
 }
 
 impl PeerInner {
@@ -407,18 +704,13 @@ impl PeerInner {
             session_cwds: HashMap::new(),
             active_run: None,
             conn: None,
-            transcript: Vec::new(),
+            store: PeerStore::default(),
             replaying: false,
             pending_permission: None,
             stream: None,
             closing: false,
             ever_ready: false,
             staging: HashMap::new(),
-            item_seq: 0,
-            live_item: HashMap::new(),
-            live_kind: HashMap::new(),
-            item_text: HashMap::new(),
-            tool_items: HashMap::new(),
         }
     }
 }
@@ -680,21 +972,24 @@ impl RoamPeer {
             .map(|id| format!("roam:{}:{id}", self.label))
     }
 
-    /// The accumulated transcript of the open session (peer-owned, never
-    /// cached — cache keys would collide across machines).
+    /// The accumulated transcript of the open session, flat-projected (the
+    /// legacy getter). The rich store is the source of truth.
     pub fn transcript(&self) -> Vec<Message> {
-        // Rebuild from fields: the uniffi records are not Clone (yet).
-        self.inner
-            .lock()
-            .transcript
-            .iter()
-            .map(|m| Message {
-                id: m.id.clone(),
-                role: m.role.clone(),
-                content: m.content.clone(),
-                output: m.output.clone(),
-            })
-            .collect()
+        self.inner.lock().store.messages()
+    }
+
+    /// The peer's rich items for the open session (docs/TRANSCRIPT_MODEL.md).
+    pub fn items(&self) -> Vec<Item> {
+        self.inner.lock().store.items.clone()
+    }
+
+    /// Walk the open session's window back by `count` items, emitting the older
+    /// items for the client to prepend (docs/TRANSCRIPT_MODEL.md).
+    pub fn load_older(&self, count: usize) {
+        let ops = self.inner.lock().store.load_older(count);
+        for op in ops {
+            self.listener.on_item(op);
+        }
     }
 
     /// Open a session on this peer: `session/load` with the given cwd (the
@@ -787,7 +1082,9 @@ impl RoamPeer {
         let inner = self.inner.lock();
         let Some(open) = inner.open_session_id.clone() else { return };
         let key = self.cache_key(&open);
-        let transcript = inner.transcript.clone();
+        // The store is already rich: save it as-is, so peer charts/apps survive
+        // a restart (the old flat projection did not).
+        let items = inner.store.items.clone();
         let updated = inner
             .sessions
             .iter()
@@ -795,7 +1092,6 @@ impl RoamPeer {
             .map(|s| s.updated_at.clone())
             .unwrap_or_default();
         drop(inner);
-        let items = crate::messages_to_items(&transcript);
         self.cache.save_transcript(&key, &items, &updated);
     }
 
@@ -1265,10 +1561,7 @@ impl RoamPeer {
                 if let Some((items, _)) = self.cache.load_transcript(&key) {
                     inner.staging.insert(
                         raw,
-                        StagedSession {
-                            messages: crate::items_to_messages(&items),
-                            has_new: false,
-                        },
+                        StagedSession { store: PeerStore::from_items(items), has_new: false },
                     );
                 }
             }
@@ -1281,7 +1574,8 @@ impl RoamPeer {
             if let Some(raw) = inner.open_session_id.clone() {
                 let app_id = format!("roam:{}:{}", self.label, raw);
                 if !sessions.iter().any(|s| s.id == app_id) {
-                    let staged = inner.staging.get(&raw).map(|s| s.messages.len()).unwrap_or(0);
+                    let staged =
+                        inner.staging.get(&raw).map(|s| s.store.items.len()).unwrap_or(0);
                     sessions.insert(
                         0,
                         SessionSummary {
@@ -1332,13 +1626,13 @@ impl RoamPeer {
         let cached = self
             .cache
             .load_transcript(&self.cache_key(&raw_session_id))
-            .map(|(items, _)| crate::items_to_messages(&items));
+            .map(|(items, _)| items);
         {
             let mut inner = self.inner.lock();
             inner.open_session_id.take();
-            let staged = inner.staging.remove(&raw_session_id).map(|s| s.messages);
-            inner.transcript = staged.or(cached).unwrap_or_default();
-            inner.open_session_id = Some(raw_session_id);
+            let staged = inner.staging.remove(&raw_session_id).map(|s| s.store.items);
+            inner.store.replace(staged.or(cached).unwrap_or_default());
+            inner.open_session_id = Some(raw_session_id.clone());
             // The session/load replay that follows re-delivers the promoted
             // (or cached) content; dedupe against it during this replay only,
             // cleared once a live turn begins (dispatch SessionInfoUpdate).
@@ -1346,9 +1640,18 @@ impl RoamPeer {
             // Promotion (or simply visiting) clears the green dot: has_new is
             // gone with the staging entry, and sessions() re-reads it live.
         }
-        // Unconditional, empty session included: otherwise the previous chat's
-        // rows stay on screen.
-        self.emit(TranscriptEvent::Clear);
+        // Unconditional legacy Clear (empty session included: otherwise the
+        // previous chat's rows stay on screen). The item paint is gated on this
+        // peer owning the display — a backgrounded peer must not wipe the
+        // visible model.
+        let session = format!("roam:{}:{}", self.label, raw_session_id);
+        let ops = self.inner.lock().store.paint(&session);
+        self.listener.on_transcript(TranscriptEvent::Clear);
+        if (self.is_active)() {
+            for op in ops {
+                self.listener.on_item(op);
+            }
+        }
     }
 
     /// The link ended. `Ok` = clean (close command, or the peer was torn
@@ -1440,11 +1743,9 @@ impl RoamPeer {
             SessionUpdate::UserMessageChunk(chunk) => {
                 if let Some(text) = chunk_text(&chunk.content) {
                     let message_id = chunk.message_id.map(|m| m.to_string()).unwrap_or_default();
-                    let event = self.accumulate(&session_id, "user", &text, &message_id);
+                    let mutation = self.accumulate(&session_id, "user", &text, &message_id);
                     if active && mine {
-                        if let Some(event) = event {
-                            self.emit(event);
-                        }
+                        self.emit_mutation(mutation);
                         self.emit_stream(StreamEvent::UserChunk { text, message_id });
                     }
                 }
@@ -1452,11 +1753,9 @@ impl RoamPeer {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if let Some(text) = chunk_text(&chunk.content) {
                     let message_id = chunk.message_id.map(|m| m.to_string()).unwrap_or_default();
-                    let event = self.accumulate(&session_id, "agent", &text, &message_id);
+                    let mutation = self.accumulate(&session_id, "agent", &text, &message_id);
                     if active && mine {
-                        if let Some(event) = event {
-                            self.emit(event);
-                        }
+                        self.emit_mutation(mutation);
                         self.emit_stream(StreamEvent::AgentChunk { text, message_id });
                     }
                 }
@@ -1464,11 +1763,9 @@ impl RoamPeer {
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 if let Some(text) = chunk_text(&chunk.content) {
                     let message_id = chunk.message_id.map(|m| m.to_string()).unwrap_or_default();
-                    let event = self.accumulate(&session_id, "thought", &text, &message_id);
+                    let mutation = self.accumulate(&session_id, "thought", &text, &message_id);
                     if active && mine {
-                        if let Some(event) = event {
-                            self.emit(event);
-                        }
+                        self.emit_mutation(mutation);
                         self.emit_stream(StreamEvent::ThoughtChunk { text });
                     }
                 }
@@ -1476,11 +1773,10 @@ impl RoamPeer {
             SessionUpdate::ToolCall(tool) => {
                 let tool_call_id = tool.tool_call_id.to_string();
                 let (kind, detail) = tool_kind(&tool);
-                let event = self.accumulate_tool(&session_id, &tool_call_id, &tool.title, None);
+                let mutation =
+                    self.accumulate_tool(&session_id, &tool_call_id, &tool.title, &detail, &kind);
                 if active && mine {
-                    if let Some(event) = event {
-                        self.emit(event);
-                    }
+                    self.emit_mutation(mutation);
                     self.emit_stream(StreamEvent::ToolCall {
                         title: tool.title.clone(),
                         detail,
@@ -1492,15 +1788,10 @@ impl RoamPeer {
             SessionUpdate::ToolCallUpdate(update) => {
                 let id = update.tool_call_id.to_string();
                 let (status, output, live) = tool_update(&update);
-                let event = if live {
-                    self.accumulate_tool_append(&session_id, &id, &output)
-                } else {
-                    self.accumulate_tool(&session_id, &id, &status, Some(&output))
-                };
+                let mutation =
+                    self.accumulate_tool_update(&session_id, &id, &status, &output, live);
                 if active && mine {
-                    if let Some(event) = event {
-                        self.emit(event);
-                    }
+                    self.emit_mutation(mutation);
                     self.emit_stream(StreamEvent::ToolCallUpdate {
                         id: id.clone(),
                         status: status.clone(),
@@ -1509,6 +1800,7 @@ impl RoamPeer {
                     });
                 }
             }
+
             SessionUpdate::UsageUpdate(usage) => {
                 let (cost, currency) = usage
                     .cost
@@ -1610,243 +1902,86 @@ impl RoamPeer {
         }
     }
 
-    /// Append a text chunk to the bubble for `(role, message_id)`; a new
-    /// message_id starts a new bubble (CONTRACT §4 accumulation rule). Chunks
-    /// for a session that is NOT currently open accumulate into its staging
-    /// buffer instead (green dot) and never touch the visible transcript.
-    /// Returns the transcript mutation for the caller to emit under the
-    /// active gate (`emit_if_mine` handles the session-membership check too,
-    /// so a staged event is never emitted to the live view).
-    fn accumulate(&self, session_id: &str, role: &str, text: &str, message_id: &str) -> Option<TranscriptEvent> {
+    /// Append a text chunk to the bubble for `(role, message_id)` (CONTRACT §4
+    /// accumulation rule). Chunks for a session that is NOT open accumulate into
+    /// its staging store instead (green dot) and never touch the visible chat.
+    /// The caller emits the returned mutation under the active+mine gate.
+    fn accumulate(&self, session_id: &str, role: &str, text: &str, message_id: &str) -> Mutation {
         let mut inner = self.inner.lock();
         let mine = inner.open_session_id.as_deref() == Some(session_id);
-        let replaying = inner.replaying;   // snapshot before the target borrow
+        let replaying = inner.replaying;
         let mut staged_new = false;
-        let target: &mut Vec<Message> = if mine {
-            &mut inner.transcript
+        let m = if mine {
+            inner.store.accumulate_text(role, text, message_id, replaying)
         } else {
             let st = inner.staging.entry(session_id.to_string()).or_default();
             staged_new = !st.has_new;
             st.has_new = true;
-            &mut st.messages
+            st.store.accumulate_text(role, text, message_id, replaying)
         };
-        // Whether this chunk belongs to an ALREADY-OPEN bubble. Distinct from
-        // `event`: a chunk can be consumed by an open bubble and still produce no
-        // event (it was already on screen). Both were encoded as `None`, and the
-        // `or_else` below could not tell them apart — so an already-shown chunk was
-        // re-emitted as a brand-new bubble. Callers must never conflate "nothing to
-        // emit" with "nothing to append to".
-        let mut consumed = false;
-        let event = if message_id.is_empty() {
-            // Live text chunks have no stable id. Serve keeps a tracked stream
-            // bubble; roam mirrors that by appending to the LAST message ONLY
-            // when it is still the open stream for this role — i.e. it is this
-            // role and still empty-id. A tool/thought/user bubble in between (or
-            // a prior turn's bubble) means the stream closed: start a fresh
-            // bubble instead of merging non-contiguous text (which garbled the
-            // transcript and swallowed thinking blocks).
-            let msg = target.last_mut().filter(|m| m.role == role && m.id.is_empty());
-            match msg {
-                // Live chunks normally append unconditionally (serve parity).
-                // But when a live stream stalls and the server re-delivers the
-                // already-shown tail from its checkpoint, appending it again
-                // restarts the paragraph ("stops mid-paragraph, starts over
-                // beneath it"). Skip that by treating a full-suffix re-delivery
-                // as already-on-screen — it only fires for an EXACT tail match,
-                // never for a legitimate mid-paragraph repeat.
-                Some(m)
-                    if (replaying && m.content.contains(text))
-                        || (!replaying && m.content.ends_with(text) && m.content != text) => {
-                        // Already on screen. Consumed, so no bubble is opened for it.
-                        consumed = true;
-                        None
-                    }
-                Some(m) => {
-                    m.content.push_str(text);
-                    Some(TranscriptEvent::Update {
-                        message: Message {
-                            id: m.id.clone(),
-                            role: m.role.clone(),
-                            content: m.content.clone(),
-                            output: String::new(),
-                        },
-                    })
-                }
-                _ => None,
-            }
-        } else if let Some(msg) = target
-            .iter_mut()
-            .find(|m| m.role == role && m.id == message_id)
-        {
-            // Replay dedupe: a staged message being re-sent by session/load
-            // is identical — appending it again would double the text. Live
-            // chunks (replaying==false) never dedupe.
-            if !replaying || !msg.content.contains(text) {
-                msg.content.push_str(text);
-                Some(TranscriptEvent::Update {
-                    message: Message {
-                        id: msg.id.clone(),
-                        role: msg.role.clone(),
-                        content: msg.content.clone(),
-                        output: String::new(),
-                    },
-                })
-            } else {
-                // Second instance of the same trap: a replay re-sent a staged
-                // message that is already on screen. Consumed — NOT a new bubble.
-                consumed = true;
-                None
-            }
-        } else {
-            None
-        };
-        let event = event.or_else(|| {
-            if consumed {
-                return None;
-            }
-            // No open stream bubble matched (empty id, or a new stream after a tool/
-            // thought/other role, or a fresh id): start a new bubble.
-            let msg = Message {
-                id: message_id.to_string(),
-                role: role.to_string(),
-                content: text.to_string(),
-                output: String::new(),
-            };
-            target.push(Message {
-                id: msg.id.clone(),
-                role: msg.role.clone(),
-                content: msg.content.clone(),
-                output: String::new(),
-            });
-            Some(TranscriptEvent::Append { message: msg })
-        });
-        cap_messages(target);
         drop(inner);
         if !mine && staged_new {
-            // First backgrounded content for this session: tell the UI once
-            // (prefixed id, so it can paint the row). It re-reads sessions()
-            // for the dot state; no per-chunk traffic.
-            self.listener.on_session_touched(
-                format!("roam:{}:{}", self.label, session_id),
-                String::new(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_millis().to_string())
-                    .unwrap_or_default(),
-            );
+            self.staged_touch(session_id);
         }
-        event
+        m
     }
 
-    /// Create (or replace) the bubble for a tool call id.
+    /// Create or replace a tool row, preserving the kind (chart spec / MCP-app
+    /// key) so a peer chart/app survives.
     fn accumulate_tool(
         &self,
         session_id: &str,
         tool_call_id: &str,
         title: &str,
-        output: Option<&str>,
-    ) -> Option<TranscriptEvent> {
+        detail: &str,
+        kind: &ToolCallKind,
+    ) -> Mutation {
         let mut inner = self.inner.lock();
         let mine = inner.open_session_id.as_deref() == Some(session_id);
         let mut staged_new = false;
-        let target: &mut Vec<Message> = if mine {
-            &mut inner.transcript
+        let m = if mine {
+            inner.store.tool_call(tool_call_id, title, detail, kind)
         } else {
             let st = inner.staging.entry(session_id.to_string()).or_default();
             staged_new = !st.has_new;
             st.has_new = true;
-            &mut st.messages
+            st.store.tool_call(tool_call_id, title, detail, kind)
         };
-        // Serve-shape: content is the TITLE ONLY; the result rides Message.output
-        // so the UI chip never renders the tool output in its header.
-        let (message, is_new) = if let Some(msg) = target
-            .iter_mut()
-            .find(|m| m.role == "tool" && m.id == tool_call_id)
-        {
-            msg.content = title.to_string();
-            msg.output = output.unwrap_or("").to_string();
-            (
-                Message {
-                    id: msg.id.clone(),
-                    role: msg.role.clone(),
-                    content: msg.content.clone(),
-                    output: msg.output.clone(),
-                },
-                false,
-            )
-        } else {
-            let msg = Message {
-                id: tool_call_id.to_string(),
-                role: "tool".to_string(),
-                content: title.to_string(),
-                output: output.unwrap_or("").to_string(),
-            };
-            target.push(Message {
-                id: msg.id.clone(),
-                role: msg.role.clone(),
-                content: msg.content.clone(),
-                output: msg.output.clone(),
-            });
-            (msg, true)
-        };
-        cap_messages(target);
         drop(inner);
         if !mine && staged_new {
             self.staged_touch(session_id);
         }
-        Some(if is_new {
-            TranscriptEvent::Append { message }
-        } else {
-            TranscriptEvent::Update { message }
-        })
+        m
     }
 
-    /// Live shell output appends to the tool bubble instead of replacing it
-    /// (CONTRACT §4: "live shell output appends, the completion update
-    /// replaces").
-    fn accumulate_tool_append(&self, session_id: &str, tool_call_id: &str, output: &str) -> Option<TranscriptEvent> {
+    /// A tool lifecycle update: status plus output (live output appends, the
+    /// completion replaces).
+    fn accumulate_tool_update(
+        &self,
+        session_id: &str,
+        tool_call_id: &str,
+        status: &str,
+        output: &str,
+        live: bool,
+    ) -> Mutation {
         let mut inner = self.inner.lock();
         let mine = inner.open_session_id.as_deref() == Some(session_id);
-        let replaying = inner.replaying;   // snapshot before the target borrow
         let mut staged_new = false;
-        let target: &mut Vec<Message> = if mine {
-            &mut inner.transcript
+        let m = if mine {
+            inner.store.tool_update(tool_call_id, status, output, live)
         } else {
             let st = inner.staging.entry(session_id.to_string()).or_default();
             staged_new = !st.has_new;
             st.has_new = true;
-            &mut st.messages
+            st.store.tool_update(tool_call_id, status, output, live)
         };
-        // Appends go to Message.output (title stays in content). Dedupe: a
-        // replay re-delivering already-staged output must not double it (live
-        // chunks always append — same rule as accumulate).
-        let result = if let Some(msg) = target
-            .iter_mut()
-            .find(|m| m.role == "tool" && m.id == tool_call_id)
-        {
-            if !replaying || !msg.output.contains(output) {
-                msg.output.push_str(output);
-                Some(TranscriptEvent::Update {
-                    message: Message {
-                        id: msg.id.clone(),
-                        role: msg.role.clone(),
-                        content: msg.content.clone(),
-                        output: msg.output.clone(),
-                    },
-                })
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        cap_messages(target);
         drop(inner);
         if !mine && staged_new {
             self.staged_touch(session_id);
         }
-        result
+        m
     }
+
 
     /// Fire the UI notification for a session's FIRST backgrounded content
     /// (prefixed id, so the client can paint the dot on the peer row).
@@ -1891,214 +2026,25 @@ impl RoamPeer {
 
     // -- emits ----------------------------------------------------------------
 
-    fn emit(&self, event: TranscriptEvent) {
-        // Mirror onto the item stream (docs/TRANSCRIPT_MODEL.md): peer clients
-        // render from `on_item` now. The legacy event is kept for the peer's own
-        // tests and any transitional reader.
-        //
-        // The item mirror is gated on `is_active` (unlike the legacy event,
-        // which `open` emits unconditionally): a backgrounded peer must never
-        // touch the visible item client, which no longer rebuilds from a getter.
-        if (self.is_active)() {
-            match &event {
-                TranscriptEvent::Clear => self.emit_item_reset_and_paint(),
-                // Tool rows are owned by the stream path below (it carries the
-                // kind and the output); a transcript tool event would duplicate.
-                TranscriptEvent::Append { message } | TranscriptEvent::Update { message }
-                    if message.role == "tool" => {}
-                TranscriptEvent::Append { message } | TranscriptEvent::Update { message } => {
-                    self.emit_text_item(message);
-                }
+    /// Emit a store mutation on both channels: the item stream (what clients
+    /// render) and the legacy `on_transcript` (kept until phase 4 deletes it).
+    /// The item side is gated on `is_active`: a backgrounded peer must not touch
+    /// the visible item client, which no longer rebuilds from a getter.
+    fn emit_mutation(&self, m: Mutation) {
+        if let Some(event) = m.legacy {
+            self.listener.on_transcript(event);
+        }
+        if let Some(op) = m.item {
+            if (self.is_active)() {
+                self.listener.on_item(op);
             }
         }
-        self.listener.on_transcript(event);
-    }
-
-    /// Reset the item client and paint the peer's current transcript as items.
-    /// The peer's Clear means "rebuild from the store" — with items, that store
-    /// is this paint.
-    fn emit_item_reset_and_paint(&self) {
-        let (session_id, items) = {
-            let mut inner = self.inner.lock();
-            inner.live_item.clear();
-            inner.live_kind.clear();
-            inner.item_text.clear();
-            let session_id = format!(
-                "roam:{}:{}",
-                self.label,
-                inner.open_session_id.clone().unwrap_or_default()
-            );
-            // Clone the rows first: the loop mutates the bridge maps on `inner`.
-            let transcript: Vec<(String, String, String, String)> = inner
-                .transcript
-                .iter()
-                .map(|m| (m.id.clone(), m.role.clone(), m.content.clone(), m.output.clone()))
-                .collect();
-            let mut items: Vec<Item> = Vec::with_capacity(transcript.len());
-            for (mid, role, content, output) in &transcript {
-                if role == "tool" {
-                    // The kind survived only if this session's ToolCall was seen
-                    // (a wire replay re-announces it); else a plain tool row.
-                    items.push(inner.tool_items.get(mid).cloned().unwrap_or_else(|| Item {
-                        id: mid.clone(),
-                        kind: ItemKind::Tool,
-                        text: content.clone(),
-                        output: output.clone(),
-                        ..empty_item()
-                    }));
-                    continue;
-                }
-                let kind = kind_for_role(role);
-                let id = if mid.is_empty() {
-                    let id = next_item_id(&mut inner);
-                    inner.live_item.insert(role.clone(), id.clone());
-                    inner.live_kind.insert(id.clone(), kind);
-                    id
-                } else {
-                    mid.clone()
-                };
-                inner.item_text.insert(id.clone(), content.clone());
-                items.push(Item {
-                    id,
-                    kind,
-                    text: content.clone(),
-                    output: output.clone(),
-                    ..empty_item()
-                });
-            }
-            (session_id, items)
-        };
-        self.listener.on_item(TranscriptOp::Reset { session_id });
-        for item in items {
-            self.listener.on_item(TranscriptOp::Upsert { item });
-        }
-        self.listener
-            .on_item(TranscriptOp::Window { oldest_id: String::new(), has_older: false });
-    }
-
-    /// One text row as an item: a delta while it grows, a full `Upsert` when it
-    /// is rewritten (the peer's store has no completion signal to hook).
-    fn emit_text_item(&self, m: &Message) {
-        let op = {
-            let mut inner = self.inner.lock();
-            let kind = kind_for_role(&m.role);
-            let id = if m.id.is_empty() {
-                let id = match inner.live_item.get(&m.role) {
-                    Some(id) => id.clone(),
-                    None => {
-                        let id = next_item_id(&mut inner);
-                        inner.live_item.insert(m.role.clone(), id.clone());
-                        id
-                    }
-                };
-                inner.live_kind.insert(id.clone(), kind);
-                id
-            } else {
-                m.id.clone()
-            };
-            let prev = inner.item_text.get(&id).cloned().unwrap_or_default();
-            // The first emission for an id must be an Upsert (it creates the row
-            // client-side); only THEN are deltas safe.
-            let op = if prev.is_empty() {
-                TranscriptOp::Upsert {
-                    item: Item {
-                        id: id.clone(),
-                        kind,
-                        text: m.content.clone(),
-                        output: m.output.clone(),
-                        ..empty_item()
-                    },
-                }
-            } else {
-                match m.content.strip_prefix(&prev) {
-                    Some(delta) if !delta.is_empty() => TranscriptOp::AppendText {
-                        id: id.clone(),
-                        chunk: delta.to_string(),
-                    },
-                    Some(_) => return, // identical re-delivery
-                    None => TranscriptOp::Upsert {
-                        item: Item {
-                            id: id.clone(),
-                            kind,
-                            text: m.content.clone(),
-                            output: m.output.clone(),
-                            ..empty_item()
-                        },
-                    },
-                }
-            };
-            inner.item_text.insert(id, m.content.clone());
-            op
-        };
-        self.listener.on_item(op);
     }
 
     fn emit_stream(&self, event: StreamEvent) {
-        if !(self.is_active)() {
-            self.listener.on_stream(event);
-            return;
-        }
-        match &event {
-            StreamEvent::ToolCall { title, detail, tool_call_id, kind } => {
-                let item = item_for_tool(kind, title, detail, tool_call_id, "", "");
-                self.inner
-                    .lock()
-                    .tool_items
-                    .insert(tool_call_id.clone(), item.clone());
-                self.listener.on_item(TranscriptOp::Upsert { item });
-            }
-            StreamEvent::ToolCallUpdate { id, status, output, live } => {
-                let mut op = None;
-                {
-                    let mut inner = self.inner.lock();
-                    if let Some(base) = inner.tool_items.get(id).cloned() {
-                        let mut item = base;
-                        item.status = status.clone();
-                        if !output.is_empty() {
-                            if *live {
-                                item.output.push_str(output);
-                            } else {
-                                item.output = output.clone();
-                            }
-                        }
-                        inner.tool_items.insert(id.clone(), item.clone());
-                        op = Some(if *live && !output.is_empty() {
-                            TranscriptOp::AppendOutput { id: id.clone(), chunk: output.clone() }
-                        } else {
-                            TranscriptOp::Upsert { item }
-                        });
-                    }
-                }
-                if let Some(op) = op {
-                    self.listener.on_item(op);
-                }
-            }
-            StreamEvent::RunEnded { .. } => {
-                // Finalize each live text bubble so the client renders markdown
-                // once (the deltas above leave `html` empty).
-                let finals: Vec<Item> = {
-                    let inner = self.inner.lock();
-                    inner
-                        .live_kind
-                        .iter()
-                        .filter_map(|(id, kind)| {
-                            inner.item_text.get(id).map(|text| Item {
-                                id: id.clone(),
-                                kind: *kind,
-                                text: text.clone(),
-                                ..empty_item()
-                            })
-                        })
-                        .collect()
-                };
-                for item in finals {
-                    self.listener.on_item(TranscriptOp::Upsert { item });
-                }
-            }
-            _ => {}
-        }
         self.listener.on_stream(event);
     }
+
 
     fn emit_sessions(&self, sessions: Vec<SessionSummary>) {
         self.listener.on_roam_sessions(self.label.clone(), sessions);
@@ -2209,12 +2155,6 @@ fn item_for_tool(
             ..empty_item()
         },
     }
-}
-
-/// A stable id for a live text bubble the server sent without one.
-fn next_item_id(inner: &mut PeerInner) -> String {
-    inner.item_seq += 1;
-    format!("roam-item-{}", inner.item_seq)
 }
 
 /// ToolCallUpdate → status/output/live. Live shell output rides
@@ -2364,21 +2304,6 @@ const REPLAY_TAIL: usize = 100;
 /// testing: a tail only when both stamps exist and agree.
 fn replay_tail_decision(cached_at: &str, listed_at: &str) -> Option<usize> {
     (!cached_at.is_empty() && cached_at == listed_at).then_some(REPLAY_TAIL)
-}
-
-/// Cap a roam-side message list (S-RC-4) so a pathological session cannot grow
-/// memory without bound — and, because the backward `.find()` scans for tool
-/// updates are bounded by this cap, the per-update cost cannot scale with
-/// unbounded history. Evicts the OLDEST messages in bulk to a watermark
-/// (amortized O(1) per append).
-fn cap_messages(messages: &mut Vec<Message>) {
-    const MAX: usize = 2000;
-    if messages.len() <= MAX {
-        return;
-    }
-    let keep = MAX - MAX / 4;
-    let drop = messages.len() - keep;
-    messages.drain(0..drop);
 }
 
 // ---------------------------------------------------------------------------
@@ -2734,9 +2659,14 @@ mod tests {
             .lock()
             .staging
             .get("s1")
-            .map(|st| st.messages.len())
+            .map(|st| st.store.items.len())
             .unwrap_or(0);
         assert_eq!(n, 1, "s1 should be staged from the cache");
+        // Staging is rich now: the item's kind survives.
+        assert_eq!(
+            peer.inner.lock().staging.get("s1").unwrap().store.items[0].kind,
+            ItemKind::Agent
+        );
     }
 
     #[test]
@@ -2787,55 +2717,29 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_bridges_live_chunks_and_tools_onto_the_item_stream() {
+    fn a_peer_streams_rich_items_from_its_store() {
         let listener = test_listener();
-        let (peer, _) =
+        let (peer, _cmd_rx) =
             offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
-        peer.emit(TranscriptEvent::Clear);
-        // A live text bubble with no message id: the bridge mints one, Upserts it
-        // first, then sends the delta.
-        peer.emit(TranscriptEvent::Append {
-            message: Message {
-                id: String::new(),
-                role: "agent".into(),
-                content: "Hel".into(),
-                output: String::new(),
-            },
-        });
-        peer.emit(TranscriptEvent::Update {
-            message: Message {
-                id: String::new(),
-                role: "agent".into(),
-                content: "Hello".into(),
-                output: String::new(),
-            },
-        });
-        // A tool call: the transcript row is skipped (the stream owns tools) and
-        // the item carries the kind.
-        peer.emit(TranscriptEvent::Append {
-            message: Message {
-                id: "t1".into(),
-                role: "tool".into(),
-                content: "Bash".into(),
-                output: String::new(),
-            },
-        });
-        peer.emit_stream(StreamEvent::ToolCall {
-            title: "Bash".into(),
-            detail: "ls".into(),
-            tool_call_id: "t1".into(),
-            kind: ToolCallKind::Plain,
-        });
-        peer.emit_stream(StreamEvent::ToolCallUpdate {
-            id: "t1".into(),
-            status: "completed".into(),
-            output: "out".into(),
-            live: false,
-        });
-        peer.emit_stream(StreamEvent::RunEnded { stop_reason: "end_turn".into() });
+        peer.open("s1".to_string()); // live-transcript path
+
+        // Two live chunks (no message id): the store mints an id, Upserts it
+        // first (creating the row), then sends the rest as a delta.
+        for text in ["Hel", "lo"] {
+            peer.dispatch(SessionNotification::new(
+                "s1",
+                SessionUpdate::AgentMessageChunk(
+                    ContentChunk::new(ContentBlock::Text(TextContent::new(text))),
+                ),
+            ));
+        }
+        // A tool call whose item keeps its kind.
+        peer.dispatch(SessionNotification::new(
+            "s1",
+            SessionUpdate::ToolCall(ToolCall::new(ToolCallId::new("t1"), "Bash")),
+        ));
 
         let events = listener.events.lock().clone();
-        assert!(events.iter().any(|e| e == "item Reset"), "{events:?}");
         let created = events
             .iter()
             .position(|e| e.starts_with("item Upsert roam-item-1 kind=Agent"))
@@ -2845,14 +2749,19 @@ mod tests {
             .position(|e| e == "item AppendText roam-item-1 lo")
             .expect("the next chunk is a delta");
         assert!(created < delta, "Upsert must precede the delta: {events:?}");
-        assert!(events.iter().any(|e| e.starts_with("item Upsert t1 kind=Tool")), "{events:?}");
-        // RunEnded finalizes the live text bubble (the delta left html empty).
-        let last_live = events
-            .iter()
-            .rposition(|e| e.starts_with("item Upsert roam-item-1 kind=Agent"))
-            .unwrap();
-        assert!(last_live > delta, "a finalize Upsert follows the delta: {events:?}");
+        assert!(
+            events.iter().any(|e| e.starts_with("item Upsert t1 kind=Tool")),
+            "{events:?}"
+        );
+
+        // The rich store is the source of truth for both getters.
+        let items = peer.items();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1].id, "t1");
+        assert_eq!(items[1].kind, ItemKind::Tool);
+        assert_eq!(peer.transcript().len(), 2);
     }
+
 
     /// Opening a session the peer has never listed still paints: the cache is
     /// read on open, not only when apply_sessions seeds staging.
@@ -3265,6 +3174,33 @@ mod tests {
         ));
         let events = listener.events.lock();
         assert!(events.iter().any(|e| e.contains("ToolCall") && e.contains("Plain") && e.contains("ls")));
+    }
+
+    #[test]
+    fn an_update_below_the_paint_window_is_not_emitted_as_an_item() {
+        // The peer paints a window, then a replay touches an OLDER row (it asks
+        // for a 100-message tail but paints 60). That row's item op must be
+        // suppressed — the client does not hold it, so an Upsert would append it
+        // at the end — while the legacy event still flows.
+        let mut store = PeerStore::default();
+        let items: Vec<Item> = (0..70)
+            .map(|n| Item {
+                id: format!("m{n}"),
+                kind: ItemKind::Agent,
+                text: format!("t{n}"),
+                ..empty_item()
+            })
+            .collect();
+        store.replace(items);
+        store.paint("roam:laptop:s1");
+        assert_eq!(store.emitted_from, 10, "the window is the newest 60");
+
+        let in_window = store.accumulate_text("agent", "!", "m20", true);
+        assert!(in_window.item.is_some(), "an in-window update is emitted");
+
+        let below = store.accumulate_text("agent", "!", "m5", true);
+        assert!(below.item.is_none(), "an update below the window is suppressed");
+        assert!(below.legacy.is_some(), "the legacy event still flows");
     }
 
     // -- routing --------------------------------------------------------------

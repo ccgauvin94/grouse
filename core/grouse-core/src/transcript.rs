@@ -260,7 +260,7 @@ const MAX_BUBBLES: usize = 2000;
 /// (and the cache) and arrive as the client asks for them via `load_older`.
 /// See docs/TRANSCRIPT_MODEL.md ("Windows"). A client that paints a long chat
 /// in full pays for every delegate on every open; the window bounds that.
-const CLIENT_WINDOW: usize = 60;
+pub(crate) const CLIENT_WINDOW: usize = 60;
 
 /// Rebuild `tool_by_id` from scratch — used after a bulk eviction or rebuild,
 /// when the surviving bubbles' absolute indices have shifted.

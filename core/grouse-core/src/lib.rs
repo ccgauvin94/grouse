@@ -1106,11 +1106,10 @@ impl Core {
     }
 
     /// The rich item snapshot of the active session (docs/TRANSCRIPT_MODEL.md).
-    /// Peer chats flatten to items (the peer's store is still `Message`-based);
-    /// the main connection carries the full rich set.
+    /// Both the main connection and roam peers hold rich items now.
     pub fn rich_transcript(&self) -> Vec<Item> {
         if let Some(peer) = self.active_peer() {
-            return messages_to_items(&peer.transcript());
+            return peer.items();
         }
         self.inner.store.rich_transcript()
     }
@@ -1131,9 +1130,9 @@ impl Core {
     /// per older item (oldest-first) + a refreshed `Window`; `has_older: false`
     /// means there is nothing further back.
     pub fn load_older(&self, count: u32) {
-        // Peers carry their own (flat) transcript and no window; the item window
-        // is main-connection only for now.
-        if self.active_peer().is_some() {
+        // A peer owns its own rich window.
+        if let Some(peer) = self.active_peer() {
+            peer.load_older(count as usize);
             return;
         }
         self.inner.store.load_older(count as usize);
@@ -1142,64 +1141,6 @@ impl Core {
     pub fn config(&self) -> Vec<ConfigOption> {
         self.inner.state.lock().config.clone()
     }
-}
-
-/// Best-effort rich `Item` → flat `Message` mapping (the roam peer's store is
-/// still `Message`-based). Charts/apps/toolgroups degrade to the "tool" umbrella.
-pub(crate) fn items_to_messages(items: &[Item]) -> Vec<Message> {
-    items
-        .iter()
-        .map(|it| {
-            let role = match it.kind {
-                ItemKind::User => "user",
-                ItemKind::Agent => "agent",
-                ItemKind::Thought => "thought",
-                ItemKind::Error => "error",
-                _ => "tool",
-            };
-            let (id, content) = match it.kind {
-                ItemKind::ToolGroup => match it.calls.first() {
-                    Some(c) => (c.id.clone(), c.title.clone()),
-                    None => (String::new(), String::new()),
-                },
-                _ => (it.id.clone(), it.text.clone()),
-            };
-            Message {
-                id,
-                role: role.to_string(),
-                content,
-                output: it.output.clone(),
-            }
-        })
-        .collect()
-}
-
-/// Best-effort flat `Message` → rich `Item` mapping (peers, and any caller that
-/// only has the legacy projection). Charts/apps/toolgroups are already lost at
-/// this point, so they degrade to plain tool items.
-pub(crate) fn messages_to_items(messages: &[Message]) -> Vec<Item> {
-    messages
-        .iter()
-        .map(|m| {
-            let (kind, text) = match m.role.as_str() {
-                "user" => (ItemKind::User, m.content.clone()),
-                "thought" => (ItemKind::Thought, m.content.clone()),
-                "error" => (ItemKind::Error, m.content.clone()),
-                "tool" => (ItemKind::Tool, m.content.clone()),
-                _ => (ItemKind::Agent, m.content.clone()),
-            };
-            Item {
-                id: if m.id.is_empty() { format!("@flat:{}", m.content.len()) } else { m.id.clone() },
-                kind,
-                text,
-                detail: String::new(),
-                output: m.output.clone(),
-                status: String::new(),
-                app_key: String::new(),
-                calls: Vec::new(),
-            }
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------

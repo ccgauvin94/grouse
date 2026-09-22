@@ -23,16 +23,16 @@ normative surface.
 - **Android (phase 3):** the same — `onCoreItem` maps items to `ChatMessage`
   rows keyed by item id (a ToolGroup expands to one `tool` row per call so the
   chat UI keeps grouping them), and the list asks for older items on scroll-back.
-- **Roam peers (pulled forward from phase 4):** both clients render items now,
-  so `RoamPeer` bridges its legacy `Clear`/chunks/tools onto `on_item` at its
-  emit funnels (a `Clear` paints the peer's transcript; live text mints a
-  stable id, Upserts once, then deltas; a tool carries its kind). The peer's
-  own store is still flat `Message`s, so a peer's chart/app kind comes from the
-  live `ToolCall` and can degrade to a tool row on a cache-only paint until the
-  peer holds items itself.
+- **Roam peers (pulled forward from phase 4):** `RoamPeer` holds a rich item
+  store (`PeerStore`) — transcript, staging and cache are all items, so a peer
+  chart/app survives promotion and restart. Its mutations emit `on_item`
+  directly (no bridge), with the same window/`load_older` behaviour as the main
+  connection (the peer owns its own window). Live text mints a stable id,
+  Upserts once, then deltas; a tool carries its kind; a replay that touches a
+  row below the painted window is not emitted (the client does not hold it).
 
 Still to come: deleting `on_transcript`/`on_stream`/the flat `Message`/the
-provisional-merge machinery, and giving `RoamPeer` an item store of its own.
+provisional-merge machinery.
 
 ## Why we want to replace the current model
 

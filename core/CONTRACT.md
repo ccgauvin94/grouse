@@ -211,12 +211,13 @@ Rules:
 - `load_older(count)` walks the window back over the store's in-memory rows —
   no cache read and no wire call. A stock server has no history cursor, so once
   the store's start is reached `has_older` is `false`.
-- **Roam peers** emit the item stream too: `RoamPeer` bridges its legacy
-  `Clear`/chunks/tools onto `on_item` at its emit funnels (gated on the peer
-  being the active display, since the item client no longer rebuilds from a
-  getter). The peer's own store is still `Message`-based, so a peer's
-  chart/MCP-app kind rides the live `ToolCall` and can degrade to a tool row on
-  a cache-only paint until the peer holds items itself (phase 4).
+- **Roam peers** hold a rich item store of their own (`PeerStore`): live text,
+  tool calls (kind and payload preserved), and staging/cache are all items, so
+  a peer chart/app survives promotion and restart, and `rich_transcript()` /
+  `window()` / `load_older` work for a peer exactly as for the main connection
+  (the peer owns its own window; `Core::load_older` routes to it). Its mutations
+  still emit the legacy `on_transcript` alongside `on_item` until that channel is
+  deleted.
 
 ---
 
