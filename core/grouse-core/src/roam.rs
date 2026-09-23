@@ -2705,6 +2705,36 @@ mod tests {
     }
 
     #[test]
+    fn session_list_meta_survives_typed_deserialization() {
+        // Decisive: does the typed SDK schema keep `_meta` on a session/list
+        // entry, or drop it before to_summary can read it?
+        let reply: ListSessionsResponse = serde_json::from_value(serde_json::json!({
+            "sessions": [{
+                "sessionId": "s1",
+                "cwd": "/home/user",
+                "title": "Chat",
+                "updatedAt": "2026-01-01T00:00:00Z",
+                "_meta": {
+                    "messageCount": 42,
+                    "lastMessageSnippet": "hi there",
+                    "model": "m-a",
+                    "hasRecipe": true
+                }
+            }]
+        }))
+        .expect("deserialize a session/list reply");
+        assert_eq!(reply.sessions.len(), 1);
+        assert!(
+            reply.sessions[0].meta.is_some(),
+            "the typed SessionInfo must keep _meta: {:?}",
+            reply.sessions[0].meta
+        );
+        let summary = to_summary("laptop", &reply.sessions[0]);
+        assert_eq!(summary.message_count, 42);
+        assert_eq!(summary.last_message_snippet.as_deref(), Some("hi there"));
+    }
+
+    #[test]
     fn a_listed_peer_session_carries_its_meta() {
         let listener = test_listener();
         let (peer, _) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
