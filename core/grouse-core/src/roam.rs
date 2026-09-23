@@ -934,21 +934,29 @@ impl RoamPeer {
         // Rebuild from fields: the uniffi records are not Clone (yet). Read
         // has_new from the staging map under the SAME lock — staging_has_new
         // locks again and parking_lot is not re-entrant (deadlock).
+        //
+        // Preserve every OTHER field: this used to zero message_count/model/
+        // has_recipe/archived and re-read staging under the PREFIXED id (which
+        // never matched), so roam cards showed "0 msg" and never a green dot.
         let inner = self.inner.lock();
+        let prefix = format!("roam:{}:", self.label);
         inner
             .sessions
             .iter()
-            .map(|s| SessionSummary {
-                id: s.id.clone(),
-                title: s.title.clone(),
-                updated_at: s.updated_at.clone(),
-                last_message_snippet: s.last_message_snippet.clone(),
-                project_id: None,
-                message_count: 0,
-                model: String::new(),
-                has_recipe: false,
-                has_new: inner.staging.get(&s.id).map(|st| st.has_new).unwrap_or(false),
-                archived: false,
+            .map(|s| {
+                let raw = s.id.strip_prefix(&prefix).unwrap_or(&s.id);
+                SessionSummary {
+                    id: s.id.clone(),
+                    title: s.title.clone(),
+                    updated_at: s.updated_at.clone(),
+                    last_message_snippet: s.last_message_snippet.clone(),
+                    project_id: s.project_id.clone(),
+                    message_count: s.message_count,
+                    model: s.model.clone(),
+                    has_recipe: s.has_recipe,
+                    has_new: inner.staging.get(raw).map(|st| st.has_new).unwrap_or(false),
+                    archived: s.archived,
+                }
             })
             .collect()
     }
@@ -2208,17 +2216,44 @@ fn tool_update(
 /// One `session/list` entry → summary, in the peer's id namespace
 /// (`roam:<label>:<id>`, CONTRACT §6).
 fn to_summary(label: &str, info: &SessionInfo) -> SessionSummary {
+    // goose carries the drawer's metadata on `_meta` (the main connection parses
+    // the same keys from the raw reply). Without this the roam card had no
+    // snippet and a hardcoded "0 msg".
+    let meta = info.meta.as_ref();
+    let snippet = meta
+        .and_then(|m| m.get("lastMessageSnippet"))
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    let project_id = meta
+        .and_then(|m| m.get("projectId"))
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    let message_count = meta
+        .and_then(|m| m.get("messageCount"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let model = meta
+        .and_then(|m| m.get("model"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let has_recipe = meta
+        .and_then(|m| m.get("hasRecipe"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // goose's archive only stamps archivedAt (session/list has no filter).
+    let archived = meta.map(|m| m.contains_key("archivedAt")).unwrap_or(false);
     SessionSummary {
         id: format!("roam:{label}:{}", info.session_id),
         title: info.title.clone().unwrap_or_default(),
         updated_at: info.updated_at.clone().unwrap_or_default(),
-        last_message_snippet: None,
-        project_id: None,
-        message_count: 0,
-        model: String::new(),
-        has_recipe: false,
+        last_message_snippet: snippet,
+        project_id,
+        message_count,
+        model,
+        has_recipe,
         has_new: false,
-        archived: false,
+        archived,
     }
 }
 
@@ -2667,6 +2702,32 @@ mod tests {
             peer.inner.lock().staging.get("s1").unwrap().store.items[0].kind,
             ItemKind::Agent
         );
+    }
+
+    #[test]
+    fn a_listed_peer_session_carries_its_meta() {
+        let listener = test_listener();
+        let (peer, _) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let mut meta = Map::new();
+        meta.insert("messageCount".into(), Value::from(42));
+        meta.insert("lastMessageSnippet".into(), Value::from("hi there"));
+        meta.insert("model".into(), Value::from("m-a"));
+        meta.insert("hasRecipe".into(), Value::from(true));
+        let mut info = SessionInfo::new("s1".to_string(), "/home/user");
+        info.title = Some("Chat".into());
+        info.updated_at = Some("2026-01-01T00:00:00Z".into());
+        info.meta = Some(meta);
+        peer.apply_sessions(&ListSessionsResponse::new(vec![info]));
+
+        // The drawer's metadata survives both the `_meta` parse and the
+        // field-by-field re-emit in sessions() (which used to zero it).
+        let sessions = peer.sessions();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "roam:laptop:s1");
+        assert_eq!(sessions[0].message_count, 42);
+        assert_eq!(sessions[0].last_message_snippet.as_deref(), Some("hi there"));
+        assert_eq!(sessions[0].model, "m-a");
+        assert!(sessions[0].has_recipe);
     }
 
     #[test]
