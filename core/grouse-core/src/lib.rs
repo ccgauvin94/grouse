@@ -131,17 +131,6 @@ pub struct Message {
     pub output: String,
 }
 
-/// Transcript mutation carried by `CoreListener::on_transcript` (CONTRACT §3.2).
-///
-/// **Legacy.** Superseded by [`TranscriptOp`] / `CoreListener::on_item`; kept
-/// until every client has moved (docs/TRANSCRIPT_MODEL.md, migration phase 4).
-#[derive(uniffi::Enum, Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum TranscriptEvent {
-    Append { message: Message },
-    Update { message: Message },
-    Clear,
-}
-
 /// The kind of a rich transcript [`Item`] (docs/TRANSCRIPT_MODEL.md). One
 /// variant per thing a client draws, so a chart stays a chart and an MCP app
 /// keeps its identity through replay and restart.
@@ -220,18 +209,6 @@ pub struct TranscriptWindow {
     pub oldest_id: String,
     pub newest_id: String,
     pub has_older: bool,
-}
-
-/// The flat stream event `CoreListener::on_stream` carries (CONTRACT §3.4).
-#[derive(uniffi::Enum, Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum StreamEvent {
-    AgentChunk { text: String, message_id: String },
-    UserChunk { text: String, message_id: String },
-    ThoughtChunk { text: String },
-    ToolCall { title: String, detail: String, tool_call_id: String, kind: ToolCallKind },
-    ToolCallUpdate { id: String, status: String, output: String, live: bool },
-    Usage { used: i64, size: i64, cost: f64, currency: String },
-    RunEnded { stop_reason: String },
 }
 
 /// Collapses the desktop's toolgroup/chart/mcpapp split (CONTRACT §3.4).
@@ -328,12 +305,12 @@ pub struct SendExpect {
 pub trait CoreListener: Send + Sync {
     fn on_status(&self, status: ConnectionStatus);
     fn on_sessions(&self, sessions: Vec<SessionSummary>);
-    fn on_transcript(&self, event: TranscriptEvent);
-    fn on_stream(&self, event: StreamEvent);
-    /// The item stream (docs/TRANSCRIPT_MODEL.md). Replaces `on_transcript` +
-    /// the tool half of `on_stream`; both are still emitted alongside it until
-    /// every client has moved.
+    /// The item stream (docs/TRANSCRIPT_MODEL.md): every transcript row.
     fn on_item(&self, op: TranscriptOp);
+    /// Context-window usage + cost (`used`/`size` in tokens).
+    fn on_usage(&self, used: i64, size: i64, cost: f64, currency: String);
+    /// A turn finished (`stop_reason` is the server's).
+    fn on_run_ended(&self, stop_reason: String);
     fn on_config(&self, options: Vec<ConfigOption>);
     fn on_permission_request(&self, request: PermissionRequest);
     fn on_session_touched(&self, session_id: String, title: String, updated_at: String);
@@ -2069,25 +2046,20 @@ impl CoreListener for CoreListenerForwarder {
     fn on_sessions(&self, sessions: Vec<SessionSummary>) {
         self.inner.on_sessions(sessions);
     }
-    fn on_transcript(&self, event: TranscriptEvent) {
-        if self.main_displayed() {
-            self.inner.on_transcript(event);
-        }
-    }
-    fn on_stream(&self, event: StreamEvent) {
-        match event {
-            StreamEvent::RunEnded { .. } => self.inner.on_stream(event),
-            _ => {
-                if self.main_displayed() {
-                    self.inner.on_stream(event);
-                }
-            }
-        }
-    }
     fn on_item(&self, op: TranscriptOp) {
         if self.main_displayed() {
             self.inner.on_item(op);
         }
+    }
+    fn on_usage(&self, used: i64, size: i64, cost: f64, currency: String) {
+        if self.main_displayed() {
+            self.inner.on_usage(used, size, cost, currency);
+        }
+    }
+    fn on_run_ended(&self, stop_reason: String) {
+        // Turn CONTROL is not painting: always passes, so a backgrounded turn
+        // still drains its own per-chat queue wherever the user is looking.
+        self.inner.on_run_ended(stop_reason);
     }
     fn on_config(&self, options: Vec<ConfigOption>) {
         self.inner.on_config(options);
@@ -2123,44 +2095,33 @@ mod forwarder_tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// Records only the two painting channels (the gate's subject); the other
+    /// Records the painting channels (the gate's subject); the other
     /// CoreListener methods are irrelevant to forwarding and stub out empty.
     struct Recorder {
-        transcripts: Mutex<usize>,
-        streams: Mutex<Vec<String>>,
         items: Mutex<usize>,
+        usages: Mutex<usize>,
+        run_ended: Mutex<usize>,
     }
     impl Recorder {
         fn new() -> Arc<Self> {
             Arc::new(Self {
-                transcripts: Mutex::new(0),
-                streams: Mutex::new(Vec::new()),
                 items: Mutex::new(0),
+                usages: Mutex::new(0),
+                run_ended: Mutex::new(0),
             })
-        }
-        fn tag(e: &StreamEvent) -> &'static str {
-            match e {
-                StreamEvent::AgentChunk { .. } => "agent",
-                StreamEvent::UserChunk { .. } => "user",
-                StreamEvent::ThoughtChunk { .. } => "thought",
-                StreamEvent::ToolCall { .. } => "tool",
-                StreamEvent::ToolCallUpdate { .. } => "tool_update",
-                StreamEvent::Usage { .. } => "usage",
-                StreamEvent::RunEnded { .. } => "run_ended",
-            }
         }
     }
     impl CoreListener for Recorder {
         fn on_status(&self, _: ConnectionStatus) {}
         fn on_sessions(&self, _: Vec<SessionSummary>) {}
-        fn on_transcript(&self, _: TranscriptEvent) {
-            *self.transcripts.lock().unwrap() += 1;
-        }
-        fn on_stream(&self, e: StreamEvent) {
-            self.streams.lock().unwrap().push(Self::tag(&e).to_string());
-        }
         fn on_item(&self, _: TranscriptOp) {
             *self.items.lock().unwrap() += 1;
+        }
+        fn on_usage(&self, _: i64, _: i64, _: f64, _: String) {
+            *self.usages.lock().unwrap() += 1;
+        }
+        fn on_run_ended(&self, _: String) {
+            *self.run_ended.lock().unwrap() += 1;
         }
         fn on_config(&self, _: Vec<ConfigOption>) {}
         fn on_permission_request(&self, _: PermissionRequest) {}
@@ -2185,38 +2146,35 @@ mod forwarder_tests {
     fn painting_flows_when_main_owns_the_display() {
         let active = Arc::new(RwLock::new(None));
         let (f, rec) = fwd(active);
-        f.on_transcript(TranscriptEvent::Clear);
-        f.on_stream(StreamEvent::AgentChunk { text: "hi".into(), message_id: String::new() });
         f.on_item(TranscriptOp::Reset { session_id: "s".into() });
-        assert_eq!(*rec.transcripts.lock().unwrap(), 1);
-        assert_eq!(*rec.streams.lock().unwrap(), vec!["agent".to_string()]);
+        f.on_usage(1, 2, 0.0, "x".into());
+        f.on_run_ended("end_turn".into());
         assert_eq!(*rec.items.lock().unwrap(), 1);
+        assert_eq!(*rec.usages.lock().unwrap(), 1);
+        assert_eq!(*rec.run_ended.lock().unwrap(), 1);
     }
 
     #[test]
     fn painting_suppressed_while_a_peer_owns_the_display() {
         // The reported bug: a backgrounded Main chat's reply streamed into the
-        // roam window. With a peer displayed, transcript + chunk painting must
-        // not reach the (single, on-screen) transcript.
+        // roam window. With a peer displayed, item + usage painting must not
+        // reach the (single, on-screen) transcript.
         let active = Arc::new(RwLock::new(Some("laptop".to_string())));
         let (f, rec) = fwd(active);
-        f.on_transcript(TranscriptEvent::Clear);
-        f.on_stream(StreamEvent::AgentChunk { text: "hi".into(), message_id: String::new() });
-        f.on_stream(StreamEvent::Usage { used: 1, size: 2, cost: 0.0, currency: "x".into() });
         f.on_item(TranscriptOp::Reset { session_id: "s".into() });
-        assert_eq!(*rec.transcripts.lock().unwrap(), 0, "no painting while a peer owns the screen");
-        assert!(rec.streams.lock().unwrap().is_empty());
-        assert_eq!(*rec.items.lock().unwrap(), 0);
+        f.on_usage(1, 2, 0.0, "x".into());
+        assert_eq!(*rec.items.lock().unwrap(), 0, "no painting while a peer owns the screen");
+        assert_eq!(*rec.usages.lock().unwrap(), 0);
+        // Turn CONTROL still passes (below).
     }
 
     #[test]
     fn run_ended_always_flows_so_a_background_turn_drains_its_queue() {
         // Turn CONTROL is not painting: a Main turn ending while a peer is shown
-        // must still emit RunEnded, or its per-chat queue strands with busy=true.
+        // must still emit run-ended, or its per-chat queue strands with busy=true.
         let active = Arc::new(RwLock::new(Some("laptop".to_string())));
         let (f, rec) = fwd(active);
-        f.on_stream(StreamEvent::AgentChunk { text: "hi".into(), message_id: String::new() });
-        f.on_stream(StreamEvent::RunEnded { stop_reason: "end_turn".into() });
-        assert_eq!(*rec.streams.lock().unwrap(), vec!["run_ended".to_string()]);
+        f.on_run_ended("end_turn".into());
+        assert_eq!(*rec.run_ended.lock().unwrap(), 1);
     }
 }

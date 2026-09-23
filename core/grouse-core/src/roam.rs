@@ -67,7 +67,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use crate::spine::RpcConn;
 use crate::{
     ConfigOption, ConnectionStatus, CoreListener, Item, ItemKind, Message, PermissionOutcome,
-    SessionSummary, StreamEvent, ToolCallKind, TranscriptEvent, TranscriptOp,
+    SessionSummary, ToolCallKind, TranscriptOp,
 };
 use crate::cache::CacheStore;
 
@@ -383,11 +383,11 @@ struct StagedSession {
     has_new: bool,
 }
 
-/// A store mutation's two projections. `legacy` is the pre-items channel the
-/// peer still emits for its own tests; `item` is what clients render.
+/// A store mutation: the item op for the live stream. `None` means the mutation
+/// was consumed (a replayed row already on screen) or the row is outside the
+/// client's window, so nothing is emitted.
 #[derive(Default)]
 struct Mutation {
-    legacy: Option<TranscriptEvent>,
     item: Option<TranscriptOp>,
 }
 
@@ -395,8 +395,8 @@ impl Mutation {
     fn none() -> Self {
         Self::default()
     }
-    fn both(legacy: TranscriptEvent, item: TranscriptOp) -> Self {
-        Self { legacy: Some(legacy), item: Some(item) }
+    fn item(op: TranscriptOp) -> Self {
+        Self { item: Some(op) }
     }
 }
 
@@ -498,11 +498,11 @@ impl PeerStore {
     /// paint (the peer asks for a 100-message tail but paints 60); emitting their
     /// Upserts would append them at the client's end. The legacy event still
     /// flows, and `load_older` re-reads the store so the update is not lost.
-    fn at(&self, idx: usize, legacy: TranscriptEvent, item: TranscriptOp) -> Mutation {
+    fn at(&self, idx: usize, item: TranscriptOp) -> Mutation {
         if idx >= self.emitted_from {
-            Mutation::both(legacy, item)
+            Mutation::item(item)
         } else {
-            Mutation { legacy: Some(legacy), item: None }
+            Mutation::none()
         }
     }
 
@@ -526,11 +526,7 @@ impl PeerStore {
                 }
                 it.text.push_str(text);
                 let item = it.clone();
-                return self.at(
-                    idx,
-                    TranscriptEvent::Update { message: text_message(&item) },
-                    TranscriptOp::Upsert { item },
-                );
+                return self.at(idx, TranscriptOp::Upsert { item });
             }
             // No item for this id yet: a fresh bubble.
             let item = Item {
@@ -543,11 +539,7 @@ impl PeerStore {
             self.stream = None;
             self.cap();
             let idx = self.items.len() - 1;
-            return self.at(
-                idx,
-                TranscriptEvent::Append { message: text_message(&item) },
-                TranscriptOp::Upsert { item },
-            );
+            return self.at(idx, TranscriptOp::Upsert { item });
         }
         // No server id: the live stream. Append to the open bubble of this role
         // if there is one (the peer's "last empty-id bubble" rule).
@@ -564,17 +556,8 @@ impl PeerStore {
                 }
                 it.text.push_str(text);
                 let id = it.id.clone();
-                let full = it.text.clone();
                 return self.at(
                     idx,
-                    TranscriptEvent::Update {
-                        message: Message {
-                            id: id.clone(),
-                            role: role.to_string(),
-                            content: full,
-                            output: String::new(),
-                        },
-                    },
                     TranscriptOp::AppendText { id, chunk: text.to_string() },
                 );
             }
@@ -591,44 +574,25 @@ impl PeerStore {
         self.cap();
         let idx = self.items.len() - 1;
         let item = self.items[idx].clone();
-        self.at(
-            idx,
-            TranscriptEvent::Append { message: text_message(&item) },
-            TranscriptOp::Upsert { item },
-        )
+        self.at(idx, TranscriptOp::Upsert { item })
     }
 
     /// Create or replace a tool row (the peer's `accumulate_tool`). The kind is
     /// preserved, so a chart/app survives the cache and staging.
     fn tool_call(&mut self, id: &str, title: &str, detail: &str, kind: &ToolCallKind) -> Mutation {
         let item = item_for_tool(kind, title, detail, id, "", "in_progress");
-        let is_new = match self.tool_idx.get(id).copied() {
-            Some(idx) => {
-                self.items[idx] = item.clone();
-                false
-            }
+        match self.tool_idx.get(id).copied() {
+            Some(idx) => self.items[idx] = item.clone(),
             None => {
                 self.items.push(item.clone());
                 self.tool_idx.insert(id.to_string(), self.items.len() - 1);
-                true
             }
-        };
+        }
         // A tool call closes the text stream (the next chunk opens a bubble).
         self.stream = None;
         self.cap();
         let idx = self.tool_idx.get(id).copied().unwrap_or(0);
-        let msg = Message {
-            id: id.to_string(),
-            role: "tool".to_string(),
-            content: title.to_string(),
-            output: String::new(),
-        };
-        let legacy = if is_new {
-            TranscriptEvent::Append { message: msg }
-        } else {
-            TranscriptEvent::Update { message: msg }
-        };
-        self.at(idx, legacy, TranscriptOp::Upsert { item })
+        self.at(idx, TranscriptOp::Upsert { item })
     }
 
     /// A tool lifecycle update (the peer's `accumulate_tool[_append]`). The
@@ -651,13 +615,12 @@ impl PeerStore {
             }
             it.clone()
         };
-        let legacy = TranscriptEvent::Update { message: text_message(&item) };
-        let item_op = if live && !output.is_empty() && matches!(item.kind, ItemKind::Tool) {
+        let op = if live && !output.is_empty() && matches!(item.kind, ItemKind::Tool) {
             TranscriptOp::AppendOutput { id: id.to_string(), chunk: output.to_string() }
         } else {
             TranscriptOp::Upsert { item }
         };
-        self.at(idx, legacy, item_op)
+        self.at(idx, op)
     }
 
     /// The paint ops for a session switch / cache paint: Reset, the newest
@@ -1163,9 +1126,7 @@ impl RoamPeer {
             // state is app-global, one wedged roam turn then made EVERY chat
             // steer a dead run ("no turn exists to steer"). The app matches the
             // completion to its own session/queue.
-            self.emit_stream(StreamEvent::RunEnded {
-                stop_reason: stop.to_string(),
-            });
+            self.listener.on_run_ended(stop.to_string());
             // The peer's turn bookkeeping mirrors the spine: a live run id is
             // now over, whether or not the server sent an activeRunId update.
             self.inner.lock().active_run = None;
@@ -1654,7 +1615,6 @@ impl RoamPeer {
         // visible model.
         let session = format!("roam:{}:{}", self.label, raw_session_id);
         let ops = self.inner.lock().store.paint(&session);
-        self.listener.on_transcript(TranscriptEvent::Clear);
         if (self.is_active)() {
             for op in ops {
                 self.listener.on_item(op);
@@ -1754,7 +1714,6 @@ impl RoamPeer {
                     let mutation = self.accumulate(&session_id, "user", &text, &message_id);
                     if active && mine {
                         self.emit_mutation(mutation);
-                        self.emit_stream(StreamEvent::UserChunk { text, message_id });
                     }
                 }
             }
@@ -1764,7 +1723,6 @@ impl RoamPeer {
                     let mutation = self.accumulate(&session_id, "agent", &text, &message_id);
                     if active && mine {
                         self.emit_mutation(mutation);
-                        self.emit_stream(StreamEvent::AgentChunk { text, message_id });
                     }
                 }
             }
@@ -1774,7 +1732,6 @@ impl RoamPeer {
                     let mutation = self.accumulate(&session_id, "thought", &text, &message_id);
                     if active && mine {
                         self.emit_mutation(mutation);
-                        self.emit_stream(StreamEvent::ThoughtChunk { text });
                     }
                 }
             }
@@ -1785,12 +1742,6 @@ impl RoamPeer {
                     self.accumulate_tool(&session_id, &tool_call_id, &tool.title, &detail, &kind);
                 if active && mine {
                     self.emit_mutation(mutation);
-                    self.emit_stream(StreamEvent::ToolCall {
-                        title: tool.title.clone(),
-                        detail,
-                        tool_call_id: tool_call_id.clone(),
-                        kind,
-                    });
                 }
             }
             SessionUpdate::ToolCallUpdate(update) => {
@@ -1800,12 +1751,6 @@ impl RoamPeer {
                     self.accumulate_tool_update(&session_id, &id, &status, &output, live);
                 if active && mine {
                     self.emit_mutation(mutation);
-                    self.emit_stream(StreamEvent::ToolCallUpdate {
-                        id: id.clone(),
-                        status: status.clone(),
-                        output: output.clone(),
-                        live,
-                    });
                 }
             }
 
@@ -1816,14 +1761,10 @@ impl RoamPeer {
                     .map(|c| (c.amount, c.currency.clone()))
                     .unwrap_or((0.0, String::new()));
                 if active && mine {
-                    self.emit_stream(StreamEvent::Usage {
-                        used: usage.used as i64,
-                        size: usage.size as i64,
-                        cost,
-                        currency,
-                    });
+                    self.listener.on_usage(usage.used as i64, usage.size as i64, cost, currency);
                 }
             }
+
             SessionUpdate::SessionInfoUpdate(info) => {
                 // The active-run lifecycle rides _meta.goose.activeRunId (same
                 // translation as the spine's dispatch_session_info_update):
@@ -2034,23 +1975,15 @@ impl RoamPeer {
 
     // -- emits ----------------------------------------------------------------
 
-    /// Emit a store mutation on both channels: the item stream (what clients
-    /// render) and the legacy `on_transcript` (kept until phase 4 deletes it).
-    /// The item side is gated on `is_active`: a backgrounded peer must not touch
-    /// the visible item client, which no longer rebuilds from a getter.
+    /// Emit a store mutation's item op, gated on `is_active`: a backgrounded
+    /// peer must not touch the visible item client, which does not rebuild from
+    /// a getter.
     fn emit_mutation(&self, m: Mutation) {
-        if let Some(event) = m.legacy {
-            self.listener.on_transcript(event);
-        }
         if let Some(op) = m.item {
             if (self.is_active)() {
                 self.listener.on_item(op);
             }
         }
-    }
-
-    fn emit_stream(&self, event: StreamEvent) {
-        self.listener.on_stream(event);
     }
 
 
@@ -2371,34 +2304,6 @@ mod tests {
         }
     }
 
-    fn transcript_name(event: &TranscriptEvent) -> &'static str {
-        match event {
-            TranscriptEvent::Append { .. } => "Append",
-            TranscriptEvent::Update { .. } => "Update",
-            TranscriptEvent::Clear => "Clear",
-        }
-    }
-    fn stream_name(event: &StreamEvent) -> &'static str {
-        match event {
-            StreamEvent::AgentChunk { .. } => "AgentChunk",
-            StreamEvent::UserChunk { .. } => "UserChunk",
-            StreamEvent::ThoughtChunk { .. } => "ThoughtChunk",
-            StreamEvent::ToolCall { .. } => "ToolCall",
-            StreamEvent::ToolCallUpdate { .. } => "ToolCallUpdate",
-            StreamEvent::Usage { .. } => "Usage",
-            StreamEvent::RunEnded { .. } => "RunEnded",
-        }
-    }
-
-    fn tool_kind_name(kind: &ToolCallKind) -> &'static str {
-        match kind {
-            ToolCallKind::Plain => "Plain",
-            ToolCallKind::Chart { .. } => "Chart",
-            ToolCallKind::McpApp { .. } => "McpApp",
-        }
-    }
-
-
     impl CoreListener for RecordingListener {
         fn on_status(&self, status: ConnectionStatus) {
             self.events
@@ -2408,25 +2313,13 @@ mod tests {
         fn on_sessions(&self, sessions: Vec<SessionSummary>) {
             self.events.lock().push(format!("sessions {}", sessions.len()));
         }
-        fn on_transcript(&self, event: TranscriptEvent) {
+        fn on_usage(&self, used: i64, size: i64, _cost: f64, currency: String) {
             self.events
                 .lock()
-                .push(format!("transcript {}", transcript_name(&event)));
+                .push(format!("usage {used} {size} {currency}"));
         }
-        fn on_stream(&self, event: StreamEvent) {
-            let line = match &event {
-                StreamEvent::ToolCall {
-                    title,
-                    detail,
-                    tool_call_id,
-                    kind,
-                } => format!(
-                    "stream ToolCall kind={} detail={detail} title={title} id={tool_call_id}",
-                    tool_kind_name(kind)
-                ),
-                other => format!("stream {}", stream_name(other)),
-            };
-            self.events.lock().push(line);
+        fn on_run_ended(&self, stop_reason: String) {
+            self.events.lock().push(format!("run_ended {stop_reason}"));
         }
         fn on_item(&self, op: crate::TranscriptOp) {
             use crate::TranscriptOp as Op;
@@ -2778,24 +2671,14 @@ mod tests {
         assert!(peer.cache.save_transcript("roam:laptop:s1", &[m], "2026-01-01T00:00:00Z"));
         peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
         peer.open("s1".to_string());
-        // ONE Clear and NO Appends: a Clear tells the UI to rebuild from
-        // transcript(), so an Append per row on top of it painted the cached
-        // snapshot twice. The rows must be in transcript() for that rebuild.
-        {
-            let events = listener.events.lock();
-            let clears = events.iter().filter(|e| e.as_str() == "transcript Clear").count();
-            let appends = events.iter().filter(|e| e.as_str() == "transcript Append").count();
-            assert_eq!(clears, 1, "exactly one Clear: {events:?}");
-            assert_eq!(appends, 0, "a Clear rebuilds from transcript(); no Appends: {events:?}");
-        }
-        let snapshot = peer.transcript();
-        assert_eq!(snapshot.len(), 1, "the cached row is what the rebuild reads");
-        assert_eq!(snapshot[0].content, "hello");
-
-        // The same Clear also paints the item stream (clients render from items
-        // now), so a peer chat is not blank.
+        // The open paints the item stream: exactly one Reset, the cached row,
+        // and one Window cursor.
         let events = listener.events.lock().clone();
-        assert!(events.iter().any(|e| e == "item Reset"), "{events:?}");
+        assert_eq!(
+            events.iter().filter(|e| e.as_str() == "item Reset").count(),
+            1,
+            "exactly one Reset: {events:?}"
+        );
         assert!(
             events.iter().any(|e| e.starts_with("item Upsert msg1 kind=Agent")),
             "{events:?}"
@@ -2805,6 +2688,9 @@ mod tests {
             1,
             "{events:?}"
         );
+        let snapshot = peer.transcript();
+        assert_eq!(snapshot.len(), 1, "the cached row is what the rebuild reads");
+        assert_eq!(snapshot[0].content, "hello");
     }
 
     #[test]
@@ -2887,9 +2773,9 @@ mod tests {
         peer.open("s-empty".to_string());
         let events = listener.events.lock();
         assert_eq!(
-            events.iter().filter(|e| e.as_str() == "transcript Clear").count(),
+            events.iter().filter(|e| e.as_str() == "item Reset").count(),
             1,
-            "an empty session still emits the Clear: {events:?}"
+            "an empty session still emits the Reset: {events:?}"
         );
     }
 
@@ -3113,7 +2999,7 @@ mod tests {
         // Inactive: the bubble accumulates, but no chat events forward.
         assert_eq!(peer.transcript().len(), 1);
         assert_eq!(peer.transcript()[0].content, "hello");
-        assert!(!listener.events.lock().iter().any(|e| e.starts_with("stream ")));
+        assert!(!listener.events.lock().iter().any(|e| e.starts_with("item ")));
 
         active.store(true, Ordering::SeqCst);
         peer.dispatch(SessionNotification::new(
@@ -3124,7 +3010,7 @@ mod tests {
             ),
         ));
         let events = listener.events.lock();
-        assert!(events.iter().any(|e| e.contains("AgentChunk")));
+        assert!(events.iter().any(|e| e.starts_with("item ")), "{events:?}");
     }
 
     #[test]
@@ -3263,8 +3149,11 @@ mod tests {
                     .raw_input(serde_json::json!({"command": "ls"})),
             ),
         ));
-        let events = listener.events.lock();
-        assert!(events.iter().any(|e| e.contains("ToolCall") && e.contains("Plain") && e.contains("ls")));
+        // A plain call becomes a Tool item whose detail carries the raw input.
+        let items = peer.items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, ItemKind::Tool);
+        assert!(items[0].detail.contains("ls"), "{:?}", items[0].detail);
     }
 
     #[test]
@@ -3291,7 +3180,6 @@ mod tests {
 
         let below = store.accumulate_text("agent", "!", "m5", true);
         assert!(below.item.is_none(), "an update below the window is suppressed");
-        assert!(below.legacy.is_some(), "the legacy event still flows");
     }
 
     // -- routing --------------------------------------------------------------
@@ -3388,8 +3276,8 @@ mod tests {
 
         let events = listener.events.lock();
         assert!(
-            events.iter().any(|e| e == "stream RunEnded"),
-            "expected RunEnded to be emitted, got: {events:?}"
+            events.iter().any(|e| e.starts_with("run_ended")),
+            "expected run-ended to be emitted, got: {events:?}"
         );
         // The peer's run bookkeeping is cleared too.
         assert!(peer.inner.lock().active_run.is_none());

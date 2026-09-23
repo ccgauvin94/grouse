@@ -91,8 +91,10 @@ roam.rs        the peer registry: RoamPeer { label, client, sessions },
 
 ## Event fan-out rules (who emits what)
 
-- Stream chunks → TranscriptStore emits `CoreListener::on_stream(...)`; bubble
-  structure changes also emit `on_transcript(...)`.
+- Transcript content → TranscriptStore emits `CoreListener::on_item(...)`
+  (`Upsert` / `AppendText` / `AppendOutput` / `Remove` / `Reset` / `Window`).
+  Usage and turn end are the two non-item families: `on_usage` /
+  `on_run_ended`.
 - `session/list` replies → `on_sessions(Vec<SessionSummary>)` (spine).
 - `session_info_update` → `on_session_touched` (spine) AND the resync cycle
   (debounce 1.5s → probe `_goose/unstable/session/info` → in-place

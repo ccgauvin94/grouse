@@ -657,13 +657,13 @@ internal interface UniffiCallbackInterfaceCoreListenerMethod1 : com.sun.jna.Call
     fun callback(`uniffiHandle`: Long,`sessions`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCoreListenerMethod2 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`op`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCoreListenerMethod3 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`used`: Long,`size`: Long,`cost`: Double,`currency`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCoreListenerMethod4 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`op`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`stopReason`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCoreListenerMethod5 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`options`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
@@ -749,15 +749,15 @@ internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod17 : com.s
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod18 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`method`: RustBuffer.ByValue,`message`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "onStatus", "onSessions", "onTranscript", "onStream", "onItem", "onConfig", "onPermissionRequest", "onSessionTouched", "onProjects", "onRoamPeerStatus", "onRoamSessions", "onPeerNewSession", "onActiveRun", "onCommands")
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onStatus", "onSessions", "onItem", "onUsage", "onRunEnded", "onConfig", "onPermissionRequest", "onSessionTouched", "onProjects", "onRoamPeerStatus", "onRoamSessions", "onPeerNewSession", "onActiveRun", "onCommands")
 internal open class UniffiVTableCallbackInterfaceCoreListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
     @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
     @JvmField internal var `onStatus`: UniffiCallbackInterfaceCoreListenerMethod0? = null,
     @JvmField internal var `onSessions`: UniffiCallbackInterfaceCoreListenerMethod1? = null,
-    @JvmField internal var `onTranscript`: UniffiCallbackInterfaceCoreListenerMethod2? = null,
-    @JvmField internal var `onStream`: UniffiCallbackInterfaceCoreListenerMethod3? = null,
-    @JvmField internal var `onItem`: UniffiCallbackInterfaceCoreListenerMethod4? = null,
+    @JvmField internal var `onItem`: UniffiCallbackInterfaceCoreListenerMethod2? = null,
+    @JvmField internal var `onUsage`: UniffiCallbackInterfaceCoreListenerMethod3? = null,
+    @JvmField internal var `onRunEnded`: UniffiCallbackInterfaceCoreListenerMethod4? = null,
     @JvmField internal var `onConfig`: UniffiCallbackInterfaceCoreListenerMethod5? = null,
     @JvmField internal var `onPermissionRequest`: UniffiCallbackInterfaceCoreListenerMethod6? = null,
     @JvmField internal var `onSessionTouched`: UniffiCallbackInterfaceCoreListenerMethod7? = null,
@@ -773,9 +773,9 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
         `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `onStatus`: UniffiCallbackInterfaceCoreListenerMethod0? = null,
         `onSessions`: UniffiCallbackInterfaceCoreListenerMethod1? = null,
-        `onTranscript`: UniffiCallbackInterfaceCoreListenerMethod2? = null,
-        `onStream`: UniffiCallbackInterfaceCoreListenerMethod3? = null,
-        `onItem`: UniffiCallbackInterfaceCoreListenerMethod4? = null,
+        `onItem`: UniffiCallbackInterfaceCoreListenerMethod2? = null,
+        `onUsage`: UniffiCallbackInterfaceCoreListenerMethod3? = null,
+        `onRunEnded`: UniffiCallbackInterfaceCoreListenerMethod4? = null,
         `onConfig`: UniffiCallbackInterfaceCoreListenerMethod5? = null,
         `onPermissionRequest`: UniffiCallbackInterfaceCoreListenerMethod6? = null,
         `onSessionTouched`: UniffiCallbackInterfaceCoreListenerMethod7? = null,
@@ -785,16 +785,16 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
         `onPeerNewSession`: UniffiCallbackInterfaceCoreListenerMethod11? = null,
         `onActiveRun`: UniffiCallbackInterfaceCoreListenerMethod12? = null,
         `onCommands`: UniffiCallbackInterfaceCoreListenerMethod13? = null,
-    ): UniffiVTableCallbackInterfaceCoreListener(`uniffiFree`,`uniffiClone`,`onStatus`,`onSessions`,`onTranscript`,`onStream`,`onItem`,`onConfig`,`onPermissionRequest`,`onSessionTouched`,`onProjects`,`onRoamPeerStatus`,`onRoamSessions`,`onPeerNewSession`,`onActiveRun`,`onCommands`,), Structure.ByValue
+    ): UniffiVTableCallbackInterfaceCoreListener(`uniffiFree`,`uniffiClone`,`onStatus`,`onSessions`,`onItem`,`onUsage`,`onRunEnded`,`onConfig`,`onPermissionRequest`,`onSessionTouched`,`onProjects`,`onRoamPeerStatus`,`onRoamSessions`,`onPeerNewSession`,`onActiveRun`,`onCommands`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceCoreListener) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onStatus` = other.`onStatus`
         `onSessions` = other.`onSessions`
-        `onTranscript` = other.`onTranscript`
-        `onStream` = other.`onStream`
         `onItem` = other.`onItem`
+        `onUsage` = other.`onUsage`
+        `onRunEnded` = other.`onRunEnded`
         `onConfig` = other.`onConfig`
         `onPermissionRequest` = other.`onPermissionRequest`
         `onSessionTouched` = other.`onSessionTouched`
@@ -1049,11 +1049,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_corelistener_on_sessions(
     ): Int
-    external fun uniffi_grouse_core_checksum_method_corelistener_on_transcript(
-    ): Int
-    external fun uniffi_grouse_core_checksum_method_corelistener_on_stream(
-    ): Int
     external fun uniffi_grouse_core_checksum_method_corelistener_on_item(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_corelistener_on_usage(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_corelistener_on_run_ended(
     ): Int
     external fun uniffi_grouse_core_checksum_method_corelistener_on_config(
     ): Int
@@ -1623,13 +1623,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_grouse_core_checksum_method_corelistener_on_sessions() != 13238) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_transcript() != 27010) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_item() != 1090) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_stream() != 33084) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_usage() != 56483) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_item() != 31949) {
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_run_ended() != 44189) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_corelistener_on_config() != 15290) {
@@ -5617,256 +5617,6 @@ public object FfiConverterTypePushKind: FfiConverterRustBuffer<PushKind> {
 
 
 /**
- * The flat stream event `CoreListener::on_stream` carries (CONTRACT §3.4).
- */
-sealed class StreamEvent {
-    
-    data class AgentChunk(
-        val `text`: kotlin.String, 
-        val `messageId`: kotlin.String) : StreamEvent()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class UserChunk(
-        val `text`: kotlin.String, 
-        val `messageId`: kotlin.String) : StreamEvent()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class ThoughtChunk(
-        val `text`: kotlin.String) : StreamEvent()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class ToolCall(
-        val `title`: kotlin.String, 
-        val `detail`: kotlin.String, 
-        val `toolCallId`: kotlin.String, 
-        val `kind`: uniffi.grouse_core.ToolCallKind) : StreamEvent()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class ToolCallUpdate(
-        val `id`: kotlin.String, 
-        val `status`: kotlin.String, 
-        val `output`: kotlin.String, 
-        val `live`: kotlin.Boolean) : StreamEvent()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class Usage(
-        val `used`: kotlin.Long, 
-        val `size`: kotlin.Long, 
-        val `cost`: kotlin.Double, 
-        val `currency`: kotlin.String) : StreamEvent()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class RunEnded(
-        val `stopReason`: kotlin.String) : StreamEvent()
-        
-    {
-        
-
-        companion object
-    }
-    
-
-    
-
-    
-    
-
-
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeStreamEvent : FfiConverterRustBuffer<StreamEvent>{
-    override fun read(buf: ByteBuffer): StreamEvent {
-        return when(buf.getInt()) {
-            1 -> StreamEvent.AgentChunk(
-                FfiConverterString.read(buf),
-                FfiConverterString.read(buf),
-                )
-            2 -> StreamEvent.UserChunk(
-                FfiConverterString.read(buf),
-                FfiConverterString.read(buf),
-                )
-            3 -> StreamEvent.ThoughtChunk(
-                FfiConverterString.read(buf),
-                )
-            4 -> StreamEvent.ToolCall(
-                FfiConverterString.read(buf),
-                FfiConverterString.read(buf),
-                FfiConverterString.read(buf),
-                FfiConverterTypeToolCallKind.read(buf),
-                )
-            5 -> StreamEvent.ToolCallUpdate(
-                FfiConverterString.read(buf),
-                FfiConverterString.read(buf),
-                FfiConverterString.read(buf),
-                FfiConverterBoolean.read(buf),
-                )
-            6 -> StreamEvent.Usage(
-                FfiConverterLong.read(buf),
-                FfiConverterLong.read(buf),
-                FfiConverterDouble.read(buf),
-                FfiConverterString.read(buf),
-                )
-            7 -> StreamEvent.RunEnded(
-                FfiConverterString.read(buf),
-                )
-            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
-        }
-    }
-
-    override fun allocationSize(value: StreamEvent): ULong = when(value) {
-        is StreamEvent.AgentChunk -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.`text`)
-                + FfiConverterString.allocationSize(value.`messageId`)
-            )
-        }
-        is StreamEvent.UserChunk -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.`text`)
-                + FfiConverterString.allocationSize(value.`messageId`)
-            )
-        }
-        is StreamEvent.ThoughtChunk -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.`text`)
-            )
-        }
-        is StreamEvent.ToolCall -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.`title`)
-                + FfiConverterString.allocationSize(value.`detail`)
-                + FfiConverterString.allocationSize(value.`toolCallId`)
-                + FfiConverterTypeToolCallKind.allocationSize(value.`kind`)
-            )
-        }
-        is StreamEvent.ToolCallUpdate -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.`id`)
-                + FfiConverterString.allocationSize(value.`status`)
-                + FfiConverterString.allocationSize(value.`output`)
-                + FfiConverterBoolean.allocationSize(value.`live`)
-            )
-        }
-        is StreamEvent.Usage -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterLong.allocationSize(value.`used`)
-                + FfiConverterLong.allocationSize(value.`size`)
-                + FfiConverterDouble.allocationSize(value.`cost`)
-                + FfiConverterString.allocationSize(value.`currency`)
-            )
-        }
-        is StreamEvent.RunEnded -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterString.allocationSize(value.`stopReason`)
-            )
-        }
-    }
-
-    override fun write(value: StreamEvent, buf: ByteBuffer) {
-        when(value) {
-            is StreamEvent.AgentChunk -> {
-                buf.putInt(1)
-                FfiConverterString.write(value.`text`, buf)
-                FfiConverterString.write(value.`messageId`, buf)
-                Unit
-            }
-            is StreamEvent.UserChunk -> {
-                buf.putInt(2)
-                FfiConverterString.write(value.`text`, buf)
-                FfiConverterString.write(value.`messageId`, buf)
-                Unit
-            }
-            is StreamEvent.ThoughtChunk -> {
-                buf.putInt(3)
-                FfiConverterString.write(value.`text`, buf)
-                Unit
-            }
-            is StreamEvent.ToolCall -> {
-                buf.putInt(4)
-                FfiConverterString.write(value.`title`, buf)
-                FfiConverterString.write(value.`detail`, buf)
-                FfiConverterString.write(value.`toolCallId`, buf)
-                FfiConverterTypeToolCallKind.write(value.`kind`, buf)
-                Unit
-            }
-            is StreamEvent.ToolCallUpdate -> {
-                buf.putInt(5)
-                FfiConverterString.write(value.`id`, buf)
-                FfiConverterString.write(value.`status`, buf)
-                FfiConverterString.write(value.`output`, buf)
-                FfiConverterBoolean.write(value.`live`, buf)
-                Unit
-            }
-            is StreamEvent.Usage -> {
-                buf.putInt(6)
-                FfiConverterLong.write(value.`used`, buf)
-                FfiConverterLong.write(value.`size`, buf)
-                FfiConverterDouble.write(value.`cost`, buf)
-                FfiConverterString.write(value.`currency`, buf)
-                Unit
-            }
-            is StreamEvent.RunEnded -> {
-                buf.putInt(7)
-                FfiConverterString.write(value.`stopReason`, buf)
-                Unit
-            }
-        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
-    }
-}
-
-
-
-
-
-/**
  * Collapses the desktop's toolgroup/chart/mcpapp split (CONTRACT §3.4).
  */
 sealed class ToolCallKind {
@@ -5968,109 +5718,6 @@ public object FfiConverterTypeToolCallKind : FfiConverterRustBuffer<ToolCallKind
                 FfiConverterString.write(value.`uri`, buf)
                 FfiConverterString.write(value.`extension`, buf)
                 FfiConverterString.write(value.`input`, buf)
-                Unit
-            }
-        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
-    }
-}
-
-
-
-
-
-/**
- * Transcript mutation carried by `CoreListener::on_transcript` (CONTRACT §3.2).
- *
- * **Legacy.** Superseded by [`TranscriptOp`] / `CoreListener::on_item`; kept
- * until every client has moved (docs/TRANSCRIPT_MODEL.md, migration phase 4).
- */
-sealed class TranscriptEvent {
-    
-    data class Append(
-        val `message`: uniffi.grouse_core.Message) : TranscriptEvent()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class Update(
-        val `message`: uniffi.grouse_core.Message) : TranscriptEvent()
-        
-    {
-        
-
-        companion object
-    }
-    
-    object Clear : TranscriptEvent()
-    
-    
-
-    
-
-    
-    
-
-
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeTranscriptEvent : FfiConverterRustBuffer<TranscriptEvent>{
-    override fun read(buf: ByteBuffer): TranscriptEvent {
-        return when(buf.getInt()) {
-            1 -> TranscriptEvent.Append(
-                FfiConverterTypeMessage.read(buf),
-                )
-            2 -> TranscriptEvent.Update(
-                FfiConverterTypeMessage.read(buf),
-                )
-            3 -> TranscriptEvent.Clear
-            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
-        }
-    }
-
-    override fun allocationSize(value: TranscriptEvent): ULong = when(value) {
-        is TranscriptEvent.Append -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeMessage.allocationSize(value.`message`)
-            )
-        }
-        is TranscriptEvent.Update -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeMessage.allocationSize(value.`message`)
-            )
-        }
-        is TranscriptEvent.Clear -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-            )
-        }
-    }
-
-    override fun write(value: TranscriptEvent, buf: ByteBuffer) {
-        when(value) {
-            is TranscriptEvent.Append -> {
-                buf.putInt(1)
-                FfiConverterTypeMessage.write(value.`message`, buf)
-                Unit
-            }
-            is TranscriptEvent.Update -> {
-                buf.putInt(2)
-                FfiConverterTypeMessage.write(value.`message`, buf)
-                Unit
-            }
-            is TranscriptEvent.Clear -> {
-                buf.putInt(3)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -6308,16 +5955,20 @@ public interface CoreListener {
     
     fun `onSessions`(`sessions`: List<SessionSummary>)
     
-    fun `onTranscript`(`event`: TranscriptEvent)
-    
-    fun `onStream`(`event`: StreamEvent)
-    
     /**
-     * The item stream (docs/TRANSCRIPT_MODEL.md). Replaces `on_transcript` +
-     * the tool half of `on_stream`; both are still emitted alongside it until
-     * every client has moved.
+     * The item stream (docs/TRANSCRIPT_MODEL.md): every transcript row.
      */
     fun `onItem`(`op`: TranscriptOp)
+    
+    /**
+     * Context-window usage + cost (`used`/`size` in tokens).
+     */
+    fun `onUsage`(`used`: kotlin.Long, `size`: kotlin.Long, `cost`: kotlin.Double, `currency`: kotlin.String)
+    
+    /**
+     * A turn finished (`stop_reason` is the server's).
+     */
+    fun `onRunEnded`(`stopReason`: kotlin.String)
     
     fun `onConfig`(`options`: List<ConfigOption>)
     
@@ -6385,36 +6036,39 @@ internal object uniffiCallbackInterfaceCoreListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onTranscript`: UniffiCallbackInterfaceCoreListenerMethod2 {
-        override fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`onTranscript`(
-                    FfiConverterTypeTranscriptEvent.lift(`event`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-    internal object `onStream`: UniffiCallbackInterfaceCoreListenerMethod3 {
-        override fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`onStream`(
-                    FfiConverterTypeStreamEvent.lift(`event`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-    internal object `onItem`: UniffiCallbackInterfaceCoreListenerMethod4 {
+    internal object `onItem`: UniffiCallbackInterfaceCoreListenerMethod2 {
         override fun callback(`uniffiHandle`: Long,`op`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
                 uniffiObj.`onItem`(
                     FfiConverterTypeTranscriptOp.lift(`op`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+    internal object `onUsage`: UniffiCallbackInterfaceCoreListenerMethod3 {
+        override fun callback(`uniffiHandle`: Long,`used`: Long,`size`: Long,`cost`: Double,`currency`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onUsage`(
+                    FfiConverterLong.lift(`used`),
+                    FfiConverterLong.lift(`size`),
+                    FfiConverterDouble.lift(`cost`),
+                    FfiConverterString.lift(`currency`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+    internal object `onRunEnded`: UniffiCallbackInterfaceCoreListenerMethod4 {
+        override fun callback(`uniffiHandle`: Long,`stopReason`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onRunEnded`(
+                    FfiConverterString.lift(`stopReason`),
                 )
             }
             val writeReturn = { _: Unit -> Unit }
@@ -6553,9 +6207,9 @@ internal object uniffiCallbackInterfaceCoreListener {
         uniffiClone,
         `onStatus`,
         `onSessions`,
-        `onTranscript`,
-        `onStream`,
         `onItem`,
+        `onUsage`,
+        `onRunEnded`,
         `onConfig`,
         `onPermissionRequest`,
         `onSessionTouched`,

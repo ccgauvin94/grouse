@@ -321,9 +321,9 @@ public:
     // the ONLY route from the wire into the Manager/models.
     void coreOnStatus(const QString &json);
     void coreOnSessions(const QString &json);
-    void coreOnTranscript(const QString &json);
-    void coreOnStream(const QString &json);
     void coreOnItem(const QString &json);
+    void coreOnUsage(qint64 used, qint64 size, double cost, const QString &currency);
+    void coreOnRunEnded(const QString &stopReason);
     void coreOnConfig(const QString &json);
     void coreOnPermission(const QString &json);
     void coreOnSessionTouched(const QString &sid, const QString &title, const QString &u);

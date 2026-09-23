@@ -1575,13 +1575,7 @@ void Manager::coreOnSessions(const QString &json)
     onSessions(sessions);
 }
 
-void Manager::coreOnTranscript(const QString &json)
-{
-    // Superseded by on_item (docs/TRANSCRIPT_MODEL.md phase 2): the core still
-    // emits this legacy channel, but every transcript row now comes from the
-    // item stream, so there is nothing to reconcile here.
-    Q_UNUSED(json);
-}
+
 
 
 void Manager::coreOnConfig(const QString &json)
@@ -2113,28 +2107,26 @@ void Manager::coreOnItem(const QString &json)
 }
 
 // ---------------------------------------------------------------------------
-// Legacy stream (on_stream): only the two families that are NOT transcript
-// items — usage accounting and turn end. All transcript content now arrives on
-// on_item (docs/TRANSCRIPT_MODEL.md), so the chunk/tool branches are gone.
+// The two non-item families: context-window usage and turn end. Every
+// transcript row arrives on on_item (docs/TRANSCRIPT_MODEL.md).
 // ---------------------------------------------------------------------------
 
-void Manager::coreOnStream(const QString &json)
+void Manager::coreOnUsage(qint64 used, qint64 size, double cost, const QString &currency)
 {
-    const QJsonObject root = parseObj(json);
-    if (root.contains(QStringLiteral("Usage"))) {
-        const QJsonObject o = root.value("Usage").toObject();
-        onUsage(int(o.value("used").toDouble()), int(o.value("size").toDouble()),
-                o.value("cost").toDouble(), o.value("currency").toString());
-    } else if (root.contains(QStringLiteral("RunEnded"))) {
-        m_prompting = false;
-        m_promptingSessionId.clear();
-        m_compacting = false;
-        setActiveRunId(QString());
-        emit promptingChanged();
-        emit compactingChanged();
-        flushQueue();
-        notifyTurnFinished();
-    }
+    onUsage(int(used), int(size), cost, currency);
+}
+
+void Manager::coreOnRunEnded(const QString &stopReason)
+{
+    Q_UNUSED(stopReason);
+    m_prompting = false;
+    m_promptingSessionId.clear();
+    m_compacting = false;
+    setActiveRunId(QString());
+    emit promptingChanged();
+    emit compactingChanged();
+    flushQueue();
+    notifyTurnFinished();
 }
 
 // ---------------------------------------------------------------------------

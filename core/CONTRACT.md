@@ -98,9 +98,9 @@ defaulting to real verification; roam byte stream). The UI supplies only
 pub trait CoreListener {
     fn on_status(&self, status: ConnectionStatus);
     fn on_sessions(&self, sessions: Vec<SessionSummary>);
-    fn on_transcript(&self, event: TranscriptEvent);       // append / update / clear
-    fn on_stream(&self, event: StreamEvent);               // chunk, tool_call, tool_update, usage
     fn on_item(&self, op: TranscriptOp);                   // the rich item stream (§3.5)
+    fn on_usage(&self, used: i64, size: i64, cost: f64, currency: String); // context window + cost
+    fn on_run_ended(&self, stop_reason: String);           // a turn finished
     fn on_config(&self, options: Vec<ConfigOption>);
     fn on_permission_request(&self, request: PermissionRequest);
     fn on_session_touched(&self, session_id: String, title: String, updated_at: String);
@@ -135,31 +135,27 @@ pub trait CoreListener {
 - `load_older(count: u32)` — an **intent**: extend the window backward by
   `count` items, cache-first; outcomes arrive as `on_item` ops (§3.5).
 
-### 3.4 Stream event enum (what `on_stream` carries)
+### 3.4 (removed) the flat stream enum
 
-`AgentChunk(text, message_id) · UserChunk(text, message_id) · ThoughtChunk(text) ·
-ToolCall { title, detail, tool_call_id, kind } · ToolCallUpdate { id, status, output, live } ·
-Usage { used, size, cost, currency } · RunEnded(stop_reason)`
+The old `on_stream` / `StreamEvent` channel is gone (docs/TRANSCRIPT_MODEL.md
+phase 4). Every transcript row — text, tool call, tool update, chart, MCP app —
+arrives on `on_item` (§3.5); the two things that are not transcript rows have
+their own methods: `on_usage` and `on_run_ended`.
 
-`ToolCall.kind` collapses the desktop's toolgroup/chart/mcpapp split into:
-`Plain | Chart(spec) | McpApp { app_key, uri, extension, input }`.
+`ToolCallKind` survives as the wire-derived kind (`Plain | Chart(spec) |
+McpApp { app_key, uri, extension, input }`) that the core maps into an `Item`.
 
 **Late MCP-App hydration.** goose attaches `_meta.goose.mcpApp` to the COMPLETING
 `tool_call_update`, not the `tool_call` frame (the tool's `ui://` resource only
-resolves after the call ran). When that happens the core promotes the transcript
-bubble and RE-ISSUES `ToolCall{ tool_call_id, kind = McpApp }` for the same id,
-followed by the matching `on_transcript` Update (or Update+Append when the row
-was inside a collapsed toolgroup). Clients must treat a re-issued ToolCall as a
-CONVERT-IN-PLACE instruction (match on `tool_call_id`; desktop rewrites the chip
-row, Android rebuilds the bubble from the re-stashed kind) — appending blindly
-duplicates the row. A second promotion of the same id is a core-side no-op.
+resolves after the call ran). The core then emits an `Upsert` carrying
+`kind = McpApp` for the SAME `tool_call_id`, which clients apply as an in-place
+update (match on `tool_call_id`) — appending blindly duplicates the row. A
+second promotion of the same id is a core-side no-op.
 
 ### 3.5 Rich items (the transcript model, phase 1)
 
-`docs/TRANSCRIPT_MODEL.md` is the design. Phase 1 lands the core surface
-**alongside** the legacy `on_transcript` / `on_stream` / `Message`: both are
-emitted from the same store, so today's clients keep working while the item
-store is adopted platform by platform.
+`docs/TRANSCRIPT_MODEL.md` is the design. `on_item` is the ONLY transcript
+channel; the legacy `on_transcript` / `on_stream` surface is deleted.
 
 ```rust
 pub enum ItemKind { User, Agent, Thought, Tool, ToolGroup, Chart, McpApp, Error }

@@ -31,8 +31,12 @@ normative surface.
   Upserts once, then deltas; a tool carries its kind; a replay that touches a
   row below the painted window is not emitted (the client does not hold it).
 
-Still to come: deleting `on_transcript`/`on_stream`/the flat `Message`/the
-provisional-merge machinery.
+**Phase 4 (in progress).** The legacy channels are deleted: `on_transcript`,
+`on_stream`, `TranscriptEvent` and `StreamEvent` are gone, and usage /
+run-ended — the two things that are not transcript rows — have their own
+`on_usage` / `on_run_ended` listener methods. Still to come: the flat `Message`
+projection + `transcript()` getter, and the provisional-merge machinery
+(removed once replay merges by id in place).
 
 ## Why we want to replace the current model
 

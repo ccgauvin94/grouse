@@ -39,7 +39,7 @@ use crate::unstable::GrouseUnstable;
 use crate::{
     ConfigOption, ConnectionStatus, Core, CoreListener, GrouseUnstableListener,
     PermissionOutcome, PermissionRequest, ProjectSummary, Prompt, SendExpect, ServerConfig,
-    SessionSummary, StreamEvent, TranscriptEvent, TranscriptOp,
+    SessionSummary, TranscriptOp,
 };
 
 /// malloc-allocated UTF-8 copy of `s`; NULL when the input contains an interior
@@ -141,13 +141,13 @@ pub struct GrouseCoreListener {
     pub on_status: Option<extern "C" fn(*mut c_void, *const c_char)>,
     /// `sessions` serialized as a JSON array of `SessionSummary`.
     pub on_sessions: Option<extern "C" fn(*mut c_void, *const c_char)>,
-    /// `event` serialized as JSON (`TranscriptEvent`).
-    pub on_transcript: Option<extern "C" fn(*mut c_void, *const c_char)>,
-    /// `event` serialized as JSON (`StreamEvent`).
-    pub on_stream: Option<extern "C" fn(*mut c_void, *const c_char)>,
     /// `op` serialized as JSON (`TranscriptOp`) — the rich item stream
     /// (docs/TRANSCRIPT_MODEL.md).
     pub on_item: Option<extern "C" fn(*mut c_void, *const c_char)>,
+    /// Context-window usage + cost: `(used, size, cost, currency)`.
+    pub on_usage: Option<extern "C" fn(*mut c_void, i64, i64, f64, *const c_char)>,
+    /// A turn finished; the C string is the server's stop reason.
+    pub on_run_ended: Option<extern "C" fn(*mut c_void, *const c_char)>,
     /// `options` serialized as a JSON array of `ConfigOption`.
     pub on_config: Option<extern "C" fn(*mut c_void, *const c_char)>,
     /// `request` serialized as JSON (`PermissionRequest`).
@@ -336,31 +336,33 @@ impl CoreListener for CoreCallbackForwarder {
             grouse_string_free(p);
         }
     }
-    fn on_transcript(&self, event: TranscriptEvent) {
-        let p = c_json(&event);
-        unsafe {
-            let table = &*self.table;
-            if let Some(f) = table.on_transcript {
-                f(self.user_data, p);
-            }
-            grouse_string_free(p);
-        }
-    }
-    fn on_stream(&self, event: StreamEvent) {
-        let p = c_json(&event);
-        unsafe {
-            let table = &*self.table;
-            if let Some(f) = table.on_stream {
-                f(self.user_data, p);
-            }
-            grouse_string_free(p);
-        }
-    }
     fn on_item(&self, op: TranscriptOp) {
         let p = c_json(&op);
         unsafe {
             let table = &*self.table;
             if let Some(f) = table.on_item {
+                f(self.user_data, p);
+            }
+            grouse_string_free(p);
+        }
+    }
+    fn on_usage(&self, used: i64, size: i64, cost: f64, currency: String) {
+        unsafe {
+            let table = &*self.table;
+            if let Some(f) = table.on_usage {
+                let cs = c_str(&currency);
+                if !cs.is_null() {
+                    f(self.user_data, used, size, cost, cs);
+                    grouse_string_free(cs);
+                }
+            }
+        }
+    }
+    fn on_run_ended(&self, stop_reason: String) {
+        let p = c_str(&stop_reason);
+        unsafe {
+            let table = &*self.table;
+            if let Some(f) = table.on_run_ended {
                 f(self.user_data, p);
             }
             grouse_string_free(p);

@@ -19,8 +19,7 @@ use async_tungstenite::tungstenite::Message as WsMessage;
 use futures::stream::StreamExt;
 use grouse_core::{
     ConfigOption, ConnectionStatus, Core, CoreListener, PermissionRequest, ProjectSummary, Prompt,
-    ConfigChoice, PromptBlock, SendExpect, SessionSummary, StreamEvent, TranscriptEvent,
-    TranscriptOp,
+    ConfigChoice, PromptBlock, SendExpect, SessionSummary, TranscriptOp,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -37,9 +36,9 @@ static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 enum Ev {
     Status(ConnectionStatus),
     Sessions(Vec<SessionSummary>),
-    Transcript(TranscriptEvent),
-    Stream(StreamEvent),
     Item(TranscriptOp),
+    Usage(i64, i64, f64, String),
+    RunEnded(String),
     Config(Vec<ConfigOption>),
     Permission(PermissionRequest),
     Touched(String, String, String),
@@ -68,14 +67,14 @@ impl CoreListener for RecordingListener {
     fn on_sessions(&self, sessions: Vec<SessionSummary>) {
         let _ = self.tx.send(Ev::Sessions(sessions));
     }
-    fn on_transcript(&self, event: TranscriptEvent) {
-        let _ = self.tx.send(Ev::Transcript(event));
-    }
-    fn on_stream(&self, event: StreamEvent) {
-        let _ = self.tx.send(Ev::Stream(event));
-    }
     fn on_item(&self, op: TranscriptOp) {
         let _ = self.tx.send(Ev::Item(op));
+    }
+    fn on_usage(&self, used: i64, size: i64, cost: f64, currency: String) {
+        let _ = self.tx.send(Ev::Usage(used, size, cost, currency));
+    }
+    fn on_run_ended(&self, stop_reason: String) {
+        let _ = self.tx.send(Ev::RunEnded(stop_reason));
     }
     fn on_config(&self, options: Vec<ConfigOption>) {
         let _ = self.tx.send(Ev::Config(options));
@@ -715,30 +714,21 @@ fn spine_e2e_connect_prompt_stream() {
 
     let chunk = wait_for(
         &ev_rx,
-        |ev| {
-            matches!(
-                ev,
-                Ev::Stream(StreamEvent::AgentChunk { text, .. }) if text == "hello from fake goose"
-            )
-        },
-        "agent chunk",
+        |ev| matches!(ev, Ev::Item(TranscriptOp::Upsert { item }) if item.id == "m-1"),
+        "agent item",
     );
-    let Ev::Stream(StreamEvent::AgentChunk { message_id, .. }) = chunk else {
+    let Ev::Item(TranscriptOp::Upsert { item }) = chunk else {
         unreachable!()
     };
-    assert_eq!(message_id, "m-1");
+    assert_eq!(item.id, "m-1");
+    assert!(item.text.contains("hello from fake goose"), "{:?}", item.text);
 
     let ended = wait_for(
         &ev_rx,
-        |ev| {
-            matches!(
-                ev,
-                Ev::Stream(StreamEvent::RunEnded { stop_reason }) if stop_reason == "end_turn"
-            )
-        },
+        |ev| matches!(ev, Ev::RunEnded(r) if r == "end_turn"),
         "RunEnded",
     );
-    let Ev::Stream(StreamEvent::RunEnded { stop_reason }) = ended else {
+    let Ev::RunEnded(stop_reason) = ended else {
         unreachable!()
     };
     assert_eq!(stop_reason, "end_turn");
@@ -825,7 +815,7 @@ fn prompt_does_not_resync_its_own_turn() {
     );
     wait_for(
         &ev_rx,
-        |ev| matches!(ev, Ev::Stream(StreamEvent::RunEnded { .. })),
+        |ev| matches!(ev, Ev::RunEnded(_)),
         "RunEnded",
     );
 

@@ -34,9 +34,9 @@ impl CoreListener for L {
         // the touch arrived, and for which chat by title.
         println!("-- touched: title={:?} updatedAt={}", title, updated_at);
     }
-    fn on_transcript(&self, _e: grouse_core::TranscriptEvent) {}
-    fn on_stream(&self, _e: grouse_core::StreamEvent) {}
     fn on_item(&self, _op: grouse_core::TranscriptOp) {}
+    fn on_usage(&self, _u: i64, _s: i64, _c: f64, _cur: String) {}
+    fn on_run_ended(&self, _r: String) {}
     fn on_config(&self, _o: Vec<grouse_core::ConfigOption>) {}
     fn on_permission_request(&self, _r: grouse_core::PermissionRequest) {}
     fn on_projects(&self, _p: Vec<grouse_core::ProjectSummary>) {}

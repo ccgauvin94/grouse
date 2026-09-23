@@ -40,8 +40,6 @@ import uniffi.grouse_core.PromptBlock
 import uniffi.grouse_core.SendExpect
 import uniffi.grouse_core.ServerConfig
 import uniffi.grouse_core.SessionSummary
-import uniffi.grouse_core.StreamEvent
-import uniffi.grouse_core.TranscriptEvent
 import uniffi.grouse_core.TranscriptOp
 import uniffi.grouse_roam_core.cardFingerprint
 import uniffi.grouse_roam_core.identityGenerate
@@ -152,11 +150,13 @@ class ConnectionManager private constructor(context: Context) {
     private val core = Core(object : CoreListener {
         override fun onStatus(status: ConnectionStatus) { main.post { onCoreStatus(status) } }
         override fun onSessions(sessions: List<SessionSummary>) { main.post { onCoreSessions(sessions) } }
-        override fun onTranscript(event: TranscriptEvent) { main.post { onCoreTranscript(event) } }
-        override fun onStream(event: StreamEvent) { main.post { onCoreStream(event) } }
         // The rich item stream (docs/TRANSCRIPT_MODEL.md): the only transcript
-        // channel now. on_transcript/on_stream remain only for usage + run-ended.
+        // channel.
         override fun onItem(op: TranscriptOp) { main.post { onCoreItem(op) } }
+        override fun onUsage(used: Long, size: Long, cost: Double, currency: String) {
+            main.post { usage.value = AcpEvent.Usage(used.toInt(), size.toInt(), cost, currency) }
+        }
+        override fun onRunEnded(stopReason: String) { main.post { onRunEnded(stopReason) } }
         override fun onConfig(options: List<CoreConfigOption>) { main.post { onCoreConfig(options) } }
         override fun onPermissionRequest(request: PermissionRequest) { main.post { onCorePermission(request) } }
         override fun onSessionTouched(sessionId: String, title: String, updatedAt: String) {
@@ -1770,13 +1770,6 @@ class ConnectionManager private constructor(context: Context) {
      *  (a fresh cached transcript arrives as Clear + nothing else; a live replay arrives as
      *  Clear + chunks). The app's bubbles are per-message ids allocated here; the core's
      *  message ids correlate Updates to the right bubble. */
-    /** Legacy channel (on_transcript): superseded by on_item (docs/TRANSCRIPT_MODEL.md
-     *  phase 3). The core still emits it, but every transcript row now comes from
-     *  the item stream, so there is nothing to reconcile here. */
-    private fun onCoreTranscript(event: TranscriptEvent) {
-        // no-op
-    }
-
     /** Core item id -> app bubble id (the LazyColumn key). */
     private val coreKeyToAppId = HashMap<String, Long>()
     /** Older items collected during a loadOlder, prepended as one batch on Window. */
@@ -1909,16 +1902,6 @@ class ConnectionManager private constructor(context: Context) {
             .forEach { fetchAppTemplate(it) }
     }
 
-    private fun onCoreStream(event: StreamEvent) {
-        when (event) {
-            is StreamEvent.Usage -> usage.value =
-                AcpEvent.Usage(event.used.toInt(), event.size.toInt(), event.cost, event.currency)
-            is StreamEvent.RunEnded -> onRunEnded(event.stopReason)
-            // Every transcript event (chunks, tool calls, output) arrives on
-            // on_item now; nothing here mirrors it.
-            else -> {}
-        }
-    }
 
 
     private fun onRunEnded(stopReason: String) {
