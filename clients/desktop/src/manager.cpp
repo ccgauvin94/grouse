@@ -1732,10 +1732,22 @@ void Manager::coreOnRoamSessions(const QString &label, const QString &json)
     const QJsonArray arr = parseArr(json);
     for (const auto &el : arr) {
         const QJsonObject o = el.toObject();
-        sessions << QVariantMap{{"sessionId", o.value("id").toString()},
-                                {"title", o.value("title").toString()},
-                                {"updatedAt", o.value("updated_at").toString()},
-                                {"peer", label}};
+        QVariantMap m;
+        m["sessionId"] = o.value("id").toString();
+        m["id"] = o.value("id").toString();
+        m["title"] = o.value("title").toString();
+        m["updatedAt"] = o.value("updated_at").toString();
+        m["lastMessageAt"] = o.value("updated_at").toString();
+        // The roam card shows the snippet, falling back to "N msg" — carry
+        // both. This handler used to drop them, so every roam card read
+        // "0 msg" no matter what the peer's session/list carried.
+        m["snippet"] = o.value("last_message_snippet").toString();
+        m["messageCount"] = o.value("message_count").toVariant();
+        m["projectId"] = projectKey(o.value("project_id").toString());
+        m["hasRecipe"] = o.value("has_recipe").toBool();
+        m["archived"] = o.value("archived").toBool();
+        m["peer"] = label;
+        sessions << m;
     }
     m_roamModel->setPeerSessions(label, sessions);
 }
