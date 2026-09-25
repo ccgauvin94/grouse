@@ -35,8 +35,9 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
   arrive on the listing thread, are marshalled onto the Qt main thread by
   `CoreBridge`, and drive the models.
 - QML → `Mgr` Q_INVOKABLEs → `grouse_*` intent (via `CoreBridge::api()`) → the
-  Rust core → server. Server → core (`on_status`/`on_transcript`/`on_stream`/
-  `on_config`/...) → `CoreBridge` listener → `Manager` `coreOn*` slots → models
+  Rust core → server. Server → core (`on_status`/`on_item`/`on_usage`/
+  `on_run_ended`/`on_config`/...) → `CoreBridge` listener → `Manager` `coreOn*`
+  slots → models
   → QML delegates.
 - Connection lifecycle: `main.cpp` calls `manager.autoConnect()` at startup
   (resumes the last chat when settings exist); `Mgr.connectToServer()` otherwise.
@@ -69,9 +70,16 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
   streams as `AppendText` deltas (rendered plain) and the core's finalizing
   `Upsert` restores the markdown once per message. The core windows the paint
   (newest ~60); `Mgr.loadOlder(n)` asks for older items and `coreOnItem`
-  prepends them. `on_stream` is now only usage + run-ended, and `on_transcript`
-  is a no-op. Never republish a QVariantList to `MessageListModel` per event:
-  use the model's `insertRows`/`dataChanged` (coalesced via `requestMessagesUpdate`).
+  prepends them. Usage and turn-end are the two non-item families (`on_usage` /
+  `on_run_ended`); there is no legacy channel. Never republish a QVariantList to
+  `MessageListModel` per event: use the model's `insertRows`/`dataChanged`
+  (coalesced via `requestMessagesUpdate`).
+- Bubble text is a read-only `TextEdit` (not a `Label`) so it can be selected;
+  left-clicking a reply opens a `Popup` with its generation stats, right-clicking
+  opens a `Menu` (Copy / Select all / Show stats). `onMessageUsage` stamps the
+  `usage` role onto the last agent row — the server's `message_usage` carries no
+  message id — so replayed history has no stats (the core cache does not carry
+  them either).
 - Per-session transcript/tool caches live in `QStandardPaths::CacheLocation`,
   keyed by sessionId. Reconnects use exponential backoff.
 

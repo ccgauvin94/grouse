@@ -691,6 +691,41 @@ Kirigami.Page {
                      : mdel.isMcpApp ? mcpAppChip.implicitHeight
                      : errorBanner.implicitHeight
 
+                // The selectable bubble text under the cursor (user or agent).
+                readonly property var msgEdit: mdel.isUser ? userText : agentText
+
+                // Right-click menu for the bubble text. Copy takes the selection when
+                // there is one, else the whole message.
+                Controls.Menu {
+                    id: msgMenu
+                    Controls.MenuItem {
+                        text: qsTr("Copy")
+                        enabled: mdel.messageText.length > 0
+                        onTriggered: {
+                            const e = mdel.msgEdit
+                            if (e.selectedText.length > 0) {
+                                e.copy()
+                            } else {
+                                e.selectAll()
+                                e.copy()
+                                e.deselect()
+                            }
+                        }
+                    }
+                    Controls.MenuItem {
+                        text: qsTr("Select all")
+                        enabled: mdel.messageText.length > 0
+                        onTriggered: mdel.msgEdit.selectAll()
+                    }
+                    Controls.MenuSeparator { visible: mdel.isAgent }
+                    Controls.MenuItem {
+                        text: qsTr("Show stats")
+                        visible: mdel.isAgent
+                        enabled: mdel.messageUsage.length > 0
+                        onTriggered: statsPopup.open()
+                    }
+                }
+
                 // ---------------- user bubble (right) ----------------
                 Rectangle {
                     id: userBubble
@@ -759,7 +794,10 @@ Kirigami.Page {
                                 }
                             }
                         }
-                        Controls.Label {
+                        // A TextEdit (not a Label) so the text is selectable; right-click
+                        // opens the copy menu.
+                        TextEdit {
+                            id: userText
                             text: mdel.messageHtml || mdel.messageText
                             // PlainText until the row is finalized: with RichText, Qt
                             // re-parses + reshapes the WHOLE accumulated message on every
@@ -767,8 +805,20 @@ Kirigami.Page {
                             // streams and is set once at finalize.
                             textFormat: mdel.messageHtml.length > 0 ? Text.RichText : Text.PlainText
                             width: mdel.userBubbleW - mdel.pad * 2
-                            wrapMode: Text.Wrap
+                            wrapMode: TextEdit.Wrap
+                            readOnly: true
+                            selectByMouse: true
+                            persistentSelection: true
+                            cursorVisible: false
                             color: Kirigami.Theme.highlightedTextColor
+                            selectionColor: Kirigami.Theme.highlightColor
+                            selectedTextColor: Kirigami.Theme.highlightedTextColor
+                            renderType: Text.NativeRendering
+                            onLinkActivated: Qt.openUrlExternally(link)
+                            TapHandler {
+                                acceptedButtons: Qt.RightButton
+                                onTapped: msgMenu.popup()
+                            }
                         }
                     }
                 }
@@ -801,22 +851,55 @@ Kirigami.Page {
                             renderType: Text.NativeRendering
                             color: Kirigami.Theme.disabledTextColor
                         }
-                        Controls.Label {
+                        // Selectable; a plain left-click (a tap, not a drag — a drag
+                        // selects text) reveals this reply's stats, and right-click opens
+                        // the copy menu.
+                        TextEdit {
+                            id: agentText
                             text: mdel.messageHtml || mdel.messageText
                             // PlainText while streaming (see the user bubble note above);
                             // RichText once finalize has rendered the markdown to html.
                             textFormat: mdel.messageHtml.length > 0 ? Text.RichText : Text.PlainText
                             width: mdel.agentBubbleW - mdel.pad * 2
-                            wrapMode: Text.Wrap
-                            onLinkActivated: Qt.openUrlExternally(link)
+                            wrapMode: TextEdit.Wrap
+                            readOnly: true
+                            selectByMouse: true
+                            persistentSelection: true
+                            cursorVisible: false
                             color: Kirigami.Theme.textColor
-                        }
-                        Controls.Label {
-                            visible: mdel.messageUsage.length > 0
-                            text: mdel.messageUsage
-                            color: Kirigami.Theme.disabledTextColor
-                            font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.8))
+                            selectionColor: Kirigami.Theme.highlightColor
+                            selectedTextColor: Kirigami.Theme.highlightedTextColor
                             renderType: Text.NativeRendering
+                            onLinkActivated: Qt.openUrlExternally(link)
+                            TapHandler {
+                                acceptedButtons: Qt.LeftButton
+                                onTapped: {
+                                    statsPopup.x = point.position.x + 8
+                                    statsPopup.y = point.position.y + 8
+                                    statsPopup.open()
+                                }
+                            }
+                            TapHandler {
+                                acceptedButtons: Qt.RightButton
+                                onTapped: msgMenu.popup()
+                            }
+                            // Stats used to sit permanently under the reply. They are
+                            // diagnostics — interesting when asking "why was that slow",
+                            // noise the rest of the time — so they surface on demand
+                            // instead of shifting the conversation as they appear.
+                            Controls.Popup {
+                                id: statsPopup
+                                padding: Kirigami.Units.smallSpacing
+                                closePolicy: Controls.Popup.CloseOnEscape | Controls.Popup.CloseOnPressOutside
+                                Controls.Label {
+                                    text: mdel.messageUsage.length > 0
+                                          ? mdel.messageUsage
+                                          : qsTr("No stats recorded for this message")
+                                    color: Kirigami.Theme.textColor
+                                    font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.85))
+                                    renderType: Text.NativeRendering
+                                }
+                            }
                         }
                     }
                 }

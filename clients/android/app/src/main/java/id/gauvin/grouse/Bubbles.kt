@@ -86,8 +86,11 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.ui.composed
+import androidx.compose.ui.input.pointer.pointerInput
 import android.widget.Toast
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
@@ -397,18 +400,33 @@ private fun Markdownish(text: String) {
     RichText(modifier = Modifier.fillMaxWidth()) { Markdown(text) }
 }
 
-/** Long-press any message to copy its text. */
-@OptIn(ExperimentalFoundationApi::class)
+/** Runs [onTap] on a short tap only; a long press is left to the inner SelectionContainer
+ *  (which selects text). A custom detector rather than `clickable`: `clickable` keeps waiting
+ *  for the up even while an inner selection has started, so a long press would both select and
+ *  fire the tap. This consumes nothing, so the selection gesture is unaffected. */
+private fun Modifier.tapOnly(onTap: () -> Unit): Modifier = composed {
+    val cb = rememberUpdatedState(onTap)
+    pointerInput(Unit) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            val up = waitForUpOrCancellation()
+            if (up != null && up.uptimeMillis - down.uptimeMillis < viewConfiguration.longPressTimeoutMillis) {
+                cb.value()
+            }
+        }
+    }
+}
+
+/** Tap to copy the message text; long-press selects it. Used by USER bubbles, which have no
+ *  generation stats -- an assistant bubble opens a menu instead, because there is something to
+ *  show alongside copy. A menu whose only item is Copy would be strictly worse than copying. */
 @Composable
-/** Long-press to copy. Still used by USER bubbles, which have no generation stats -- an
- *  assistant bubble opens a menu instead, because there is something to show alongside copy.
- *  A menu whose only item is Copy would be strictly worse than copying. */
-private fun Modifier.copyOnLongPress(text: String): Modifier {
+private fun Modifier.copyOnTap(text: String): Modifier {
     val clip = LocalClipboardManager.current
     val ctx = LocalContext.current
-    return combinedClickable(onClick = {}, onLongClick = {
+    return tapOnly {
         clip.setText(AnnotatedString(text)); Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show()
-    })
+    }
 }
 
 @Composable
@@ -420,7 +438,7 @@ private fun UserBubble(m: ChatMessage) {
             shape = GrouseShapes.userBubble,
             modifier = Modifier.widthIn(max = 320.dp)
         ) {
-            Column(Modifier.copyOnLongPress(m.text).padding(horizontal = 6.dp, vertical = 6.dp)) {
+            Column(Modifier.copyOnTap(m.text).padding(horizontal = 6.dp, vertical = 6.dp)) {
                 m.images.forEach { img ->
                     val decoded by androidx.compose.runtime.produceState<androidx.compose.ui.graphics.ImageBitmap?>(
                         imageDecodeCache[img.dataB64], img.dataB64
@@ -440,7 +458,10 @@ private fun UserBubble(m: ChatMessage) {
                             .heightIn(max = 220.dp).clip(RoundedCornerShape(10.dp)))
                 }
                 if (m.text.isNotBlank())
-                    Box(Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) { Markdownish(m.text) }
+                    Box(Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) {
+                        // Long-press selects; tap copies the whole message.
+                        SelectionContainer { Markdownish(m.text) }
+                    }
             }
         }
     }
@@ -481,13 +502,12 @@ private fun usageLine(u: AcpEvent.MessageUsage): String {
     return bits.joinToString("  ·  ")
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun AssistantBubble(text: String, streaming: Boolean = false, usage: AcpEvent.MessageUsage? = null) {
     // Stats used to sit permanently under the newest reply. They are diagnostics -- interesting
     // when you are asking "why was that slow", noise the rest of the time, and they moved the
-    // conversation around as they appeared. Long-press surfaces them, alongside the copy action
-    // that long-press already did, so nothing that was reachable stopped being reachable.
+    // conversation around as they appeared. Tapping the reply surfaces them; long-press selects
+    // text (SelectionContainer), so the two no longer compete for the same gesture.
     var menu by remember { mutableStateOf(false) }
     val clip = LocalClipboardManager.current
     val ctx = LocalContext.current
@@ -495,12 +515,15 @@ private fun AssistantBubble(text: String, streaming: Boolean = false, usage: Acp
         Box {
             Box(
                 Modifier
-                    .combinedClickable(onClick = {}, onLongClick = { menu = true })
+                    .tapOnly { menu = true }
                     .padding(horizontal = 2.dp, vertical = 4.dp)
             ) {
-                // Plain text while streaming — re-parsing the growing Markdown every token is
-                // O(n²). The bubble re-renders once with full Markdown when the turn finishes.
-                if (streaming) Text(text) else Markdownish(text)
+                // Long-press selects the text; a tap opens the menu above. Plain text while
+                // streaming — re-parsing the growing Markdown every token is O(n²). The bubble
+                // re-renders once with full Markdown when the turn finishes.
+                SelectionContainer {
+                    if (streaming) Text(text) else Markdownish(text)
+                }
             }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 Text(
