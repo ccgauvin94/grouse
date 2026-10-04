@@ -127,9 +127,12 @@ Controls.Dialog {
         toHourCombo.currentIndex = s.toHour
         dowCombo.currentIndex = dialog.cronDays.indexOf(s.dow)
         customField.text = s.raw
-        providerCombo.model = dialog.pinChoices("provider", dialog.selOrigProvider)
-        providerCombo.currentIndex = valueIndex(providerCombo.model,
-                                               dialog.selDraftProvider || dialog.selOrigProvider)
+        // The draft pick wins over the saved pin, and both the model and the
+        // currentIndex must be built from it — an unconfigured draft provider
+        // would otherwise be filtered out and the index would fall back to 0.
+        const pinProvider = dialog.selDraftProvider || dialog.selOrigProvider
+        providerCombo.model = dialog.pinChoices("provider", pinProvider)
+        providerCombo.currentIndex = valueIndex(providerCombo.model, pinProvider)
         modelCombo.model = dialog.pinChoices("model", dialog.selOrigModel)
         modelCombo.currentIndex = valueIndex(modelCombo.model,
                                             dialog.selDraftModel || dialog.selOrigModel)
@@ -273,16 +276,21 @@ Controls.Dialog {
             if (list[i].value === value) return i
         return 0
     }
-    function configChoices(id) {
+    function configChoices(id, current) {
         const o = findOption(id)
-        const cs = (o && o.choices ? o.choices : []).map(c => ({ value: c.value, name: c.name || c.value }))
+        let cs = (o && o.choices ? o.choices : []).map(c => ({ value: c.value, name: c.name || c.value }))
+        // Configured-only applies to providers, never models (goose's `configured`
+        // flag is per-provider). `current` is the draft/saved pin, kept even when
+        // it isn't configured.
+        if (id === "provider")
+            cs = Mgr.filterConfiguredProviders(cs, current || "")
         // "Server default" is the empty pin; the recipe's own pin wins over it.
         return [{ value: "", name: qsTr("Server default") }].concat(cs)
     }
     // A recipe pinned to a provider/model not in the (session-config-derived)
     // choice list still shows its pin rather than silently dropping it.
     function pinChoices(id, pin) {
-        const list = dialog.configChoices(id)
+        const list = dialog.configChoices(id, pin)
         if (pin && !list.some(c => c.value === pin))
             return list.concat([{ value: pin, name: pin }])
         return list

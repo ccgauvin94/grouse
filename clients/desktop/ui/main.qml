@@ -45,7 +45,8 @@ Controls.ApplicationWindow {
     }
     function landingProviderChoices() {
         const o = root.landingFindOption("provider")
-        return o ? o.choices : []
+        // Same configured-only rule as the in-chat strip (Manager owns it).
+        return o ? Mgr.filterConfiguredProviders(o.choices, o.currentValue) : []
     }
     function landingModelChoices() {
         const o = root.landingFindOption("model")
@@ -54,7 +55,10 @@ Controls.ApplicationWindow {
     function landingOptionIndex(id) {
         const o = root.landingFindOption(id)
         if (!o) return -1
-        const choices = o.choices
+        // Search the SAME list the combo is bound to: once unconfigured providers
+        // are hidden, indexing the raw list highlights the wrong row.
+        const choices = id === "provider" ? root.landingProviderChoices()
+                                          : root.landingModelChoices()
         for (let i = 0; i < choices.length; i++)
             if (choices[i].value === o.currentValue) return i
         return -1

@@ -215,6 +215,18 @@ public:
     Q_INVOKABLE void refreshProjects();
     /** Ask the server for its provider inventory (which are configured, and their models). */
     Q_INVOKABLE void refreshProviders();
+    /** Filter a provider-choice list down to goose's configured inventory (`providers/list`
+     *  `configured` flag), keeping `current` and falling back to the full list when the
+     *  inventory is unknown — a combo must never drop its own value or go blank. Shared by
+     *  every provider picker (chat strip, landing page, recipe editor) so the rule can't
+     *  drift between surfaces. */
+    Q_INVOKABLE QVariantList filterConfiguredProviders(const QVariantList &choices,
+                                                       const QString &current) const;
+    /** Pure half of filterConfiguredProviders: no settings, no members, so the rule is
+     *  unit-testable (the Android client's providerChoices() is the twin). */
+    static QVariantList filterProviders(const QVariantList &choices,
+                                        const QStringList &configured,
+                                        bool configuredOnly, const QString &current);
     Q_INVOKABLE void createProject(const QString &name);
     Q_INVOKABLE void deleteProject(const QString &nameOrPath);
     Q_INVOKABLE void moveSessionToProject(const QString &sessionId, const QString &projectId);

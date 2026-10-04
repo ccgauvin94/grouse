@@ -1928,6 +1928,29 @@ void Manager::refreshProviders()
         m_bridge->api().grouse_unstable_providers_list(m_bridge->handle());
 }
 
+QVariantList Manager::filterProviders(const QVariantList &choices, const QStringList &configured,
+                                      bool configuredOnly, const QString &current)
+{
+    if (!configuredOnly || configured.isEmpty())
+        return choices;
+    QVariantList keep;
+    for (const QVariant &choice : choices) {
+        const QString value = choice.toMap().value(QStringLiteral("value")).toString();
+        // `current` is kept unconditionally: a disabled/off-catalog pick still has to
+        // show in its own combo, or it looks like the app switched provider by itself.
+        if (value == current || configured.contains(value))
+            keep.append(choice);
+    }
+    // Never hand back an empty model: a stale inventory that matches nothing (or an
+    // all-unconfigured server) degrades to the full list instead of a blank combo.
+    return keep.isEmpty() ? choices : keep;
+}
+
+QVariantList Manager::filterConfiguredProviders(const QVariantList &choices, const QString &current) const
+{
+    return filterProviders(choices, m_configuredProviders, configuredProvidersOnly(), current);
+}
+
 void Manager::coreOnSessionProbe(const QString &sid, const QString &u, qint64 n)
 {
     Q_UNUSED(sid); Q_UNUSED(u); Q_UNUSED(n);

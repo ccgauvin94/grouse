@@ -31,6 +31,7 @@ private slots:
     void turnOwnerMatches_ownerRule();
     void sessionExtensionsParseWrappedServerShape();
     void itemStreamDrivesTheModel();
+    void configuredProviderFilter();
 };
 
 /**
@@ -218,6 +219,40 @@ void TstManager::invokableSurfaceRunsWithoutCrash()
     QString id, pk;
     QVERIFY(QMetaObject::invokeMethod(&mgr, "roamIdentity", Qt::DirectConnection, Q_RETURN_ARG(QString, id)));
     QVERIFY(QMetaObject::invokeMethod(&mgr, "roamPublicKey", Qt::DirectConnection, Q_RETURN_ARG(QString, pk)));
+}
+
+void TstManager::configuredProviderFilter()
+{
+    // The pure half of Manager::filterConfiguredProviders (the shared rule behind
+    // the chat strip, landing page and recipe editor). Android's
+    // ProviderChoicesTest pins the identical behavior on the other client.
+    const QVariantList catalog{
+        QVariantMap{{QStringLiteral("value"), QStringLiteral("openai")},
+                    {QStringLiteral("name"), QStringLiteral("OpenAI")}},
+        QVariantMap{{QStringLiteral("value"), QStringLiteral("anthropic")},
+                    {QStringLiteral("name"), QStringLiteral("Anthropic")}},
+        QVariantMap{{QStringLiteral("value"), QStringLiteral("ollama")},
+                    {QStringLiteral("name"), QStringLiteral("Ollama")}},
+    };
+    const QStringList configured{QStringLiteral("openai")};
+
+    // Configured-only hides the rest of the catalog.
+    QVariantList got = Manager::filterProviders(catalog, configured, true, QStringLiteral("openai"));
+    QCOMPARE(got.size(), 1);
+    QCOMPARE(got[0].toMap().value(QStringLiteral("value")).toString(), QStringLiteral("openai"));
+
+    // The current pick survives even when it isn't configured.
+    got = Manager::filterProviders(catalog, configured, true, QStringLiteral("ollama"));
+    QCOMPARE(got.size(), 2);
+    QCOMPARE(got[1].toMap().value(QStringLiteral("value")).toString(), QStringLiteral("ollama"));
+
+    // Unknown inventory (server without providers/list) shows everything.
+    got = Manager::filterProviders(catalog, {}, true, QStringLiteral("openai"));
+    QCOMPARE(got.size(), 3);
+
+    // Opting out of configured-only shows everything.
+    got = Manager::filterProviders(catalog, configured, false, QStringLiteral("openai"));
+    QCOMPARE(got.size(), 3);
 }
 
 void TstManager::bridgeLoadsWhenCorePresent()
