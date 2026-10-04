@@ -59,6 +59,10 @@ TestCase {
         verify(modelValues.indexOf("m1") >= 0)
         compare(dlg.modelPicker.currentValue, "m1")
         const providerValues = dlg.providerPicker.model.map(c => c.value)
+        // Configured-only: "anthropic" is in the catalog but not configured, so it
+        // must be hidden; the current unconfigured pin "meta" is still visible.
+        verify(providerValues.indexOf("anthropic") < 0)
+        verify(providerValues.indexOf("openai") >= 0)
         verify(providerValues.indexOf("meta") >= 0)
         compare(dlg.providerPicker.currentValue, "meta")
 

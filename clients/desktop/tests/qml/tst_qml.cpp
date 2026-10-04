@@ -61,6 +61,11 @@ public:
         openai[QStringLiteral("value")] = QStringLiteral("openai");
         openai[QStringLiteral("name")] = QStringLiteral("OpenAI");
         provChoices << openai;
+        // In the catalog but NOT configured: configured-only must hide it.
+        QVariantMap anthropic;
+        anthropic[QStringLiteral("value")] = QStringLiteral("anthropic");
+        anthropic[QStringLiteral("name")] = QStringLiteral("Anthropic");
+        provChoices << anthropic;
         prov[QStringLiteral("choices")] = provChoices;
         m_config << prov;
         QVariantMap model;
@@ -91,6 +96,19 @@ public:
     Q_INVOKABLE void saveRecipe(const QString &id, const QString &dto)
     { record(QStringLiteral("saveRecipe:%1").arg(id)); Q_UNUSED(dto); }
     Q_INVOKABLE void deleteRecipe(const QString &id) { record(QStringLiteral("deleteRecipe:%1").arg(id)); }
+    // Stand-in for Manager::filterConfiguredProviders: configured-only with a
+    // fixed inventory, so the QML wiring (not the rule) is what these tests cover.
+    Q_INVOKABLE QVariantList filterConfiguredProviders(const QVariantList &choices,
+                                                       const QString &current) const
+    {
+        QVariantList keep;
+        for (const QVariant &c : choices) {
+            const QString v = c.toMap().value(QStringLiteral("value")).toString();
+            if (v == current || v == QStringLiteral("openai"))
+                keep.append(c);
+        }
+        return keep.isEmpty() ? choices : keep;
+    }
 
 signals:
     void recipesChanged();
