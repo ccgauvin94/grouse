@@ -395,6 +395,7 @@ impl GrouseUnstable {
             json!({ "providerIds": [] }),
         ) {
             let entries = result.get("entries").cloned().unwrap_or(Value::Null);
+            let entries = self.stamp_has_credentials(&*conn, entries);
             self.listener.on_providers(entries.to_string());
         }
     }
@@ -672,6 +673,61 @@ impl GrouseUnstable {
                 self.listener.on_error(method.to_string(), format!("{e}"));
                 None
             }
+        }
+    }
+
+    /// Stamp each inventory entry with `hasCredentials`: whether at least one of the
+    /// provider's own config fields is actually set. Goose checks the environment for
+    /// secret keys and the goose config for the rest, so an env-configured provider
+    /// still counts. Goose's `configured` flag is broader — it also marks local
+    /// endpoints and detected CLIs usable with nothing set — so a UI that wants "the
+    /// user set this up" needs this stricter signal. Only entries goose already reports
+    /// `configured` are probed, so the unconfigured catalog costs nothing.
+    fn stamp_has_credentials(&self, conn: &dyn RpcConn, entries: Value) -> Value {
+        let Value::Array(list) = entries else { return entries };
+        let mut out = Vec::with_capacity(list.len());
+        for mut entry in list {
+            let configured = entry
+                .get("configured")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let has_credentials = configured
+                && entry
+                    .get("providerId")
+                    .and_then(Value::as_str)
+                    .map(|id| self.provider_has_credentials(conn, id))
+                    .unwrap_or(false);
+            if let Value::Object(map) = &mut entry {
+                map.insert("hasCredentials".to_string(), Value::Bool(has_credentials));
+            }
+            out.push(entry);
+        }
+        Value::Array(out)
+    }
+
+    /// Whether a provider has any config field set. `providers/config/read` returns one
+    /// entry per config key with `isSet`; a provider with no config keys (`local`) has
+    /// none and reads false. A failed read is treated as "unknown" (true) so a server
+    /// that predates the method keeps the `configured`-only behavior instead of hiding
+    /// every provider.
+    fn provider_has_credentials(&self, conn: &dyn RpcConn, provider_id: &str) -> bool {
+        match conn.rpc(
+            "_goose/unstable/providers/config/read",
+            json!({ "providerId": provider_id }),
+        ) {
+            Ok(result) => result
+                .get("fields")
+                .and_then(Value::as_array)
+                .map(|fields| {
+                    fields.iter().any(|field| {
+                        field
+                            .get("isSet")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false),
+            Err(_) => true,
         }
     }
 
@@ -966,6 +1022,65 @@ mod tests {
             other => panic!("expected one on_recipes, got {other:?}"),
         }
         assert_calls(&stub, &[("_goose/unstable/recipes/list", json!({}))]);
+    }
+
+    #[test]
+    fn providers_list_stamps_has_credentials() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        stub.script(vec![
+            Ok(json!({"entries": [
+                {"providerId": "anthropic", "configured": true},
+                {"providerId": "lmstudio", "configured": true},
+                {"providerId": "aimlapi", "configured": false}
+            ]})),
+            Ok(json!({"fields": [{"key": "ANTHROPIC_API_KEY", "isSet": true}]})),
+            Ok(json!({"fields": [{"key": "LMSTUDIO_HOST", "isSet": false}]})),
+        ]);
+        let (g, rec) = harness(stub.clone());
+
+        g.providers_list();
+
+        match rec.events().as_slice() {
+            [Ev::Providers(payload)] => {
+                let parsed: Value = serde_json::from_str(payload).unwrap();
+                let entries = parsed.as_array().unwrap();
+                assert_eq!(entries[0]["hasCredentials"], json!(true), "anthropic has a key set");
+                assert_eq!(entries[1]["hasCredentials"], json!(false), "lmstudio has nothing set");
+                assert_eq!(entries[2]["hasCredentials"], json!(false), "unconfigured is not probed");
+            }
+            other => panic!("expected one on_providers, got {other:?}"),
+        }
+        // Only the `configured` entries are probed, in order.
+        assert_calls(
+            &stub,
+            &[
+                ("_goose/unstable/providers/list", json!({"providerIds": []})),
+                ("_goose/unstable/providers/config/read", json!({"providerId": "anthropic"})),
+                ("_goose/unstable/providers/config/read", json!({"providerId": "lmstudio"})),
+            ],
+        );
+    }
+
+    #[test]
+    fn providers_list_failed_read_keeps_configured() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        stub.script(vec![
+            Ok(json!({"entries": [{"providerId": "openai", "configured": true}]})),
+            Err(err()), // a server without providers/config/read
+        ]);
+        let (g, rec) = harness(stub.clone());
+
+        g.providers_list();
+
+        match rec.events().as_slice() {
+            [Ev::Providers(payload)] => {
+                let parsed: Value = serde_json::from_str(payload).unwrap();
+                assert_eq!(parsed[0]["hasCredentials"], json!(true), "unknown must not hide the provider");
+            }
+            other => panic!("expected one on_providers, got {other:?}"),
+        }
     }
 
     #[test]

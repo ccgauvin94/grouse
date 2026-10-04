@@ -292,6 +292,11 @@ Custom notifications (gated on `customNotifications`): `status_message` →
 > feature), so the UI parses these JSON payloads directly and the shim is
 > dropped without touching the stable contract. This is the documented
 > exception to the "typed event per family" rule in §1.
+> One shim-side enrichment matters: `on_providers` entries carry
+> `hasCredentials` (whether any of the provider's own config fields is actually
+> set — env vars count for secret keys), because goose's `configured` also marks
+> local endpoints and detected CLIs usable with nothing configured. A picker that
+> means "the user set this up" must require `configured && hasCredentials`.
 
 ---
 

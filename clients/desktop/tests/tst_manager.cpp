@@ -32,6 +32,7 @@ private slots:
     void sessionExtensionsParseWrappedServerShape();
     void itemStreamDrivesTheModel();
     void configuredProviderFilter();
+    void configuredProvidersParse();
 };
 
 /**
@@ -253,6 +254,25 @@ void TstManager::configuredProviderFilter()
     // Opting out of configured-only shows everything.
     got = Manager::filterProviders(catalog, configured, false, QStringLiteral("openai"));
     QCOMPARE(got.size(), 3);
+}
+
+void TstManager::configuredProvidersParse()
+{
+    // `hasCredentials` is the core's stricter signal: goose's `configured` also marks
+    // local endpoints and detected CLIs usable with nothing set, and those must not
+    // clutter the picker.
+    const QString json = R"([
+        {"providerId":"anthropic","configured":true,"hasCredentials":true},
+        {"providerId":"lmstudio","configured":true,"hasCredentials":false},
+        {"providerId":"aimlapi","configured":false,"hasCredentials":false}
+    ])";
+    QCOMPARE(Manager::configuredProvidersFromJson(json),
+             QStringList{QStringLiteral("anthropic")});
+
+    // A core that predates the field falls back to `configured` (nothing regresses).
+    const QString legacy = R"([{"providerId":"openai","configured":true}])";
+    QCOMPARE(Manager::configuredProvidersFromJson(legacy),
+             QStringList{QStringLiteral("openai")});
 }
 
 void TstManager::bridgeLoadsWhenCorePresent()

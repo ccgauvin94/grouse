@@ -227,6 +227,10 @@ public:
     static QVariantList filterProviders(const QVariantList &choices,
                                         const QStringList &configured,
                                         bool configuredOnly, const QString &current);
+    /** Derive the configured-provider ids from a `providers/list` payload: `configured`
+     *  AND `hasCredentials` (missing `hasCredentials` falls back to `configured`, for an
+     *  older core). Pure so the parse is unit-testable. */
+    static QStringList configuredProvidersFromJson(const QString &json);
     Q_INVOKABLE void createProject(const QString &name);
     Q_INVOKABLE void deleteProject(const QString &nameOrPath);
     Q_INVOKABLE void moveSessionToProject(const QString &sessionId, const QString &projectId);
