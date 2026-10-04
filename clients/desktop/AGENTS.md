@@ -180,7 +180,10 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
   container's `spc_t` domain can, and nested bwrap works on the current flatpak
   generation (an older note about a `/oldroot/etc/resolv.conf` mount failure was
   a previous container generation). The host's own `flatpak` is still what you
-  install/bundle with; only the builder needs the container. Footgun:
+  install/bundle with; only the builder needs the container. The host therefore
+  needs just `flatpak` + `distrobox`; `build-flatpak.sh` checks for
+  `flatpak-builder` inside `kde-build`, not on the host (atomic Fedora has no
+  host `flatpak-builder`). Footgun:
   flatpak-builder can "check out
   last cache hit" and ship a bundle with STALE source (the export reports
   `Content Written: 0`). `build-flatpak.sh` now drops the app module's cached

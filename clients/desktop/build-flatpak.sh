@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Build grouse-desktop as a Flatpak bundle.
 #
-# Requires flatpak and flatpak-builder, with the flathub remote added:
-#   flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+# Host prerequisites: flatpak and distrobox, with the flathub remote added (the
+# script adds it). flatpak-builder is NOT a host package on atomic Fedora
+# (immutable /usr, dnf blocked) — it lives in the kde-build distrobox, which is
+# where the builder runs (see the note before its invocation). Run this on the
+# HOST, not from inside the container.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -15,12 +18,19 @@ BUILD_DIR="${BUILD_DIR:-${STATE_DIR}/build}"
 REPO_DIR="${REPO_DIR:-${STATE_DIR}/repo}"
 BUNDLE="${BUNDLE:-grouse-desktop.flatpak}"
 
-for cmd in flatpak flatpak-builder; do
+for cmd in flatpak distrobox; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "error: $cmd is required" >&2
         exit 1
     fi
 done
+
+# flatpak-builder is provided by the kde-build container, not the host. Check it
+# where it is actually used so an atomic-Fedora host does not abort here.
+if ! distrobox enter kde-build -- bash -lc 'command -v flatpak-builder' >/dev/null 2>&1; then
+    echo "error: flatpak-builder is required inside the kde-build distrobox" >&2
+    exit 1
+fi
 
 flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 
