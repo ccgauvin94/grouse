@@ -74,6 +74,12 @@ pub struct ServerConfig {
     /// Start the fresh session as a recipe session (`session/new` recipeId),
     /// for recipe runs on a cold start (gap 4: no connect happened yet).
     pub initial_recipe_id: Option<String>,
+    /// Start the fresh session filed under this project (`session/new`
+    /// `_meta.projectId`), for a project chat on a cold start (mirrors
+    /// `initial_recipe_id`). Stock goose persists it to the `project_id`
+    /// column, so no post-creation `session/project/update` is needed.
+    #[serde(default)]
+    pub initial_project_id: Option<String>,
 }
 
 /// Connection lifecycle (CONTRACT §3.3).
@@ -526,6 +532,7 @@ impl Core {
             config.clone(),
             ConnectSpec::New {
                 recipe_id: config.initial_recipe_id.clone(),
+                project_id: config.initial_project_id.clone(),
             },
             false,
             false,
@@ -601,10 +608,13 @@ impl Core {
     }
 
     /// `session/new` with `_meta.client` + cwd; replaces the current wire.
-    /// When a Ready wire with the same host/port/key already exists, reuse it
-    /// live — no `old.shutdown()` race. Only falls back to a full reconnect
-    /// when the wire is down or the server identity changed.
-    pub fn new_session(&self, recipe_id: Option<String>) {
+    /// `recipe_id` starts a recipe session; `project_id` files the chat under a
+    /// project at creation (`_meta.projectId`, which stock goose persists to the
+    /// `project_id` column — the create-time bridge off `session/project/update`,
+    /// see grouse#5). When a Ready wire with the same host/port/key already
+    /// exists, reuse it live — no `old.shutdown()` race. Only falls back to a
+    /// full reconnect when the wire is down or the server identity changed.
+    pub fn new_session(&self, recipe_id: Option<String>, project_id: Option<String>) {
         *self.inner.active_peer_label.write() = None;
         self.reset_chat_state();
         self.inner.store.clear();
@@ -622,8 +632,9 @@ impl Core {
                 let this = self.clone();
                 let cfg = config.clone();
                 let rid = recipe_id.clone();
+                let pid = project_id.clone();
                 crate::roam::runtime().spawn(async move {
-                    match conn.live_new_session_async(rid.clone()).await {
+                    match conn.live_new_session_async(rid.clone(), pid.clone()).await {
                         Ok(session_id) => {
                             {
                                 let mut state = this.inner.state.lock();
@@ -639,7 +650,7 @@ impl Core {
                         }
                         Err(_) => {
                             let _ =
-                                this.connect_impl(cfg, ConnectSpec::New { recipe_id: rid }, false, false);
+                                this.connect_impl(cfg, ConnectSpec::New { recipe_id: rid, project_id: pid }, false, false);
                         }
                     }
                 });
@@ -647,7 +658,7 @@ impl Core {
             }
         }
         let (_, _rx) =
-            self.connect_impl(config, ConnectSpec::New { recipe_id }, false, false);
+            self.connect_impl(config, ConnectSpec::New { recipe_id, project_id }, false, false);
     }
 
     /// Whether the cached transcript for a session is up to date with the
@@ -743,7 +754,7 @@ impl Core {
                     };
                     if let Some(conn2) = conn2_opt {
                         if conn2.is_ready() && conn2.config_matches(&cfg) {
-                            if let Ok(new_id) = conn2.live_new_session_async(None).await {
+                            if let Ok(new_id) = conn2.live_new_session_async(None, None).await {
                                 {
                                     let mut state = this.inner.state.lock();
                                     state.store_session_id = Some(new_id);

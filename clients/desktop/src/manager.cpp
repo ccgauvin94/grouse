@@ -574,9 +574,20 @@ void Manager::newChat()
     emit messagesChanged();
     setStatus(QStringLiteral("connecting…"));
     char *err = nullptr;
-    const QByteArray cfg = serverConfigJson().toUtf8();
+    // The recipe id and project id ride session/new directly. `grouse_new_session`
+    // already took a recipe id; passing it here (rather than letting
+    // serverConfigJson consume it) is what actually starts a recipe run.
+    const QString recipeId = m_pendingRecipeId;
+    m_pendingRecipeId.clear();
+    const QString projectId = m_pendingProjectFiling;
+    m_pendingProjectFiling.clear();
     if (m_bridge && m_bridge->isAvailable()) {
-        m_bridge->api().grouse_new_session(m_bridge->handle(), nullptr, &err);
+        const QByteArray rid = recipeId.toUtf8();
+        const QByteArray pid = projectId.toUtf8();
+        m_bridge->api().grouse_new_session(m_bridge->handle(),
+                                           recipeId.isEmpty() ? nullptr : rid.constData(),
+                                           projectId.isEmpty() ? nullptr : pid.constData(),
+                                           &err);
         if (err) {
             setStatus(QStringLiteral("new session failed: ") + QString::fromUtf8(err));
             m_bridge->api().grouse_string_free(err);
@@ -1502,12 +1513,6 @@ void Manager::coreOnStatus(const QString &json)
         // Tool state must land WITH the session, not on the next toggle: global
         // extension catalog + this session's active tools + attached extensions.
         refreshToolGroups();
-        if (!m_pendingProjectFiling.isEmpty()) {
-            const QString proj = m_pendingProjectFiling;
-            m_pendingProjectFiling.clear();
-            if (!m_currentSessionId.isEmpty())
-                moveSessionToProject(m_currentSessionId, proj);
-        }
     } else if (s == QStringLiteral("\"Connecting\"") || s == QStringLiteral("Connecting")) {
         setOnline(false);
         setStatus(QStringLiteral("connecting…"));

@@ -374,15 +374,12 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Start a chat already filed under [projectId].
      *
-     *  Filing happens once the server hands back a session id -- session/new has no
-     *  projectId parameter. The core decides the new session's cwd (the connect-time cwd). */
+     *  The project id rides `session/new` `_meta.projectId` (stamped by the core), so the
+     *  server persists membership at creation — no second `session/project/update`. The core
+     *  decides the new session's cwd (the connect-time cwd). */
     fun newChatInProject(projectId: String, cwd: String? = null) {
-        pendingProjectFiling = projectId
-        newSession(cwd = cwd ?: store.workingDir, kind = SessionKind.CHAT)
+        newSession(cwd = cwd ?: store.workingDir, kind = SessionKind.CHAT, projectId = projectId)
     }
-
-    /** Set while a new-chat-in-project is in flight; consumed when Ready delivers the id. */
-    private var pendingProjectFiling: String? = null
     /** Error text of the in-flight `sources/create`, captured by onUnstableError.
      *  The uniffi call returns Unit — failures surface only through the listener. */
     @Volatile private var pendingCreateError: String? = null
@@ -1146,6 +1143,7 @@ class ConnectionManager private constructor(context: Context) {
         cwd: String = "",
         kind: SessionKind = SessionKind.CHAT,
         recipeId: String? = null,
+        projectId: String? = null,
     ) {
         pendingOpenAssistant = false      // same as openSession: an explicit choice cancels it
         pendingAssistantRename = false
@@ -1153,12 +1151,16 @@ class ConnectionManager private constructor(context: Context) {
         // A new chat always leaves any peer-owned session (the core clears its own routing too).
         currentRoamPeer = null
         pendingRecipeId = recipeId
+        pendingProjectId = projectId
         open(resume = null, kind = kind)
     }
 
     /** Carried to the next session/new. Consumed by open() once handed to the core, so a plain
      *  chat started afterwards does not inherit the recipe. */
     @Volatile private var pendingRecipeId: String? = null
+    /** Project to file the next session under, via `session/new` `_meta.projectId` (grouse#5 P0).
+     *  Consumed with [pendingRecipeId] so a later plain chat is not filed into it. */
+    @Volatile private var pendingProjectId: String? = null
 
     /** Run a recipe: start a session from it, optionally in [cwd].
      *
@@ -1655,14 +1657,15 @@ class ConnectionManager private constructor(context: Context) {
         val deferred = pendingResumeAfterConnect
         if (deferred != null) {
             pendingResumeAfterConnect = null
-            if (pendingRecipeId != null) core.newSession(pendingRecipeId.also { pendingRecipeId = null })
+            if (pendingRecipeId != null) core.newSession(pendingRecipeId.also { pendingRecipeId = null },
+                                                         pendingProjectId.also { pendingProjectId = null })
             else core.openSession(deferred)
             return
         }
         if (pendingNewSessionAfterConnect) {
             pendingNewSessionAfterConnect = false
             val rid = pendingRecipeId.also { pendingRecipeId = null }
-            core.newSession(rid)
+            core.newSession(rid, pendingProjectId.also { pendingProjectId = null })
             return
         }
         // A roam peer owns the chat: Ready here is the MAIN connection's — don't repoint the
@@ -1675,12 +1678,8 @@ class ConnectionManager private constructor(context: Context) {
             lastSessionId = sid
             store.lastSessionId = sid
             currentSession.value = sid
-            // A chat started from inside a project gets filed the moment it has an id --
-            // session/new takes no projectId, so membership is a second call.
-            pendingProjectFiling?.let { pid ->
-                pendingProjectFiling = null
-                fileSession(sid, pid)
-            }
+            // (A chat started from inside a project is filed by session/new's
+            // `_meta.projectId` now — grouse#5 P0 — not a post-Ready call.)
             pendingClearOnReady?.let { target ->
                 pendingClearOnReady = null
                 if (target == sid) {
@@ -2424,11 +2423,12 @@ class ConnectionManager private constructor(context: Context) {
             // suppress-vs-replay decision can match the cache stamp (no wire
             // replay on a cold start into an unchanged chat).
             core.listSessions()
-            // A recipe pending on a cold start rides the connect's session/new
-            // (gap 4: the core's connect() takes initial_recipe_id), so the
-            // transient session IS the recipe session — one session, no waste.
-            val cfg = base.copy(initialRecipeId = pendingRecipeId)
+            // A recipe/project pending on a cold start rides the connect's session/new
+            // (gap 4 + grouse#5 P0: the core's connect() takes initial_recipe_id /
+            // initial_project_id), so the transient session IS the target — no orphan.
+            val cfg = base.copy(initialRecipeId = pendingRecipeId, initialProjectId = pendingProjectId)
             pendingRecipeId = null
+            pendingProjectId = null
             val target = resume
             Thread({
                 // Resume the known chat directly. `connect()` would bind a
@@ -2456,7 +2456,8 @@ class ConnectionManager private constructor(context: Context) {
             pendingResumeAfterConnect = null
             core.openSession(resume)
         }
-        else core.newSession(pendingRecipeId.also { pendingRecipeId = null })
+        else core.newSession(pendingRecipeId.also { pendingRecipeId = null },
+                             pendingProjectId.also { pendingProjectId = null })
     }
 
     private fun currentServerConfig(): ServerConfig = ServerConfig(
@@ -2476,6 +2477,7 @@ class ConnectionManager private constructor(context: Context) {
         autoConnect = true,
         clientId = "grouse",
         initialRecipeId = null,
+        initialProjectId = null,
     )
     // ---------------------------------------------------------------------------
     // Unstable payload parsers (the core hands the raw JSON reply payloads)

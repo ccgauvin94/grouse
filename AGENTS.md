@@ -131,7 +131,10 @@ keep them when extending the core.
 - **Sessions are typed by `_meta.client`.** `session/new` without it creates an
   `acp` session, which desktop and CLI never list. Each client sets its own
   `_meta.client` value on `session/new` (e.g. `"grouse-desktop"`, `"grouse"`,
-  `"grouse-cli"`).
+  `"grouse-cli"`). `_meta.projectId` on `session/new` is persisted to goose's
+  `project_id` column at creation — the stock-goose create-time project bridge
+  (grouse#5 P0); after creation only the doomed
+  `_goose/unstable/session/project/update` can change it.
 - **`session/load` rewrites `working_dir` from the cwd you send.** Never guess a
   cwd — carry the session's real cwd from `session/list` or ask the server
   (core resolves it via `_goose/unstable/session/info`).

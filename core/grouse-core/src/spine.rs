@@ -259,10 +259,38 @@ fn notify_listeners(method: &str, params: Value) {
 /// resolves the resume cwd before building the connection.
 #[derive(Debug, Clone)]
 pub(crate) enum ConnectSpec {
-    /// `session/new` with `_meta.client` (and optionally `recipeId`).
-    New { recipe_id: Option<String> },
+    /// `session/new` with `_meta.client` (and optionally `recipeId`/`projectId`).
+    New {
+        recipe_id: Option<String>,
+        project_id: Option<String>,
+    },
     /// `session/load` with the session's resolved cwd.
     Resume { session_id: String, cwd: String },
+}
+
+/// The `session/new` params. `_meta.client` present ⇒ `SessionType::User`, so
+/// Desktop/CLI can see these chats. `recipeId` starts a recipe session;
+/// `projectId` files the chat under a project *at creation* — stock goose
+/// persists it to the `project_id` column, which is the create-time bridge off
+/// the doomed `session/project/update` mutation (see grouse#5).
+fn session_new_params(
+    config: &ServerConfig,
+    recipe_id: Option<&str>,
+    project_id: Option<&str>,
+) -> Value {
+    let mut meta = Map::new();
+    meta.insert("client".into(), Value::String(config.client_id.clone()));
+    if let Some(recipe) = recipe_id.filter(|r| !r.is_empty()) {
+        meta.insert("recipeId".into(), Value::String(recipe.to_string()));
+    }
+    if let Some(project) = project_id.filter(|p| !p.is_empty()) {
+        meta.insert("projectId".into(), Value::String(project.to_string()));
+    }
+    json!({
+        "cwd": config.cwd,
+        "mcpServers": [],
+        "_meta": Value::Object(meta),
+    })
 }
 
 struct ConnInner {
@@ -686,15 +714,18 @@ impl Conn {
                         // painted rows belong to the session we just failed to
                         // resume, so they must not linger in the new one.
                         self.drop_painted_cache();
-                        self.start_new_session(&cx, None).await?;
+                        self.start_new_session(&cx, None, None).await?;
                     }
                 }
             }
-            Some(ConnectSpec::New { recipe_id }) => {
-                self.start_new_session(&cx, recipe_id).await?;
+            Some(ConnectSpec::New {
+                recipe_id,
+                project_id,
+            }) => {
+                self.start_new_session(&cx, recipe_id, project_id).await?;
             }
             None => {
-                self.start_new_session(&cx, None).await?;
+                self.start_new_session(&cx, None, None).await?;
             }
         }
 
@@ -714,19 +745,13 @@ impl Conn {
         &self,
         cx: &ConnectionTo<Agent>,
         recipe_id: Option<String>,
+        project_id: Option<String>,
     ) -> Result<(), AcpError> {
-        let mut params = json!({
-            "cwd": self.inner.config.cwd,
-            "mcpServers": [],
-        });
-        let mut meta = Map::new();
-        // _meta.client present => SessionType::User, so Desktop/CLI can see
-        // these chats (desktop startNewSession).
-        meta.insert("client".into(), Value::String(self.inner.config.client_id.clone()));
-        if let Some(recipe) = recipe_id {
-            meta.insert("recipeId".into(), Value::String(recipe));
-        }
-        params["_meta"] = Value::Object(meta);
+        let params = session_new_params(
+            &self.inner.config,
+            recipe_id.as_deref(),
+            project_id.as_deref(),
+        );
         let reply: Value = cx
             .send_request(UntypedMessage::new("session/new", params)?)
             .block_task()
@@ -752,17 +777,13 @@ impl Conn {
     pub(crate) fn live_new_session(
         &self,
         recipe_id: Option<String>,
+        project_id: Option<String>,
     ) -> Result<String, AcpError> {
-        let mut params = json!({
-            "cwd": self.inner.config.cwd,
-            "mcpServers": [],
-        });
-        let mut meta = Map::new();
-        meta.insert("client".into(), Value::String(self.inner.config.client_id.clone()));
-        if let Some(recipe) = recipe_id {
-            meta.insert("recipeId".into(), Value::String(recipe));
-        }
-        params["_meta"] = Value::Object(meta);
+        let params = session_new_params(
+            &self.inner.config,
+            recipe_id.as_deref(),
+            project_id.as_deref(),
+        );
         let reply: Value = self.rpc("session/new", params)?;
         let session_id = reply
             .get("sessionId")
@@ -776,17 +797,13 @@ impl Conn {
     pub(crate) async fn live_new_session_async(
         &self,
         recipe_id: Option<String>,
+        project_id: Option<String>,
     ) -> Result<String, AcpError> {
-        let mut params = json!({
-            "cwd": self.inner.config.cwd,
-            "mcpServers": [],
-        });
-        let mut meta = Map::new();
-        meta.insert("client".into(), Value::String(self.inner.config.client_id.clone()));
-        if let Some(recipe) = recipe_id {
-            meta.insert("recipeId".into(), Value::String(recipe));
-        }
-        params["_meta"] = Value::Object(meta);
+        let params = session_new_params(
+            &self.inner.config,
+            recipe_id.as_deref(),
+            project_id.as_deref(),
+        );
         let reply: Value = self.rpc_async("session/new", params).await?;
         let session_id = reply
             .get("sessionId")
@@ -1621,6 +1638,38 @@ mod tests {
             "lost the MCP-Apps capability declaration — the server will stop \
              attaching _meta.goose.mcpApp to tool calls"
         );
+    }
+
+    /// grouse#5 P0: `session/new` must carry `_meta.projectId` when a project
+    /// chat is created, so stock goose persists it at creation instead of us
+    /// calling the doomed `session/project/update`.
+    #[test]
+    fn session_new_params_stamps_project_id() {
+        let cfg = ServerConfig {
+            host: "h".into(),
+            port: 1,
+            secret_key: "k".into(),
+            use_tls: false,
+            accept_invalid_certs: false,
+            ca_cert_pem: None,
+            cwd: "/w".into(),
+            auto_connect: false,
+            client_id: "grouse-desktop".into(),
+            initial_recipe_id: None,
+            initial_project_id: None,
+        };
+        let p = session_new_params(&cfg, Some("r-1"), Some("proj-9"));
+        assert_eq!(
+            p.pointer("/_meta/client").and_then(Value::as_str),
+            Some("grouse-desktop")
+        );
+        assert_eq!(p.pointer("/_meta/recipeId").and_then(Value::as_str), Some("r-1"));
+        assert_eq!(p.pointer("/_meta/projectId").and_then(Value::as_str), Some("proj-9"));
+
+        // Absent/empty ids are omitted, never emitted as `""`.
+        let p = session_new_params(&cfg, None, Some(""));
+        assert!(p.pointer("/_meta/recipeId").is_none());
+        assert!(p.pointer("/_meta/projectId").is_none());
     }
 
     /// Ordering/freshness must track MESSAGE activity (_meta.lastMessageAt),

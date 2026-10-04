@@ -90,6 +90,7 @@ fn main() {
         auto_connect: false,
         client_id: "grouse-smoke".into(),
         initial_recipe_id: None,
+        initial_project_id: None,
     });
     std::thread::sleep(std::time::Duration::from_secs(4));
     core.list_sessions();
