@@ -1903,17 +1903,31 @@ void Manager::coreOnSupportedModels(const QString &provider, const QString &json
     onSupportedModels(provider, models);
 }
 
-void Manager::coreOnProviders(const QString &json)
+QStringList Manager::configuredProvidersFromJson(const QString &json)
 {
-    // goose's inventory of providers, each with a `configured` flag: the authority on
-    // which are usable (the app used to carry a hardcoded list that drifted).
+    // goose's inventory of providers. `configured` alone is too broad: goose also marks
+    // local endpoints and detected CLIs usable with nothing set. `hasCredentials` (the
+    // core's stricter signal — a provider config field is actually set) keeps only the
+    // providers the user actually set up. When the core doesn't send it (older .so) fall
+    // back to `configured` so nothing regresses.
     QStringList configured;
     for (const auto &el : parseArr(json)) {
         const QJsonObject o = el.toObject();
         const QString id = o.value("providerId").toString();
-        if (!id.isEmpty() && o.value("configured").toBool())
+        if (id.isEmpty() || !o.value("configured").toBool())
+            continue;
+        const bool hasCredentials = o.contains("hasCredentials")
+                                        ? o.value("hasCredentials").toBool()
+                                        : true;
+        if (hasCredentials)
             configured << id;
     }
+    return configured;
+}
+
+void Manager::coreOnProviders(const QString &json)
+{
+    const QStringList configured = configuredProvidersFromJson(json);
     // An empty parse must not empty the pickers: a server that doesn't answer this
     // leaves the previous list (and configured-providers-only degrades to "show all").
     if (configured.isEmpty() && !m_configuredProviders.isEmpty())

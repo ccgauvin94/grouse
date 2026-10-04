@@ -287,10 +287,14 @@ sealed interface AcpEvent {
  *
  *  `configured` is the server's own judgement of whether it has enough config to USE the
  *  provider, and `models` is that provider's inventory — both were previously guessed by
- *  the app from hardcoded lists. */
+ *  the app from hardcoded lists. `configured` is broader than "the user set this up": it
+ *  also covers local endpoints and detected CLIs that need nothing configured, so the
+ *  picker also requires [hasCredentials] (a provider config field is actually set). It
+ *  defaults true so an older core that doesn't send it behaves as before. */
 data class ProviderInfo(
     val id: String,
     val name: String,
     val configured: Boolean,
+    val hasCredentials: Boolean = true,
     val models: List<String>,
 )

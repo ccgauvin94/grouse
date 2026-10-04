@@ -14,8 +14,10 @@ import org.junit.Test
  *  change the list is the one that would have caught it. */
 class ProviderChoicesTest {
 
-    private fun p(id: String, configured: Boolean, models: List<String> = emptyList()) =
-        ProviderInfo(id = id, name = id, configured = configured, models = models)
+    private fun p(id: String, configured: Boolean, hasCredentials: Boolean = true,
+                  models: List<String> = emptyList()) =
+        ProviderInfo(id = id, name = id, configured = configured,
+                     hasCredentials = hasCredentials, models = models)
 
     private val inventory = listOf(
         p("openai", true), p("openrouter", true),
@@ -34,6 +36,19 @@ class ProviderChoicesTest {
     @Test
     fun `on shows the whole catalog`() {
         assertEquals(catalog, providerChoices(inventory, showAll = true, current = "openai"))
+    }
+
+    @Test
+    fun `auto-usable without credentials is hidden`() {
+        // `configured` also covers local endpoints and detected CLIs that need nothing
+        // set; the picker must not offer those as if the user had configured them.
+        val inv = listOf(
+            p("anthropic", configured = true, hasCredentials = true),
+            p("lmstudio", configured = true, hasCredentials = false),
+        )
+        assertEquals(listOf("anthropic"), providerChoices(inv, showAll = false, current = ""))
+        assertEquals(listOf("anthropic", "lmstudio"),
+            providerChoices(inv, showAll = true, current = ""))
     }
 
     @Test
@@ -90,6 +105,17 @@ class ProviderChoicesTest {
         assertEquals(listOf("gpt-4o", "gpt-4o-mini"), got[0].models)
         // `configured` is the SERVER's judgement; the app must not assume.
         assertTrue(!got[1].configured)
+    }
+
+    @Test
+    fun `parseProviders defaults hasCredentials when the core omits it`() {
+        // An older core sends only `configured`; do not hide every provider.
+        val legacy = parseProviders("""[{"providerId":"openai","configured":true}]""")
+        assertTrue(legacy.single().hasCredentials)
+
+        val strict = parseProviders(
+            """[{"providerId":"lmstudio","configured":true,"hasCredentials":false}]""")
+        assertTrue(!strict.single().hasCredentials)
     }
 
     @Test

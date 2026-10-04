@@ -644,9 +644,11 @@ class ConnectionManager private constructor(context: Context) {
     val providers = mutableStateOf<List<ProviderInfo>>(emptyList())
 
     /** The provider list a picker should show: everything the server knows when the user
-     *  asked for the full catalog, otherwise only what it reports as configured. The current
-     *  selection is always included, so an off-catalog value stays visible in its own picker
-     *  instead of silently vanishing. */
+     *  asked for the full catalog, otherwise the providers the user actually set up
+     *  (`configured` AND `hasCredentials` — `configured` alone includes local endpoints and
+     *  detected CLIs that need nothing set). The current selection is always included, so
+     *  an off-catalog value stays visible in its own picker instead of silently
+     *  vanishing. */
     fun providerChoices(current: String): List<String> =
         providerChoices(providers.value, showAllProviders.value, current)
 
@@ -2657,7 +2659,7 @@ class ConnectionManager private constructor(context: Context) {
             showAll: Boolean,
             current: String,
         ): List<String> {
-            val base = inventory.filter { showAll || it.configured }.map { it.id }
+            val base = inventory.filter { showAll || (it.configured && it.hasCredentials) }.map { it.id }
             return if (current.isNotBlank() && current !in base) base + current else base
         }
 
@@ -2674,6 +2676,9 @@ class ConnectionManager private constructor(context: Context) {
                     id = id,
                     name = o["providerName"]?.jsonPrimitive?.contentOrNull ?: id,
                     configured = o["configured"]?.jsonPrimitive?.booleanOrNull ?: false,
+                    // Absent from an older core: keep the previous `configured`-only
+                    // behavior rather than hiding every provider.
+                    hasCredentials = o["hasCredentials"]?.jsonPrimitive?.booleanOrNull ?: true,
                     models = (o["models"] as? JsonArray).orEmpty().mapNotNull { m ->
                         // `id` is the identifier that goes in GOOSE_MODEL; `name` is a
                         // DISPLAY string ("Claude Sonnet 5 (Global)" for the id
