@@ -62,6 +62,7 @@ pub struct ServerConfig {
     pub auto_connect: bool,
     pub client_id: String,     // _meta.client, e.g. "grouse-desktop" | "grouse" | "grouse-cli"
     pub initial_recipe_id: Option<String>, // session/new recipeId for the fresh session
+    pub initial_project_id: Option<String>, // session/new _meta.projectId; stock goose persists it to the project_id column
 }
 ```
 
@@ -80,7 +81,7 @@ defaulting to real verification; roam byte stream). The UI supplies only
 |---|---|---|
 | `connect(config: ServerConfig)` | — | opens the WebSocket; `initialize`; then new-or-resume per §4 |
 | `disconnect()` | — | explicit close, no reconnect |
-| `new_session(recipe_id: Option<String>)` | — | `session/new` with `_meta.client` + cwd |
+| `new_session(recipe_id: Option<String>, project_id: Option<String>)` | — | `session/new` with `_meta.client` + cwd; `recipeId`/`projectId` when given. `projectId` is persisted by stock goose at creation, so a project chat needs no post-creation `session/project/update` |
 | `open_session(session_id: String)` | — | `session/load` with the real cwd (core resolves it) |
 | `list_sessions()` | — | refreshes `session/list` |
 | `send_prompt(prompt: Prompt, expect: Option<SendExpect>)` | — | text/image/resource blocks |

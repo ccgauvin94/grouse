@@ -1163,7 +1163,7 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_load_older(`ptr`: Long,`count`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_grouse_core_fn_method_core_new_session(`ptr`: Long,`recipeId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_grouse_core_fn_method_core_new_session(`ptr`: Long,`recipeId`: RustBuffer.ByValue,`projectId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_open_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1449,7 +1449,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_grouse_core_checksum_method_core_load_older() != 38303) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_new_session() != 50585) {
+    if (lib.uniffi_grouse_core_checksum_method_core_new_session() != 6666) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_open_session() != 21069) {
@@ -2295,11 +2295,14 @@ public interface CoreInterface {
     
     /**
      * `session/new` with `_meta.client` + cwd; replaces the current wire.
-     * When a Ready wire with the same host/port/key already exists, reuse it
-     * live — no `old.shutdown()` race. Only falls back to a full reconnect
-     * when the wire is down or the server identity changed.
+     * `recipe_id` starts a recipe session; `project_id` files the chat under a
+     * project at creation (`_meta.projectId`, which stock goose persists to the
+     * `project_id` column — the create-time bridge off `session/project/update`,
+     * see grouse#5). When a Ready wire with the same host/port/key already
+     * exists, reuse it live — no `old.shutdown()` race. Only falls back to a
+     * full reconnect when the wire is down or the server identity changed.
      */
-    fun `newSession`(`recipeId`: kotlin.String?)
+    fun `newSession`(`recipeId`: kotlin.String?, `projectId`: kotlin.String?)
     
     /**
      * `session/load` with the session's real cwd (resolved: cache → probe →
@@ -2762,17 +2765,21 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     
     /**
      * `session/new` with `_meta.client` + cwd; replaces the current wire.
-     * When a Ready wire with the same host/port/key already exists, reuse it
-     * live — no `old.shutdown()` race. Only falls back to a full reconnect
-     * when the wire is down or the server identity changed.
-     */override fun `newSession`(`recipeId`: kotlin.String?)
+     * `recipe_id` starts a recipe session; `project_id` files the chat under a
+     * project at creation (`_meta.projectId`, which stock goose persists to the
+     * `project_id` column — the create-time bridge off `session/project/update`,
+     * see grouse#5). When a Ready wire with the same host/port/key already
+     * exists, reuse it live — no `old.shutdown()` race. Only falls back to a
+     * full reconnect when the wire is down or the server identity changed.
+     */override fun `newSession`(`recipeId`: kotlin.String?, `projectId`: kotlin.String?)
         = 
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_grouse_core_fn_method_core_new_session(
         it,
         
-        FfiConverterOptionalString.lower(`recipeId`),_status)
+        FfiConverterOptionalString.lower(`recipeId`),
+        FfiConverterOptionalString.lower(`projectId`),_status)
 }
     }
     
@@ -4937,6 +4944,14 @@ data class ServerConfig (
      * for recipe runs on a cold start (gap 4: no connect happened yet).
      */
     var `initialRecipeId`: kotlin.String?
+    , 
+    /**
+     * Start the fresh session filed under this project (`session/new`
+     * `_meta.projectId`), for a project chat on a cold start (mirrors
+     * `initial_recipe_id`). Stock goose persists it to the `project_id`
+     * column, so no post-creation `session/project/update` is needed.
+     */
+    var `initialProjectId`: kotlin.String?
     
 ){
     
@@ -4963,6 +4978,7 @@ public object FfiConverterTypeServerConfig: FfiConverterRustBuffer<ServerConfig>
             FfiConverterBoolean.read(buf),
             FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -4976,7 +4992,8 @@ public object FfiConverterTypeServerConfig: FfiConverterRustBuffer<ServerConfig>
             FfiConverterString.allocationSize(value.`cwd`) +
             FfiConverterBoolean.allocationSize(value.`autoConnect`) +
             FfiConverterString.allocationSize(value.`clientId`) +
-            FfiConverterOptionalString.allocationSize(value.`initialRecipeId`)
+            FfiConverterOptionalString.allocationSize(value.`initialRecipeId`) +
+            FfiConverterOptionalString.allocationSize(value.`initialProjectId`)
     )
 
     override fun write(value: ServerConfig, buf: ByteBuffer) {
@@ -4990,6 +5007,7 @@ public object FfiConverterTypeServerConfig: FfiConverterRustBuffer<ServerConfig>
             FfiConverterBoolean.write(value.`autoConnect`, buf)
             FfiConverterString.write(value.`clientId`, buf)
             FfiConverterOptionalString.write(value.`initialRecipeId`, buf)
+            FfiConverterOptionalString.write(value.`initialProjectId`, buf)
     }
 }
 

@@ -591,12 +591,21 @@ pub extern "C" fn grouse_disconnect(h: *mut c_void) {
 }
 
 #[no_mangle]
-pub extern "C" fn grouse_new_session(h: *mut c_void, recipe_id: *const c_char, out_err: *mut *mut c_char) {
+pub extern "C" fn grouse_new_session(
+    h: *mut c_void,
+    recipe_id: *const c_char,
+    project_id: *const c_char,
+    out_err: *mut *mut c_char,
+) {
     if !out_err.is_null() {
         unsafe { *out_err = std::ptr::null_mut() };
     }
     let recipe_id = unsafe { c_param(recipe_id) }.map(str::to_owned);
-    catch_unwind(AssertUnwindSafe(|| handle(h).core.new_session(recipe_id))).unwrap_or_else(|_| {
+    let project_id = unsafe { c_param(project_id) }.map(str::to_owned);
+    catch_unwind(AssertUnwindSafe(|| {
+        handle(h).core.new_session(recipe_id, project_id)
+    }))
+    .unwrap_or_else(|_| {
         set_err(out_err, "panic in grouse_new_session");
     });
 }

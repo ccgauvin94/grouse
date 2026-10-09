@@ -452,6 +452,7 @@ fn resume_replay_persists_the_fresh_cache() {
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),
         initial_recipe_id: None,
+        initial_project_id: None,
     });
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
 
@@ -591,6 +592,7 @@ fn spine_e2e_active_run_commands_and_recipe_connect() {
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),
         initial_recipe_id: Some("r-42".to_string()),
+        initial_project_id: Some("proj-7".to_string()),
     });
 
     // The recipe rode the session/new call (cold-start recipe run, gap 4).
@@ -600,6 +602,11 @@ fn spine_e2e_active_run_commands_and_recipe_connect() {
         new_frames[0].pointer("/params/_meta/recipeId").and_then(Value::as_str),
         Some("r-42"),
         "recipeId must ride _meta on session/new"
+    );
+    assert_eq!(
+        new_frames[0].pointer("/params/_meta/projectId").and_then(Value::as_str),
+        Some("proj-7"),
+        "projectId must ride _meta on session/new (grouse#5 P0)"
     );
 
     // The run-id event (gap 1) and the commands event (gap 2) arrived.
@@ -643,6 +650,7 @@ fn spine_e2e_connect_prompt_stream() {
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),
         initial_recipe_id: None,
+        initial_project_id: None,
     });
 
     // Ready + the bound session + config.
@@ -805,6 +813,7 @@ fn prompt_does_not_resync_its_own_turn() {
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),
         initial_recipe_id: None,
+        initial_project_id: None,
     });
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "Ready");
     assert_eq!(core.active_session_id().as_deref(), Some("sess-e2e"));
@@ -868,6 +877,7 @@ fn set_config_update_merges_and_preserves_choices() {
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),
         initial_recipe_id: None,
+        initial_project_id: None,
     });
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "Ready");
 
@@ -937,6 +947,7 @@ fn stale_cache_is_painted_then_replaced_not_appended() {
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),
         initial_recipe_id: None,
+        initial_project_id: None,
     });
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
 
@@ -1016,6 +1027,7 @@ fn rich_transcript_paints_and_replaces_on_a_stale_open() {
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),
         initial_recipe_id: None,
+        initial_project_id: None,
     });
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
 
@@ -1083,6 +1095,7 @@ fn stale_cache_tail_merge_keeps_the_older_prefix() {
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),
         initial_recipe_id: None,
+        initial_project_id: None,
     });
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
 
@@ -1146,6 +1159,7 @@ fn reopening_a_cached_session_merges_a_tail_instead_of_full_replay() {
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),
         initial_recipe_id: None,
+        initial_project_id: None,
     });
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
 
@@ -1229,6 +1243,7 @@ fn cold_start_paint_is_not_filed_under_the_transient_session() {
         auto_connect: false,
         client_id: "grouse-core-test".to_string(),
         initial_recipe_id: None,
+        initial_project_id: None,
     });
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
     // save_cache runs on ready, and probe_stamp_and_save follows asynchronously.
