@@ -197,6 +197,7 @@ void TstManager::invokableSurfaceRunsWithoutCrash()
 
     // Argument-taking intents.
     QMetaObject::invokeMethod(&mgr, "openSession", Qt::DirectConnection, Q_ARG(QString, QStringLiteral("s1")));
+    QMetaObject::invokeMethod(&mgr, "refreshSession", Qt::DirectConnection);
     QMetaObject::invokeMethod(&mgr, "newChatInProject", Qt::DirectConnection, Q_ARG(QString, QStringLiteral("proj1")));
     QMetaObject::invokeMethod(&mgr, "runRecipe", Qt::DirectConnection, Q_ARG(QString, QStringLiteral("r1")));
     QMetaObject::invokeMethod(&mgr, "setActiveTab", Qt::DirectConnection, Q_ARG(QString, QStringLiteral("main")));

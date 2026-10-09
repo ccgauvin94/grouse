@@ -331,6 +331,21 @@ Kirigami.Page {
                     }
                 }
 
+                // Re-fetch the conversation from the server. A turn that dropped
+                // mid-stream can leave the local transcript partial, and there is
+                // otherwise no way to force it to catch up (the core suppresses a
+                // replay when its cache looks current). The core paints the cached
+                // window provisionally and the full replay replaces it.
+                Controls.Button {
+                    id: reloadPill
+                    visible: Mgr.currentSessionId.length > 0
+                    icon.name: "view-refresh"
+                    text: qsTr("Reload")
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Re-fetch this conversation from the server")
+                    onClicked: Mgr.refreshSession()
+                }
+
                 // Per-conversation tool indicator: toggles the tools panel open
                 // from the right of the chat area. A plain native Button (no
                 // custom background) so the label/icon render with theme colors

@@ -119,6 +119,12 @@ keep them when extending the core.
   including changes by another client. It carries `_meta.goose.activeRunId`, the
   live run id required to steer (`session/steer` sends `expectedRunId`). Debounce
   bursts and re-probe via `_goose/unstable/session/info` rather than full resync.
+- **A cached transcript is trusted only when it is *settled*.** A store saved
+  while a turn is in flight (or after it ended in error because the wire dropped
+  mid-stream) is written with an empty `updatedAt`, so it can never suppress the
+  replay that would complete it; a settled-but-stale cache merges a bounded tail,
+  an incomplete one full-replays. `refresh_session(id)` forces the full replay
+  (the clients' "reload chat" action) — the escape hatch after a drop.
 - **roam** is ACP over iroh direct peer streams (`goose serve --roam`): same
   JSON-RPC, newline-framed (ACP ByteStreams framing, identical to goose on stdio),
   over an iroh connection between two peers instead of a WebSocket to a host.

@@ -42,7 +42,17 @@ use crate::{Item, SessionSummary};
 /// projection, which cannot restore a chart's spec, an MCP app's key, or a
 /// toolgroup's children. Reading a v2 file would silently degrade those rows, so
 /// it returns `None` and the next open replays and rewrites in the rich shape.
-pub const TRANSCRIPT_CACHE_VERSION: u64 = 3;
+///
+/// Bumped to 4 when an INCOMPLETE store (a turn that dropped mid-stream) could
+/// still be saved with a non-empty `updatedAt` stamp — `probe_stamp_and_save`
+/// copied the server's current stamp onto whatever the store held, so the
+/// half-finished transcript compared equal to the server forever and the replay
+/// that would have completed it was suppressed. The fix writes an empty stamp
+/// for an incomplete store (see `save_cache`), but caches already on disk carry
+/// the poisoned stamp, so a v3 file is not merely stale but possibly TRUNCATED
+/// and must not be trusted: reading it returns `None` and the next open replays
+/// and rewrites it.
+pub const TRANSCRIPT_CACHE_VERSION: u64 = 4;
 
 /// The tool catalog cache, mirroring the desktop's tool-cache JSON.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
