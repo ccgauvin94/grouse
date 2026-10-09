@@ -49,6 +49,7 @@ public:
         void (*grouse_disconnect)(void *h);
         void (*grouse_new_session)(void *h, const char *recipe_id, const char *project_id, char **out_err);
         void (*grouse_open_session)(void *h, const char *session_id);
+        void (*grouse_refresh_session)(void *h, const char *session_id);
         void (*grouse_list_sessions)(void *h);
         void (*grouse_load_cached_transcript)(void *h, const char *session_id);
         void (*grouse_flush_caches)(void *h);

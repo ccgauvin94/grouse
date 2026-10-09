@@ -937,7 +937,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_open_session(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_open_session_inner(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_ready(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_core_refresh_session(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_rename_session(
     ): Int
@@ -1167,8 +1171,12 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_open_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_core_open_session_inner(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`forceReplay`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_grouse_core_fn_method_core_ready(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_grouse_core_fn_method_core_refresh_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_grouse_core_fn_method_core_rename_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_respond_permission(`ptr`: Long,`toolCallId`: RustBuffer.ByValue,`outcome`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1455,7 +1463,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_grouse_core_checksum_method_core_open_session() != 21069) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_grouse_core_checksum_method_core_open_session_inner() != 5683) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_grouse_core_checksum_method_core_ready() != 64347) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_core_refresh_session() != 7988) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_rename_session() != 51923) {
@@ -1497,7 +1511,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_grouse_core_checksum_method_core_transcript() != 31384) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_transcript_is_fresh() != 53914) {
+    if (lib.uniffi_grouse_core_checksum_method_core_transcript_is_fresh() != 45455) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_unarchive_session() != 51838) {
@@ -2311,10 +2325,22 @@ public interface CoreInterface {
      */
     fun `openSession`(`sessionId`: kotlin.String)
     
+    fun `openSessionInner`(`sessionId`: kotlin.String, `forceReplay`: kotlin.Boolean)
+    
     /**
      * `ready` ⇔ an open session id exists (CONTRACT §4).
      */
     fun `ready`(): kotlin.Boolean
+    
+    /**
+     * Force a full `session/load` replay of `session_id`, ignoring cache
+     * freshness, and rebuild the transcript from the server. The escape hatch
+     * for a local view that has drifted — a turn that dropped mid-stream left a
+     * truncated store, and the cache on disk may match it. Unlike a plain open
+     * this never suppresses and never bounded-tail-merges: the cached window is
+     * painted provisionally and the full replay replaces it.
+     */
+    fun `refreshSession`(`sessionId`: kotlin.String)
     
     /**
      * Rename a session; the reply re-lists sessions (desktop response table).
@@ -2395,6 +2421,11 @@ public interface CoreInterface {
      * session/list, or a session_info_update). A mismatch means the session
      * changed remotely and a replay is owed; equality means the cache is
      * fresh and any load can suppress its replay.
+     *
+     * A cache is fresh only when it is also COMPLETE: `store_incomplete` is set
+     * while a turn is in flight (or after it ended in error), and a save in that
+     * state writes an empty stamp — but within one process the store can still
+     * be incomplete before any save lands, so gate on the flag directly too.
      */
     fun `transcriptIsFresh`(`sessionId`: kotlin.String, `cachedAt`: kotlin.String): kotlin.Boolean
     
@@ -2803,6 +2834,20 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     
     
 
+    override fun `openSessionInner`(`sessionId`: kotlin.String, `forceReplay`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_open_session_inner(
+        it,
+        
+        FfiConverterString.lower(`sessionId`),
+        FfiConverterBoolean.lower(`forceReplay`),_status)
+}
+    }
+    
+    
+
     
     /**
      * `ready` ⇔ an open session id exists (CONTRACT §4).
@@ -2817,6 +2862,27 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     }
     )
     }
+    
+
+    
+    /**
+     * Force a full `session/load` replay of `session_id`, ignoring cache
+     * freshness, and rebuild the transcript from the server. The escape hatch
+     * for a local view that has drifted — a turn that dropped mid-stream left a
+     * truncated store, and the cache on disk may match it. Unlike a plain open
+     * this never suppresses and never bounded-tail-merges: the cached window is
+     * painted provisionally and the full replay replaces it.
+     */override fun `refreshSession`(`sessionId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_refresh_session(
+        it,
+        
+        FfiConverterString.lower(`sessionId`),_status)
+}
+    }
+    
     
 
     
@@ -3049,6 +3115,11 @@ open class Core: Disposable, AutoCloseable, CoreInterface
      * session/list, or a session_info_update). A mismatch means the session
      * changed remotely and a replay is owed; equality means the cache is
      * fresh and any load can suppress its replay.
+     *
+     * A cache is fresh only when it is also COMPLETE: `store_incomplete` is set
+     * while a turn is in flight (or after it ended in error), and a save in that
+     * state writes an empty stamp — but within one process the store can still
+     * be incomplete before any save lands, so gate on the flag directly too.
      */override fun `transcriptIsFresh`(`sessionId`: kotlin.String, `cachedAt`: kotlin.String): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     callWithHandle {

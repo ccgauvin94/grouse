@@ -85,6 +85,7 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_disconnect);
     RESOLVE(grouse_new_session);
     RESOLVE(grouse_open_session);
+    RESOLVE(grouse_refresh_session);
     RESOLVE(grouse_list_sessions);
     RESOLVE(grouse_load_cached_transcript);
     RESOLVE(grouse_flush_caches);
