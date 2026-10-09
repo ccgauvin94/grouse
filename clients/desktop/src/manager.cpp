@@ -550,6 +550,15 @@ void Manager::openSession(const QString &sessionId)
     }
 }
 
+void Manager::refreshSession()
+{
+    if (!m_bridge || !m_bridge->isAvailable() || m_currentSessionId.isEmpty())
+        return;
+    setStatus(QStringLiteral("reloading…"));
+    const QByteArray sid = m_currentSessionId.toUtf8();
+    m_bridge->api().grouse_refresh_session(m_bridge->handle(), sid.constData());
+}
+
 void Manager::newChat()
 {
     m_activePeerLabel.clear();

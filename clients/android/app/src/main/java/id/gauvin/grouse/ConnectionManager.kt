@@ -1139,6 +1139,21 @@ class ConnectionManager private constructor(context: Context) {
         open(resume = sessionId, kind = knownKind)
     }
 
+    /** Force the on-screen chat to be re-fetched from the server, replacing a
+     *  local view that drifted (a turn that dropped mid-stream left it partial).
+     *  Backs the "pull up to reload" gesture. */
+    fun refreshCurrent() {
+        val sid = currentSession.value ?: return
+        replayActive.value = true
+        replayProgress.value = 0
+        val peer = currentRoamPeer
+        if (peer != null) {
+            core.roamOpenSession(peer, sid)
+            return
+        }
+        core.refreshSession(sid)
+    }
+
     fun newSession(
         cwd: String = "",
         kind: SessionKind = SessionKind.CHAT,

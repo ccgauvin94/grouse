@@ -39,6 +39,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -610,6 +613,26 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                     }
                 }
 
+                // Pull-up reload handle: a dropped turn can leave the local view
+                // partial, and there is otherwise no way to force a re-fetch. When
+                // already at the bottom it reloads from the server; when scrolled
+                // back it just tails. A dedicated handle (not a list-edge swipe)
+                // because the transcript is reverseLayout, where an upward drag is
+                // ordinary scroll-back.
+                val reloadHint = when {
+                    !cm.wireUpForCurrentChat -> "Offline — pull up to reload"
+                    cm.status.value.contains("reconnect", true) -> "Reconnecting… pull up to reload"
+                    else -> null
+                }
+                ReloadHandle(
+                    hint = reloadHint,
+                    onPullUp = {
+                        if (atBottom) cm.refreshCurrent()
+                        else scope.launch { listState.animateScrollToItem(0) }
+                    },
+                    onTail = { scope.launch { listState.animateScrollToItem(0) } },
+                )
+
                 // Slash-command autocomplete (goose's available commands).
                 val slash = input.startsWith("/") && !input.contains(' ')
                 if (slash) {
@@ -821,6 +844,69 @@ private fun BoxScope.PinnedDock(
                     cm.pinnedMessage(key)?.let { m -> PinnedAppPane(m) { cm.unpinApp() } }
                 }
             }
+        }
+    }
+}
+
+/** Slim grabber between the transcript and the composer. Drag it UP to force a
+ *  reload of the chat from the server (a dropped turn can leave the local view
+ *  partial, and nothing else re-fetches it); a short drag or tap just tails to
+ *  the newest message. A dedicated handle rather than a list-edge swipe: the
+ *  transcript is reverseLayout, where an upward drag is ordinary scroll-back. */
+@Composable
+private fun ReloadHandle(
+    hint: String?,
+    onPullUp: () -> Unit,
+    onTail: () -> Unit,
+) {
+    val density = LocalDensity.current
+    val threshold = with(density) { 44.dp.toPx() }
+    var drag by remember { mutableStateOf(0f) }
+    val armed = drag <= -threshold
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 18.dp)
+            .pointerInput(Unit) {
+                detectVerticalDragGestures(
+                    onDragEnd = {
+                        if (drag <= -threshold) onPullUp() else if (drag < -8f) onTail()
+                        drag = 0f
+                    },
+                    onDragCancel = { drag = 0f },
+                    onVerticalDrag = { change, amount ->
+                        drag = (drag + amount).coerceIn(-threshold * 1.3f, 0f)
+                        change.consume()
+                    },
+                )
+            }
+            .clickable { onTail() },
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            Modifier
+                .padding(vertical = 4.dp)
+                .width(if (armed) 56.dp else 34.dp)
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(
+                    if (armed) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.outlineVariant
+                )
+        )
+        val label = when {
+            armed -> "Release to reload"
+            drag < -8f -> "Pull up to reload"
+            else -> hint
+        }
+        if (label != null) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (armed) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(bottom = 2.dp),
+            )
         }
     }
 }

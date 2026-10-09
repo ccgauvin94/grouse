@@ -832,7 +832,11 @@ impl Conn {
         if suppress_replay {
             params["_meta"] = json!({ "replayTail": 1 });
         }
-        let reply: Value = self.rpc("session/load", params)?;
+        let reply = self.rpc("session/load", params);
+        // Disarm the replay gates for the next load (see the async twin).
+        self.inner.suppress_replay.store(false, Ordering::SeqCst);
+        self.inner.merge_replay.store(false, Ordering::SeqCst);
+        let reply: Value = reply?;
         *self.inner.session_id.lock() = Some(session_id);
         self.emit_config(&reply);
         Ok(())
@@ -857,7 +861,13 @@ impl Conn {
         } else if merge_replay {
             params["_meta"] = json!({ "replayTail": REPLAY_TAIL });
         }
-        let reply: Value = self.rpc_async("session/load", params).await?;
+        let reply = self.rpc_async("session/load", params).await;
+        // Disarm the replay gates for the NEXT load: a fresh-cache open arms
+        // `suppress_replay`, and a later full rebuild (resync) that did not reset
+        // it would have every replayed row dropped — an empty transcript.
+        self.inner.suppress_replay.store(false, Ordering::SeqCst);
+        self.inner.merge_replay.store(false, Ordering::SeqCst);
+        let reply: Value = reply?;
         // Merge gap: the tail started past the cached prefix — clear and reload
         // the whole transcript (see the handshake Resume branch).
         if self.inner.store.end_merge() {

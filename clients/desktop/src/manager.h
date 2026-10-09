@@ -204,6 +204,7 @@ public:
     Q_INVOKABLE void setConfigOption(const QString &id, const QString &value);
     Q_INVOKABLE void refreshSessions();
     Q_INVOKABLE void openSession(const QString &sessionId);
+    Q_INVOKABLE void refreshSession();
     Q_INVOKABLE void newChat();
     /** Step off the landing page into the staging chat (provider/model already chosen there). */
     Q_INVOKABLE void beginChat();

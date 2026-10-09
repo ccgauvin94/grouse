@@ -82,7 +82,8 @@ defaulting to real verification; roam byte stream). The UI supplies only
 | `connect(config: ServerConfig)` | — | opens the WebSocket; `initialize`; then new-or-resume per §4 |
 | `disconnect()` | — | explicit close, no reconnect |
 | `new_session(recipe_id: Option<String>, project_id: Option<String>)` | — | `session/new` with `_meta.client` + cwd; `recipeId`/`projectId` when given. `projectId` is persisted by stock goose at creation, so a project chat needs no post-creation `session/project/update` |
-| `open_session(session_id: String)` | — | `session/load` with the real cwd (core resolves it) |
+| `open_session(session_id: String)` | — | `session/load` with the real cwd (core resolves it); a settled, matching cache paints authoritatively and suppresses the replay, a settled-but-stale one merges a bounded tail, an incomplete one full-replays |
+| `refresh_session(session_id: String)` | — | Force a full `session/load` replay, ignoring cache freshness; the "reload this chat" escape hatch after a turn dropped mid-stream |
 | `list_sessions()` | — | refreshes `session/list` |
 | `send_prompt(prompt: Prompt, expect: Option<SendExpect>)` | — | text/image/resource blocks |
 | `cancel()` | — | `session/cancel` (notification) |

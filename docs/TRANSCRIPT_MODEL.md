@@ -189,6 +189,16 @@ items: [Item] }`. It is the source for
 - cold-start paint of the recent window, and
 - `load_older` when the cache reaches back far enough.
 
+**A cache is only trusted as a *settled* revision.** A transcript saved while a
+turn is in flight — or after it ended in error because the wire dropped
+mid-stream — is written with an EMPTY `updatedAt`, so it can never compare equal
+to the server's stamp and suppress the replay that would complete it. A
+settled-but-stale cache merges a bounded tail; an incomplete one takes a full
+replay (its rows are painted provisionally and dropped wholesale). `cache v4`
+exists because a v3 file could carry a poisoned stamp over a truncated
+transcript. `refresh_session(id)` forces the full replay on demand (the clients'
+"reload chat" action).
+
 Because items carry their kind and payload, restart fidelity is total: charts,
 MCP apps, and tool groups survive untouched. The desktop's separate transcript
 cache is deleted.

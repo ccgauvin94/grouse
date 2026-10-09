@@ -616,6 +616,14 @@ pub extern "C" fn grouse_open_session(h: *mut c_void, session_id: *const c_char)
     catch_unwind(AssertUnwindSafe(|| handle(h).core.open_session(session_id))).ok();
 }
 
+/// Force a full reload of `session_id` (the client's "refresh chat" action):
+/// ignore cache freshness and replay the server's transcript.
+#[no_mangle]
+pub extern "C" fn grouse_refresh_session(h: *mut c_void, session_id: *const c_char) {
+    let Some(session_id) = (unsafe { c_param(session_id) }).map(str::to_owned) else { return };
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.refresh_session(session_id))).ok();
+}
+
 #[no_mangle]
 pub extern "C" fn grouse_list_sessions(h: *mut c_void) {
     catch_unwind(AssertUnwindSafe(|| handle(h).core.list_sessions())).ok();

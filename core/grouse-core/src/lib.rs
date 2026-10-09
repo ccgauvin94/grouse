@@ -397,6 +397,15 @@ struct CoreState {
     last_config: Option<ServerConfig>,
     /// A turn is in flight on the main connection; the pending queue waits.
     prompting: bool,
+    /// The store may NOT be a complete copy of the server's transcript: a turn
+    /// was in flight (or ended in error) and the last rows are partial. Drives
+    /// two things: `save_cache` writes an EMPTY `updatedAt` stamp for an
+    /// incomplete store (so it can never read back as "fresh" and suppress the
+    /// replay that would complete it), and a non-fresh reconnect asks for a FULL
+    /// replay instead of a bounded tail-merge, since a merge anchors onto rows
+    /// that may be truncated. A fresh process starts `false` — nothing is known
+    /// to be incomplete, so a settled cache still suppresses its replay.
+    store_incomplete: bool,
     /// Per-session pending intents (key is sessionId, "" for global/no-session).
     /// Prompts queued in one chat must not leak into another.
     pending: HashMap<String, VecDeque<PendingIntent>>,
@@ -423,6 +432,18 @@ struct CoreState {
     resync_ticks: i32,
     /// Last probed (updatedAt, messageCount) — the "did it move?" comparison.
     sync_stamp: Option<(String, i64)>,
+}
+
+/// How to paint a session's cached transcript and which wire load it owes. See
+/// [`Core::plan_cache_paint`].
+struct CachePaint {
+    /// The cache is a settled, up-to-date copy: paint authoritatively, suppress
+    /// the replay.
+    suppress: bool,
+    /// The cache is settled but stale: paint and merge a bounded tail.
+    merge: bool,
+    /// The cached items to paint, if any.
+    items: Option<Vec<Item>>,
 }
 
 struct CoreInner {
@@ -553,23 +574,18 @@ impl Core {
         *self.inner.active_peer_label.write() = None;
         self.reset_chat_state();
         let cwd = self.resolve_cwd(&session_id);
-        let (suppress, cached) = match self.inner.cache.load_transcript(&session_id) {
-            Some((messages, cached_at)) => {
-                let fresh = self.transcript_is_fresh(&session_id, &cached_at);
-                (fresh, Some(messages))
-            }
-            None => (false, None),
-        };
-        // The cache is now the rich item list (`docs/TRANSCRIPT_MODEL.md`), so a
+        let paint = self.plan_cache_paint(&session_id, false);
+        let (suppress, merge) = (paint.suppress, paint.merge);
+        // The cache is the rich item list (`docs/TRANSCRIPT_MODEL.md`), so a
         // paint keeps charts/apps/toolgroups intact. A fresh cache suppresses the
-        // replay outright; a STALE one paints and asks the server for a bounded
-        // tail that merges into the paint, so opening a long chat no longer
-        // re-streams the whole history.
-        let merge = cached.is_some() && !suppress;
+        // replay outright; a settled-but-stale one asks for a bounded tail that
+        // merges into the paint; an incomplete one paints provisionally and
+        // takes the full replay (see `plan_cache_paint`).
         self.inner.store.set_session(&session_id);
-        match cached {
+        match paint.items {
             Some(items) if suppress => self.inner.store.replace_rich(items, false),
-            Some(items) => self.inner.store.replace_rich_for_merge(items),
+            Some(items) if merge => self.inner.store.replace_rich_for_merge(items),
+            Some(items) => self.inner.store.replace_rich(items, true),
             None => self.inner.store.clear(),
         };
         {
@@ -666,8 +682,16 @@ impl Core {
     /// session/list, or a session_info_update). A mismatch means the session
     /// changed remotely and a replay is owed; equality means the cache is
     /// fresh and any load can suppress its replay.
+    ///
+    /// A cache is fresh only when it is also COMPLETE: `store_incomplete` is set
+    /// while a turn is in flight (or after it ended in error), and a save in that
+    /// state writes an empty stamp — but within one process the store can still
+    /// be incomplete before any save lands, so gate on the flag directly too.
     fn transcript_is_fresh(&self, session_id: &str, cached_at: &str) -> bool {
         if cached_at.is_empty() {
+            return false;
+        }
+        if self.inner.state.lock().store_incomplete {
             return false;
         }
         let updated = self
@@ -685,6 +709,20 @@ impl Core {
     /// session/list, never guessed); a fresh cached transcript renders
     /// instantly, otherwise the load replays it.
     pub fn open_session(&self, session_id: String) {
+        self.open_session_inner(session_id, false);
+    }
+
+    /// Force a full `session/load` replay of `session_id`, ignoring cache
+    /// freshness, and rebuild the transcript from the server. The escape hatch
+    /// for a local view that has drifted — a turn that dropped mid-stream left a
+    /// truncated store, and the cache on disk may match it. Unlike a plain open
+    /// this never suppresses and never bounded-tail-merges: the cached window is
+    /// painted provisionally and the full replay replaces it.
+    pub fn refresh_session(&self, session_id: String) {
+        self.open_session_inner(session_id, true);
+    }
+
+    fn open_session_inner(&self, session_id: String, force_replay: bool) {
         *self.inner.active_peer_label.write() = None;
         self.reset_chat_state();
         // Move the chat-event gate BEFORE anything that can block. Everything
@@ -697,28 +735,22 @@ impl Core {
             conn.prebind_session(&session_id);
         }
         let cwd = self.resolve_cwd(&session_id);
-        let (suppress, cached) = match self.inner.cache.load_transcript(&session_id) {
-            Some((messages, cached_at)) => {
-                let fresh = self.transcript_is_fresh(&session_id, &cached_at);
-                (fresh, Some(messages))
-            }
-            None => (false, None),
-        };
         // ALWAYS paint the cached transcript instantly — never clear it and wait
-        // on the wire. A fresh cache suppresses the replay outright and its rows
-        // are authoritative; a stale one is painted PROVISIONAL, so the first
-        // real row of the replay this load owes drops it wholesale — the replay
-        // APPENDS, so painted rows left in place would be followed by replayed
-        // ones. The store owns that handoff (`replace_provisional`).
-        //
-        // A fresh cache suppresses the replay; a stale one paints and merges a
-        // bounded tail (see `connect_resume`). `end_merge` emits one Clear so the
-        // rebuild drops any stale suffix the anchor truncated.
-        let merge = cached.is_some() && !suppress;
+        // on the wire. Three cases:
+        //  - a SETTLED, fresh cache is authoritative: suppress the replay;
+        //  - a SETTLED, stale cache paints and merges a bounded tail;
+        //  - an INCOMPLETE cache (or a forced refresh) paints PROVISIONAL, so the
+        //    first real row of the full replay drops it wholesale and rebuilds.
+        // The incomplete case is the one that used to corrupt: a mid-stream drop
+        // left a truncated store, the bounded-tail merge anchored onto it, and
+        // each reopen re-saved a different wrong subset.
+        let paint = self.plan_cache_paint(&session_id, force_replay);
+        let (suppress, merge) = (paint.suppress, paint.merge);
         self.inner.store.set_session(&session_id);
-        match cached {
+        match paint.items {
             Some(items) if suppress => self.inner.store.replace_rich(items, false),
-            Some(items) => self.inner.store.replace_rich_for_merge(items),
+            Some(items) if merge => self.inner.store.replace_rich_for_merge(items),
+            Some(items) => self.inner.store.replace_rich(items, true),
             None => self.inner.store.clear(),
         };
         let config = {
@@ -1136,6 +1168,32 @@ impl Core {
 // ---------------------------------------------------------------------------
 
 impl Core {
+    /// Decide how to paint a session's cached transcript and which wire load it
+    /// owes. `force_replay` (see [`Core::refresh_session`]) ignores the cache as
+    /// a source of truth. A cache is usable as a merge BASE only when it is
+    /// settled (non-empty stamp: written from a complete store) and the store is
+    /// not currently incomplete — a truncated base would anchor a bounded-tail
+    /// merge in the wrong place and drift on every reopen.
+    fn plan_cache_paint(&self, session_id: &str, force_replay: bool) -> CachePaint {
+        match self.inner.cache.load_transcript(session_id) {
+            Some((items, cached_at)) => {
+                let settled = !cached_at.is_empty();
+                let fresh = !force_replay && self.transcript_is_fresh(session_id, &cached_at);
+                let incomplete = self.inner.state.lock().store_incomplete;
+                CachePaint {
+                    suppress: fresh,
+                    merge: !force_replay && settled && !fresh && !incomplete,
+                    items: Some(items),
+                }
+            }
+            None => CachePaint {
+                suppress: false,
+                merge: false,
+                items: None,
+            },
+        }
+    }
+
     /// Reset the per-chat state a fresh open/new starts from (desktop
     /// openSession/newChat: clear the queue, drop the prompt flag, cancel any
     /// in-flight resync cycle).
@@ -1259,6 +1317,9 @@ impl Core {
                 if state.store_session_id.is_none() {
                     state.store_session_id = active;
                 }
+                // The replay/new just completed, so the store is a faithful copy
+                // of the server's transcript — unless a turn is still in flight.
+                state.store_incomplete = state.prompting;
             }
             self.save_cache();
             self.flush_pending();
@@ -1390,23 +1451,22 @@ impl Core {
         // convo every time). The store kept the live transcript across the
         // drop, so a fresh suppress keeps the UI exactly as it was; a stale
         // one replays (the id-gated chunks dedupe against the store).
-        let suppress = match self.inner.cache.load_transcript(&resume) {
-            Some((_, cached_at)) => self.transcript_is_fresh(&resume, &cached_at),
-            None => false,
-        };
-        // A stale resume replays the whole history onto the live transcript the
-        // store kept across the drop. The replay APPENDS — chunks reset the
-        // stream anchor, they do NOT dedupe against existing rows — so the rows
-        // held now have to be dropped when the replay's first real row lands,
-        // or replayed history would land after them. Arm that in the store.
-        if !suppress {
+        let paint = self.plan_cache_paint(&resume, false);
+        let (suppress, merge) = (paint.suppress, paint.merge);
+        // A resume that neither suppresses nor merges replays the whole history
+        // onto the live transcript the store kept across the drop. The replay
+        // APPENDS — chunks reset the stream anchor, they do NOT dedupe against
+        // existing rows — so the rows held now have to be dropped when the
+        // replay's first real row lands, or replayed history would land after
+        // them. Arm that in the store.
+        if !suppress && !merge {
             self.inner.store.mark_provisional();
         }
         let (_, _rx) = self.connect_impl(
             config,
             ConnectSpec::Resume { session_id: resume, cwd },
             suppress,
-            false,
+            merge,
         );
     }
 
@@ -1494,7 +1554,14 @@ impl Core {
         let params = prompt_params(&prompt, &session_id);
         let core = self.clone();
         let store = self.inner.store.clone();
-        self.inner.state.lock().prompting = true;
+        {
+            let mut state = self.inner.state.lock();
+            state.prompting = true;
+            // The turn's rows are not final until it ends: mark the store
+            // incomplete so a save or reconnect in the meantime cannot treat it
+            // as a settled copy of the session.
+            state.store_incomplete = true;
+        }
         crate::roam::runtime().spawn(async move {
             let result = conn.rpc_async("session/prompt", params).await;
             match &result {
@@ -1514,7 +1581,7 @@ impl Core {
                     store.run_ended("error");
                 }
             }
-            core.on_prompt_done();
+            core.on_prompt_done(result.is_ok());
         });
     }
 
@@ -1533,8 +1600,16 @@ impl Core {
         });
     }
 
-    fn on_prompt_done(&self) {
-        self.inner.state.lock().prompting = false;
+    /// A turn finished. `clean` is false when the prompt failed (including a
+    /// dropped wire): the store's tail is then partial, so it stays marked
+    /// incomplete — `save_cache` writes no freshness stamp and the next open
+    /// full-replays instead of trusting it.
+    fn on_prompt_done(&self, clean: bool) {
+        {
+            let mut state = self.inner.state.lock();
+            state.prompting = false;
+            state.store_incomplete = !clean;
+        }
         self.save_cache();
         // Re-baseline the resync stamp from the server after OUR OWN turn. The
         // server also emits a run-end `session_info_update`, and its debounced
@@ -1605,6 +1680,11 @@ impl Core {
 
     /// Persist the accumulated transcript under the current session's
     /// updatedAt (the freshness check on the next open).
+    ///
+    /// An INCOMPLETE store (a turn in flight, or one that ended in error after a
+    /// dropped wire) is written with an EMPTY stamp: the content is still worth
+    /// painting instantly, but it must never compare equal to the server's
+    /// `updatedAt` and suppress the replay that would complete it.
     fn save_cache(&self) {
         let Some(session_id) = self.active_session_id() else { return };
         // Only persist rows this session actually owns. A cold start paints the
@@ -1617,15 +1697,19 @@ impl Core {
             return;
         }
         let items = self.inner.store.rich_transcript();
-        let updated_at = self
-            .inner
-            .state
-            .lock()
-            .session_updated_at
-            .get(&session_id)
-            .cloned()
-            .unwrap_or_default();
-        self.inner.cache.save_transcript(&session_id, &items, &updated_at);
+        let (incomplete, updated_at) = {
+            let state = self.inner.state.lock();
+            (
+                state.store_incomplete,
+                state
+                    .session_updated_at
+                    .get(&session_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        };
+        let stamp = if incomplete { "" } else { &updated_at };
+        self.inner.cache.save_transcript(&session_id, &items, stamp);
     }
 
     fn on_sessions_reply(&self, reply: Value) {
@@ -1863,6 +1947,12 @@ impl Core {
         let Some(conn) = self.inner.conn.lock().clone() else { return };
         let cwd = self.resolve_cwd(session_id);
         self.inner.store.clear();
+        // This is a FULL rebuild: the store was just cleared, so the replay must
+        // be APPLIED. A previous live load can leave `suppress_replay` armed
+        // (open a fresh cache → suppress), and without this reset the resync's
+        // rows would be dropped and the transcript left empty/partial.
+        conn.set_suppress_replay(false);
+        conn.set_merge_replay(false);
         conn.set_replaying(true);
         self.emit_status(ConnectionStatus::Syncing);
         let core = self.clone();
@@ -2187,5 +2277,82 @@ mod forwarder_tests {
         let (f, rec) = fwd(active);
         f.on_run_ended("end_turn".into());
         assert_eq!(*rec.run_ended.lock().unwrap(), 1);
+    }
+
+    /// The freshness/merge decision: an incomplete store must never be trusted
+    /// as a replay-suppressing or merge base, and a forced refresh ignores even a
+    /// fresh cache. This is the fix for a mid-stream drop persisting a truncated
+    /// cache that then looked fresh forever (the "different wrong version on
+    /// every reopen" bug).
+    #[test]
+    fn cache_plan_never_trusts_an_incomplete_store() {
+        use crate::cache::CacheStore;
+        use crate::{Item, ItemKind};
+
+        let dir = std::env::temp_dir().join(format!("grouse-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = CacheStore::new(dir.clone());
+        let items = vec![Item {
+            id: "m1".into(),
+            kind: ItemKind::Agent,
+            text: "hi".into(),
+            detail: String::new(),
+            output: String::new(),
+            status: String::new(),
+            app_key: String::new(),
+            calls: Vec::new(),
+        }];
+
+        let core = Core::new(
+            Box::new(Recorder {
+                items: Mutex::new(0),
+                usages: Mutex::new(0),
+                run_ended: Mutex::new(0),
+            }),
+            dir.to_string_lossy().to_string(),
+        );
+
+        // Settled + stamp matches the server: suppress (the fast path).
+        cache.save_transcript("s", &items, "T1");
+        {
+            let mut st = core.inner.state.lock();
+            st.session_updated_at.insert("s".into(), "T1".into());
+            st.store_incomplete = false;
+        }
+        let p = core.plan_cache_paint("s", false);
+        assert!(p.suppress, "a settled, matching cache suppresses its replay");
+        assert!(!p.merge);
+
+        // Settled but stale: a bounded tail-merge is allowed.
+        core.inner
+            .state
+            .lock()
+            .session_updated_at
+            .insert("s".into(), "T2".into());
+        let p = core.plan_cache_paint("s", false);
+        assert!(!p.suppress);
+        assert!(p.merge, "a settled-but-stale cache may tail-merge");
+
+        // A turn is in flight: never merge — take the full replay.
+        core.inner.state.lock().store_incomplete = true;
+        let p = core.plan_cache_paint("s", false);
+        assert!(!p.suppress && !p.merge, "an incomplete store must full-replay");
+
+        // Forced refresh ignores even a fresh cache.
+        {
+            let mut st = core.inner.state.lock();
+            st.store_incomplete = false;
+            st.session_updated_at.insert("s".into(), "T1".into());
+        }
+        let p = core.plan_cache_paint("s", true);
+        assert!(!p.suppress && !p.merge, "a forced refresh never trusts the cache");
+
+        // A cache saved from an incomplete store carries no stamp → unsettled.
+        cache.save_transcript("s", &items, "");
+        let p = core.plan_cache_paint("s", false);
+        assert!(!p.suppress && !p.merge, "an unstamped cache is not a merge base");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
