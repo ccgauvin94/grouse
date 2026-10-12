@@ -88,12 +88,16 @@ just desktop
 ## Releasing
 
 ```sh
-git tag v0.2 && git push origin v0.2
+git tag v0.2.0 && git push origin v0.2.0
 ```
 
 The tag runs the release workflow, which builds the signed Android APK and the
 desktop Flatpak and attaches them to the GitHub release. See `AGENTS.md` for signing
 and native-library requirements.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
 ## License
 
