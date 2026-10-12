@@ -407,6 +407,14 @@ fn call_to_row(c: &ToolCall) -> ToolRow {
 fn bubble_from_item(it: &Item) -> Option<Bubble> {
     match it.kind {
         ItemKind::User | ItemKind::Agent | ItemKind::Thought | ItemKind::Error => {
+            // A whitespace-only agent/thought item is goose's "\n\n" between
+            // tool calls (see `append_chunk`): dropping it keeps a cache paint
+            // or a replay from re-creating an empty bubble.
+            if matches!(it.kind, ItemKind::Agent | ItemKind::Thought)
+                && it.text.trim().is_empty()
+            {
+                return None;
+            }
             let role = match it.kind {
                 ItemKind::User => "user",
                 ItemKind::Thought => "thought",
@@ -516,6 +524,17 @@ impl TranscriptStore {
                 || (message_id.is_some()
                     && !st.stream_msg_id.is_empty()
                     && message_id != Some(st.stream_msg_id.as_str()));
+
+            // A whitespace-only chunk that would OPEN a bubble is goose's empty
+            // assistant message between tool calls (its text is "\n\n"). It
+            // renders as a bare "Goose" bubble with no content, so drop it.
+            // Whitespace folded into an ALREADY-OPEN bubble is kept: that is
+            // real intra-message spacing ("a" + "\n\n" + "b" must not become
+            // "ab"). Leaving the stream anchor untouched lets the next real
+            // chunk finalize the previous bubble as usual.
+            if fresh && text.trim().is_empty() {
+                return self.emit_ops(ops);
+            }
 
             let idx = if fresh {
                 // The previous streamed bubble is done: emit its authoritative
@@ -1032,6 +1051,16 @@ impl TranscriptStore {
     /// clear + rebuild, emitting Clear + `Reset` + one `Upsert` per item + a
     /// `Window`. Full fidelity — charts, MCP apps and toolgroups survive.
     pub fn replace_rich(&self, items: Vec<Item>, provisional: bool) {
+        // Drop whitespace-only agent/thought items before the identical-paint
+        // check below so it compares like with like: `bubble_from_item` drops
+        // them too, and a stale cache carrying them must not defeat the no-op.
+        let items: Vec<Item> = items
+            .into_iter()
+            .filter(|it| {
+                !(matches!(it.kind, ItemKind::Agent | ItemKind::Thought)
+                    && it.text.trim().is_empty())
+            })
+            .collect();
         {
             // Identical paint (the cold-start paint followed by the open's own):
             // skip the Clear, or the list empties and re-paints on every open
@@ -1087,6 +1116,15 @@ impl TranscriptStore {
     }
 
     fn replace_inner(&self, messages: Vec<Message>, provisional: bool) {
+        // See `replace_rich`: drop whitespace-only agent/thought rows up front
+        // so the identical-paint check compares like with like.
+        let messages: Vec<Message> = messages
+            .into_iter()
+            .filter(|m| {
+                !((m.role == "agent" || m.role == "thought")
+                    && m.content.trim().is_empty())
+            })
+            .collect();
         let (session_id, oldest, items, has_older) = {
             let mut st = self.state.lock();
             let same = {
@@ -1782,6 +1820,50 @@ mod tests {
         let items = store.rich_transcript();
         assert_eq!(items[0].id, "@1");
         assert_eq!(items[0].text, "hmm more");
+    }
+
+    #[test]
+    fn a_whitespace_only_message_opens_no_bubble() {
+        let (l, i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        // goose emits the assistant's text as "\n\n" between tool calls; that is
+        // not content and must not paint a bare "Goose" bubble.
+        store.append_chunk("agent", "\n\n", Some("m1"), false);
+        store.tool_call("Bash", "ls", "t1", ToolCallKind::Plain);
+        assert_eq!(&*i_evts.lock(), &["upsert:t1:Tool:Bash:in_progress"]);
+        assert!(store.rich_transcript().iter().all(|i| i.kind != ItemKind::Agent));
+    }
+
+    #[test]
+    fn intra_message_whitespace_is_kept() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        // Whitespace folded into an open bubble is real spacing, not a message.
+        store.append_chunk("agent", "a", Some("m1"), false);
+        store.append_chunk("agent", "\n\n", Some("m1"), false);
+        store.append_chunk("agent", "b", Some("m1"), false);
+        let items = store.rich_transcript();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "a\n\nb");
+    }
+
+    #[test]
+    fn a_whitespace_only_item_is_dropped_from_a_rich_paint() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.replace_rich(
+            vec![
+                text_item("m1", ItemKind::Agent, "\n\n"),
+                text_item("t1", ItemKind::Tool, "Bash"),
+                text_item("m2", ItemKind::Thought, "   "),
+                text_item("m3", ItemKind::Agent, "real"),
+            ],
+            false,
+        );
+        let items = store.rich_transcript();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].kind, ItemKind::Tool);
+        assert_eq!(items[1].text, "real");
     }
 
     #[test]

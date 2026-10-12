@@ -93,6 +93,12 @@ round-trips through the cache.
 `id` is the server's `message_id` for text, or the `tool_call_id` for tool-ish
 rows. A `toolgroup`'s id is its first child's id.
 
+A whitespace-only agent/thought message is **not** an item: goose emits the
+assistant's text as `"\n\n"` between tool calls, and the core drops a chunk that
+would open a bubble with only whitespace (whitespace folded into an already-open
+bubble is kept — that is real intra-message spacing). Cache paints and replays
+drop such rows too, so a stale cache cannot re-create an empty bubble.
+
 ### Ops
 
 The core emits **one** op stream (`CoreListener::on_item`), replacing both
