@@ -156,6 +156,17 @@ struct FakeServer {
     /// activeRunId) before answering — the server's own post-turn touch that
     /// must not be mistaken for a remote change.
     post_turn_touch: Arc<std::sync::atomic::AtomicBool>,
+    /// Fired by a test to close the live WebSocket(s), so the core's reconnect
+    /// path (and its `session/load` replay) actually runs.
+    drop_now: Arc<tokio::sync::Notify>,
+    /// When set, the `session/load` replay stamps its rows with a DIFFERENT
+    /// message id — modelling goose, which re-assigns ids on every replay, so a
+    /// replay's rows do not match the live rows they restate.
+    replay_alt_id: Arc<std::sync::atomic::AtomicBool>,
+    /// The live connection's out-of-band push half, so a test can inject a
+    /// notification (e.g. a remote `session_info_update` that makes the on-disk
+    /// cache stale) without a request to hang it on.
+    push: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Value>>>>,
 }
 
 impl FakeServer {
@@ -167,6 +178,9 @@ impl FakeServer {
             secret_header: Arc::new(Mutex::new(None)),
             notify: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             post_turn_touch: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            drop_now: Arc::new(tokio::sync::Notify::new()),
+            replay_alt_id: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            push: Arc::new(Mutex::new(None)),
         });
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -201,6 +215,18 @@ impl FakeServer {
             .cloned()
             .collect()
     }
+
+    /// Close every live connection, so the core's reconnect path runs.
+    fn drop_connections(&self) {
+        self.drop_now.notify_one();
+    }
+
+    /// Push a notification to the live connection, out of band.
+    fn push_notification(&self, value: Value) {
+        if let Some(tx) = self.push.lock().as_ref() {
+            let _ = tx.send(value);
+        }
+    }
 }
 
 #[allow(clippy::result_large_err)] // tungstenite mandates the large ErrorResponse here
@@ -221,8 +247,19 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
     .await
     .expect("fake server ws handshake");
 
+    let (push_tx, mut push_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    *server.push.lock() = Some(push_tx);
     let (mut tx, mut rx) = ws.split();
-    while let Some(Ok(message)) = rx.next().await {
+    loop {
+        let next = tokio::select! {
+            _ = server.drop_now.notified() => break,
+            Some(pushed) = push_rx.recv() => {
+                let _ = tx.send(WsMessage::Text(pushed.to_string().into())).await;
+                continue;
+            }
+            msg = rx.next() => msg,
+        };
+        let Some(Ok(message)) = next else { break };
         let WsMessage::Text(text) = message else { continue };
         let Ok(frame) = serde_json::from_str::<Value>(text.as_str()) else {
             continue;
@@ -301,9 +338,14 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
+                let mid = if server.replay_alt_id.load(std::sync::atomic::Ordering::SeqCst) {
+                    "r-2"
+                } else {
+                    "r-1"
+                };
                 for (tag, text, message_id) in [
-                    ("agent_message_chunk", "replayed line one", "r-1"),
-                    ("agent_message_chunk", " and two", "r-1"),
+                    ("agent_message_chunk", "replayed line one", mid),
+                    ("agent_message_chunk", " and two", mid),
                 ] {
                     let frame = json!({
                         "jsonrpc": "2.0",
@@ -988,6 +1030,91 @@ fn stale_cache_is_painted_then_replaced_not_appended() {
         Some("replayed line one and two"),
         "the newest row on screen must be the newest the server sent: {rows:?}"
     );
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+#[test]
+fn reconnect_replaces_the_live_transcript_not_appends() {
+    let _guard = CACHE_TEST_LOCK.lock();
+    let data_dir =
+        std::env::temp_dir().join(format!("grouse-reconnect-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let cache = grouse_core::cache::CacheStore::new(data_dir.clone());
+    let stale = vec![item("m-old", grouse_core::ItemKind::Agent, "STALE-MARKER")];
+    assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z"));
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        data_dir.to_string_lossy().to_string(),
+    );
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+        initial_project_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
+
+    core.open_session("sess-r".to_string());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "resume ready");
+    let opened: String =
+        core.transcript().iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("");
+    assert!(opened.contains("replayed line one and two"), "open replay landed: {opened}");
+
+    // A remote change bumps the session's updatedAt, so the on-disk cache
+    // (stamped when the open finished) is now STALE — the reconnect plans a
+    // merge. The store holds the LIVE transcript, not a painted cache, so there
+    // is nothing to merge into: the replay must REPLACE it. (goose also
+    // re-assigns ids on replay, so the replayed rows do not match the live ones.)
+    std::thread::sleep(Duration::from_millis(300)); // let the open's stamp-save settle
+    server.push_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "sess-r",
+            "update": {
+                "sessionUpdate": "session_info_update",
+                "title": "Remote",
+                "updatedAt": "2026-08-12T15:00:00.000Z"
+            }
+        }
+    }));
+    std::thread::sleep(Duration::from_millis(150)); // let the core ingest it
+    server.replay_alt_id.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // Key on a fresh `session/load` rather than a `Ready`: the open itself emits
+    // a Ready, so a Ready wait could be satisfied without any reconnect.
+    let loads_before = server.frames_for("session/load").len();
+    server.drop_connections();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while server.frames_for("session/load").len() <= loads_before {
+        assert!(Instant::now() < deadline, "the core never reconnected and reloaded");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+
+    let after: String =
+        core.transcript().iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("");
+    assert_eq!(
+        after.matches("replayed line one").count(),
+        1,
+        "reconnect must REPLACE the live rows, not append a copy: {after}"
+    );
+    assert!(!after.contains("STALE-MARKER"), "the stale paint must not survive: {after}");
 
     core.disconnect();
     let _ = std::fs::remove_dir_all(&data_dir);

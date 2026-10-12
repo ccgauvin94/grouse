@@ -141,13 +141,20 @@ recent `N` items (default 50) plus any earlier windows the client has asked for.
 Cold open:
 
 1. `Reset` + the cached recent window as Upserts + `Window`.
-2. A bounded `session/load` catch-up (`_meta.replayTail: N`), merged into the
-   window by id: overlapping items are Upserted (authoritative), new tail items
-   Upsert in order.
+2. A `session/load` catch-up, reconciled by id: overlapping items are Upserted
+   (authoritative), new items Upsert in order.
 3. New live ops as they arrive.
 
-A stale cache therefore costs a bounded tail on the wire, never a full replay,
-and the older window stays available locally.
+**A stock goose ignores `_meta.replayTail` and replays the WHOLE session, and it
+re-assigns `tool_call_id`s from `call_0` on every replay.** A replayed row's id
+therefore does NOT reliably match the live row it restates, so a replay must
+always REPLACE the rows already held, never append onto them: appending
+duplicates every replayed row and collides tool ids. A cache paint is
+provisional (dropped wholesale by the first replayed row), and the reconnect
+path arms that same drop — the store holds the LIVE transcript across a drop,
+not a merge base, so there is nothing to merge into. (The `merge` mode still
+exists for a painted stale cache, but against this server the anchor is the
+first replayed row, so it is a full rebuild in practice.)
 
 ## Types (sketch)
 

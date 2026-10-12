@@ -304,6 +304,19 @@ impl State {
         format!("@{}", self.next_uid)
     }
 
+    /// Keep synthetic ids unique against ones already held: a cache written by
+    /// an earlier process carries `@n` ids while `next_uid` restarts at 0, so
+    /// without this a fresh id-less chunk re-issues an `@n` already in use.
+    fn seed_next_uid(&mut self) {
+        for b in &self.bubbles {
+            if let Bubble::Text { uid, .. } = b {
+                if let Some(n) = uid.strip_prefix('@').and_then(|s| s.parse::<u64>().ok()) {
+                    self.next_uid = self.next_uid.max(n);
+                }
+            }
+        }
+    }
+
     /// Forget everything and start clean, keeping the id index consistent.
     fn reset(&mut self) {
         self.bubbles.clear();
@@ -1096,6 +1109,7 @@ impl TranscriptStore {
             let st = &mut *st;
             st.tool_by_id.clear();
             index_bubbles(&mut st.tool_by_id, &st.bubbles);
+            st.seed_next_uid();
             st.provisional = provisional;
             st.trim();
             // Paint only the newest CLIENT_WINDOW items; the store keeps all (for
@@ -1173,6 +1187,7 @@ impl TranscriptStore {
                     });
                 }
             }
+            st.seed_next_uid();
             st.provisional = provisional;
             st.emitted_from = st.bubbles.len().saturating_sub(CLIENT_WINDOW);
             let has_older = st.emitted_from > 0;
@@ -1864,6 +1879,45 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].kind, ItemKind::Tool);
         assert_eq!(items[1].text, "real");
+    }
+
+    #[test]
+    fn a_provisional_live_transcript_is_replaced_by_the_replay() {
+        let (l, _e) = listener();
+        let store = TranscriptStore::new(l);
+        // A live turn lands before the socket drops.
+        store.append_chunk("user", "hi", Some("u1"), false);
+        store.append_chunk("agent", "old", Some("a1"), false);
+        store.tool_call("Bash", "ls", "call_0", ToolCallKind::Plain);
+        // The reconnect keeps those rows but arms the provisional drop (goose
+        // replays the WHOLE session and re-assigns tool_call_ids from call_0).
+        store.mark_provisional();
+        store.append_chunk("user", "hi", Some("u1"), false);
+        store.append_chunk("agent", "new", Some("a1"), false);
+        store.tool_call("Bash", "ls -la", "call_0", ToolCallKind::Plain);
+
+        let items = store.rich_transcript();
+        let ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
+        // The replay REPLACED the live rows — no duplicated id survives.
+        assert_eq!(ids, vec!["u1", "a1", "call_0"]);
+        assert_eq!(items[1].text, "new");
+        assert_eq!(items[2].text, "Bash");
+        assert_eq!(items[2].detail, "ls -la");
+    }
+
+    #[test]
+    fn synthetic_ids_do_not_collide_with_a_loaded_cache() {
+        let (l, _e) = listener();
+        let store = TranscriptStore::new(l);
+        // A cache from an earlier process carries `@n` ids; `next_uid` restarts
+        // at 0, so a fresh id-less chunk must not re-issue one already held.
+        store.replace_rich(vec![text_item("@1", ItemKind::Thought, "cached")], false);
+        store.append_chunk("thought", "fresh", None, true);
+        let items = store.rich_transcript();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, "@1");
+        assert_ne!(items[1].id, "@1");
+        assert_eq!(items[1].id, "@2");
     }
 
     #[test]

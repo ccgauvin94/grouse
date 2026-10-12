@@ -1449,24 +1449,29 @@ impl Core {
         // transcript is up to date must not replay just because the socket
         // dropped (screen-off / background reconnects re-streamed the whole
         // convo every time). The store kept the live transcript across the
-        // drop, so a fresh suppress keeps the UI exactly as it was; a stale
-        // one replays (the id-gated chunks dedupe against the store).
+        // drop, so a fresh suppress keeps the UI exactly as it was; a stale one
+        // replays (see below: the live rows are marked provisional and the
+        // replay replaces them).
         let paint = self.plan_cache_paint(&resume, false);
-        let (suppress, merge) = (paint.suppress, paint.merge);
-        // A resume that neither suppresses nor merges replays the whole history
-        // onto the live transcript the store kept across the drop. The replay
-        // APPENDS — chunks reset the stream anchor, they do NOT dedupe against
-        // existing rows — so the rows held now have to be dropped when the
-        // replay's first real row lands, or replayed history would land after
-        // them. Arm that in the store.
-        if !suppress && !merge {
+        let suppress = paint.suppress;
+        // The store holds the LIVE transcript across the drop, not a painted
+        // cache, so there is no merge base: `replace_rich_for_merge` was never
+        // called and the store's `merging` flag is off. A "merge" here would
+        // therefore just APPEND the replay onto the live rows — and goose
+        // ignores `_meta.replayTail` and replays the WHOLE session with
+        // `tool_call_id`s re-assigned from `call_0`, so appending duplicates
+        // every replayed row and collides the ids (the repeated/duplicated-bubble
+        // bug). Arm the provisional drop instead: the first replayed row
+        // supersedes the live rows and the full replay rebuilds cleanly. Never
+        // arm a merge on reconnect — the paint it would need does not exist.
+        if !suppress {
             self.inner.store.mark_provisional();
         }
         let (_, _rx) = self.connect_impl(
             config,
             ConnectSpec::Resume { session_id: resume, cwd },
             suppress,
-            merge,
+            false,
         );
     }
 
