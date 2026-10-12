@@ -125,6 +125,24 @@ Rules:
 - **Reset** happens only on a session switch or a cache miss that forces a full
   reload.
 
+### Speaking (the TTS stream)
+
+Alongside `on_item`, the core emits `on_speak(text)` — a sanitized,
+sentence-sized chunk of the assistant's **visible** text, ready for a TTS engine.
+It is derived from the same text that feeds the agent bubbles, but:
+
+- code fences and inline code are stripped (never spoken),
+- markdown links read their text, images their alt,
+- headings / bullets / emphasis markers are removed,
+- chunks are cut at sentence boundaries *as the reply streams*, so speech can
+  start before the turn ends; `on_run_ended` flushes the remainder.
+
+One implementation lives in the core (`speak.rs`), so desktop and Android agree
+on what gets spoken. Playback is the client's — an on-device engine today, an
+optional streaming TTS backend later (the voice workstream). The stream is
+independent of the transcript: a client that is not narrating a live turn simply
+ignores it.
+
 ### Windows
 
 The core holds the full session transcript, but emits only a window of the most

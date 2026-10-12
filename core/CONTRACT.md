@@ -103,6 +103,11 @@ pub trait CoreListener {
     fn on_item(&self, op: TranscriptOp);                   // the rich item stream (§3.5)
     fn on_usage(&self, used: i64, size: i64, cost: f64, currency: String); // context window + cost
     fn on_run_ended(&self, stop_reason: String);           // a turn finished
+    // A sanitized, sentence-sized chunk of the assistant's visible text, ready
+    // for a TTS engine (see docs/TRANSCRIPT_MODEL.md "Speaking"). Emitted as
+    // the reply streams and on the finalizing flush, so a conversation loop can
+    // speak before the turn ends; a client not narrating a live turn ignores it.
+    fn on_speak(&self, text: String);
     fn on_config(&self, options: Vec<ConfigOption>);
     fn on_permission_request(&self, request: PermissionRequest);
     fn on_session_touched(&self, session_id: String, title: String, updated_at: String);
