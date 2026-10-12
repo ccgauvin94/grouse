@@ -70,6 +70,8 @@ impl grouse_core::GrouseUnstableListener for UL {
         println!("-- probe: updatedAt={} count={}", updated_at, message_count);
     }
     fn on_tool_result(&self, _t: String, _e: bool) {}
+    fn on_dictation_config(&self, _p: String) {}
+    fn on_transcript(&self, _t: String) {}
     fn on_error(&self, _m: String, _e: String) {}
 }
 

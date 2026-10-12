@@ -342,6 +342,10 @@ void CoreBridge::installListener()
         cb_on_session_probe,
         cb_on_tool_result,
         cb_on_error,
+        // Dictation is not wired on the desktop yet; the slots stay null so the
+        // table is ABI-locked to the core's GrouseCoreListener.
+        nullptr,   // on_dictation_config
+        nullptr,   // on_transcript
     };
     m_listener = &table;
 

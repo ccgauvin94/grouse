@@ -375,6 +375,13 @@ pub trait GrouseUnstableListener: Send + Sync {
     fn on_providers(&self, providers: String);
     fn on_session_probe(&self, session_id: String, updated_at: String, message_count: i64);
     fn on_tool_result(&self, text: String, is_error: bool);
+    /// Dictation provider status (`_goose/unstable/dictation/config`): which
+    /// speech-to-text providers the server has configured, as a raw JSON map of
+    /// provider name → status entry (the shim's list-reply convention).
+    fn on_dictation_config(&self, providers: String);
+    /// A dictation transcript (`_goose/unstable/dictation/transcribe`): the text
+    /// decoded from the audio clip the UI sent; empty when the clip was silent.
+    fn on_transcript(&self, text: String);
     fn on_error(&self, method: String, message: String);
 }
 

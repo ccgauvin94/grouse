@@ -39,6 +39,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
@@ -47,6 +48,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
@@ -753,6 +755,33 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             ModelPill(modelOpt, cm.knownModels.value, cm::setOption,
                                 onOpenSheet = { showModelSheet = true })
                             Spacer(Modifier.weight(1f))
+                            // Push-to-talk: press and hold to record, release to transcribe and
+                            // send. The transcript lands as a normal prompt, so a spoken turn is
+                            // indistinguishable from a typed one.
+                            val rec = cm.recording.value
+                            FilledIconButton(
+                                onClick = {},
+                                modifier = Modifier.size(42.dp).pointerInput(Unit) {
+                                    detectTapGestures(onPress = {
+                                        cm.startVoiceRecording()
+                                        tryAwaitRelease()
+                                        cm.stopVoiceRecording()
+                                    })
+                                },
+                                colors = IconButtonDefaults.filledIconButtonColors(
+                                    containerColor = if (rec) MaterialTheme.colorScheme.error
+                                                     else MaterialTheme.colorScheme.surface,
+                                ),
+                            ) {
+                                Icon(
+                                    Icons.Filled.Mic,
+                                    contentDescription = "hold to talk",
+                                    modifier = Modifier.size(20.dp),
+                                    tint = if (rec) MaterialTheme.colorScheme.onError
+                                           else MaterialTheme.colorScheme.onSurface,
+                                )
+                            }
+                            Spacer(Modifier.width(6.dp))
                             // One circle, two states: stop while a turn runs, send when there is
                             // text. Sending mid-turn queues, so the arrow is never wrong -- it just
                             // may not go out immediately.

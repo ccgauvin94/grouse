@@ -215,5 +215,8 @@ struct GrouseCoreListener {
     void (*on_session_probe)(void *, const char *, const char *, long long);
     void (*on_tool_result)(void *, const char *, int);
     void (*on_error)(void *, const char *, const char *);
+    // -- dictation (speech-to-text) --
+    void (*on_dictation_config)(void *, const char *);
+    void (*on_transcript)(void *, const char *);
 };
 }

@@ -567,6 +567,37 @@ impl GrouseUnstable {
     }
 
     // -----------------------------------------------------------------------
+    // Dictation (speech-to-text)
+    // -----------------------------------------------------------------------
+
+    /// Which dictation providers the server has configured; surfaces as
+    /// `on_dictation_config` (raw JSON map, the shim's list-reply convention).
+    pub fn dictation_config(&self) {
+        let Some(conn) = spine::current_conn() else { return };
+        if let Some(result) = self.call(&*conn, "_goose/unstable/dictation/config", json!({})) {
+            let providers = result.get("providers").cloned().unwrap_or(Value::Null);
+            self.listener.on_dictation_config(providers.to_string());
+        }
+    }
+
+    /// Transcribe one base64 audio clip through a dictation provider
+    /// (`openai` / `groq` / `elevenlabs` / `local` / `model`); the text arrives on
+    /// `on_transcript`. goose's dictation is one-shot — the clip is the whole
+    /// utterance, `mime_type` one of `audio/wav|webm|mp4|m4a|mpeg` — so this is a
+    /// blocking round-trip (STT decode + provider). Call it off the UI thread.
+    pub fn dictation_transcribe(&self, audio: String, mime_type: String, provider: String) {
+        let Some(conn) = spine::current_conn() else { return };
+        if let Some(result) = self.call(
+            &*conn,
+            "_goose/unstable/dictation/transcribe",
+            json!({ "audio": audio, "mimeType": mime_type, "provider": provider }),
+        ) {
+            let text = result.get("text").and_then(Value::as_str).unwrap_or_default();
+            self.listener.on_transcript(text.to_string());
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Server-request answers (CONTRACT §5)
     // -----------------------------------------------------------------------
 
@@ -894,6 +925,8 @@ mod tests {
         Providers(String),
         SessionProbe(String, String, i64),
         ToolResult(String, bool),
+        DictationConfig(String),
+        Transcript(String),
         Error(String, String),
     }
 
@@ -971,6 +1004,12 @@ mod tests {
         fn on_tool_result(&self, text: String, is_error: bool) {
             self.events.lock().push(Ev::ToolResult(text, is_error));
         }
+        fn on_dictation_config(&self, providers: String) {
+            self.events.lock().push(Ev::DictationConfig(providers));
+        }
+        fn on_transcript(&self, text: String) {
+            self.events.lock().push(Ev::Transcript(text));
+        }
         fn on_error(&self, method: String, message: String) {
             self.events.lock().push(Ev::Error(method, message));
         }
@@ -1022,6 +1061,44 @@ mod tests {
             other => panic!("expected one on_recipes, got {other:?}"),
         }
         assert_calls(&stub, &[("_goose/unstable/recipes/list", json!({}))]);
+    }
+
+    #[test]
+    fn dictation_transcribe_emits_text() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        stub.script(vec![Ok(json!({"text": "hello world"}))]);
+        let (g, rec) = harness(stub.clone());
+
+        g.dictation_transcribe("QUJD".to_string(), "audio/wav".to_string(), "openai".to_string());
+
+        assert_eq!(rec.events(), vec![Ev::Transcript("hello world".to_string())]);
+        assert_calls(
+            &stub,
+            &[(
+                "_goose/unstable/dictation/transcribe",
+                json!({"audio": "QUJD", "mimeType": "audio/wav", "provider": "openai"}),
+            )],
+        );
+    }
+
+    #[test]
+    fn dictation_config_emits_providers() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        stub.script(vec![Ok(json!({"providers": {"openai": {"configured": true}}}))]);
+        let (g, rec) = harness(stub.clone());
+
+        g.dictation_config();
+
+        match rec.events().as_slice() {
+            [Ev::DictationConfig(payload)] => {
+                let parsed: Value = serde_json::from_str(payload).unwrap();
+                assert_eq!(parsed, json!({"openai": {"configured": true}}));
+            }
+            other => panic!("expected one on_dictation_config, got {other:?}"),
+        }
+        assert_calls(&stub, &[("_goose/unstable/dictation/config", json!({}))]);
     }
 
     #[test]

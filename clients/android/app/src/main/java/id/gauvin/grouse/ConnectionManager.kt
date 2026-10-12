@@ -145,6 +145,17 @@ class ConnectionManager private constructor(context: Context) {
     // emits onSessions before the first connect), so `main` MUST be initialized before
     // `core` — declared here, not with the other handlers below.
     private val main = Handler(Looper.getMainLooper())
+
+    // --- Voice: push-to-talk STT (goose dictation) + on-device TTS ------------
+    // The STT half is goose's dictation (the client records, the server transcribes
+    // via a configured provider); the TTS half is client-side, fed by the core's
+    // on_speak stream (CONTRACT §5). See docs/TRANSCRIPT_MODEL.md.
+    private val speaker = Speaker(appContext)
+    private val recorder = VoiceRecorder(appContext)
+    /** True while a push-to-talk clip is being captured (drives the mic button). */
+    val recording = mutableStateOf(false)
+    /** Raw JSON of goose's dictation provider status (backs an eventual STT picker). */
+    val dictationProviders = mutableStateOf("")
     // The core owns the socket, reconnect/backoff, the transcript, and the caches. `unstable`
     // is the _goose/unstable/* shim (recipes, schedules, skills, extensions, tools, config).
     private val core = Core(object : CoreListener {
@@ -157,10 +168,12 @@ class ConnectionManager private constructor(context: Context) {
             main.post { usage.value = AcpEvent.Usage(used.toInt(), size.toInt(), cost, currency) }
         }
         override fun onRunEnded(stopReason: String) { main.post { onRunEnded(stopReason) } }
-        // Sanitized, sentence-sized speakable text (docs/TRANSCRIPT_MODEL.md).
-        // No playback yet — the on-device TTS engine lands with the voice
-        // workstream; accepted and dropped for now.
-        override fun onSpeak(text: String) {}
+        // Sanitized, sentence-sized speakable text (docs/TRANSCRIPT_MODEL.md) — one
+        // TTS utterance per chunk, played in order as it arrives.
+        override fun onSpeak(text: String) {
+            if (!store.speakReplies) return
+            main.post { speaker.speak(text) }
+        }
         override fun onConfig(options: List<CoreConfigOption>) { main.post { onCoreConfig(options) } }
         override fun onPermissionRequest(request: PermissionRequest) { main.post { onCorePermission(request) } }
         override fun onSessionTouched(sessionId: String, title: String, updatedAt: String) {
@@ -220,6 +233,12 @@ class ConnectionManager private constructor(context: Context) {
         // The core emits this only in response to a direct tools_call; the app issues none
         // since fetchProjectInfo was removed (the server requires Auto mode for those).
         override fun onToolResult(text: String, isError: Boolean) { }
+        override fun onDictationConfig(providers: String) {
+            main.post { this@ConnectionManager.dictationProviders.value = providers }
+        }
+        override fun onTranscript(text: String) {
+            main.post { this@ConnectionManager.onVoiceTranscript(text) }
+        }
         override fun onError(method: String, message: String) { main.post { onUnstableError(method, message) } }
     })
 
@@ -1439,6 +1458,7 @@ class ConnectionManager private constructor(context: Context) {
         images.forEach { img -> blocks.add(PromptBlock.Image(img.mimeType, img.dataB64)) }
         files.forEach { f -> blocks.add(PromptBlock.Resource(f.name, f.mimeType, f.text, f.blobB64)) }
         if (blocks.isEmpty()) { busy.value = false; turnInFlight = false; turnInFlightSession = null; return }
+        speaker.stop()   // a new prompt supersedes any reply still being spoken
         core.sendPrompt(Prompt(blocks), expect?.let { SendExpect(it) })
     }
 
@@ -1564,11 +1584,43 @@ class ConnectionManager private constructor(context: Context) {
      *  business and survives. */
     fun cancel() {
         core.cancel()
+        speaker.stop()   // Stop means stop — spoken replies included
         busy.value = false
         turnInFlight = false   // wire is free again; without this the queue never drains
         turnInFlightSession = null
         clearQueueFor(currentSession.value)   // Stop means stop: nothing queued here fires after
     }
+
+    // --- Voice (push-to-talk) --------------------------------------------------
+
+    /** Begin a push-to-talk clip; the mic button calls this on press. */
+    fun startVoiceRecording() {
+        speaker.stop()   // barge-in: talking over a reply silences it
+        recording.value = recorder.start()
+    }
+
+    /**
+     * End the clip and transcribe it through goose's dictation. The transcript
+     * arrives on `onTranscript` (a core callback), not here — dictation is a
+     * blocking round-trip, so it runs on the intent thread, never the UI thread.
+     */
+    fun stopVoiceRecording() {
+        if (!recording.value) return
+        recording.value = false
+        val bytes = recorder.stop() ?: return
+        val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        io { unstable.dictationTranscribe(b64, "audio/mp4", store.dictationProvider) }
+    }
+
+    /** A dictation transcript landed: send it as a prompt, exactly as if it were typed. */
+    fun onVoiceTranscript(text: String) {
+        val t = text.trim()
+        if (t.isEmpty()) return
+        sendPromptBlocks(t, emptyList(), expect = currentSession.value)
+    }
+
+    /** Ask goose which dictation providers are configured (backs an eventual STT picker). */
+    fun refreshDictation() { io { unstable.dictationConfig() } }
 
     /** Compact the conversation history to reclaim context (goose /compact command). */
     fun compact() {

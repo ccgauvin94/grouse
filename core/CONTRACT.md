@@ -293,7 +293,8 @@ Custom notifications (gated on `customNotifications`): `status_message` →
 > on `GrouseUnstableListener`: `on_recipes`, `on_projects`, `on_skills`,
 > `on_tools`, `on_extensions`, `on_session_extensions`, `on_supported_models`,
 > `on_providers`, `on_config_value`, `on_export`, `on_session_probe`,
-> `on_app_resource`, and `on_tool_result` (+ the error/compaction/message
+> `on_app_resource`, `on_tool_result`, and the dictation pair
+> `on_dictation_config` / `on_transcript` (+ the error/compaction/message
 > families). The fork wire shapes are intentionally NOT mirrored into typed
 > uniffi records here — the shim is slated for retirement (GDK absorbs each
 > feature), so the UI parses these JSON payloads directly and the shim is
@@ -304,6 +305,22 @@ Custom notifications (gated on `customNotifications`): `status_message` →
 > set — env vars count for secret keys), because goose's `configured` also marks
 > local endpoints and detected CLIs usable with nothing configured. A picker that
 > means "the user set this up" must require `configured && hasCredentials`.
+
+### Dictation (speech-to-text)
+
+`GrouseUnstable::dictation_config()` → `_goose/unstable/dictation/config`: the
+provider status map as raw JSON on `on_dictation_config` (same list-reply
+convention as the other shim families).
+
+`GrouseUnstable::dictation_transcribe(audio, mime_type, provider)` →
+`_goose/unstable/dictation/transcribe`: the decoded text on `on_transcript`.
+
+`audio` is base64; `mime_type` ∈ `audio/wav|webm|mp4|m4a|mpeg`; `provider` ∈
+`openai|groq|elevenlabs|local|model`. goose's dictation is **one-shot** — the
+clip is the whole utterance and there are no partials — and the call is a
+blocking round-trip (decode + provider), so a UI must call it off its UI thread.
+This is the STT half of the voice loop; the TTS half is client-side and is fed
+by the `on_speak` stream (§3.2, `docs/TRANSCRIPT_MODEL.md`).
 
 ---
 
