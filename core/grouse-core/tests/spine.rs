@@ -39,6 +39,7 @@ enum Ev {
     Item(TranscriptOp),
     Usage(i64, i64, f64, String),
     RunEnded(String),
+    Speak(String),
     Config(Vec<ConfigOption>),
     Permission(PermissionRequest),
     Touched(String, String, String),
@@ -75,6 +76,9 @@ impl CoreListener for RecordingListener {
     }
     fn on_run_ended(&self, stop_reason: String) {
         let _ = self.tx.send(Ev::RunEnded(stop_reason));
+    }
+    fn on_speak(&self, text: String) {
+        let _ = self.tx.send(Ev::Speak(text));
     }
     fn on_config(&self, options: Vec<ConfigOption>) {
         let _ = self.tx.send(Ev::Config(options));

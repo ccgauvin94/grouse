@@ -37,6 +37,7 @@ pub mod cache;
 pub mod capi;
 pub mod notify;
 pub mod roam;
+pub mod speak;
 pub mod spine;
 pub mod transcript;
 pub mod transport;
@@ -317,6 +318,12 @@ pub trait CoreListener: Send + Sync {
     fn on_usage(&self, used: i64, size: i64, cost: f64, currency: String);
     /// A turn finished (`stop_reason` is the server's).
     fn on_run_ended(&self, stop_reason: String);
+    /// A sanitized, sentence-sized chunk of the assistant's visible text, ready
+    /// for a client's TTS engine (see `docs/TRANSCRIPT_MODEL.md`). Emitted as
+    /// the reply streams (and on the finalizing flush), so a conversation loop
+    /// can speak before the turn ends. Clients that are not narrating a live
+    /// turn simply ignore it.
+    fn on_speak(&self, text: String);
     fn on_config(&self, options: Vec<ConfigOption>);
     fn on_permission_request(&self, request: PermissionRequest);
     fn on_session_touched(&self, session_id: String, title: String, updated_at: String);
@@ -2167,6 +2174,13 @@ impl CoreListener for CoreListenerForwarder {
         // still drains its own per-chat queue wherever the user is looking.
         self.inner.on_run_ended(stop_reason);
     }
+    fn on_speak(&self, text: String) {
+        // Speech is painting: a backgrounded Main chat must not narrate into
+        // the window showing a roam peer.
+        if self.main_displayed() {
+            self.inner.on_speak(text);
+        }
+    }
     fn on_config(&self, options: Vec<ConfigOption>) {
         self.inner.on_config(options);
     }
@@ -2229,6 +2243,7 @@ mod forwarder_tests {
         fn on_run_ended(&self, _: String) {
             *self.run_ended.lock().unwrap() += 1;
         }
+        fn on_speak(&self, _: String) {}
         fn on_config(&self, _: Vec<ConfigOption>) {}
         fn on_permission_request(&self, _: PermissionRequest) {}
         fn on_session_touched(&self, _: String, _: String, _: String) {}

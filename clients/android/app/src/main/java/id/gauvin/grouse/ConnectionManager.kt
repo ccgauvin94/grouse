@@ -157,6 +157,10 @@ class ConnectionManager private constructor(context: Context) {
             main.post { usage.value = AcpEvent.Usage(used.toInt(), size.toInt(), cost, currency) }
         }
         override fun onRunEnded(stopReason: String) { main.post { onRunEnded(stopReason) } }
+        // Sanitized, sentence-sized speakable text (docs/TRANSCRIPT_MODEL.md).
+        // No playback yet — the on-device TTS engine lands with the voice
+        // workstream; accepted and dropped for now.
+        override fun onSpeak(text: String) {}
         override fun onConfig(options: List<CoreConfigOption>) { main.post { onCoreConfig(options) } }
         override fun onPermissionRequest(request: PermissionRequest) { main.post { onCorePermission(request) } }
         override fun onSessionTouched(sessionId: String, title: String, updatedAt: String) {

@@ -226,6 +226,13 @@ static void cb_on_run_ended(void *u, const char *stop) {
     const QString s = copyStr(stop);
     marshal(u, nullptr, [=](Manager *m) { m->coreOnRunEnded(s); });
 }
+static void cb_on_speak(void *u, const char *text) {
+    // The core's sanitized, sentence-sized speakable text (docs/TRANSCRIPT_MODEL.md).
+    // Accepted and dropped for now — the desktop TTS engine lands with the voice
+    // workstream; the payload is only valid for this call, so nothing is retained.
+    Q_UNUSED(u);
+    Q_UNUSED(text);
+}
 static void cb_on_config(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnConfig(s); }); }
 static void cb_on_permission(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnPermission(s); }); }
 static void cb_on_session_touched(void *u, const char *a, const char *b, const char *c) {
@@ -306,6 +313,7 @@ void CoreBridge::installListener()
         cb_on_item,
         cb_on_usage,
         cb_on_run_ended,
+        cb_on_speak,
         cb_on_config,
         cb_on_permission,
         cb_on_session_touched,
