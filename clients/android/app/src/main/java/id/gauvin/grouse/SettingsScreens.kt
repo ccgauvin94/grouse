@@ -367,6 +367,14 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                     roamOn = on; cm.store.roamEnabled = on
                 }
                 SettingCaption("Shows the Roam tab and enables pairing with a goose serve --roam host.")
+                // A run of tool calls reads as a few labelled steps instead of a wall of
+                // "2 tool calls". Costs one small inference per turn, on a hidden session.
+                var runSummaries by remember { mutableStateOf(cm.store.runSummaries) }
+                SettingsSwitchRow("Summarize tool runs", runSummaries) { on ->
+                    runSummaries = on; cm.setRunSummaries(on)
+                }
+                SettingCaption("Labels each run of tool calls with a short line written by the " +
+                    "model, instead of a bare call count.")
             }
 
             Spacer(Modifier.height(24.dp))

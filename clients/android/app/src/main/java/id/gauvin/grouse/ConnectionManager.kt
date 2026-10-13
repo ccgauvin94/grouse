@@ -705,6 +705,9 @@ class ConnectionManager private constructor(context: Context) {
     fun setDynamicColor(v: Boolean) { store.dynamicColor = v; dynamicColor.value = v }
     fun setShowAllProviders(v: Boolean) { store.showAllProviders = v; showAllProviders.value = v }
 
+    /** Toggle the model-written run labels (issue #13): store it and push it to the core. */
+    fun setRunSummaries(v: Boolean) { store.runSummaries = v; core.setRunSummaries(v) }
+
     // The unstable shim's intents are SYNCHRONOUS RPCs (round-trip the server on the
     // calling thread) — unlike the core's own async intents. Calling them on the main
     // thread freezes the UI for the whole call (the drawer's refreshSidebar used to do
@@ -2552,6 +2555,9 @@ class ConnectionManager private constructor(context: Context) {
             liveModelsFetchedFor = null
             desiredApplied = false
         }
+        // The core defaults the model-written run labels ON and keeps the flag for the
+        // process; push the stored preference so an OFF setting survives a restart.
+        core.setRunSummaries(store.runSummaries)
         // Resuming means content is on its way — show "Loading…" from the tap,
         // not from whenever the core's first event happens to land. onCoreTranscript
         // turns it straight back off if a cached snapshot paints (content on screen

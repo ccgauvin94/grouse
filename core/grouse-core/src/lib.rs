@@ -39,6 +39,7 @@ pub mod notify;
 pub mod roam;
 pub mod speak;
 pub mod spine;
+mod summarize;
 pub mod transcript;
 pub mod transport;
 pub mod unstable;
@@ -456,6 +457,10 @@ struct CoreState {
     resync_ticks: i32,
     /// Last probed (updatedAt, messageCount) — the "did it move?" comparison.
     sync_stamp: Option<(String, i64)>,
+    /// Ask the model to rewrite each tool run's label at the end of a turn
+    /// (issue #13). On by default; costs one short inference per turn, spent on
+    /// a hidden session so it never appears in a chat.
+    run_summaries: bool,
 }
 
 /// How to paint a session's cached transcript and which wire load it owes. See
@@ -523,7 +528,7 @@ impl Core {
                 listener,
                 store,
                 cache: Arc::new(CacheStore::new(cache_dir)),
-                state: Mutex::new(CoreState::default()),
+                state: Mutex::new(CoreState { run_summaries: true, ..Default::default() }),
                 conn: Mutex::new(None),
                 conn_task: Mutex::new(None),
                 peers: Mutex::new(Vec::new()),
@@ -1185,6 +1190,18 @@ impl Core {
     pub fn config(&self) -> Vec<ConfigOption> {
         self.inner.state.lock().config.clone()
     }
+
+    /// Rewrite each tool run's label with a short model-written line at the end
+    /// of a turn (issue #13). On by default; the request runs on a hidden
+    /// session after the turn, so it never delays a reply or appears in a chat.
+    pub fn set_run_summaries(&self, on: bool) {
+        self.inner.state.lock().run_summaries = on;
+    }
+
+    /// Whether the model rewrites run labels (issue #13).
+    pub fn run_summaries(&self) -> bool {
+        self.inner.state.lock().run_summaries
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1583,6 +1600,8 @@ impl Core {
         let params = prompt_params(&prompt, &session_id);
         let core = self.clone();
         let store = self.inner.store.clone();
+        // A new turn's runs are a fresh worklist for the summarizer.
+        conn.clear_turn_runs();
         {
             let mut state = self.inner.state.lock();
             state.prompting = true;
@@ -1610,8 +1629,88 @@ impl Core {
                     store.run_ended("error");
                 }
             }
+            // The turn is over: rewrite its tool runs' labels (issue #13). After
+            // the reply, on a hidden session, so it costs the user no latency.
+            core.spawn_run_summaries(conn.clone());
             core.on_prompt_done(result.is_ok());
         });
+    }
+
+    /// Ask the model for a one-line label per tool run of the turn that just
+    /// ended. The provisional label (the run's own thinking, condensed by the
+    /// store) stands wherever the model does not answer, so this is pure
+    /// improvement — and it runs after the turn, so it never delays a reply.
+    fn spawn_run_summaries(&self, conn: Arc<crate::spine::Conn>) {
+        if !self.inner.state.lock().run_summaries {
+            conn.clear_turn_runs();
+            return;
+        }
+        let runs: Vec<(String, String, Vec<String>)> = conn
+            .take_turn_runs()
+            .into_iter()
+            .filter_map(|id| {
+                conn.store().run_framing(&id).map(|(thought, tools)| (id, thought, tools))
+            })
+            .collect();
+        if runs.is_empty() {
+            return;
+        }
+        let core = self.clone();
+        crate::roam::runtime().spawn(async move {
+            core.rewrite_run_labels(conn, runs).await;
+        });
+    }
+
+    async fn rewrite_run_labels(
+        &self,
+        conn: Arc<crate::spine::Conn>,
+        runs: Vec<(String, String, Vec<String>)>,
+    ) {
+        let Some(session_id) = self.summarizer_session(&conn).await else {
+            return;
+        };
+        let body = crate::summarize::prompt(
+            &runs.iter().map(|(_, t, tools)| (t.clone(), tools.clone())).collect::<Vec<_>>(),
+        );
+        let params = prompt_params(
+            &Prompt { blocks: vec![PromptBlock::Text { text: body }] },
+            &session_id,
+        );
+        let sent = conn.rpc_async("session/prompt", params).await.is_ok();
+        let text = conn.take_summary_reply();
+        // Empty the hidden session: its context must not grow turn on turn.
+        let _ = conn
+            .rpc_async(
+                "_goose/unstable/session/conversation/truncate",
+                json!({ "sessionId": session_id, "truncateFrom": 0 }),
+            )
+            .await;
+        if !sent {
+            return;
+        }
+        for (n, label) in crate::summarize::parse_labels(&text) {
+            if let Some((id, _, _)) = runs.get(n - 1) {
+                conn.store().set_run_summary(id, &label);
+            }
+        }
+    }
+
+    /// The hidden summarizer session, created on first use. `_meta.hidden` keeps
+    /// it out of `session/list` (goose's `hidden` session type is not listable),
+    /// so it can never show up as a chat in any client.
+    async fn summarizer_session(&self, conn: &Arc<crate::spine::Conn>) -> Option<String> {
+        if let Some(id) = conn.summarizer_session() {
+            return Some(id);
+        }
+        let params = json!({
+            "cwd": conn.cwd(),
+            "mcpServers": [],
+            "_meta": { "hidden": true },
+        });
+        let reply = conn.rpc_async("session/new", params).await.ok()?;
+        let id = reply.get("sessionId").and_then(Value::as_str)?.to_string();
+        conn.set_summarizer_session(id.clone());
+        Some(id)
     }
 
     fn spawn_set_config(&self, conn: Arc<crate::spine::Conn>, session_id: String, config_id: String, value: String) {

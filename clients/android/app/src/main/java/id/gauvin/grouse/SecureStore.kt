@@ -228,6 +228,13 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("speak_replies", true)
         set(v) = cfg.edit().putBoolean("speak_replies", v).apply()
 
+    /** Whether each run of tool calls gets a short model-written label at the end of a turn
+     *  (issue #13). One small inference per turn, on a hidden session; off keeps the label the
+     *  run's own thinking gives. On by default. */
+    var runSummaries: Boolean
+        get() = cfg.getBoolean("run_summaries", true)
+        set(v) = cfg.edit().putBoolean("run_summaries", v).apply()
+
     /** Which goose dictation provider push-to-talk transcribes with. "openai" is the
      *  provider repointed at the box's own STT server; the enum is goose's, not ours. */
     var dictationProvider: String

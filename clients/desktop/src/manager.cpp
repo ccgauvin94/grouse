@@ -83,6 +83,7 @@ bool Manager::useTls() const { return m_store.value("wss", true).toBool(); }
 bool Manager::autoConnectEnabled() const { return m_store.value("auto_connect", true).toBool(); }
 bool Manager::notificationsEnabled() const { return m_store.value("notify_events", true).toBool(); }
 bool Manager::configuredProvidersOnly() const { return m_store.value("configured_providers_only", true).toBool(); }
+bool Manager::runSummaries() const { return m_store.value("run_summaries", true).toBool(); }
 QString Manager::workingDir() const { return m_store.value("cwd", "").toString(); }
 bool Manager::roamEnabled() const { return m_store.value("roam_enabled", false).toBool(); }
 
@@ -113,6 +114,20 @@ void Manager::setConfiguredProvidersOnly(bool v)
     emit settingsChanged();
     emit providersChanged();   // the pickers filter on this
 }
+void Manager::setRunSummaries(bool v)
+{
+    m_store.setValue("run_summaries", v);
+    emit settingsChanged();
+    syncRunSummariesToCore();
+}
+
+void Manager::syncRunSummariesToCore()
+{
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    m_bridge->api().grouse_set_run_summaries(m_bridge->handle(), runSummaries() ? 1 : 0);
+}
+
 void Manager::setWorkingDir(const QString &v)
 {
     m_store.setValue("cwd", v.trimmed().remove(QRegularExpression(QStringLiteral("/+$"))));
@@ -1514,6 +1529,7 @@ void Manager::coreOnStatus(const QString &json)
             syncRoamIdentityToCore();
             restoreRoamPeers();
         }
+        syncRunSummariesToCore();
         flushQueue();
         refreshSessions();
         refreshProjects();

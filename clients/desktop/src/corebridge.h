@@ -67,6 +67,9 @@ public:
         // stable getters
         char *(*grouse_status)(void *h);
         int (*grouse_ready)(void *h);
+        // model-written run labels (issue #13)
+        void (*grouse_set_run_summaries)(void *h, int on);
+        int (*grouse_run_summaries)(void *h);
         char *(*grouse_active_session_id)(void *h);
         char *(*grouse_sessions)(void *h);
         char *(*grouse_transcript)(void *h);

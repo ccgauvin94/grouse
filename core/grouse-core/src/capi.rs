@@ -756,6 +756,18 @@ pub extern "C" fn grouse_ready(h: *mut c_void) -> i32 {
     catch_unwind(AssertUnwindSafe(|| handle(h).core.ready() as i32)).unwrap_or(0)
 }
 
+/// Rewrite each tool run's label with a short model-written line (issue #13).
+#[no_mangle]
+pub extern "C" fn grouse_set_run_summaries(h: *mut c_void, on: i32) {
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.set_run_summaries(on != 0))).ok();
+}
+
+/// Whether the model rewrites run labels (issue #13).
+#[no_mangle]
+pub extern "C" fn grouse_run_summaries(h: *mut c_void) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.run_summaries() as i32)).unwrap_or(0)
+}
+
 /// NULL when no session is active (the caller treats it as "none").
 #[no_mangle]
 pub extern "C" fn grouse_active_session_id(h: *mut c_void) -> *mut c_char {

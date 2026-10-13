@@ -117,6 +117,18 @@ Thinking that leads nowhere (no call follows before the turn's next text) is not
 absorbed and stays a `Thought` item of its own. The expanded chip shows the full
 `thought`, so nothing is lost.
 
+**The rewrite.** The label above is *provisional*. At the end of a turn the core
+asks the model — on a **hidden session** (`_meta.hidden`, so goose's unlistable
+`hidden` session type keeps it out of `session/list` and it can never appear as a
+chat) — for one short line per run, and the answer replaces the label with an
+`Upsert`. It is one small inference per turn, sent after the turn is over (so it
+never delays a reply), skipped when the client turns it off
+(`set_run_summaries`), and skipped for a run with no thinking to condense.
+Wherever the model does not answer, the provisional label stands. The hidden
+session is emptied after every request
+(`_goose/unstable/session/conversation/truncate`) so its context cannot grow
+turn on turn.
+
 **Replay.** goose re-sends the reasoning trail on every `session/load`, but a
 standalone replayed thought would double the trail and carries no stable id to
 reconcile by (a merge cannot match it). It is therefore held only as the next

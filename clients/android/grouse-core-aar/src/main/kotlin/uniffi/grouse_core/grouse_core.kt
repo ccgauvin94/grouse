@@ -977,11 +977,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_roam_open_session(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_run_summaries(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_send_prompt(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_sessions(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_set_config_option(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_core_set_run_summaries(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_status(
     ): Int
@@ -1221,11 +1225,15 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_roam_open_session(`ptr`: Long,`label`: RustBuffer.ByValue,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_core_run_summaries(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_grouse_core_fn_method_core_send_prompt(`ptr`: Long,`prompt`: RustBuffer.ByValue,`expect`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_sessions(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_set_config_option(`ptr`: Long,`configId`: RustBuffer.ByValue,`value`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_core_set_run_summaries(`ptr`: Long,`on`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_status(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1528,6 +1536,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_grouse_core_checksum_method_core_roam_open_session() != 26278) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_grouse_core_checksum_method_core_run_summaries() != 42596) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_grouse_core_checksum_method_core_send_prompt() != 38382) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1535,6 +1546,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_set_config_option() != 58160) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_core_set_run_summaries() != 33914) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_status() != 4077) {
@@ -2441,6 +2455,11 @@ public interface CoreInterface {
     fun `roamOpenSession`(`label`: kotlin.String, `sessionId`: kotlin.String)
     
     /**
+     * Whether the model rewrites run labels (issue #13).
+     */
+    fun `runSummaries`(): kotlin.Boolean
+    
+    /**
      * Send a prompt (text/image/resource blocks). Queues until the socket is
      * ready; rejected (not queued) when `expect` mismatches the bound
      * session. Routes to the active roam peer when one owns the chat.
@@ -2453,6 +2472,13 @@ public interface CoreInterface {
      * `session/set_config_option`; queues until ready (CONTRACT §4).
      */
     fun `setConfigOption`(`configId`: kotlin.String, `value`: kotlin.String)
+    
+    /**
+     * Rewrite each tool run's label with a short model-written line at the end
+     * of a turn (issue #13). On by default; the request runs on a hidden
+     * session after the turn, so it never delays a reply or appears in a chat.
+     */
+    fun `setRunSummaries`(`on`: kotlin.Boolean)
     
     fun `status`(): ConnectionStatus
     
@@ -3078,6 +3104,22 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
+     * Whether the model rewrites run labels (issue #13).
+     */override fun `runSummaries`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_run_summaries(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Send a prompt (text/image/resource blocks). Queues until the socket is
      * ready; rejected (not queued) when `expect` mismatches the bound
      * session. Routes to the active roam peer when one owns the chat.
@@ -3120,6 +3162,24 @@ open class Core: Disposable, AutoCloseable, CoreInterface
         
         FfiConverterString.lower(`configId`),
         FfiConverterString.lower(`value`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Rewrite each tool run's label with a short model-written line at the end
+     * of a turn (issue #13). On by default; the request runs on a hidden
+     * session after the turn, so it never delays a reply or appears in a chat.
+     */override fun `setRunSummaries`(`on`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_set_run_summaries(
+        it,
+        
+        FfiConverterBoolean.lower(`on`),_status)
 }
     }
     

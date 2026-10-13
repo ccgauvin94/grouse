@@ -99,6 +99,8 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_respond_permission);
     RESOLVE(grouse_status);
     RESOLVE(grouse_ready);
+    RESOLVE(grouse_set_run_summaries);
+    RESOLVE(grouse_run_summaries);
     RESOLVE(grouse_active_session_id);
     RESOLVE(grouse_sessions);
     RESOLVE(grouse_transcript);

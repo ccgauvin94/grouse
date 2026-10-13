@@ -225,6 +225,15 @@ Rules:
   that leads nowhere (no call follows) stays a `Thought` item of its own. Both
   fields are empty when a run has nothing to draw on, and a client then falls
   back to the call titles.
+- **The label is rewritten by the model at the end of a turn.** `summary` as the
+  store sets it is provisional; after the turn the core asks the model for one
+  short line per run and replaces the label with an `Upsert`. The request runs on
+  a **hidden session** (`session/new` with `_meta.hidden` — goose's `hidden`
+  session type is not listable, so it can never appear as a chat), is emptied
+  after every use (`_goose/unstable/session/conversation/truncate`), and is one
+  inference per turn that never delays a reply. `set_run_summaries(bool)` /
+  `run_summaries()` toggle it (on by default); with it off, or wherever the model
+  does not answer, the provisional label stands.
 - **A replayed thought never becomes a row of its own.** goose re-sends the
   reasoning trail on every `session/load`, but such a row would double the trail
   and carries no stable id to reconcile by. The core holds it as the next run's

@@ -345,6 +345,17 @@ struct ConnInner {
     on_ended: Mutex<Option<Arc<dyn Fn(Result<(), String>) + Send + Sync>>>,
     /// Pending `session/request_permission` responders, keyed by tool call id.
     permission: Mutex<HashMap<String, Responder<RequestPermissionResponse>>>,
+    /// The hidden session the core asks for run labels (issue #13). Created
+    /// lazily on the first request, reused, and truncated empty after every
+    /// request so its context cannot grow; `session/list` never shows it.
+    summarizer: Mutex<Option<String>>,
+    /// The in-flight summarizer reply's text. The hidden session's agent chunks
+    /// are routed here instead of into the transcript (its session is not the
+    /// open one, so the chat-event gate would drop them anyway).
+    summary_reply: Mutex<String>,
+    /// The tool runs of the current turn (item ids, oldest first) — the
+    /// summarizer's worklist, drained when the turn's labels are requested.
+    turn_runs: Mutex<Vec<String>>,
 }
 
 /// The live connection. Owned by the core; slices reach it through
@@ -391,6 +402,9 @@ impl Conn {
                 on_config: Mutex::new(None),
                 on_ended: Mutex::new(None),
                 permission: Mutex::new(HashMap::new()),
+                summarizer: Mutex::new(None),
+                summary_reply: Mutex::new(String::new()),
+                turn_runs: Mutex::new(Vec::new()),
             }),
         });
         (conn, ready_rx)
@@ -472,6 +486,41 @@ impl Conn {
 
     pub(crate) fn set_replaying(&self, replaying: bool) {
         self.inner.replaying.store(replaying, Ordering::SeqCst);
+    }
+
+    /// The host cwd this connection was opened with — the only cwd the core may
+    /// hand to `session/new` without guessing (CONTRACT §4).
+    pub(crate) fn cwd(&self) -> String {
+        self.inner.config.cwd.clone()
+    }
+
+    /// The transcript store this connection streams into.
+    pub(crate) fn store(&self) -> &Arc<TranscriptStore> {
+        &self.inner.store
+    }
+
+    /// The hidden summarizer session, if one has been created (issue #13).
+    pub(crate) fn summarizer_session(&self) -> Option<String> {
+        self.inner.summarizer.lock().clone()
+    }
+
+    pub(crate) fn set_summarizer_session(&self, session_id: String) {
+        *self.inner.summarizer.lock() = Some(session_id);
+    }
+
+    /// Take the text the summarizer session streamed back, and clear it.
+    pub(crate) fn take_summary_reply(&self) -> String {
+        std::mem::take(&mut *self.inner.summary_reply.lock())
+    }
+
+    /// Take the current turn's tool runs (item ids, oldest first).
+    pub(crate) fn take_turn_runs(&self) -> Vec<String> {
+        std::mem::take(&mut *self.inner.turn_runs.lock())
+    }
+
+    /// Forget the current turn's runs (a new turn's worklist starts empty).
+    pub(crate) fn clear_turn_runs(&self) {
+        self.inner.turn_runs.lock().clear();
     }
 
     /// Drop a provisional cache paint as this load's replay produces its first
@@ -888,6 +937,16 @@ impl Conn {
 
     fn dispatch_session_notification(&self, notif: SessionNotification) {
         let session_id = notif.session_id.to_string();
+        // The hidden summarizer session's turn is the core's own bookkeeping, not
+        // chat content: collect its text for the caller and keep it out of the
+        // transcript entirely (the chat-event gate below would drop it anyway,
+        // silently, and the caller would wait for a reply that never arrived).
+        if self.inner.summarizer.lock().as_deref() == Some(session_id.as_str()) {
+            if let SessionUpdate::AgentMessageChunk(chunk) = &notif.update {
+                self.inner.summary_reply.lock().push_str(&chunk_text(chunk));
+            }
+            return;
+        }
         // Session-membership gate (serve parity with the roam peers): a CHAT
         // event for a session other than the one currently open belongs to a
         // backgrounded turn — never render it in the wrong chat (serve re-loads
@@ -1017,9 +1076,21 @@ impl Conn {
         let tool_call_id = tc.tool_call_id.to_string();
         let title = tc.title.clone();
         let (kind, detail) = tool_call_kind(tc);
+        // Remember which run this call landed in: the turn's runs are the
+        // summarizer's worklist (issue #13). Only plain runs are summarised —
+        // a chart or an app is not a "step" the model narrates.
+        let plain = matches!(kind, ToolCallKind::Plain);
         self.inner
             .store
             .tool_call(&title, &detail, &tool_call_id, kind);
+        if plain {
+            if let Some(run) = self.inner.store.run_id_for(&tool_call_id) {
+                let mut runs = self.inner.turn_runs.lock();
+                if !runs.contains(&run) {
+                    runs.push(run);
+                }
+            }
+        }
     }
 
     fn dispatch_tool_update(&self, tcu: &agent_client_protocol::schema::v1::ToolCallUpdate) {

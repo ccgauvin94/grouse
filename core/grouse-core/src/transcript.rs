@@ -1063,6 +1063,66 @@ impl TranscriptStore {
             .map(Bubble::item)
     }
 
+    /// The run (the tool / toolgroup ITEM) a tool call landed in, as its item
+    /// id. A toolgroup is anchored on its first call, so a call in the middle of
+    /// a run answers with the run's own id — which is what the summarizer
+    /// addresses a run by.
+    pub fn run_id_for(&self, tool_call_id: &str) -> Option<String> {
+        let st = self.state.lock();
+        let b = st.bubbles.get(*st.tool_by_id.get(tool_call_id)?)?;
+        match b {
+            Bubble::Tool(r, _) => Some(r.tool_call_id.clone()),
+            Bubble::ToolGroup(calls, _) => calls.first().map(|c| c.tool_call_id.clone()),
+            _ => None,
+        }
+    }
+
+    /// A run's framing for the summarizer: the thinking it absorbed and its call
+    /// titles. `None` when the run has no thinking — there is nothing to condense,
+    /// so the inference would be spent for nothing.
+    pub fn run_framing(&self, id: &str) -> Option<(String, Vec<String>)> {
+        let st = self.state.lock();
+        let b = st.bubbles.get(*st.tool_by_id.get(id)?)?;
+        let (step, calls): (&Step, &[ToolRow]) = match b {
+            Bubble::Tool(r, step) => (step, std::slice::from_ref(r)),
+            Bubble::ToolGroup(calls, step) => (step, calls),
+            _ => return None,
+        };
+        if step.thought.trim().is_empty() {
+            return None;
+        }
+        Some((
+            step.thought.clone(),
+            calls.iter().map(|c| c.title.clone()).collect(),
+        ))
+    }
+
+    /// Replace a run's label with the model's rewrite, emitting the `Upsert` the
+    /// client needs. The absorbed thinking is untouched: it is still what the
+    /// expanded chip shows.
+    pub fn set_run_summary(&self, id: &str, summary: &str) {
+        let op = {
+            let mut st = self.state.lock();
+            let Some(&idx) = st.tool_by_id.get(id) else { return };
+            {
+                let Some(b) = st.bubbles.get_mut(idx) else { return };
+                let step = match b {
+                    Bubble::Tool(_, step) => step,
+                    Bubble::ToolGroup(_, step) => step,
+                    _ => return,
+                };
+                if step.summary == summary {
+                    return;
+                }
+                step.summary = summary.to_string();
+            }
+            Some(st.bubbles[idx].item())
+        };
+        if let Some(item) = op {
+            self.emit_ops(vec![TranscriptOp::Upsert { item }]);
+        }
+    }
+
     /// Drop a provisional cache paint (see [`State::provisional`]) — the spine
     /// calls this as the first row of a `session/load` replay arrives, and once
     /// more when a load completes without producing any, meaning the server's
@@ -2373,6 +2433,58 @@ mod tests {
             }
             other => panic!("expected a toolgroup, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_run_answers_with_its_own_id_and_framing() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("thought", "Look it up. Then read the page.", None, true);
+        store.tool_call("Search", "q", "t1", ToolCallKind::Plain);
+        store.tool_call("Read", "u", "t2", ToolCallKind::Plain);
+
+        // A run is anchored on its first call, so either call answers with it.
+        assert_eq!(store.run_id_for("t1").as_deref(), Some("t1"));
+        assert_eq!(store.run_id_for("t2").as_deref(), Some("t1"));
+        let (thought, tools) = store.run_framing("t2").expect("framing");
+        assert_eq!(thought, "Look it up. Then read the page.");
+        assert_eq!(tools, vec!["Search".to_string(), "Read".to_string()]);
+    }
+
+    #[test]
+    fn a_run_without_thinking_has_no_framing() {
+        // Nothing to condense: the inference would be spent for nothing.
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.tool_call("Bash", "ls", "t1", ToolCallKind::Plain);
+        assert!(store.run_framing("t1").is_none());
+    }
+
+    #[test]
+    fn the_model_rewrite_replaces_the_label_and_upserts() {
+        let (l, i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("thought", "Let me check the calendar.", None, true);
+        store.tool_call("Bash", "date", "t1", ToolCallKind::Plain);
+        i_evts.lock().clear();
+
+        store.set_run_summary("t1", "Check the calendar");
+        match &store.rows_for_test()[0] {
+            Bubble::Tool(_, step) => {
+                assert_eq!(step.summary, "Check the calendar");
+                // The absorbed thinking is untouched: the chip still shows it.
+                assert_eq!(step.thought, "Let me check the calendar.");
+            }
+            other => panic!("expected a tool bubble, got {other:?}"),
+        }
+        let ops = i_evts.lock().clone();
+        assert_eq!(ops.len(), 1, "{ops:?}");
+        assert!(ops[0].starts_with("upsert:t1"), "{ops:?}");
+
+        // Idempotent: the same label does not re-announce.
+        i_evts.lock().clear();
+        store.set_run_summary("t1", "Check the calendar");
+        assert!(i_evts.lock().is_empty());
     }
 
     #[test]
