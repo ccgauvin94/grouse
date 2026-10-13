@@ -321,6 +321,8 @@ mod tests {
             status: String::new(),
             app_key: String::new(),
             calls: Vec::new(),
+            thought: String::new(),
+            summary: String::new(),
         }
     }
 
@@ -340,6 +342,8 @@ mod tests {
                 status: "completed".into(),
                 app_key: String::new(),
                 calls: Vec::new(),
+                thought: String::new(),
+                summary: String::new(),
             },
             text("@1", ItemKind::Thought, "hmm"),
         ];
@@ -377,6 +381,8 @@ mod tests {
                 status: "completed".into(),
                 app_key: String::new(),
                 calls: Vec::new(),
+                thought: String::new(),
+                summary: String::new(),
             },
             Item {
                 id: "a1".into(),
@@ -387,6 +393,8 @@ mod tests {
                 status: "completed".into(),
                 app_key: "assistantmonitor|ui://x/dashboard".into(),
                 calls: Vec::new(),
+                thought: String::new(),
+                summary: String::new(),
             },
             Item {
                 id: "t1".into(),
@@ -412,6 +420,10 @@ mod tests {
                         status: "completed".into(),
                     },
                 ],
+                // The run's framing must survive the cache like everything else:
+                // a reloaded chat keeps its step labels.
+                thought: "Let me run the pair.".into(),
+                summary: "Let me run the pair".into(),
             },
         ];
         assert!(store.save_transcript("s1", &items, "2026-08-12T10:00:00Z"));

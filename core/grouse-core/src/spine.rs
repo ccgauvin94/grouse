@@ -933,15 +933,20 @@ impl Conn {
                 }
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
-                // Replayed thoughts (session/load) are dropped: the reasoning
-                // trail would double up in the bubble (desktop m_replaying).
-                if !self.inner.suppress_replay.load(Ordering::SeqCst)
-                    && !self.inner.replaying.load(Ordering::SeqCst)
-                {
+                if !self.inner.suppress_replay.load(Ordering::SeqCst) {
                     let text = chunk_text(&chunk);
                     if !text.is_empty() {
-                        self.drop_painted_cache();
-                        self.inner.store.append_chunk("thought", &text, None, true);
+                        if self.inner.replaying.load(Ordering::SeqCst) {
+                            // A replayed thought never becomes a row of its own:
+                            // the trail would double, and it carries no stable id
+                            // to reconcile by. It is held as the framing for the
+                            // tool run it precedes, so the run's label survives a
+                            // reload (see `TranscriptStore::replay_thought`).
+                            self.inner.store.replay_thought(&text);
+                        } else {
+                            self.drop_painted_cache();
+                            self.inner.store.append_chunk("thought", &text, None, true);
+                        }
                     }
                 }
             }

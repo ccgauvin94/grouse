@@ -37,6 +37,9 @@ public:
         AppHtmlRole,       // "appHtml"  — fetched MCP-App template HTML
         AppKeyRole,        // "appKey"   — "$ext|$uri" cache key for an MCP-App bubble
         CallsRole,         // "calls"    — grouped consecutive tool-call maps
+        SummaryRole,       // "summary"  — a tool run's one-line label (issue #13)
+        StepThoughtRole,   // "stepThought" — the thinking a tool run absorbed; shown
+                           //              when the chip opens
         ExpandedRole,      // "expanded" — per-row UI state kept in the model so it
                            //              survives delegate recycling (thinking bubble)
     };

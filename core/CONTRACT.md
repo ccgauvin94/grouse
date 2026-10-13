@@ -178,6 +178,8 @@ pub struct Item {
     status: String,      // tool lifecycle
     app_key: String,     // McpApp: "<extension>|<uri>"
     calls: Vec<ToolCall>,// ToolGroup children
+    thought: String,     // Tool/ToolGroup: the thinking the run absorbed
+    summary: String,     // Tool/ToolGroup: the run's one-line label
 }
 
 pub enum TranscriptOp {
@@ -214,6 +216,21 @@ Rules:
 - `load_older(count)` walks the window back over the store's in-memory rows —
   no cache read and no wire call. A stock server has no history cursor, so once
   the store's start is reached `has_older` is `false`.
+- **A run of tool calls carries the model's own framing of it** (issue #13). The
+  thinking that immediately precedes a `Plain` call is absorbed into the run's
+  item as `thought`, with `summary` derived from its first sentence; the
+  standalone `Thought` row is dropped with a `Remove`. A thought therefore OPENS
+  a run — it never merges the call into the run above it — so a 20-call loop
+  reads as a few meaningful steps instead of a wall of bare call counts. Thinking
+  that leads nowhere (no call follows) stays a `Thought` item of its own. Both
+  fields are empty when a run has nothing to draw on, and a client then falls
+  back to the call titles.
+- **A replayed thought never becomes a row of its own.** goose re-sends the
+  reasoning trail on every `session/load`, but such a row would double the trail
+  and carries no stable id to reconcile by. The core holds it as the next run's
+  framing only (`replay_thought`), so a run's `summary`/`thought` rebuild
+  identically from a replay — the label is derived from the replayed rows, never
+  persisted against a `tool_call_id`.
 - **Roam peers** hold a rich item store of their own (`PeerStore`): live text,
   tool calls (kind and payload preserved), and staging/cache are all items, so
   a peer chart/app survives promotion and restart, and `rich_transcript()` /

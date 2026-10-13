@@ -82,11 +82,11 @@ projection + `transcript()` getter, and the provisional-merge machinery
 An **Item** is the only unit the client knows. It is self-describing and
 round-trips through the cache.
 
-| kind | text | detail | output | app_key | calls |
-|---|---|---|---|---|---|
-| user / agent / thought / error | body | — | — | — | — |
-| tool | title | tool input | tool result | — | — |
-| toolgroup | — | — | — | — | children |
+| kind | text | detail | output | app_key | calls | thought / summary |
+|---|---|---|---|---|---|---|
+| user / agent / thought / error | body | — | — | — | — | — |
+| tool | title | tool input | tool result | — | — | the run's framing |
+| toolgroup | — | — | — | — | children | the run's framing |
 | chart | title | chart spec | — | — | — |
 | mcpapp | title | app input | — | `<ext>\|<uri>` | — |
 
@@ -98,6 +98,32 @@ assistant's text as `"\n\n"` between tool calls, and the core drops a chunk that
 would open a bubble with only whitespace (whitespace folded into an already-open
 bubble is kept — that is real intra-message spacing). Cache paints and replays
 drop such rows too, so a stale cache cannot re-create an empty bubble.
+
+### Run summaries
+
+A run of consecutive tool calls currently collapses to a bare count — "11 tool
+calls" — which says nothing about what the agent was doing. Instead, a `tool` /
+`toolgroup` item carries the model's own framing of the run:
+
+- **`thought`** — the thinking that immediately preceded the run, absorbed from
+  the `Thought` item it used to render as (which is dropped with a `Remove`).
+- **`summary`** — a one-line label derived from that thought (first sentence,
+  capped). Empty when the run has nothing to draw on, and the client then falls
+  back to the call titles.
+
+A thought therefore **opens a run**: it never merges the call into the run above
+it, so a 20-step loop reads as a few meaningful steps rather than one wall.
+Thinking that leads nowhere (no call follows before the turn's next text) is not
+absorbed and stays a `Thought` item of its own. The expanded chip shows the full
+`thought`, so nothing is lost.
+
+**Replay.** goose re-sends the reasoning trail on every `session/load`, but a
+standalone replayed thought would double the trail and carries no stable id to
+reconcile by (a merge cannot match it). It is therefore held only as the next
+run's framing, never emitted as a row: a run's label is *derived from the
+replayed rows*, never persisted against a `tool_call_id` (which the server
+re-assigns on every replay). Both fields round-trip through the cache, so a
+reloaded chat keeps its labels.
 
 ### Ops
 
@@ -194,6 +220,8 @@ pub struct Item {
     pub status: String,   // tool lifecycle
     pub app_key: String,  // mcpapp: "<ext>|<uri>"
     pub calls: Vec<ToolCall>, // toolgroup children
+    pub thought: String,  // tool/toolgroup: the thinking the run absorbed
+    pub summary: String,  // tool/toolgroup: the run's one-line label
 }
 
 pub enum TranscriptOp {

@@ -1992,9 +1992,14 @@ class ConnectionManager private constructor(context: Context) {
 
     /** One rich item as UI rows (a ToolGroup is one row per call). */
     private fun itemRows(item: Item): List<Pair<String, ChatMessage>> = when (item.kind) {
-        ItemKind.TOOL_GROUP -> item.calls.map { c ->
+        // A group expands to one row per call (the chat UI re-groups them); the
+        // run's framing rides on the first row, which is the group's anchor.
+        ItemKind.TOOL_GROUP -> item.calls.mapIndexed { i, c ->
             c.id to ChatMessage("tool", c.title, detail = c.detail, toolCallId = c.id,
-                                status = c.status, output = c.output, id = appIdFor(c.id))
+                                status = c.status, output = c.output, id = appIdFor(c.id),
+                                summary = if (i == 0) item.summary else "",
+                                stepThought = if (i == 0) item.thought else "",
+                                stepId = item.id)
         }
         ItemKind.CHART -> listOf(item.id to ChatMessage("chart", item.detail, id = appIdFor(item.id)))
         ItemKind.MCP_APP -> listOf(item.id to ChatMessage(
@@ -2004,7 +2009,8 @@ class ConnectionManager private constructor(context: Context) {
         ).also { fetchAppTemplate(item.appKey) })
         ItemKind.TOOL -> listOf(item.id to ChatMessage(
             itemRole(item.kind), item.text, detail = item.detail, toolCallId = item.id,
-            status = item.status, output = item.output, id = appIdFor(item.id)))
+            status = item.status, output = item.output, id = appIdFor(item.id),
+            summary = item.summary, stepThought = item.thought, stepId = item.id))
         ItemKind.USER, ItemKind.THOUGHT, ItemKind.ERROR, ItemKind.AGENT ->
             listOf(item.id to ChatMessage(itemRole(item.kind), item.text, id = appIdFor(item.id)))
     }

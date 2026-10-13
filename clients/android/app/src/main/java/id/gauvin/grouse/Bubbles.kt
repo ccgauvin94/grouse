@@ -579,8 +579,12 @@ internal sealed interface ChatItem {
     data class Tools(val items: List<ChatMessage>) : ChatItem { override val firstId get() = items.first().id }
 }
 
-/** Walk messages in chronological order, merging consecutive role=="tool" runs of 2+ into one
- *  ChatItem.Tools; everything else (including a lone tool call) stays a ChatItem.Msg. */
+/** Walk messages in chronological order, merging a run of tool rows into one ChatItem.Tools;
+ *  everything else (including a lone tool call) stays a ChatItem.Msg.
+ *
+ *  The run is the CORE's step (`stepId`), not merely consecutive tool rows: the core opens a new
+ *  step wherever the model's thinking framed one, and grouping by role alone would merge those
+ *  steps back into the one meaningless wall this all exists to replace. */
 internal fun groupChatItems(messages: List<ChatMessage>): List<ChatItem> {
     val out = mutableListOf<ChatItem>()
     var i = 0
@@ -588,7 +592,7 @@ internal fun groupChatItems(messages: List<ChatMessage>): List<ChatItem> {
         val m = messages[i]
         if (m.role == "tool") {
             var j = i + 1
-            while (j < messages.size && messages[j].role == "tool") j++
+            while (j < messages.size && messages[j].role == "tool" && messages[j].stepId == m.stepId) j++
             out += if (j - i > 1) ChatItem.Tools(messages.subList(i, j).toList()) else ChatItem.Msg(m)
             i = j
         } else {
@@ -605,13 +609,19 @@ private fun splitToolTitle(title: String): Pair<String, String> {
     return if (idx >= 0) title.take(idx) to title.substring(idx + 3) else title to ""
 }
 
-/** Collapsed: one chip, "N× <tool>" (or "N tool calls" for a mixed run). Tap to expand into the
- *  individual calls, oldest first, each rendered like a normal ToolChip. */
+/** Collapsed: one chip, labelled with the core's framing of the run — the model's own thinking
+ *  that preceded it — or "N× <tool>" / "N tool calls" when there is nothing to draw on. Tap to
+ *  expand into the individual calls, oldest first, each rendered like a normal ToolChip. */
 @Composable
 internal fun ToolChipGroup(items: List<ChatMessage>) {
     var expanded by remember { mutableStateOf(false) }
     val names = items.map { splitToolTitle(it.text).first }.distinct()
-    val label = if (names.size == 1) "${items.size}× ${names[0]}" else "${items.size} tool calls"
+    // The framing rides on the first row: the core anchors a run on its first call.
+    val summary = items.firstOrNull()?.summary.orEmpty()
+    val stepThought = items.firstOrNull()?.stepThought.orEmpty()
+    val label = summary.ifBlank {
+        if (names.size == 1) "${items.size}× ${names[0]}" else "${items.size} tool calls"
+    }
     Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
         Surface(
             color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
@@ -634,6 +644,13 @@ internal fun ToolChipGroup(items: List<ChatMessage>) {
         }
         AnimatedVisibility(expanded) {
             Column(Modifier.padding(start = 20.dp, top = 2.dp)) {
+                // The thinking the core folded into this run: the chip's label, in
+                // full, for when you want to read what the model was reasoning.
+                if (stepThought.isNotBlank()) {
+                    Text(stepThought, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 4.dp))
+                }
                 items.forEach { ToolChip(it) }
             }
         }
@@ -647,7 +664,10 @@ private fun ToolChip(m: ChatMessage) {
     val title = m.text; val detail = m.detail
     var expanded by remember { mutableStateOf(false) }
     val (name, inlineDetail) = splitToolTitle(title)
-    val hasBody = detail.isNotBlank() || m.output.isNotBlank()
+    // A lone call framed by the model's thinking reads as that framing rather
+    // than as a bare tool name (issue #13).
+    val label = m.summary.ifBlank { name.replace('_', ' ') }
+    val hasBody = detail.isNotBlank() || m.output.isNotBlank() || m.stepThought.isNotBlank()
     Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
         Surface(color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
             contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -665,7 +685,7 @@ private fun ToolChip(m: ChatMessage) {
                         modifier = Modifier.size(13.dp), tint = MaterialTheme.colorScheme.primary)
                 }
                 Spacer(Modifier.width(8.dp))
-                Text(name.replace('_', ' '), style = MaterialTheme.typography.labelLarge)
+                Text(label, style = MaterialTheme.typography.labelLarge)
                 if (inlineDetail.isNotBlank()) {
                     Spacer(Modifier.width(8.dp))
                     Text(inlineDetail, style = MaterialTheme.typography.labelMedium,

@@ -618,6 +618,10 @@ Kirigami.Page {
                 readonly property string messageAppHtml: model.appHtml ? String(model.appHtml) : ""
                 readonly property string messageAppKey: model.appKey ? String(model.appKey) : ""
                 readonly property var messageCalls: model.calls ? model.calls : []
+                // A tool run's framing (issue #13): the one-line label and the
+                // thinking the core absorbed into it.
+                readonly property string messageSummary: model.summary ? model.summary : ""
+                readonly property string messageStepThought: model.stepThought ? model.stepThought : ""
 
                 readonly property bool isUser: mdel.messageRole === "user"
                 readonly property bool isAgent: mdel.messageRole === "agent"
@@ -667,6 +671,10 @@ Kirigami.Page {
                          : mdel.messageStatus === "failed" ? qsTr("failed") : mdel.messageStatus
                 }
                 function groupTitle() {
+                    // The run's own label first — the model's framing of what it
+                    // was doing. The call-count fallback is only for a run with
+                    // nothing to draw on.
+                    if (mdel.messageSummary.length > 0) return mdel.messageSummary
                     if (mdel.messageCalls.length === 0) return qsTr("Tool calls")
                     var first = String(mdel.messageCalls[0].title || qsTr("call"))
                     var same = true
@@ -682,6 +690,12 @@ Kirigami.Page {
                 function callStatus(call) {
                     return call.status === "completed" ? "✓ " + qsTr("done")
                          : call.status === "failed" ? qsTr("failed") : call.status
+                }
+                function toolChipTitle() {
+                    // A lone call framed by the model's thinking reads as that
+                    // framing; otherwise the raw tool title is all there is.
+                    if (mdel.messageSummary.length > 0) return mdel.messageSummary
+                    return qsTr("Tool") + ": " + (mdel.messageTitle || qsTr("call"))
                 }
 
                 height: mdel.isUser ? userBubble.implicitHeight
@@ -937,7 +951,7 @@ Kirigami.Page {
                                 Layout.alignment: Qt.AlignVCenter
                             }
                             Controls.Label {
-                                text: qsTr("Tool") + ": " + (mdel.messageTitle || qsTr("call"))
+                                text: mdel.toolChipTitle()
                                 font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.88))
                                 renderType: Text.NativeRendering
                                 color: Kirigami.Theme.disabledTextColor
@@ -953,6 +967,17 @@ Kirigami.Page {
                                 renderType: Text.NativeRendering
                                 verticalAlignment: Text.AlignVCenter
                             }
+                        }
+                        // The thinking the core folded into this chip: it is the
+                        // chip's label, so opening the chip shows what the model
+                        // was actually reasoning.
+                        Controls.Label {
+                            visible: mdel.toolOpen && mdel.messageStepThought.length > 0
+                            text: mdel.messageStepThought
+                            width: parent.width
+                            wrapMode: Text.Wrap
+                            opacity: 0.8
+                            bottomPadding: mdel.pad
                         }
                         Controls.Label {
                             visible: mdel.toolOpen && mdel.messageOutput.length > 0
@@ -1029,6 +1054,16 @@ Kirigami.Page {
                             visible: mdel.toolOpen
                             width: parent.width
                             spacing: Kirigami.Units.smallSpacing
+                            // The thinking the core folded into this run: the
+                            // chip's label, in full, for when you want to read
+                            // what the model was reasoning.
+                            Controls.Label {
+                                visible: mdel.messageStepThought.length > 0
+                                text: mdel.messageStepThought
+                                width: parent.width
+                                wrapMode: Text.Wrap
+                                opacity: 0.8
+                            }
                             Repeater {
                                 model: mdel.messageCalls
                                 delegate: Column {

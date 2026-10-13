@@ -186,6 +186,16 @@ pub struct Item {
     pub app_key: String,
     /// `ItemKind::ToolGroup` only: the collapsed calls.
     pub calls: Vec<ToolCall>,
+    /// `ItemKind::ToolGroup` / `Tool` only: the model's own framing of the step —
+    /// the thinking that preceded the run, absorbed so a 20-call loop reads as a
+    /// few meaningful rows instead of a wall of chips. Shown when the chip opens.
+    #[serde(default)]
+    pub thought: String,
+    /// `ItemKind::ToolGroup` / `Tool` only: a one-line label for the step. The
+    /// core fills it from the run's thinking; empty means the client falls back
+    /// to the call titles.
+    #[serde(default)]
+    pub summary: String,
 }
 
 /// One transcript mutation carried by `CoreListener::on_item`
@@ -2329,6 +2339,8 @@ mod forwarder_tests {
             status: String::new(),
             app_key: String::new(),
             calls: Vec::new(),
+            thought: String::new(),
+            summary: String::new(),
         }];
 
         let core = Core::new(

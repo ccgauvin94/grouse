@@ -120,6 +120,8 @@ fn item(id: &str, kind: grouse_core::ItemKind, text: &str) -> grouse_core::Item 
         status: String::new(),
         app_key: String::new(),
         calls: Vec::new(),
+        thought: String::new(),
+        summary: String::new(),
     }
 }
 

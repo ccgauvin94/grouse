@@ -4544,6 +4544,20 @@ data class Item (
      * `ItemKind::ToolGroup` only: the collapsed calls.
      */
     var `calls`: List<ToolCall>
+    , 
+    /**
+     * `ItemKind::ToolGroup` / `Tool` only: the model's own framing of the step —
+     * the thinking that preceded the run, absorbed so a 20-call loop reads as a
+     * few meaningful rows instead of a wall of chips. Shown when the chip opens.
+     */
+    var `thought`: kotlin.String
+    , 
+    /**
+     * `ItemKind::ToolGroup` / `Tool` only: a one-line label for the step. The
+     * core fills it from the run's thinking; empty means the client falls back
+     * to the call titles.
+     */
+    var `summary`: kotlin.String
     
 ){
     
@@ -4568,6 +4582,8 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterSequenceTypeToolCall.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
         )
     }
 
@@ -4579,7 +4595,9 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.allocationSize(value.`output`) +
             FfiConverterString.allocationSize(value.`status`) +
             FfiConverterString.allocationSize(value.`appKey`) +
-            FfiConverterSequenceTypeToolCall.allocationSize(value.`calls`)
+            FfiConverterSequenceTypeToolCall.allocationSize(value.`calls`) +
+            FfiConverterString.allocationSize(value.`thought`) +
+            FfiConverterString.allocationSize(value.`summary`)
     )
 
     override fun write(value: Item, buf: ByteBuffer) {
@@ -4591,6 +4609,8 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.write(value.`status`, buf)
             FfiConverterString.write(value.`appKey`, buf)
             FfiConverterSequenceTypeToolCall.write(value.`calls`, buf)
+            FfiConverterString.write(value.`thought`, buf)
+            FfiConverterString.write(value.`summary`, buf)
     }
 }
 

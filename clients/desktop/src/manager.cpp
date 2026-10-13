@@ -2031,10 +2031,17 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
     const QString detail = item.value(QStringLiteral("detail")).toString();
     const QString output = item.value(QStringLiteral("output")).toString();
     const QString status = item.value(QStringLiteral("status")).toString();
+    // A tool run carries the model's own framing of it (issue #13): the thinking
+    // that preceded the run, absorbed by the core, and the one-line label drawn
+    // from it. Both are empty for a run with nothing to draw on, and the chip
+    // then falls back to the call titles.
+    const QString summary = item.value(QStringLiteral("summary")).toString();
+    const QString stepThought = item.value(QStringLiteral("thought")).toString();
     if (kind == QLatin1String("Tool")) {
         return QVariantMap{{"id", id}, {"role", "tool"}, {"text", ""}, {"html", ""},
                            {"title", text}, {"detail", detail}, {"output", output},
-                           {"status", status}, {"toolCallId", id}};
+                           {"status", status}, {"toolCallId", id},
+                           {"summary", summary}, {"stepThought", stepThought}};
     }
     if (kind == QLatin1String("ToolGroup")) {
         QVariantList calls;
@@ -2047,7 +2054,8 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
                                  {"toolCallId", c.value("id").toString()}};
         }
         return QVariantMap{{"id", id}, {"role", "toolgroup"}, {"text", ""},
-                           {"html", ""}, {"calls", calls}, {"status", status}};
+                           {"html", ""}, {"calls", calls}, {"status", status},
+                           {"summary", summary}, {"stepThought", stepThought}};
     }
     if (kind == QLatin1String("Chart")) {
         return QVariantMap{{"id", id}, {"role", "chart"}, {"text", ""},
