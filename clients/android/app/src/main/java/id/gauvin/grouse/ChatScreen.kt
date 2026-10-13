@@ -142,6 +142,18 @@ fun ContextRing(pct: Int, modifier: Modifier = Modifier, onClick: (() -> Unit)? 
     }
 }
 
+/** The mic level, 0..1 — a live "the microphone is actually running" readout. */
+@Composable
+private fun LevelBar(level: Float) {
+    Box(Modifier.size(width = 64.dp, height = 6.dp)
+        .clip(RoundedCornerShape(3.dp))
+        .background(MaterialTheme.colorScheme.surfaceVariant)) {
+        Box(Modifier.fillMaxHeight()
+            .fillMaxWidth(level.coerceIn(0f, 1f))
+            .background(MaterialTheme.colorScheme.primary))
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
@@ -164,6 +176,9 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     // Hoisted to ConnectionManager so picked images survive recreation (see draftAttachments).
     val attachments = cm.draftAttachments
     val listState = rememberLazyListState()
+    // Leaving the chat closes the mic: conversation mode must not keep recording in the
+    // background (or after a navigate-away).
+    DisposableEffect(Unit) { onDispose { cm.stopConversation() } }
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
@@ -728,28 +743,34 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             )
                         }
                         // The voice state line: the ONLY place the loop reports itself, so a
-                        // silent mic never looks like a dead button again.
+                        // silent mic never looks like a dead button again. The level bar is the
+                        // proof the mic is live even when nothing is being transcribed.
                         val vState = cm.voiceState.value
                         val vNotice = cm.voiceNotice.value
                         if (vState != VoiceState.IDLE || vNotice != null) {
                             Row(Modifier.fillMaxWidth().padding(bottom = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
-                                when {
-                                    vState == VoiceState.RECORDING -> {
+                                when (vState) {
+                                    VoiceState.LISTENING -> {
+                                        LevelBar(cm.voiceLevel.value)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Listening…", style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.primary)
+                                    }
+                                    VoiceState.TRANSCRIBING -> {
+                                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Thinking…", style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    VoiceState.SPEAKING -> {
                                         Icon(Icons.Filled.Mic, contentDescription = null,
                                             modifier = Modifier.size(14.dp),
-                                            tint = MaterialTheme.colorScheme.error)
-                                        Spacer(Modifier.width(6.dp))
-                                        Text("Listening… tap the mic to send",
+                                            tint = MaterialTheme.colorScheme.primary)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Speaking… talk over me to interrupt",
                                             style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.error)
-                                    }
-                                    vState == VoiceState.TRANSCRIBING -> {
-                                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                                        Spacer(Modifier.width(6.dp))
-                                        Text("Transcribing…",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            color = MaterialTheme.colorScheme.primary)
                                     }
                                     else -> Text(vNotice ?: "",
                                         style = MaterialTheme.typography.labelMedium,
@@ -784,27 +805,23 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             ModelPill(modelOpt, cm.knownModels.value, cm::setOption,
                                 onOpenSheet = { showModelSheet = true })
                             Spacer(Modifier.weight(1f))
-                            // Push-to-talk as a TAP-TO-TOGGLE, not press-and-hold: a hold gesture
-                            // nested in a clickable consumes its own down (the first cut silently
-                            // no-oped), and a toggle is one finger on a car mount.
+                            // Conversation mode: one tap in, one tap out. A plain Box, not a
+                            // Button — a Button's own clickable consumes the press (and a
+                            // pointerInput nested inside one silently no-ops; the first cut did).
                             val vs = cm.voiceState.value
+                            val on = vs != VoiceState.IDLE
                             Box(
                                 modifier = Modifier
                                     .size(42.dp)
                                     .clip(CircleShape)
                                     .background(
                                         when (vs) {
-                                            VoiceState.RECORDING -> MaterialTheme.colorScheme.error
-                                            else -> MaterialTheme.colorScheme.surface
+                                            VoiceState.IDLE, VoiceState.TRANSCRIBING ->
+                                                MaterialTheme.colorScheme.surface
+                                            else -> MaterialTheme.colorScheme.primary
                                         }
                                     )
-                                    .clickable(enabled = vs != VoiceState.TRANSCRIBING) {
-                                        when (vs) {
-                                            VoiceState.IDLE -> cm.startVoiceRecording()
-                                            VoiceState.RECORDING -> cm.stopVoiceRecording()
-                                            VoiceState.TRANSCRIBING -> {}
-                                        }
-                                    },
+                                    .clickable(enabled = vs != VoiceState.TRANSCRIBING) { cm.toggleConversation() },
                                 contentAlignment = Alignment.Center,
                             ) {
                                 if (vs == VoiceState.TRANSCRIBING) {
@@ -813,9 +830,9 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                                     Icon(
                                         Icons.Filled.Mic,
                                         contentDescription =
-                                            if (vs == VoiceState.RECORDING) "tap to send" else "tap to talk",
+                                            if (on) "stop conversation" else "start conversation",
                                         modifier = Modifier.size(20.dp),
-                                        tint = if (vs == VoiceState.RECORDING) MaterialTheme.colorScheme.onError
+                                        tint = if (on) MaterialTheme.colorScheme.onPrimary
                                                else MaterialTheme.colorScheme.onSurface,
                                     )
                                 }

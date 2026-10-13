@@ -334,8 +334,8 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                 SettingsSwitchRow("Speak replies", speak) { on ->
                     speak = on; cm.store.speakReplies = on
                 }
-                SettingCaption("Reads each reply aloud as it streams. Hold the mic button in the " +
-                    "composer to talk instead of typing.")
+                SettingCaption("Reads each reply aloud as it streams. Tap the mic in the composer " +
+                    "to start a hands-free conversation.")
             }
 
             SettingsSection("Security") {

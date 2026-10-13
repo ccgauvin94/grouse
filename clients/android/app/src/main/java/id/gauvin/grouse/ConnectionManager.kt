@@ -49,7 +49,7 @@ import uniffi.grouse_roam_core.identityPublicKey
 enum class SessionKind { ASSISTANT, CHAT, CODE }
 
 /** The push-to-talk state machine, surfaced in the composer so the user can see it running. */
-enum class VoiceState { IDLE, RECORDING, TRANSCRIBING }
+enum class VoiceState { IDLE, LISTENING, TRANSCRIBING, SPEAKING }
 
 /**
  * Process-scoped owner of the grouse-core connection + chat state. A singleton (not a
@@ -153,10 +153,16 @@ class ConnectionManager private constructor(context: Context) {
     // The STT half is goose's dictation (the client records, the server transcribes
     // via a configured provider); the TTS half is client-side, fed by the core's
     // on_speak stream (CONTRACT §5). See docs/TRANSCRIPT_MODEL.md.
-    private val speaker = Speaker(appContext)
-    private val recorder = VoiceRecorder(appContext)
-    /** The push-to-talk state; the composer renders it (Listening… / Transcribing…). */
+    // Conversation mode's speaker. onIdle returns the loop to LISTENING when the last
+    // chunk finishes playing, so the state line follows the actual audio.
+    private val speaker = Speaker(appContext) {
+        main.post { if (voiceState.value == VoiceState.SPEAKING) voiceState.value = VoiceState.LISTENING }
+    }
+    private var voiceLoop: VoiceLoop? = null
+    /** Conversation mode: IDLE (off), LISTENING, TRANSCRIBING, SPEAKING. */
     val voiceState = mutableStateOf(VoiceState.IDLE)
+    /** Mic level 0..1 while listening — the "it is actually running" indicator. */
+    val voiceLevel = mutableStateOf(0f)
     /** A one-line voice message for the composer ("didn't catch that", a failure). */
     val voiceNotice = mutableStateOf<String?>(null)
     /** Raw JSON of goose's dictation provider status (backs an eventual STT picker). */
@@ -177,7 +183,10 @@ class ConnectionManager private constructor(context: Context) {
         // TTS utterance per chunk, played in order as it arrives.
         override fun onSpeak(text: String) {
             if (!store.speakReplies) return
-            main.post { speaker.speak(text) }
+            main.post {
+                if (voiceState.value != VoiceState.IDLE) voiceState.value = VoiceState.SPEAKING
+                speaker.speak(text)
+            }
         }
         override fun onConfig(options: List<CoreConfigOption>) { main.post { onCoreConfig(options) } }
         override fun onPermissionRequest(request: PermissionRequest) { main.post { onCorePermission(request) } }
@@ -1596,55 +1605,78 @@ class ConnectionManager private constructor(context: Context) {
         clearQueueFor(currentSession.value)   // Stop means stop: nothing queued here fires after
     }
 
-    // --- Voice (push-to-talk) --------------------------------------------------
+    // --- Conversation mode -----------------------------------------------------
+    //
+    // One tap arms it; from then on the loop owns the turn: the mic stays open, a
+    // local VAD cuts your speech into utterances on trailing silence, each one is
+    // transcribed through goose's dictation and sent as a prompt, the reply is
+    // spoken, and the mic is already listening again. Talking over the reply stops
+    // it (barge-in) and starts a new utterance.
 
-    /** Begin a push-to-talk clip; the mic button calls this on press. */
-    fun startVoiceRecording() {
-        if (voiceState.value != VoiceState.IDLE) return
-        speaker.stop()   // barge-in: talking over a reply silences it
-        voiceNotice.value = null
-        if (recorder.start()) {
-            voiceState.value = VoiceState.RECORDING
-        } else {
-            voiceNotice.value = "Couldn't start the microphone — check the permission"
-        }
+    /** The mic button: one tap in, one tap out. */
+    fun toggleConversation() {
+        if (voiceState.value == VoiceState.IDLE) startConversation() else stopConversation()
     }
 
-    /**
-     * End the clip and transcribe it through goose's dictation. The transcript
-     * arrives on `onTranscript` (a core callback), not here — dictation is a
-     * blocking round-trip, so it runs on the intent thread, never the UI thread.
-     */
-    fun stopVoiceRecording() {
-        if (voiceState.value != VoiceState.RECORDING) return
-        val bytes = recorder.stop()
-        if (bytes == null || bytes.isEmpty()) {
-            voiceState.value = VoiceState.IDLE
-            voiceNotice.value = "Nothing captured — hold the button while you speak"
+    fun startConversation() {
+        if (voiceLoop != null) return
+        speaker.stop()
+        voiceNotice.value = null
+        val loop = VoiceLoop(
+            onUtterance = { wav -> onVoiceUtterance(wav) },
+            onLevel = { lvl -> main.post { voiceLevel.value = lvl } },
+            onBargeIn = { main.post { onVoiceBargeIn() } },
+            isSpeaking = { speaker.speaking },
+        )
+        if (!loop.start()) {
+            voiceNotice.value = "Couldn't start the microphone — check the permission"
             return
         }
+        voiceLoop = loop
+        voiceState.value = VoiceState.LISTENING
+    }
+
+    fun stopConversation() {
+        voiceLoop?.stop()
+        voiceLoop = null
+        speaker.stop()
+        voiceState.value = VoiceState.IDLE
+        voiceLevel.value = 0f
+    }
+
+    /** A VAD-cut utterance: transcribe it. The text returns on `onTranscript`. */
+    private fun onVoiceUtterance(wav: ByteArray) {
+        if (voiceState.value == VoiceState.IDLE) return
         voiceState.value = VoiceState.TRANSCRIBING
-        val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-        // A wedged server must not leave the composer spinning forever.
+        val b64 = android.util.Base64.encodeToString(wav, android.util.Base64.NO_WRAP)
+        // A wedged server must not leave the loop stuck out of listening.
         main.postDelayed({
             if (voiceState.value == VoiceState.TRANSCRIBING) {
-                voiceState.value = VoiceState.IDLE
                 voiceNotice.value = "Transcription timed out"
+                voiceState.value = VoiceState.LISTENING
             }
         }, 20_000)
-        io { unstable.dictationTranscribe(b64, "audio/mp4", store.dictationProvider) }
+        io { unstable.dictationTranscribe(b64, "audio/wav", store.dictationProvider) }
     }
 
     /** A dictation transcript landed: send it as a prompt, exactly as if it were typed. */
     fun onVoiceTranscript(text: String) {
-        voiceState.value = VoiceState.IDLE
+        if (voiceState.value == VoiceState.IDLE) return   // mode was switched off mid-flight
         val t = text.trim()
         if (t.isEmpty()) {
-            voiceNotice.value = "Didn't catch that"
+            voiceState.value = VoiceState.LISTENING
             return
         }
         voiceNotice.value = null
+        voiceState.value = VoiceState.LISTENING   // the mic is open while the model thinks
         sendPromptBlocks(t, emptyList(), expect = currentSession.value)
+    }
+
+    /** The user spoke over the reply: stop the audio and abort the turn. */
+    private fun onVoiceBargeIn() {
+        speaker.stop()
+        if (busy.value) cancel()
+        if (voiceState.value == VoiceState.SPEAKING) voiceState.value = VoiceState.LISTENING
     }
 
     /** Ask goose which dictation providers are configured (backs an eventual STT picker). */
@@ -2232,10 +2264,11 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     private fun onUnstableError(method: String, message: String) {
-        // A dead dictation call must clear the composer's "Transcribing…" and say why.
+        // A dead dictation call must clear "Transcribing…" and say why, without
+        // dropping out of conversation mode (the loop is still listening).
         if (method.startsWith("_goose/unstable/dictation")) {
-            voiceState.value = VoiceState.IDLE
             voiceNotice.value = message
+            if (voiceState.value == VoiceState.TRANSCRIBING) voiceState.value = VoiceState.LISTENING
         }
         // A failed sidebar/config refresh is not the conversation's problem: no
         // transcript bubble. But the flags those calls set MUST clear, or the failure
