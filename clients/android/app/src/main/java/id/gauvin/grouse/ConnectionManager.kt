@@ -48,6 +48,9 @@ import uniffi.grouse_roam_core.identityPublicKey
 /** The three drawer session categories. See ConnectionManager.sessionKind(). */
 enum class SessionKind { ASSISTANT, CHAT, CODE }
 
+/** The push-to-talk state machine, surfaced in the composer so the user can see it running. */
+enum class VoiceState { IDLE, RECORDING, TRANSCRIBING }
+
 /**
  * Process-scoped owner of the grouse-core connection + chat state. A singleton (not a
  * ViewModel) so it survives navigation/config changes and can later be shared with a
@@ -152,8 +155,10 @@ class ConnectionManager private constructor(context: Context) {
     // on_speak stream (CONTRACT §5). See docs/TRANSCRIPT_MODEL.md.
     private val speaker = Speaker(appContext)
     private val recorder = VoiceRecorder(appContext)
-    /** True while a push-to-talk clip is being captured (drives the mic button). */
-    val recording = mutableStateOf(false)
+    /** The push-to-talk state; the composer renders it (Listening… / Transcribing…). */
+    val voiceState = mutableStateOf(VoiceState.IDLE)
+    /** A one-line voice message for the composer ("didn't catch that", a failure). */
+    val voiceNotice = mutableStateOf<String?>(null)
     /** Raw JSON of goose's dictation provider status (backs an eventual STT picker). */
     val dictationProviders = mutableStateOf("")
     // The core owns the socket, reconnect/backoff, the transcript, and the caches. `unstable`
@@ -1595,8 +1600,14 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Begin a push-to-talk clip; the mic button calls this on press. */
     fun startVoiceRecording() {
+        if (voiceState.value != VoiceState.IDLE) return
         speaker.stop()   // barge-in: talking over a reply silences it
-        recording.value = recorder.start()
+        voiceNotice.value = null
+        if (recorder.start()) {
+            voiceState.value = VoiceState.RECORDING
+        } else {
+            voiceNotice.value = "Couldn't start the microphone — check the permission"
+        }
     }
 
     /**
@@ -1605,17 +1616,34 @@ class ConnectionManager private constructor(context: Context) {
      * blocking round-trip, so it runs on the intent thread, never the UI thread.
      */
     fun stopVoiceRecording() {
-        if (!recording.value) return
-        recording.value = false
-        val bytes = recorder.stop() ?: return
+        if (voiceState.value != VoiceState.RECORDING) return
+        val bytes = recorder.stop()
+        if (bytes == null || bytes.isEmpty()) {
+            voiceState.value = VoiceState.IDLE
+            voiceNotice.value = "Nothing captured — hold the button while you speak"
+            return
+        }
+        voiceState.value = VoiceState.TRANSCRIBING
         val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        // A wedged server must not leave the composer spinning forever.
+        main.postDelayed({
+            if (voiceState.value == VoiceState.TRANSCRIBING) {
+                voiceState.value = VoiceState.IDLE
+                voiceNotice.value = "Transcription timed out"
+            }
+        }, 20_000)
         io { unstable.dictationTranscribe(b64, "audio/mp4", store.dictationProvider) }
     }
 
     /** A dictation transcript landed: send it as a prompt, exactly as if it were typed. */
     fun onVoiceTranscript(text: String) {
+        voiceState.value = VoiceState.IDLE
         val t = text.trim()
-        if (t.isEmpty()) return
+        if (t.isEmpty()) {
+            voiceNotice.value = "Didn't catch that"
+            return
+        }
+        voiceNotice.value = null
         sendPromptBlocks(t, emptyList(), expect = currentSession.value)
     }
 
@@ -2204,6 +2232,11 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     private fun onUnstableError(method: String, message: String) {
+        // A dead dictation call must clear the composer's "Transcribing…" and say why.
+        if (method.startsWith("_goose/unstable/dictation")) {
+            voiceState.value = VoiceState.IDLE
+            voiceNotice.value = message
+        }
         // A failed sidebar/config refresh is not the conversation's problem: no
         // transcript bubble. But the flags those calls set MUST clear, or the failure
         // sticks: a dead tools/list left `discovering` armed and the NEXT tools reply

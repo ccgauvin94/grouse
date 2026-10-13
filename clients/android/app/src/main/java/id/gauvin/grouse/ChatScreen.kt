@@ -39,7 +39,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
@@ -728,6 +727,36 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                                 modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp),
                             )
                         }
+                        // The voice state line: the ONLY place the loop reports itself, so a
+                        // silent mic never looks like a dead button again.
+                        val vState = cm.voiceState.value
+                        val vNotice = cm.voiceNotice.value
+                        if (vState != VoiceState.IDLE || vNotice != null) {
+                            Row(Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                when {
+                                    vState == VoiceState.RECORDING -> {
+                                        Icon(Icons.Filled.Mic, contentDescription = null,
+                                            modifier = Modifier.size(14.dp),
+                                            tint = MaterialTheme.colorScheme.error)
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Listening… tap the mic to send",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.error)
+                                    }
+                                    vState == VoiceState.TRANSCRIBING -> {
+                                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Transcribing…",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    else -> Text(vNotice ?: "",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                        }
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             // "+" pill, left -- Claude-style composer: attach (camera/photos/files),
                             // the tool-approval mode, and the tools-for-this-chat list all live in
@@ -755,31 +784,41 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             ModelPill(modelOpt, cm.knownModels.value, cm::setOption,
                                 onOpenSheet = { showModelSheet = true })
                             Spacer(Modifier.weight(1f))
-                            // Push-to-talk: press and hold to record, release to transcribe and
-                            // send. The transcript lands as a normal prompt, so a spoken turn is
-                            // indistinguishable from a typed one.
-                            val rec = cm.recording.value
-                            FilledIconButton(
-                                onClick = {},
-                                modifier = Modifier.size(42.dp).pointerInput(Unit) {
-                                    detectTapGestures(onPress = {
-                                        cm.startVoiceRecording()
-                                        tryAwaitRelease()
-                                        cm.stopVoiceRecording()
-                                    })
-                                },
-                                colors = IconButtonDefaults.filledIconButtonColors(
-                                    containerColor = if (rec) MaterialTheme.colorScheme.error
-                                                     else MaterialTheme.colorScheme.surface,
-                                ),
+                            // Push-to-talk as a TAP-TO-TOGGLE, not press-and-hold: a hold gesture
+                            // nested in a clickable consumes its own down (the first cut silently
+                            // no-oped), and a toggle is one finger on a car mount.
+                            val vs = cm.voiceState.value
+                            Box(
+                                modifier = Modifier
+                                    .size(42.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        when (vs) {
+                                            VoiceState.RECORDING -> MaterialTheme.colorScheme.error
+                                            else -> MaterialTheme.colorScheme.surface
+                                        }
+                                    )
+                                    .clickable(enabled = vs != VoiceState.TRANSCRIBING) {
+                                        when (vs) {
+                                            VoiceState.IDLE -> cm.startVoiceRecording()
+                                            VoiceState.RECORDING -> cm.stopVoiceRecording()
+                                            VoiceState.TRANSCRIBING -> {}
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center,
                             ) {
-                                Icon(
-                                    Icons.Filled.Mic,
-                                    contentDescription = "hold to talk",
-                                    modifier = Modifier.size(20.dp),
-                                    tint = if (rec) MaterialTheme.colorScheme.onError
-                                           else MaterialTheme.colorScheme.onSurface,
-                                )
+                                if (vs == VoiceState.TRANSCRIBING) {
+                                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                                } else {
+                                    Icon(
+                                        Icons.Filled.Mic,
+                                        contentDescription =
+                                            if (vs == VoiceState.RECORDING) "tap to send" else "tap to talk",
+                                        modifier = Modifier.size(20.dp),
+                                        tint = if (vs == VoiceState.RECORDING) MaterialTheme.colorScheme.onError
+                                               else MaterialTheme.colorScheme.onSurface,
+                                    )
+                                }
                             }
                             Spacer(Modifier.width(6.dp))
                             // One circle, two states: stop while a turn runs, send when there is
