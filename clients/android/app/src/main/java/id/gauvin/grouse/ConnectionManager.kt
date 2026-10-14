@@ -51,6 +51,10 @@ enum class SessionKind { ASSISTANT, CHAT, CODE }
 /** The push-to-talk state machine, surfaced in the composer so the user can see it running. */
 enum class VoiceState { IDLE, LISTENING, TRANSCRIBING, SPEAKING }
 
+/** How long the model may stay silent in conversation mode before the loop says so out
+ *  loud. Warm turns answer in well under this; the filler is for the cold/slow ones. */
+private const val THINKING_FILLER_MS = 900L
+
 /**
  * Process-scoped owner of the grouse-core connection + chat state. A singleton (not a
  * ViewModel) so it survives navigation/config changes and can later be shared with a
@@ -158,6 +162,15 @@ class ConnectionManager private constructor(context: Context) {
     private val speaker = Speaker(appContext) {
         main.post { if (voiceState.value == VoiceState.SPEAKING) voiceState.value = VoiceState.LISTENING }
     }
+    /** True once the current turn's first real reply chunk has been spoken. */
+    private var replyStarted = false
+    /** Covers the wait before the model's first word: a silent loop reads as dead, and a
+     *  car is a bad place to wonder whether it heard you. Cancelled — and cut off — the
+     *  instant the reply speaks, so it never delays the real answer. */
+    private val thinkingFiller = Runnable {
+        if (voiceState.value == VoiceState.IDLE || replyStarted) return@Runnable
+        speaker.speak("Let me think for a moment.")
+    }
     private var voiceLoop: VoiceLoop? = null
     /** Conversation mode: IDLE (off), LISTENING, TRANSCRIBING, SPEAKING. */
     val voiceState = mutableStateOf(VoiceState.IDLE)
@@ -180,11 +193,19 @@ class ConnectionManager private constructor(context: Context) {
         }
         override fun onRunEnded(stopReason: String) { main.post { onRunEnded(stopReason) } }
         // Sanitized, sentence-sized speakable text (docs/TRANSCRIPT_MODEL.md) — one
-        // TTS utterance per chunk, played in order as it arrives.
+        // TTS utterance per chunk, played in order as it arrives. Speech belongs to
+        // conversation mode: with the mic off a reply is read, not heard.
         override fun onSpeak(text: String) {
-            if (!store.speakReplies) return
+            if (voiceState.value == VoiceState.IDLE) return
             main.post {
-                if (voiceState.value != VoiceState.IDLE) voiceState.value = VoiceState.SPEAKING
+                if (!replyStarted) {
+                    replyStarted = true
+                    main.removeCallbacks(thinkingFiller)
+                    // Anything playing this early is the thinking filler: cut it so
+                    // the real answer starts now instead of queueing behind it.
+                    speaker.stop()
+                }
+                if (voiceState.value != VoiceState.SPEAKING) voiceState.value = VoiceState.SPEAKING
                 speaker.speak(text)
             }
         }
@@ -1476,6 +1497,12 @@ class ConnectionManager private constructor(context: Context) {
         files.forEach { f -> blocks.add(PromptBlock.Resource(f.name, f.mimeType, f.text, f.blobB64)) }
         if (blocks.isEmpty()) { busy.value = false; turnInFlight = false; turnInFlightSession = null; return }
         speaker.stop()   // a new prompt supersedes any reply still being spoken
+        // Conversation mode: the model's first word is a second or more away, so arm
+        // the spoken filler to cover the silence. The reply cancels it; a turn that
+        // never speaks (an error) is caught by RunEnded.
+        replyStarted = false
+        main.removeCallbacks(thinkingFiller)
+        if (voiceState.value != VoiceState.IDLE) main.postDelayed(thinkingFiller, THINKING_FILLER_MS)
         core.sendPrompt(Prompt(blocks), expect?.let { SendExpect(it) })
     }
 
@@ -1601,6 +1628,7 @@ class ConnectionManager private constructor(context: Context) {
      *  business and survives. */
     fun cancel() {
         core.cancel()
+        main.removeCallbacks(thinkingFiller)
         speaker.stop()   // Stop means stop — spoken replies included
         busy.value = false
         turnInFlight = false   // wire is free again; without this the queue never drains
@@ -1642,6 +1670,7 @@ class ConnectionManager private constructor(context: Context) {
     fun stopConversation() {
         voiceLoop?.stop()
         voiceLoop = null
+        main.removeCallbacks(thinkingFiller)
         speaker.stop()
         voiceState.value = VoiceState.IDLE
         voiceLevel.value = 0f
@@ -1662,7 +1691,10 @@ class ConnectionManager private constructor(context: Context) {
         io { unstable.dictationTranscribe(b64, "audio/wav", store.dictationProvider) }
     }
 
-    /** A dictation transcript landed: send it as a prompt, exactly as if it were typed. */
+    /** A dictation transcript landed: send it as a prompt, exactly as if it were typed —
+     *  including the local echo, which is the ONLY way the utterance reaches the chat (the
+     *  live wire carries no user_message_chunk; it appears only in the next session/load
+     *  replay), and the same queue/steer rules a typed message gets. */
     fun onVoiceTranscript(text: String) {
         if (voiceState.value == VoiceState.IDLE) return   // mode was switched off mid-flight
         val t = text.trim()
@@ -1672,11 +1704,12 @@ class ConnectionManager private constructor(context: Context) {
         }
         voiceNotice.value = null
         voiceState.value = VoiceState.LISTENING   // the mic is open while the model thinks
-        sendPromptBlocks(t, emptyList(), expect = currentSession.value)
+        send(t)
     }
 
     /** The user spoke over the reply: stop the audio and abort the turn. */
     private fun onVoiceBargeIn() {
+        main.removeCallbacks(thinkingFiller)
         speaker.stop()
         if (busy.value) cancel()
         if (voiceState.value == VoiceState.SPEAKING) voiceState.value = VoiceState.LISTENING
@@ -2048,6 +2081,8 @@ class ConnectionManager private constructor(context: Context) {
     private fun onRunEnded(stopReason: String) {
         compacting.value = false
         turnInFlight = false
+        // The turn is over: a filler still waiting has nothing left to cover.
+        main.removeCallbacks(thinkingFiller)
         // The chat whose run just ended is the one whose queue is now releasable. Fall back to
         // the visible chat only when no owner was ever recorded; draining the global head into
         // whatever was on screen is exactly the cross-talk this replaces.

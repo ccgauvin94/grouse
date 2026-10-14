@@ -329,15 +329,6 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                 SettingCaption("Off uses the built-in goose-green palette.")
             }
 
-            SettingsSection("Voice") {
-                var speak by remember { mutableStateOf(cm.store.speakReplies) }
-                SettingsSwitchRow("Speak replies", speak) { on ->
-                    speak = on; cm.store.speakReplies = on
-                }
-                SettingCaption("Reads each reply aloud as it streams. Tap the mic in the composer " +
-                    "to start a hands-free conversation.")
-            }
-
             SettingsSection("Security") {
                 // Recomputed each recomposition (NOT remembered) so enrolling a biometric while the
                 // screen is open reflects immediately. Only affects the caption, not the toggle.

@@ -760,7 +760,7 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                                     VoiceState.TRANSCRIBING -> {
                                         CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
                                         Spacer(Modifier.width(8.dp))
-                                        Text("Thinking…", style = MaterialTheme.typography.labelMedium,
+                                        Text("Transcribing…", style = MaterialTheme.typography.labelMedium,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                     VoiceState.SPEAKING -> {

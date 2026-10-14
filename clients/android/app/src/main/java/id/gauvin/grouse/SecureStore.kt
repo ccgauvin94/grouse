@@ -223,11 +223,6 @@ class SecureStore(context: Context) {
     // the stock Android voice, and Whisper transcribes better than on-device recognition. LocalAI
     // publishes 0.0.0.0:8080 so the phone reaches it directly; goose is not in this path.
 
-    /** Whether replies are spoken aloud (on-device TTS). On by default — Grouse is a voice client. */
-    var speakReplies: Boolean
-        get() = cfg.getBoolean("speak_replies", true)
-        set(v) = cfg.edit().putBoolean("speak_replies", v).apply()
-
     /** Whether each run of tool calls gets a short model-written label at the end of a turn
      *  (issue #13). One small inference per turn, on a hidden session; off keeps the label the
      *  run's own thinking gives. On by default. */
