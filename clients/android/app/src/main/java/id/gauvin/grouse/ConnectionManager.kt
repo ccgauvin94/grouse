@@ -1438,10 +1438,17 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     fun send(text: String, images: List<ImageBlock> = emptyList(), files: List<FileBlock> = emptyList()) {
-        // Keep the images ON the message so the bubble renders the actual thumbnail(s), not a
-        // "[📎 N]" placeholder. (Live-session only — a session reloaded from the server replays
-        // text; images aren't reconstructed from the replayed content blocks.)
-        messages.add(ChatMessage("user", text, images, files)); busy.value = true
+        // The core echoes a PURE-TEXT prompt into the transcript itself: the wire carries
+        // no user_message_chunk for our own send, so the core keeps its own copy
+        // (otherwise the question is never recorded, and a reopen that trusts the cache
+        // shows the replies with the questions missing). Attachments are the exception —
+        // the item model has no image field — so the client keeps its own bubble for
+        // those, which is also what renders the thumbnail(s), not a "[📎 N]" placeholder.
+        // (A reloaded session replays text; images are never reconstructed.)
+        if (images.isNotEmpty() || files.isNotEmpty()) {
+            messages.add(ChatMessage("user", text, images, files))
+        }
+        busy.value = true
         lastMessageUsage.value = null   // stale stats from the previous turn shouldn't linger
         startService()   // keep the socket alive if the user backgrounds mid-turn
         dispatch(text, images, files)
@@ -1890,12 +1897,14 @@ class ConnectionManager private constructor(context: Context) {
             replayDoneTick.value++   // ChatScreen: new content -> snap to bottom
         }
         // Prompts still waiting in the queue aren't in the server history (they haven't
-        // been sent). Re-add their bubbles on top, in queue order, so the user's unsent
-        // messages don't vanish from the screen (the rebuild wiped them).
+        // been sent), so their bubbles must be re-added on top or they vanish from the
+        // screen (the rebuild wiped them). Only ATTACHMENT prompts: a pure-text one is
+        // echoed by the core when it finally goes out, and re-adding it here would show
+        // the same message twice.
         if (replayWiped) {
             replayWiped = false
             // Only THIS session's unsent prompts -- the transcript on screen is this chat's.
-            pendingSends.filter { it.sessionId == sid }
+            pendingSends.filter { it.sessionId == sid && (it.images.isNotEmpty() || it.files.isNotEmpty()) }
                 .forEach { messages.add(ChatMessage("user", it.text, it.images, it.files)) }
         }
         // Send ONE queued prompt (bubbles were already added when queued); RunEnded drains

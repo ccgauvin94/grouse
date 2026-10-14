@@ -176,6 +176,10 @@ struct FakeServer {
     /// When set, `session/prompt` on the MAIN session also emits a thinking
     /// chunk and a tool call — a turn with a run for the summarizer to label.
     tool_turn: Arc<std::sync::atomic::AtomicBool>,
+    /// The text of the last prompt sent. `session/load` replays it as a
+    /// `user_message_chunk` — the ONLY place a prompt reaches the client, since
+    /// goose never echoes it live.
+    last_prompt: Arc<Mutex<String>>,
 }
 
 impl FakeServer {
@@ -191,6 +195,7 @@ impl FakeServer {
             replay_alt_id: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             push: Arc::new(Mutex::new(None)),
             tool_turn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_prompt: Arc::new(Mutex::new(String::new())),
         });
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -359,10 +364,16 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
                 } else {
                     "r-1"
                 };
-                for (tag, text, message_id) in [
-                    ("agent_message_chunk", "replayed line one", mid),
-                    ("agent_message_chunk", " and two", mid),
-                ] {
+                // A replay DOES carry the prompts that were sent: the server
+                // stores them even though it never echoed them live.
+                let prompt = server.last_prompt.lock().clone();
+                let mut rows: Vec<(&str, String, &str)> = Vec::new();
+                if !prompt.is_empty() {
+                    rows.push(("user_message_chunk", prompt, "u-1"));
+                }
+                rows.push(("agent_message_chunk", "replayed line one".to_string(), mid));
+                rows.push(("agent_message_chunk", " and two".to_string(), mid));
+                for (tag, text, message_id) in rows {
                     let frame = json!({
                         "jsonrpc": "2.0",
                         "method": "session/update",
@@ -421,8 +432,16 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
                 json!({ "stopReason": "end_turn" })
             }
             "session/prompt" => {
-                // Stream the turn BEFORE the reply: user echo + two chunks of
-                // one agent message (same messageId -> one bubble), then end.
+                // Stream the turn BEFORE the reply: two chunks of one agent
+                // message (same messageId -> one bubble), then end.
+                //
+                // NOTE: no `user_message_chunk`. Real goose does NOT echo the
+                // prompt — a user chunk for a prompt we sent never crosses the
+                // wire (verified against a live serve); it appears only in a
+                // later `session/load` replay. The harness echoed it for a long
+                // time, which is exactly why the missing local echo went
+                // unnoticed: every test saw a user row the real server never
+                // sends.
                 let session = params
                     .get("sessionId")
                     .and_then(Value::as_str)
@@ -433,8 +452,8 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
+                *server.last_prompt.lock() = prompt_text;
                 for (tag, text, message_id) in [
-                    ("user_message_chunk", prompt_text.as_str(), "u-1"),
                     ("agent_message_chunk", "hello from fake goose", "m-1"),
                     ("agent_message_chunk", " and more", "m-1"),
                 ] {
@@ -1547,5 +1566,96 @@ fn a_tool_run_gets_a_model_written_label() {
     );
 
     core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+// ---------------------------------------------------------------------------
+// A prompt is NOT echoed on the wire (goose sends no `user_message_chunk` for a
+// prompt we sent — it next crosses the wire in a `session/load` replay). So the
+// core keeps its own copy. Without it the transcript, and the cache saved from
+// it, holds no record of what was asked: a reopen that trusts the cache shows
+// the replies with the questions missing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_prompt_survives_a_reopen_because_the_core_echoes_it() {
+    let data_dir = std::env::temp_dir().join(format!("grouse-prompt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    // The server's run-end touch, so the freshness stamp moves exactly as it does
+    // against a live serve.
+    server.post_turn_touch.store(true, std::sync::atomic::Ordering::SeqCst);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+
+    let config = grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+        initial_project_id: None,
+    };
+
+    // --- Ask something and let the turn finish. ---
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        data_dir.to_string_lossy().to_string(),
+    );
+    core.connect(config.clone());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "ready");
+    core.send_prompt(
+        Prompt { blocks: vec![PromptBlock::Text { text: "what did I ask?".to_string() }] },
+        Some(SendExpect { session_id: "sess-e2e".to_string() }),
+    );
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::RunEnded(_)), "RunEnded");
+
+    // No user chunk ever arrived (the fake no longer invents one), so this row is
+    // the CORE's echo — the only record of the question.
+    let asked = core
+        .rich_transcript()
+        .into_iter()
+        .find(|i| i.kind == grouse_core::ItemKind::User)
+        .expect("the core echoes the prompt it sent");
+    assert_eq!(asked.text, "what did I ask?");
+
+    // And the cache SAVED FROM IT records the question. This is the claim that
+    // matters: a reopen that trusts this file must still show what was asked.
+    let cache_file = std::fs::read_to_string(data_dir.join("sess-e2e.json"))
+        .expect("the turn's transcript is cached");
+    assert!(
+        cache_file.contains("what did I ask?"),
+        "the saved transcript must record the question: {cache_file}"
+    );
+    core.disconnect();
+
+    // --- Reopen, as a fresh launch would. ---
+    let (ev_tx2, ev_rx2) = mpsc::channel();
+    let core2 = Core::new(
+        Box::new(RecordingListener::new(ev_tx2)),
+        data_dir.to_string_lossy().to_string(),
+    );
+    core2.connect_resume(config, "sess-e2e".to_string());
+    wait_for(&ev_rx2, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "ready again");
+    std::thread::sleep(Duration::from_millis(600)); // let the paint/replay settle
+
+    let after: Vec<String> = core2
+        .rich_transcript()
+        .into_iter()
+        .map(|i| format!("{:?}:{}", i.kind, i.text))
+        .collect();
+    assert!(
+        after.iter().any(|r| r.contains("what did I ask?")),
+        "the question must survive a reopen: {after:?}"
+    );
+
+    core2.disconnect();
     let _ = std::fs::remove_dir_all(&data_dir);
 }

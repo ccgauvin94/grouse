@@ -93,6 +93,16 @@ round-trips through the cache.
 `id` is the server's `message_id` for text, or the `tool_call_id` for tool-ish
 rows. A `toolgroup`'s id is its first child's id.
 
+**The core echoes the prompt it sends.** goose does not send a
+`user_message_chunk` for a prompt *we* sent — the prompt next crosses the wire in
+a later `session/load` replay (verified against a live serve). So without a local
+copy the transcript, and the cache saved from it, holds no record of what was
+asked, and a reopen that trusts the cache shows the replies with the questions
+missing. `spawn_prompt` therefore appends a pure-text prompt to the store as a
+`user` item. Attachments are the exception — `Item` has no image field — so an
+attachment prompt stays the *client's* own local echo (which is also what renders
+the thumbnails; a replay reconstructs text only).
+
 A whitespace-only agent/thought message is **not** an item: goose emits the
 assistant's text as `"\n\n"` between tool calls, and the core drops a chunk that
 would open a bubble with only whitespace (whitespace folded into an already-open

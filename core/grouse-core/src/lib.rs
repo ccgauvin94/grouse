@@ -1600,6 +1600,22 @@ impl Core {
         let params = prompt_params(&prompt, &session_id);
         let core = self.clone();
         let store = self.inner.store.clone();
+        // Local echo of the prompt. goose does NOT send a `user_message_chunk`
+        // for a prompt WE sent (verified against a live serve): the prompt next
+        // crosses the wire in a later `session/load` replay. Without this the
+        // core's transcript — and the cache it saves — holds no record of what
+        // was asked, so a reopen that trusts the cache shows the replies with the
+        // questions missing. Only pure text can be echoed: `Item` has no image
+        // field, so an attachment prompt stays the client's own local echo.
+        //
+        // The echo lands here, at the send, so exactly one row appears per prompt
+        // that reaches the wire. A prompt parked in a client's own queue (the wire
+        // was down) therefore shows up when it is finally sent, not when it was
+        // typed — the clients no longer echo it themselves, which is what keeps
+        // the two from doubling.
+        if let Some(text) = pure_text(&prompt) {
+            store.append_chunk("user", &text, None, false);
+        }
         // A new turn's runs are a fresh worklist for the summarizer.
         conn.clear_turn_runs();
         {
@@ -2201,6 +2217,27 @@ impl Core {
 // ---------------------------------------------------------------------------
 // Wire-format helpers
 // ---------------------------------------------------------------------------
+
+/// The prompt's text when it is PURE text — the only shape the item model can
+/// carry (see the local echo in `spawn_prompt`). `None` when it has an image or
+/// resource block: those stay the client's own local echo, because `Item` has no
+/// image field to represent them.
+fn pure_text(prompt: &Prompt) -> Option<String> {
+    let mut text = String::new();
+    for block in &prompt.blocks {
+        match block {
+            PromptBlock::Text { text: t } => {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(t);
+            }
+            _ => return None,
+        }
+    }
+    let text = text.trim();
+    if text.is_empty() { None } else { Some(text.to_string()) }
+}
 
 /// Turn `Prompt` content blocks into the ACP `session/prompt` params
 /// (desktop sendPrompt: text/image/resource shapes pass through verbatim).

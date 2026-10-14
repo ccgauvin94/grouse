@@ -96,6 +96,12 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
   `_meta.client = "grouse-desktop"`.
 - **`session/new` needs an absolute cwd** that exists inside the goose container;
   goose has no default. It is asked for at connect time.
+- **The live wire carries NO `user_message_chunk` for a prompt you sent** — the
+  prompt next appears in a `session/load` replay. The core keeps its own copy of
+  a pure-text prompt (`spawn_prompt`), so the client must NOT also echo one: it
+  would show twice. `Manager::dispatchSend` therefore echoes only when the send
+  carries attachments, which the item model cannot represent (and which are also
+  what renders the thumbnails).
 - Recipe sessions that declare parameters hard-fail unless
   `clientCapabilities._meta.goose.recipeParameterRequests` is true.
 - **WebSocket TLS is deliberately trust-all** (`setSslConfiguration(VerifyNone)`):

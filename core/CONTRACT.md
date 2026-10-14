@@ -216,6 +216,14 @@ Rules:
 - `load_older(count)` walks the window back over the store's in-memory rows —
   no cache read and no wire call. A stock server has no history cursor, so once
   the store's start is reached `has_older` is `false`.
+- **The core echoes the prompt it sends.** goose does NOT send a
+  `user_message_chunk` for a prompt WE sent — the prompt next crosses the wire in
+  a later `session/load` replay (verified against a live serve). Without a local
+  copy the core's transcript, and the cache saved from it, holds no record of
+  what was asked, so a reopen that trusts the cache shows the replies with the
+  questions missing. `spawn_prompt` therefore appends a pure-text prompt to the
+  store as a `User` item. Attachments are the exception: `Item` has no image
+  field, so an attachment prompt stays the CLIENT's own local echo.
 - **A run of tool calls carries the model's own framing of it** (issue #13). The
   thinking that immediately precedes a `Plain` call is absorbed into the run's
   item as `thought`, with `summary` derived from its first sentence; the
