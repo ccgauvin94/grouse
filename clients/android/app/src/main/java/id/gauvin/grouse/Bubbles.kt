@@ -611,14 +611,14 @@ private fun splitToolTitle(title: String): Pair<String, String> {
 
 /** Collapsed: one chip, labelled with the core's framing of the run — the model's own thinking
  *  that preceded it — or "N× <tool>" / "N tool calls" when there is nothing to draw on. Tap to
- *  expand into the individual calls, oldest first, each rendered like a normal ToolChip. */
+ *  expand into the LOOP: each call preceded by the thinking the core absorbed for it, oldest
+ *  first, so a long run reads as think → act → think → act rather than as a wall of chips. */
 @Composable
 internal fun ToolChipGroup(items: List<ChatMessage>) {
     var expanded by remember { mutableStateOf(false) }
     val names = items.map { splitToolTitle(it.text).first }.distinct()
-    // The framing rides on the first row: the core anchors a run on its first call.
+    // The label rides on the first row: the core anchors a run on its first call.
     val summary = items.firstOrNull()?.summary.orEmpty()
-    val stepThought = items.firstOrNull()?.stepThought.orEmpty()
     val label = summary.ifBlank {
         if (names.size == 1) "${items.size}× ${names[0]}" else "${items.size} tool calls"
     }
@@ -644,30 +644,34 @@ internal fun ToolChipGroup(items: List<ChatMessage>) {
         }
         AnimatedVisibility(expanded) {
             Column(Modifier.padding(start = 20.dp, top = 2.dp)) {
-                // The thinking the core folded into this run: the chip's label, in
-                // full, for when you want to read what the model was reasoning.
-                if (stepThought.isNotBlank()) {
-                    Text(stepThought, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(bottom = 4.dp))
+                items.forEach { m ->
+                    // Each call's own thinking sits directly above it, so the run
+                    // expands as the loop the model actually ran.
+                    if (m.stepThought.isNotBlank()) {
+                        Text(m.stepThought, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 2.dp))
+                    }
+                    ToolChip(m, showThought = false)
                 }
-                items.forEach { ToolChip(it) }
             }
         }
     }
 }
 
 /** Tap to expand and see the tool's rawInput (command/args) — Desktop shows this inline; here it's
- *  collapsed by default (matches ThoughtBubble's pattern) so a wall of tool calls stays scannable. */
+ *  collapsed by default (matches ThoughtBubble's pattern) so a wall of tool calls stays scannable.
+ *  `showThought` is off inside a run: the run already prints each call's thinking above it. */
 @Composable
-private fun ToolChip(m: ChatMessage) {
+private fun ToolChip(m: ChatMessage, showThought: Boolean = true) {
     val title = m.text; val detail = m.detail
     var expanded by remember { mutableStateOf(false) }
     val (name, inlineDetail) = splitToolTitle(title)
     // A lone call framed by the model's thinking reads as that framing rather
     // than as a bare tool name (issue #13).
     val label = m.summary.ifBlank { name.replace('_', ' ') }
-    val hasBody = detail.isNotBlank() || m.output.isNotBlank() || m.stepThought.isNotBlank()
+    val thought = if (showThought) m.stepThought else ""
+    val hasBody = detail.isNotBlank() || m.output.isNotBlank() || thought.isNotBlank()
     Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
         Surface(color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
             contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -705,6 +709,11 @@ private fun ToolChip(m: ChatMessage) {
                 Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
                     val mono = MaterialTheme.typography.bodySmall.copy(
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    if (thought.isNotBlank()) {
+                        Text(thought, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (detail.isNotBlank() || m.output.isNotBlank()) Spacer(Modifier.height(6.dp))
+                    }
                     if (detail.isNotBlank()) {
                         Text("input", style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary)

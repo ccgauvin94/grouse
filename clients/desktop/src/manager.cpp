@@ -2055,7 +2055,8 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
     // A tool run carries the model's own framing of it (issue #13): the thinking
     // that preceded the run, absorbed by the core, and the one-line label drawn
     // from it. Both are empty for a run with nothing to draw on, and the chip
-    // then falls back to the call titles.
+    // then falls back to the call titles. Each call also carries the thinking
+    // that preceded IT, which is what puts the loop back in order when expanded.
     const QString summary = item.value(QStringLiteral("summary")).toString();
     const QString stepThought = item.value(QStringLiteral("thought")).toString();
     if (kind == QLatin1String("Tool")) {
@@ -2072,6 +2073,7 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
                                  {"detail", c.value("detail").toString()},
                                  {"output", c.value("output").toString()},
                                  {"status", c.value("status").toString()},
+                                 {"thought", c.value("thought").toString()},
                                  {"toolCallId", c.value("id").toString()}};
         }
         return QVariantMap{{"id", id}, {"role", "toolgroup"}, {"text", ""},

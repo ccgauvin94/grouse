@@ -2043,7 +2043,9 @@ class ConnectionManager private constructor(context: Context) {
             c.id to ChatMessage("tool", c.title, detail = c.detail, toolCallId = c.id,
                                 status = c.status, output = c.output, id = appIdFor(c.id),
                                 summary = if (i == 0) item.summary else "",
-                                stepThought = if (i == 0) item.thought else "",
+                                // Each call carries the thinking that preceded IT, so the
+                                // expanded run reads as think → act → think → act.
+                                stepThought = c.thought,
                                 stepId = item.id)
         }
         ItemKind.CHART -> listOf(item.id to ChatMessage("chart", item.detail, id = appIdFor(item.id)))

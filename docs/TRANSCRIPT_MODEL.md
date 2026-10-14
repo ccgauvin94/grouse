@@ -112,20 +112,29 @@ drop such rows too, so a stale cache cannot re-create an empty bubble.
 ### Run summaries
 
 A run of consecutive tool calls currently collapses to a bare count — "11 tool
-calls" — which says nothing about what the agent was doing. Instead, a `tool` /
-`toolgroup` item carries the model's own framing of the run:
+calls" — which says nothing about what the agent was doing. Instead, **the run is
+the whole loop**: everything the model thought and did between two visible
+messages is ONE `toolgroup` item, and the loop lives inside it.
 
-- **`thought`** — the thinking that immediately preceded the run, absorbed from
-  the `Thought` item it used to render as (which is dropped with a `Remove`).
-- **`summary`** — a one-line label derived from that thought (first sentence,
-  capped). Empty when the run has nothing to draw on, and the client then falls
-  back to the call titles.
+- **`ToolCall.thought`** — the thinking that immediately preceded that call,
+  absorbed from the `Thought` item it used to render as (which is dropped with a
+  `Remove`). Held *per call*, so the expanded run reads in order: think → act →
+  think → act.
+- **`Item.thought`** — the run's thinking, joined (what the label was drawn from).
+- **`Item.summary`** — the run's one-line label, from the first thinking it saw
+  (first sentence, capped). Empty when the run has nothing to draw on, and the
+  client then falls back to the call titles.
 
-A thought therefore **opens a run**: it never merges the call into the run above
-it, so a 20-step loop reads as a few meaningful steps rather than one wall.
-Thinking that leads nowhere (no call follows before the turn's next text) is not
-absorbed and stays a `Thought` item of its own. The expanded chip shows the full
-`thought`, so nothing is lost.
+A thought therefore does **not** split a run: the model thinking between two calls
+is still the same loop, so a 20-call loop is one row, not twenty. What *does* end
+a run is a **visible message** — the model's own narration, or your next prompt —
+which is where one loop stops and the next begins. Thinking that leads nowhere
+(no call follows before the turn ends) stays a `Thought` item of its own, and the
+turn's end seals it so a later turn's call can never claim it.
+
+This is exactly the shape goose emits: a burst of thinking, a whitespace-only
+agent message (`"\n\n"`, dropped — see above), then the call, repeated. Because
+those agent chunks are empty they do not break the loop; a real narration does.
 
 **The rewrite.** The label above is *provisional*. At the end of a turn the core
 asks the model — on a **hidden session** (`_meta.hidden`, so goose's unlistable
@@ -141,11 +150,11 @@ turn on turn.
 
 **Replay.** goose re-sends the reasoning trail on every `session/load`, but a
 standalone replayed thought would double the trail and carries no stable id to
-reconcile by (a merge cannot match it). It is therefore held only as the next
-run's framing, never emitted as a row: a run's label is *derived from the
-replayed rows*, never persisted against a `tool_call_id` (which the server
-re-assigns on every replay). Both fields round-trip through the cache, so a
-reloaded chat keeps its labels.
+reconcile by (a merge cannot match it). It is therefore held only as the thinking
+of the call that follows it, never emitted as a row: a run's label is *derived
+from the replayed rows*, never persisted against a `tool_call_id` (which the
+server re-assigns on every replay). Both fields round-trip through the cache, so
+a reloaded chat keeps its labels and its loops.
 
 ### Ops
 
@@ -231,6 +240,7 @@ pub enum ItemKind { User, Agent, Thought, Tool, ToolGroup, Chart, McpApp, Error 
 pub struct ToolCall {
     pub id: String, pub title: String, pub detail: String,
     pub output: String, pub status: String,
+    pub thought: String,  // the thinking that preceded THIS call
 }
 
 pub struct Item {

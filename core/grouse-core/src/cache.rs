@@ -411,14 +411,14 @@ mod tests {
                         detail: "ls".into(),
                         output: "a".into(),
                         status: "completed".into(),
-                    },
+                    thought: String::new(),                    },
                     ToolCall {
                         id: "t2".into(),
                         title: "Read".into(),
                         detail: "f".into(),
                         output: "b".into(),
                         status: "completed".into(),
-                    },
+                    thought: String::new(),                    },
                 ],
                 // The run's framing must survive the cache like everything else:
                 // a reloaded chat keeps its step labels.

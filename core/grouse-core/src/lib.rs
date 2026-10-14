@@ -163,6 +163,11 @@ pub struct ToolCall {
     pub detail: String,
     pub output: String,
     pub status: String,
+    /// The thinking that immediately preceded THIS call, absorbed from the
+    /// `Thought` rows above it (issue #13). Per call, not per run, so an expanded
+    /// run shows the loop in order: think, call, think, call.
+    #[serde(default)]
+    pub thought: String,
 }
 
 /// A rich transcript item — the unit the new clients render

@@ -167,7 +167,7 @@ channel; the legacy `on_transcript` / `on_stream` surface is deleted.
 ```rust
 pub enum ItemKind { User, Agent, Thought, Tool, ToolGroup, Chart, McpApp, Error }
 
-pub struct ToolCall { id, title, detail, output, status }
+pub struct ToolCall { id, title, detail, output, status, thought }
 
 pub struct Item {
     id: String,          // message_id (text) / tool_call_id, or a core "@n"
@@ -178,7 +178,7 @@ pub struct Item {
     status: String,      // tool lifecycle
     app_key: String,     // McpApp: "<extension>|<uri>"
     calls: Vec<ToolCall>,// ToolGroup children
-    thought: String,     // Tool/ToolGroup: the thinking the run absorbed
+    thought: String,     // Tool/ToolGroup: the run's thinking, joined
     summary: String,     // Tool/ToolGroup: the run's one-line label
 }
 
@@ -224,15 +224,18 @@ Rules:
   questions missing. `spawn_prompt` therefore appends a pure-text prompt to the
   store as a `User` item. Attachments are the exception: `Item` has no image
   field, so an attachment prompt stays the CLIENT's own local echo.
-- **A run of tool calls carries the model's own framing of it** (issue #13). The
-  thinking that immediately precedes a `Plain` call is absorbed into the run's
-  item as `thought`, with `summary` derived from its first sentence; the
-  standalone `Thought` row is dropped with a `Remove`. A thought therefore OPENS
-  a run — it never merges the call into the run above it — so a 20-call loop
-  reads as a few meaningful steps instead of a wall of bare call counts. Thinking
-  that leads nowhere (no call follows) stays a `Thought` item of its own. Both
-  fields are empty when a run has nothing to draw on, and a client then falls
-  back to the call titles.
+- **A run IS the loop** (issue #13). Everything the model thought and did between
+  two visible messages is ONE `toolgroup` item, with the loop inside it: each
+  `ToolCall` carries the `thought` that immediately preceded IT (absorbed from the
+  `Thought` row, which is dropped with a `Remove`), so an expanded run reads
+  think → act → think → act. A thought therefore does NOT split a run — the model
+  thinking between two calls is the same loop, so a 20-call loop is one row, not
+  twenty. A **visible message** (the model's narration, or your next prompt) is
+  what ends a run. `Item.thought` is the run's thinking joined, and `Item.summary`
+  its label, derived from the first thinking it saw; both are empty when a run has
+  nothing to draw on and the client then falls back to the call titles. Thinking
+  that leads nowhere stays a `Thought` item of its own, and the turn's end seals
+  it so a later turn's call can never claim it.
 - **The label is rewritten by the model at the end of a turn.** `summary` as the
   store sets it is provisional; after the turn the core asks the model for one
   short line per run and replaces the label with an `Upsert`. The request runs on
@@ -244,10 +247,10 @@ Rules:
   does not answer, the provisional label stands.
 - **A replayed thought never becomes a row of its own.** goose re-sends the
   reasoning trail on every `session/load`, but such a row would double the trail
-  and carries no stable id to reconcile by. The core holds it as the next run's
-  framing only (`replay_thought`), so a run's `summary`/`thought` rebuild
-  identically from a replay — the label is derived from the replayed rows, never
-  persisted against a `tool_call_id`.
+  and carries no stable id to reconcile by. The core holds it as the thinking of
+  the call that follows it (`replay_thought`), so a run's `summary`/`thought`
+  rebuild identically from a replay — the label is derived from the replayed rows,
+  never persisted against a `tool_call_id`.
 - **Roam peers** hold a rich item store of their own (`PeerStore`): live text,
   tool calls (kind and payload preserved), and staging/cache are all items, so
   a peer chart/app survives promotion and restart, and `rich_transcript()` /

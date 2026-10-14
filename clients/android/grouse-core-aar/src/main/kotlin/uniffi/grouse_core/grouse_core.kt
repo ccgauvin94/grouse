@@ -5387,6 +5387,13 @@ data class ToolCall (
     var `output`: kotlin.String
     , 
     var `status`: kotlin.String
+    , 
+    /**
+     * The thinking that immediately preceded THIS call, absorbed from the
+     * `Thought` rows above it (issue #13). Per call, not per run, so an expanded
+     * run shows the loop in order: think, call, think, call.
+     */
+    var `thought`: kotlin.String
     
 ){
     
@@ -5408,6 +5415,7 @@ public object FfiConverterTypeToolCall: FfiConverterRustBuffer<ToolCall> {
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
         )
     }
 
@@ -5416,7 +5424,8 @@ public object FfiConverterTypeToolCall: FfiConverterRustBuffer<ToolCall> {
             FfiConverterString.allocationSize(value.`title`) +
             FfiConverterString.allocationSize(value.`detail`) +
             FfiConverterString.allocationSize(value.`output`) +
-            FfiConverterString.allocationSize(value.`status`)
+            FfiConverterString.allocationSize(value.`status`) +
+            FfiConverterString.allocationSize(value.`thought`)
     )
 
     override fun write(value: ToolCall, buf: ByteBuffer) {
@@ -5425,6 +5434,7 @@ public object FfiConverterTypeToolCall: FfiConverterRustBuffer<ToolCall> {
             FfiConverterString.write(value.`detail`, buf)
             FfiConverterString.write(value.`output`, buf)
             FfiConverterString.write(value.`status`, buf)
+            FfiConverterString.write(value.`thought`, buf)
     }
 }
 

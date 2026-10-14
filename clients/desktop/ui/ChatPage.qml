@@ -1054,21 +1054,22 @@ Kirigami.Page {
                             visible: mdel.toolOpen
                             width: parent.width
                             spacing: Kirigami.Units.smallSpacing
-                            // The thinking the core folded into this run: the
-                            // chip's label, in full, for when you want to read
-                            // what the model was reasoning.
-                            Controls.Label {
-                                visible: mdel.messageStepThought.length > 0
-                                text: mdel.messageStepThought
-                                width: parent.width
-                                wrapMode: Text.Wrap
-                                opacity: 0.8
-                            }
+                            // The loop, in order: each call is preceded by the
+                            // thinking the core absorbed for IT, so a long run
+                            // reads as think → act → think → act rather than as a
+                            // wall of "Thinking" blocks beside a wall of chips.
                             Repeater {
                                 model: mdel.messageCalls
                                 delegate: Column {
                                     width: parent.width
                                     spacing: 2
+                                    Controls.Label {
+                                        visible: !!modelData.thought
+                                        text: modelData.thought || ""
+                                        width: parent.width
+                                        wrapMode: Text.Wrap
+                                        opacity: 0.8
+                                    }
                                     Row {
                                         width: parent.width
                                         Controls.Label {
