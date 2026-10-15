@@ -127,6 +127,19 @@ Kirigami.Page {
         arr.splice(i, 1)
         page.pendingFiles = arr
     }
+    // Append attachments, ignoring duplicates. Returns whether anything was added, so a
+    // paste that carried nothing attachable can fall through to the TextArea's own text
+    // paste instead of being swallowed.
+    function addPendingFiles(files) {
+        const added = []
+        for (let i = 0; i < files.length; i++)
+            if (page.pendingFiles.indexOf(files[i]) < 0)
+                added.push(files[i])
+        if (added.length === 0)
+            return false
+        page.pendingFiles = page.pendingFiles.concat(added)
+        return true
+    }
     function isImageFile(path) {
         const e = String(path).toLowerCase().split(".").pop()
         return ["png", "jpg", "jpeg", "gif", "bmp", "webp", "svg"].indexOf(e) >= 0
@@ -1607,17 +1620,7 @@ Kirigami.Page {
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Attach files")
                     // Native KDE file picker (any file type) via the Manager.
-                    onClicked: {
-                        const files = Mgr.pickAttachmentFiles()
-                        if (files.length === 0)
-                            return
-                        const added = []
-                        for (let i = 0; i < files.length; i++)
-                            if (page.pendingFiles.indexOf(files[i]) < 0)
-                                added.push(files[i])
-                        if (added.length > 0)
-                            page.pendingFiles = page.pendingFiles.concat(added)
-                    }
+                    onClicked: page.addPendingFiles(Mgr.pickAttachmentFiles())
                 }
 
                 Controls.TextArea {
@@ -1640,6 +1643,16 @@ Kirigami.Page {
                         if (event.key === Qt.Key_Return && !(event.modifiers & Qt.ShiftModifier)) {
                             page.send()
                             event.accepted = true
+                            return
+                        }
+                        // Ctrl+V that carries an image (a screenshot, or an image file copied
+                        // in the file manager) attaches it instead of inserting a path or
+                        // silently doing nothing — a TextArea has no image paste of its own.
+                        // Anything else falls through to its normal text paste, so only accept
+                        // when something was actually attached.
+                        if (event.key === Qt.Key_V && (event.modifiers & Qt.ControlModifier)) {
+                            if (page.addPendingFiles(Mgr.clipboardAttachmentFiles()))
+                                event.accepted = true
                         }
                     }
                 }

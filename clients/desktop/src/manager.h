@@ -203,6 +203,12 @@ public:
     Q_INVOKABLE void sendPrompt(const QString &text, const QVariantList &files = QVariantList());
     /** Open the native KDE file picker (any file type, multi-select) and return chosen paths. */
     Q_INVOKABLE QStringList pickAttachmentFiles();
+    /** Attachment paths for whatever is on the CLIPBOARD, or an empty list when it carries
+     *  nothing attachable (a plain text copy — the caller then pastes text normally).
+     *  A copied file (a screenshot in Spectacle, an image in Dolphin) yields its local path;
+     *  raw image data with no file behind it (a copied screenshot from a browser) is written
+     *  to a temp PNG first, because an attachment is a file path end to end. */
+    Q_INVOKABLE QStringList clipboardAttachmentFiles();
     Q_INVOKABLE void cancelTurn();
     /** Compact the conversation history (goose /compact command). */
     Q_INVOKABLE void compactConversation();

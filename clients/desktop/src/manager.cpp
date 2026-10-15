@@ -20,6 +20,8 @@
 #include <QStyleHints>
 #include <QUrl>
 #include <QClipboard>
+#include <QImage>
+#include <QMimeData>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -797,6 +799,44 @@ QStringList Manager::pickAttachmentFiles()
         m_store.setValue(QStringLiteral("last_attach_dir"), info.absolutePath());
     }
     return files;
+}
+
+QStringList Manager::clipboardAttachmentFiles()
+{
+    const QMimeData *mime = QGuiApplication::clipboard()->mimeData();
+    if (!mime)
+        return {};
+    // A file copied from a file manager (Dolphin, Spectacle's "copy to clipboard"):
+    // attach the files themselves. Their bytes must not go through an image
+    // round-trip, and non-image files are attachable too.
+    QStringList files;
+    if (mime->hasUrls()) {
+        for (const QUrl &u : mime->urls()) {
+            if (!u.isLocalFile())
+                continue;
+            const QString path = u.toLocalFile();
+            if (!path.isEmpty() && QFileInfo::exists(path))
+                files << path;
+        }
+        if (!files.isEmpty())
+            return files;
+    }
+    // Raw image data with no file behind it (a screenshot copied out of a browser).
+    // An attachment is a file path end to end, so park it under a name that carries
+    // a real image extension — the transcript picks its thumbnail renderer from it.
+    if (!mime->hasImage())
+        return {};
+    const QImage image = qvariant_cast<QImage>(mime->imageData());
+    if (image.isNull())
+        return {};
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    if (dir.isEmpty())
+        return {};
+    const QString path = QStringLiteral("%1/grouse-paste-%2.png")
+                             .arg(dir, QString::number(QDateTime::currentMSecsSinceEpoch()));
+    if (!image.save(path, "PNG"))
+        return {};
+    return {path};
 }
 
 QVariantList Manager::buildAttachmentBlocks(const QVariantList &paths)

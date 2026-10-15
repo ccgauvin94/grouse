@@ -184,25 +184,39 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
         ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? -> uri?.let { readImage(ctx, it)?.let(attachments::add) } }
 
-    // Camera capture (returns a JPEG bitmap; the "camera square" in the + sheet).
-    // TakePicturePreview launches the system camera app, which demands the CAMERA
-    // permission be granted to US first — launching revoked crashes with
+    // Camera capture (the "camera square" in the + sheet). The system camera writes a
+    // full-size JPEG through a FileProvider into our cache. TakePicturePreview — the old
+    // path — only hands back a thumbnail, which is null on many devices, so the shot
+    // never reached the chat. With a real output URI the camera app closes itself once
+    // it has written the file, and the `false` result means the user backed out.
+    // The CAMERA permission must be granted to US first: launching revoked crashes with
     // SecurityException ("Permission Denial … with revoked permission").
-    var cameraPending by remember { mutableStateOf(false) }
+    var captureUri by remember { mutableStateOf<Uri?>(null) }
     val cameraLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.TakePicturePreview()
-    ) { bmp: Bitmap? -> bmp?.let { attachments.add(bitmapToImage(it)) }; cameraPending = false }
+        ActivityResultContracts.TakePicture()
+    ) { ok: Boolean ->
+        val uri = captureUri
+        captureUri = null
+        if (ok && uri != null) readImage(ctx, uri)?.let(attachments::add)
+    }
+    fun openCamera() {
+        // A fresh file per shot: the URI is what the camera app writes to, and the name
+        // must carry a real image extension (readImage sniffs the mime from it).
+        val dir = java.io.File(ctx.cacheDir, "captures").apply { mkdirs() }
+        val file = java.io.File(dir, "capture-${System.currentTimeMillis()}.jpg")
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            ctx, "${ctx.packageName}.fileprovider", file)
+        captureUri = uri
+        cameraLauncher.launch(uri)
+    }
     val cameraPerm = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) cameraLauncher.launch(null) else cameraPending = false
-    }
+    ) { granted -> if (granted) openCamera() else captureUri = null }
     fun launchCamera() {
-        cameraPending = true
         if (androidx.core.content.ContextCompat.checkSelfPermission(
                 ctx, android.Manifest.permission.CAMERA) ==
             android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            cameraLauncher.launch(null)
+            openCamera()
         } else {
             cameraPerm.launch(android.Manifest.permission.CAMERA)
         }
@@ -324,7 +338,9 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
 
     if (showComposer) {
         ComposerSheet(cm,
-            onCamera = { launchCamera() },
+            // Close the sheet first: the camera is a whole other app, and returning to
+            // a sheet that covers the input hides the thumbnail you just took.
+            onCamera = { showComposer = false; launchCamera() },
             onPhotos = { picker.launch(PickVisualMediaRequest(
                 ActivityResultContracts.PickVisualMedia.ImageOnly)) },
             onFiles = { filePicker.launch(arrayOf("*/*")) },
@@ -839,9 +855,13 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             }
                             Spacer(Modifier.width(6.dp))
                             // One circle, two states: stop while a turn runs, send when there is
-                            // text. Sending mid-turn queues, so the arrow is never wrong -- it just
-                            // may not go out immediately.
-                            val canSend = input.isNotBlank()
+                            // something to send. Sending mid-turn queues, so the arrow is never
+                            // wrong -- it just may not go out immediately.
+                            // An image-only message IS a message: the core takes prompt blocks
+                            // with no text at all (the desktop already sends one), so the arrow
+                            // must light for attachments alone.
+                            val canSend = input.isNotBlank() ||
+                                attachments.isNotEmpty() || cm.draftFiles.isNotEmpty()
                             FilledIconButton(
                                 onClick = { if (canSend) doSend() else if (cm.busy.value) cm.cancel() },
                                 enabled = canSend || cm.busy.value,

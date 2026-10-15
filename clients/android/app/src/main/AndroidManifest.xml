@@ -59,6 +59,20 @@
                 android:resource="@xml/shortcuts" />
         </activity>
 
+        <!-- The camera app writes a captured photo THROUGH this provider: it cannot
+             open a path inside our private cache, and the alternative contract
+             (`TakePicturePreview`) only returns a thumbnail, which is null on many
+             devices — the shot then silently never reached the chat. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <service
             android:name=".GooseTile"
             android:exported="true"
