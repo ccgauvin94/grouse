@@ -339,8 +339,8 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                     bioLock = on; cm.store.biometricLock = on
                 }
                 SettingCaption("Off by default. When on, opening the app (or reconnecting with the " +
-                    "saved key) needs your fingerprint/face or device PIN; takes effect next launch." +
-                    if (!bioAvailable) " (No authenticator is enrolled on this device yet, so it " +
+                    "saved key) needs your enrolled fingerprint or face; takes effect next launch." +
+                    if (!bioAvailable) " (No strong biometric is enrolled on this device yet, so it " +
                         "won't engage until you add one.)" else "")
             }
 
