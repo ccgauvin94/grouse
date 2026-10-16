@@ -331,6 +331,7 @@ Kirigami.Page {
                     spacing: 2
                     Kirigami.Heading {
                         text: Mgr.currentSessionTitle
+                        textFormat: Text.PlainText
                         level: 3
                         elide: Text.ElideRight
                         width: parent.width
@@ -965,6 +966,7 @@ Kirigami.Page {
                             }
                             Controls.Label {
                                 text: mdel.toolChipTitle()
+                                textFormat: Text.PlainText
                                 font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.88))
                                 renderType: Text.NativeRendering
                                 color: Kirigami.Theme.disabledTextColor
@@ -975,6 +977,7 @@ Kirigami.Page {
                             Controls.Label {
                                 id: statusLabel
                                 text: mdel.statusText()
+                                textFormat: Text.PlainText
                                 color: mdel.messageStatus === "failed" ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.disabledTextColor
                                 font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
                                 renderType: Text.NativeRendering
@@ -984,9 +987,16 @@ Kirigami.Page {
                         // The thinking the core folded into this chip: it is the
                         // chip's label, so opening the chip shows what the model
                         // was actually reasoning.
+                        //
+                        // Every label showing model/tool text below is PlainText: QQC2's
+                        // AutoText default parses markup-looking content as rich text, so
+                        // prompt-injected tool output echoed into a thought could render
+                        // <img src=…> and fire an outbound request. Nothing here is meant to
+                        // be rich (the transcript bubbles set their textFormat explicitly too).
                         Controls.Label {
                             visible: mdel.toolOpen && mdel.messageStepThought.length > 0
                             text: mdel.messageStepThought
+                            textFormat: Text.PlainText
                             width: parent.width
                             wrapMode: Text.Wrap
                             opacity: 0.8
@@ -995,6 +1005,7 @@ Kirigami.Page {
                         Controls.Label {
                             visible: mdel.toolOpen && mdel.messageOutput.length > 0
                             text: (mdel.messageDetail.length > 0 ? mdel.messageDetail + "\n\n" : "") + mdel.shortOutput()
+                            textFormat: Text.PlainText
                             width: parent.width
                             wrapMode: Text.Wrap
                             opacity: 0.8
@@ -1048,6 +1059,7 @@ Kirigami.Page {
                             }
                             Controls.Label {
                                 text: mdel.groupTitle()
+                                textFormat: Text.PlainText
                                 Layout.fillWidth: true
                                 elide: Text.ElideRight
                                 color: Kirigami.Theme.textColor
@@ -1079,6 +1091,7 @@ Kirigami.Page {
                                     Controls.Label {
                                         visible: !!modelData.thought
                                         text: modelData.thought || ""
+                                        textFormat: Text.PlainText
                                         width: parent.width
                                         wrapMode: Text.Wrap
                                         opacity: 0.8
@@ -1087,6 +1100,7 @@ Kirigami.Page {
                                         width: parent.width
                                         Controls.Label {
                                             text: modelData.title || qsTr("Tool call")
+                                            textFormat: Text.PlainText
                                             width: parent.width - callStatusLabel.implicitWidth - parent.spacing
                                             elide: Text.ElideRight
                                             font.weight: Font.DemiBold
@@ -1094,6 +1108,7 @@ Kirigami.Page {
                                         Controls.Label {
                                             id: callStatusLabel
                                             text: mdel.callStatus(modelData)
+                                            textFormat: Text.PlainText
                                             color: modelData.status === "failed" ? Kirigami.Theme.negativeTextColor
                                                                                   : Kirigami.Theme.disabledTextColor
                                         }
@@ -1102,6 +1117,7 @@ Kirigami.Page {
                                         visible: !!modelData.detail || !!modelData.output
                                         text: (modelData.detail || "")
                                               + (modelData.output ? "\n" + modelData.output : "")
+                                        textFormat: Text.PlainText
                                         width: parent.width
                                         wrapMode: Text.Wrap
                                         font.family: "monospace"
@@ -1189,6 +1205,7 @@ Kirigami.Page {
                         Controls.Label {
                             text: qsTr("Pinned") + " · " + mdel.pinnedSlot
                                   + ": " + (mdel.messageTitle || qsTr("MCP app"))
+                            textFormat: Text.PlainText
                             Layout.fillWidth: true
                             elide: Text.ElideRight
                             color: Kirigami.Theme.disabledTextColor
@@ -1210,6 +1227,7 @@ Kirigami.Page {
                             width: parent.width
                             Controls.Label {
                                 text: qsTr("Visualization") + ": " + (mdel.messageTitle || qsTr("call"))
+                                textFormat: Text.PlainText
                                 font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.9
                                 color: Kirigami.Theme.disabledTextColor
                                 elide: Text.ElideRight
@@ -1229,6 +1247,7 @@ Kirigami.Page {
                         Controls.Label {
                             visible: mdel.toolOpen
                             text: mdel.messageDetail
+                            textFormat: Text.PlainText
                             width: parent.width
                             wrapMode: Text.Wrap
                             opacity: 0.8
@@ -1326,6 +1345,7 @@ Kirigami.Page {
                         Controls.Label {
                             visible: mdel.thoughtOpen
                             text: mdel.messageText
+                            textFormat: Text.PlainText
                             width: parent.width
                             wrapMode: Text.Wrap
                             opacity: 0.7
@@ -1350,6 +1370,7 @@ Kirigami.Page {
                     Controls.Label {
                         id: errCol
                         text: mdel.messageText
+                        textFormat: Text.PlainText
                         color: Kirigami.Theme.negativeTextColor
                         wrapMode: Text.Wrap
                         anchors.fill: parent

@@ -368,6 +368,7 @@ Controls.Dialog {
                         Controls.Label {
                             text: modelData.recipe && modelData.recipe.title
                                   ? modelData.recipe.title : modelData.id
+                            textFormat: Text.PlainText
                             width: parent.width
                             elide: Text.ElideRight
                             font.bold: true
@@ -421,6 +422,7 @@ Controls.Dialog {
                 Controls.Label {
                     text: dialog.sel && dialog.sel.recipe && dialog.sel.recipe.title
                           ? dialog.sel.recipe.title : (dialog.sel ? dialog.sel.id : "")
+                    textFormat: Text.PlainText
                     font.bold: true
                     font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.2
                     Layout.fillWidth: true
@@ -429,6 +431,7 @@ Controls.Dialog {
                 Controls.Label {
                     text: dialog.sel && dialog.sel.recipe && dialog.sel.recipe.description
                           ? dialog.sel.recipe.description : qsTr("No description")
+                    textFormat: Text.PlainText
                     color: Kirigami.Theme.disabledTextColor
                     wrapMode: Text.Wrap
                     Layout.fillWidth: true
@@ -690,6 +693,7 @@ Controls.Dialog {
                                 && dialog.sel.recipe.extensions.length > 0)
                     text: dialog.sel ? (dialog.sel.recipe.extensions || [])
                           .map(e => "· " + e.name).join("\n") : ""
+                    textFormat: Text.PlainText
                     color: Kirigami.Theme.disabledTextColor
                     wrapMode: Text.Wrap
                     Layout.fillWidth: true
@@ -705,6 +709,7 @@ Controls.Dialog {
                                 && dialog.sel.recipe.sub_recipes.length > 0)
                     text: dialog.sel ? (dialog.sel.recipe.sub_recipes || [])
                           .map(e => "· " + e.name).join("\n") : ""
+                    textFormat: Text.PlainText
                     color: Kirigami.Theme.disabledTextColor
                     wrapMode: Text.Wrap
                     Layout.fillWidth: true
@@ -722,6 +727,7 @@ Controls.Dialog {
                         "· " + p.key + (p.requirement === "optional"
                                         ? qsTr(" (optional)") : "")
                         + (p.description ? " — " + p.description : "")).join("\n") : ""
+                    textFormat: Text.PlainText
                     color: Kirigami.Theme.disabledTextColor
                     wrapMode: Text.Wrap
                     Layout.fillWidth: true
@@ -745,6 +751,7 @@ Controls.Dialog {
                     }
                     Controls.Label {
                         text: dialog.sel ? (dialog.sel.file_path || "") : ""
+                        textFormat: Text.PlainText
                         color: Kirigami.Theme.disabledTextColor
                         elide: Text.ElideMiddle
                         Layout.fillWidth: true
