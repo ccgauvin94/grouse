@@ -334,4 +334,18 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("roam_enabled", false)
         set(v) = cfg.edit().putBoolean("roam_enabled", v).apply()
 
+    // --- Sidebar ------------------------------------------------------------
+    // The drawer's expansion is the user's own state, remembered across launches so the
+    // sidebar opens the way it was left instead of resetting to "everything expanded".
+
+    /** The PROJECTS section's collapsed state — the master toggle above the project cards. */
+    var projectsCollapsed: Boolean
+        get() = cfg.getBoolean("projects_collapsed", false)
+        set(v) = cfg.edit().putBoolean("projects_collapsed", v).apply()
+
+    /** Project ids whose cards the user expanded in the drawer. */
+    var expandedProjects: Set<String>
+        get() = cfg.getStringSet("expanded_projects", emptySet()) ?: emptySet()
+        set(v) = cfg.edit().putStringSet("expanded_projects", v).apply()
+
 }

@@ -54,6 +54,14 @@ Manager::Manager(QObject *parent)
     m_messageModel = new MessageListModel(this);
     m_roamModel = new RoamListModel(this);
 
+    // The sidebar's collapsed groups are the user's own state, not a per-launch
+    // default: restore what was last chosen and persist every toggle. Without
+    // this the tree resets to "everything expanded" on each start.
+    m_sessionsModel->setCollapsedSections(m_store.value("sidebar_collapsed").toStringList());
+    connect(m_sessionsModel, &SessionListModel::collapsedChanged, this, [this] {
+        m_store.setValue("sidebar_collapsed", m_sessionsModel->collapsedSections());
+    });
+
     // Coalesce transcript updates while a turn streams (same rate-limit as the
     // old per-chunk path): the signal fires at most every 50ms.
     m_peekTimer = new QTimer(this);
