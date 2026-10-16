@@ -194,6 +194,10 @@ pub struct GrouseCoreListener {
         Option<extern "C" fn(*mut c_void, *const c_char, *const c_char, i64)>,
     pub on_tool_result: Option<extern "C" fn(*mut c_void, *const c_char, i32)>,
     pub on_error: Option<extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
+    /// `providers` serialized as a raw JSON map of dictation provider → status.
+    pub on_dictation_config: Option<extern "C" fn(*mut c_void, *const c_char)>,
+    /// A dictation transcript (the decoded text of the audio the UI sent).
+    pub on_transcript: Option<extern "C" fn(*mut c_void, *const c_char)>,
 }
 
 /// Bridges the core's typed listener traits to the installed C table. The raw
@@ -511,6 +515,12 @@ impl GrouseUnstableListener for CoreCallbackForwarder {
     fn on_tool_result(&self, text: String, is_error: bool) {
         unsafe { cb_str_i32(table_fn!(self, on_tool_result), self.user_data, &text, is_error as i32) };
     }
+    fn on_dictation_config(&self, providers: String) {
+        unsafe { cb_str1(table_fn!(self, on_dictation_config), self.user_data, &providers) };
+    }
+    fn on_transcript(&self, text: String) {
+        unsafe { cb_str1(table_fn!(self, on_transcript), self.user_data, &text) };
+    }
     fn on_error(&self, method: String, message: String) {
         unsafe { cb_str2(table_fn!(self, on_error), self.user_data, &method, &message) };
     }
@@ -744,6 +754,18 @@ pub extern "C" fn grouse_status(h: *mut c_void) -> *mut c_char {
 #[no_mangle]
 pub extern "C" fn grouse_ready(h: *mut c_void) -> i32 {
     catch_unwind(AssertUnwindSafe(|| handle(h).core.ready() as i32)).unwrap_or(0)
+}
+
+/// Rewrite each tool run's label with a short model-written line (issue #13).
+#[no_mangle]
+pub extern "C" fn grouse_set_run_summaries(h: *mut c_void, on: i32) {
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.set_run_summaries(on != 0))).ok();
+}
+
+/// Whether the model rewrites run labels (issue #13).
+#[no_mangle]
+pub extern "C" fn grouse_run_summaries(h: *mut c_void) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.run_summaries() as i32)).unwrap_or(0)
 }
 
 /// NULL when no session is active (the caller treats it as "none").

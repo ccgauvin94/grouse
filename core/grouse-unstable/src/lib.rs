@@ -93,6 +93,12 @@ mod tests {
         fn on_tool_result(&self, _text: String, _is_error: bool) {
             self.events.lock().push("on_tool_result".into());
         }
+        fn on_dictation_config(&self, _providers: String) {
+            self.events.lock().push("on_dictation_config".into());
+        }
+        fn on_transcript(&self, _text: String) {
+            self.events.lock().push("on_transcript".into());
+        }
         fn on_error(&self, _method: String, _message: String) {
             self.events.lock().push("on_error".into());
         }

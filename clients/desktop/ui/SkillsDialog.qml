@@ -54,12 +54,14 @@ Controls.Dialog {
                     spacing: 1
                     Controls.Label {
                         text: modelData.name
+                        textFormat: Text.PlainText
                         width: parent.width
                         elide: Text.ElideRight
                         font.bold: true
                     }
                     Controls.Label {
                         text: modelData.description
+                        textFormat: Text.PlainText
                         width: parent.width
                         elide: Text.ElideRight
                         opacity: 0.7

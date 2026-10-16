@@ -96,6 +96,12 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
   `_meta.client = "grouse-desktop"`.
 - **`session/new` needs an absolute cwd** that exists inside the goose container;
   goose has no default. It is asked for at connect time.
+- **The live wire carries NO `user_message_chunk` for a prompt you sent** — the
+  prompt next appears in a `session/load` replay. The core keeps its own copy of
+  a pure-text prompt (`spawn_prompt`), so the client must NOT also echo one: it
+  would show twice. `Manager::dispatchSend` therefore echoes only when the send
+  carries attachments, which the item model cannot represent (and which are also
+  what renders the thumbnails).
 - Recipe sessions that declare parameters hard-fail unless
   `clientCapabilities._meta.goose.recipeParameterRequests` is true.
 - **WebSocket TLS is deliberately trust-all** (`setSslConfiguration(VerifyNone)`):
@@ -248,7 +254,7 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
 |`src/corebridge.h/.cpp`|The ONLY path to the wire: dlopens `libgrouse_core.so`, resolves every `grouse_*` symbol, installs the `GrouseCoreListener` table, marshals every core event from the worker thread onto the Qt main thread, and dispatches to `Manager`'s `coreOn*` handlers. The core owns the ACP connection, transcript, streaming, reconnect and the roam transport.|
 |`src/manager.h/.cpp`|Thin native facade (`Mgr` context property): ~30 Q_INVOKABLEs (`sendPrompt`, `openSession`, `renameSession`, `setConfigOption`, `refreshRecipes`, `runRecipe`, `scheduleRecipe`, `saveSkill`, `setGlobalExtensionEnabled`, `respondPermission`, `pickAttachmentFiles`, `exportSessionTo`, `compactConversation`, …), writable Q_PROPERTYs (host/port/secretKey/workingDir/useTls/autoConnectEnabled), status Q_PROPERTYs (status/online/landingPage/prompting/compacting/queuedCount/contextSize/…). Every intent routes through `CoreBridge::api()`; `coreOn*` fold core events into the models.|
 |`src/messagelistmodel.h/.cpp`|Transcript model, 16 roles (role/text/html/title/detail/output/status/images/usage/chartData/appHtml/calls/…); `updateDeferred` coalesces dataChanged on a 120 ms QTimer; `commitDeferred` guards the cleared-model race.|
-|`src/sessionlistmodel.h/.cpp`|Sidebar model, 11 roles; flat list of group-header + session rows; sections prefixed `proj:`/`peer:` (id = `section.substring(5)`); `cwdFor()` is the source of cwd for `session/load` — never invent one; `toggleSection()`; no-op guard so unchanged lists never reset the model.|
+|`src/sessionlistmodel.h/.cpp`|Sidebar model, 11 roles; flat list of group-header + session rows; sections prefixed `proj:`/`peer:` (id = `section.substring(5)`); `cwdFor()` is the source of cwd for `session/load` — never invent one; `toggleSection()`; no-op guard so unchanged lists never reset the model. The collapsed set is the user's state: Manager restores it from QSettings (`sidebar_collapsed`) at startup and persists it on `collapsedChanged` (`collapsedSections()`/`setCollapsedSections()`), so the sidebar opens the way it was left.|
 |`src/markdown.h/.cpp`|`markdownToHtml()` — Qt CommonMark → HTML, escapes input.|
 |`src/main.cpp`|QApplication (widgets needed for QFileDialog), QSettings org/app, `org.kde.desktop` style, `Mgr` context property, `manager.autoConnect()`.|
 |`ui/main.qml`|Window shell: `Controls.ApplicationWindow` (NOT Kirigami's — its `contentItem` is read-only, so a sidebar+chat split can't be injected there); sidebar + ChatPage/landing page; every dialog instance and inline menu/dialog; landing provider/model ComboBoxes.|

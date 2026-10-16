@@ -35,6 +35,8 @@ QHash<int, QByteArray> MessageListModel::roleNames() const
         {AppHtmlRole, "appHtml"},
         {AppKeyRole, "appKey"},
         {CallsRole, "calls"},
+        {SummaryRole, "summary"},
+        {StepThoughtRole, "stepThought"},
         {ExpandedRole, "expanded"},
     };
 }
@@ -61,6 +63,8 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
     case AppHtmlRole: return m.value("appHtml");
     case AppKeyRole: return m.value("appKey");
     case CallsRole: return m.value("calls");
+    case SummaryRole: return m.value("summary");
+    case StepThoughtRole: return m.value("stepThought");
     // Keyed by ROW index, not the "id" value: text bubbles carry string message
     // ids ("" for live ones), so an id.toInt() key collapsed every thought
     // bubble onto one shared entry.

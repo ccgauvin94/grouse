@@ -75,12 +75,14 @@ Controls.Dialog {
                     }
                     Controls.Label {
                         text: edel.eName
+                        textFormat: Text.PlainText
                         elide: Text.ElideRight
                         Layout.fillWidth: true
                         font.bold: true
                     }
                     Controls.Label {
                         text: modelData.type
+                        textFormat: Text.PlainText
                         opacity: 0.6
                     }
                 }
@@ -101,6 +103,7 @@ Controls.Dialog {
                             }
                             Controls.Label {
                                 text: modelData.name
+                                textFormat: Text.PlainText
                                 elide: Text.ElideRight
                                 Layout.fillWidth: true
                             }

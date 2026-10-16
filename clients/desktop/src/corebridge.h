@@ -67,6 +67,9 @@ public:
         // stable getters
         char *(*grouse_status)(void *h);
         int (*grouse_ready)(void *h);
+        // model-written run labels (issue #13)
+        void (*grouse_set_run_summaries)(void *h, int on);
+        int (*grouse_run_summaries)(void *h);
         char *(*grouse_active_session_id)(void *h);
         char *(*grouse_sessions)(void *h);
         char *(*grouse_transcript)(void *h);
@@ -215,5 +218,8 @@ struct GrouseCoreListener {
     void (*on_session_probe)(void *, const char *, const char *, long long);
     void (*on_tool_result)(void *, const char *, int);
     void (*on_error)(void *, const char *, const char *);
+    // -- dictation (speech-to-text) --
+    void (*on_dictation_config)(void *, const char *);
+    void (*on_transcript)(void *, const char *);
 };
 }

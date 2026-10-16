@@ -2055,6 +2055,8 @@ fn empty_item() -> Item {
         status: String::new(),
         app_key: String::new(),
         calls: Vec::new(),
+        thought: String::new(),
+        summary: String::new(),
     }
 }
 
@@ -2582,6 +2584,8 @@ mod tests {
             status: String::new(),
             app_key: String::new(),
             calls: Vec::new(),
+            thought: String::new(),
+            summary: String::new(),
         };
         assert!(peer.cache.save_transcript("roam:laptop:s1", &[m], "2026-01-01T00:00:00Z"));
         peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
@@ -2670,6 +2674,8 @@ mod tests {
             status: String::new(),
             app_key: String::new(),
             calls: Vec::new(),
+            thought: String::new(),
+            summary: String::new(),
         };
         assert!(peer.cache.save_transcript("roam:laptop:s1", &[m], "2026-01-01T00:00:00Z"));
         peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
@@ -2759,6 +2765,8 @@ mod tests {
             status: String::new(),
             app_key: String::new(),
             calls: Vec::new(),
+            thought: String::new(),
+            summary: String::new(),
         };
         assert!(peer.cache.save_transcript("roam:laptop:s9", &[m], "2026-01-01T00:00:00Z"));
         // NO apply_sessions call: nothing has been staged for s9.

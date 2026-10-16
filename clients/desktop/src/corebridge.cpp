@@ -99,6 +99,8 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_respond_permission);
     RESOLVE(grouse_status);
     RESOLVE(grouse_ready);
+    RESOLVE(grouse_set_run_summaries);
+    RESOLVE(grouse_run_summaries);
     RESOLVE(grouse_active_session_id);
     RESOLVE(grouse_sessions);
     RESOLVE(grouse_transcript);
@@ -342,6 +344,10 @@ void CoreBridge::installListener()
         cb_on_session_probe,
         cb_on_tool_result,
         cb_on_error,
+        // Dictation is not wired on the desktop yet; the slots stay null so the
+        // table is ABI-locked to the core's GrouseCoreListener.
+        nullptr,   // on_dictation_config
+        nullptr,   // on_transcript
     };
     m_listener = &table;
 

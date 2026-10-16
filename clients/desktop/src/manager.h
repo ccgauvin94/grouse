@@ -58,6 +58,9 @@ class Manager : public QObject
      *  always kept so the combo can't appear to switch provider on its own. */
     Q_PROPERTY(bool configuredProvidersOnly READ configuredProvidersOnly WRITE setConfiguredProvidersOnly NOTIFY settingsChanged)
     Q_PROPERTY(QStringList configuredProviders READ configuredProviders NOTIFY providersChanged)
+    /** Rewrite each tool run's label with a short model-written line (issue #13).
+     *  Costs one small inference per turn, on a hidden session. */
+    Q_PROPERTY(bool runSummaries READ runSummaries WRITE setRunSummaries NOTIFY settingsChanged)
     Q_PROPERTY(QString workingDir READ workingDir WRITE setWorkingDir NOTIFY settingsChanged)
     /** Roam (iroh peer transport) is opt-in: its sidebar tab and stored peers
      *  stay dormant until the user enables it in Settings. */
@@ -111,6 +114,7 @@ public:
     bool notificationsEnabled() const;
     bool configuredProvidersOnly() const;
     QStringList configuredProviders() const { return m_configuredProviders; }
+    bool runSummaries() const;
     QString workingDir() const;
     bool roamEnabled() const;
     void setHost(const QString &v);
@@ -120,8 +124,12 @@ public:
     void setAutoConnectEnabled(bool v);
     void setNotificationsEnabled(bool v);
     void setConfiguredProvidersOnly(bool v);
+    void setRunSummaries(bool v);
     void setWorkingDir(const QString &v);
     void setRoamEnabled(bool v);
+    /** Push the stored run-summary preference into the core (it defaults ON, so
+     *  an OFF setting has to reach it explicitly). */
+    void syncRunSummariesToCore();
     /** The ACP endpoint URL the configured host/port/key map to ("wss://host:port/acp"). */
     QString wsUrl() const;
     QString status() const { return m_status; }
@@ -195,6 +203,12 @@ public:
     Q_INVOKABLE void sendPrompt(const QString &text, const QVariantList &files = QVariantList());
     /** Open the native KDE file picker (any file type, multi-select) and return chosen paths. */
     Q_INVOKABLE QStringList pickAttachmentFiles();
+    /** Attachment paths for whatever is on the CLIPBOARD, or an empty list when it carries
+     *  nothing attachable (a plain text copy — the caller then pastes text normally).
+     *  A copied file (a screenshot in Spectacle, an image in Dolphin) yields its local path;
+     *  raw image data with no file behind it (a copied screenshot from a browser) is written
+     *  to a temp PNG first, because an attachment is a file path end to end. */
+    Q_INVOKABLE QStringList clipboardAttachmentFiles();
     Q_INVOKABLE void cancelTurn();
     /** Compact the conversation history (goose /compact command). */
     Q_INVOKABLE void compactConversation();

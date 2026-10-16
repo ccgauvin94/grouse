@@ -47,6 +47,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
@@ -141,6 +142,18 @@ fun ContextRing(pct: Int, modifier: Modifier = Modifier, onClick: (() -> Unit)? 
     }
 }
 
+/** The mic level, 0..1 — a live "the microphone is actually running" readout. */
+@Composable
+private fun LevelBar(level: Float) {
+    Box(Modifier.size(width = 64.dp, height = 6.dp)
+        .clip(RoundedCornerShape(3.dp))
+        .background(MaterialTheme.colorScheme.surfaceVariant)) {
+        Box(Modifier.fillMaxHeight()
+            .fillMaxWidth(level.coerceIn(0f, 1f))
+            .background(MaterialTheme.colorScheme.primary))
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
@@ -163,30 +176,47 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     // Hoisted to ConnectionManager so picked images survive recreation (see draftAttachments).
     val attachments = cm.draftAttachments
     val listState = rememberLazyListState()
+    // Leaving the chat closes the mic: conversation mode must not keep recording in the
+    // background (or after a navigate-away).
+    DisposableEffect(Unit) { onDispose { cm.stopConversation() } }
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? -> uri?.let { readImage(ctx, it)?.let(attachments::add) } }
 
-    // Camera capture (returns a JPEG bitmap; the "camera square" in the + sheet).
-    // TakePicturePreview launches the system camera app, which demands the CAMERA
-    // permission be granted to US first — launching revoked crashes with
+    // Camera capture (the "camera square" in the + sheet). The system camera writes a
+    // full-size JPEG through a FileProvider into our cache. TakePicturePreview — the old
+    // path — only hands back a thumbnail, which is null on many devices, so the shot
+    // never reached the chat. With a real output URI the camera app closes itself once
+    // it has written the file, and the `false` result means the user backed out.
+    // The CAMERA permission must be granted to US first: launching revoked crashes with
     // SecurityException ("Permission Denial … with revoked permission").
-    var cameraPending by remember { mutableStateOf(false) }
+    var captureUri by remember { mutableStateOf<Uri?>(null) }
     val cameraLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.TakePicturePreview()
-    ) { bmp: Bitmap? -> bmp?.let { attachments.add(bitmapToImage(it)) }; cameraPending = false }
+        ActivityResultContracts.TakePicture()
+    ) { ok: Boolean ->
+        val uri = captureUri
+        captureUri = null
+        if (ok && uri != null) readImage(ctx, uri)?.let(attachments::add)
+    }
+    fun openCamera() {
+        // A fresh file per shot: the URI is what the camera app writes to, and the name
+        // must carry a real image extension (readImage sniffs the mime from it).
+        val dir = java.io.File(ctx.cacheDir, "captures").apply { mkdirs() }
+        val file = java.io.File(dir, "capture-${System.currentTimeMillis()}.jpg")
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            ctx, "${ctx.packageName}.fileprovider", file)
+        captureUri = uri
+        cameraLauncher.launch(uri)
+    }
     val cameraPerm = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) cameraLauncher.launch(null) else cameraPending = false
-    }
+    ) { granted -> if (granted) openCamera() else captureUri = null }
     fun launchCamera() {
-        cameraPending = true
         if (androidx.core.content.ContextCompat.checkSelfPermission(
                 ctx, android.Manifest.permission.CAMERA) ==
             android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            cameraLauncher.launch(null)
+            openCamera()
         } else {
             cameraPerm.launch(android.Manifest.permission.CAMERA)
         }
@@ -308,7 +338,9 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
 
     if (showComposer) {
         ComposerSheet(cm,
-            onCamera = { launchCamera() },
+            // Close the sheet first: the camera is a whole other app, and returning to
+            // a sheet that covers the input hides the thumbnail you just took.
+            onCamera = { showComposer = false; launchCamera() },
             onPhotos = { picker.launch(PickVisualMediaRequest(
                 ActivityResultContracts.PickVisualMedia.ImageOnly)) },
             onFiles = { filePicker.launch(arrayOf("*/*")) },
@@ -726,6 +758,42 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                                 modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp),
                             )
                         }
+                        // The voice state line: the ONLY place the loop reports itself, so a
+                        // silent mic never looks like a dead button again. The level bar is the
+                        // proof the mic is live even when nothing is being transcribed.
+                        val vState = cm.voiceState.value
+                        val vNotice = cm.voiceNotice.value
+                        if (vState != VoiceState.IDLE || vNotice != null) {
+                            Row(Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                when (vState) {
+                                    VoiceState.LISTENING -> {
+                                        LevelBar(cm.voiceLevel.value)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Listening…", style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.primary)
+                                    }
+                                    VoiceState.TRANSCRIBING -> {
+                                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Transcribing…", style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    VoiceState.SPEAKING -> {
+                                        Icon(Icons.Filled.Mic, contentDescription = null,
+                                            modifier = Modifier.size(14.dp),
+                                            tint = MaterialTheme.colorScheme.primary)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Speaking… talk over me to interrupt",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.primary)
+                                    }
+                                    else -> Text(vNotice ?: "",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                        }
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             // "+" pill, left -- Claude-style composer: attach (camera/photos/files),
                             // the tool-approval mode, and the tools-for-this-chat list all live in
@@ -753,10 +821,47 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             ModelPill(modelOpt, cm.knownModels.value, cm::setOption,
                                 onOpenSheet = { showModelSheet = true })
                             Spacer(Modifier.weight(1f))
+                            // Conversation mode: one tap in, one tap out. A plain Box, not a
+                            // Button — a Button's own clickable consumes the press (and a
+                            // pointerInput nested inside one silently no-ops; the first cut did).
+                            val vs = cm.voiceState.value
+                            val on = vs != VoiceState.IDLE
+                            Box(
+                                modifier = Modifier
+                                    .size(42.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        when (vs) {
+                                            VoiceState.IDLE, VoiceState.TRANSCRIBING ->
+                                                MaterialTheme.colorScheme.surface
+                                            else -> MaterialTheme.colorScheme.primary
+                                        }
+                                    )
+                                    .clickable(enabled = vs != VoiceState.TRANSCRIBING) { cm.toggleConversation() },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                if (vs == VoiceState.TRANSCRIBING) {
+                                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                                } else {
+                                    Icon(
+                                        Icons.Filled.Mic,
+                                        contentDescription =
+                                            if (on) "stop conversation" else "start conversation",
+                                        modifier = Modifier.size(20.dp),
+                                        tint = if (on) MaterialTheme.colorScheme.onPrimary
+                                               else MaterialTheme.colorScheme.onSurface,
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.width(6.dp))
                             // One circle, two states: stop while a turn runs, send when there is
-                            // text. Sending mid-turn queues, so the arrow is never wrong -- it just
-                            // may not go out immediately.
-                            val canSend = input.isNotBlank()
+                            // something to send. Sending mid-turn queues, so the arrow is never
+                            // wrong -- it just may not go out immediately.
+                            // An image-only message IS a message: the core takes prompt blocks
+                            // with no text at all (the desktop already sends one), so the arrow
+                            // must light for attachments alone.
+                            val canSend = input.isNotBlank() ||
+                                attachments.isNotEmpty() || cm.draftFiles.isNotEmpty()
                             FilledIconButton(
                                 onClick = { if (canSend) doSend() else if (cm.busy.value) cm.cancel() },
                                 enabled = canSend || cm.busy.value,

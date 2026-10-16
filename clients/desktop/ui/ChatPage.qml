@@ -127,6 +127,19 @@ Kirigami.Page {
         arr.splice(i, 1)
         page.pendingFiles = arr
     }
+    // Append attachments, ignoring duplicates. Returns whether anything was added, so a
+    // paste that carried nothing attachable can fall through to the TextArea's own text
+    // paste instead of being swallowed.
+    function addPendingFiles(files) {
+        const added = []
+        for (let i = 0; i < files.length; i++)
+            if (page.pendingFiles.indexOf(files[i]) < 0)
+                added.push(files[i])
+        if (added.length === 0)
+            return false
+        page.pendingFiles = page.pendingFiles.concat(added)
+        return true
+    }
     function isImageFile(path) {
         const e = String(path).toLowerCase().split(".").pop()
         return ["png", "jpg", "jpeg", "gif", "bmp", "webp", "svg"].indexOf(e) >= 0
@@ -318,6 +331,7 @@ Kirigami.Page {
                     spacing: 2
                     Kirigami.Heading {
                         text: Mgr.currentSessionTitle
+                        textFormat: Text.PlainText
                         level: 3
                         elide: Text.ElideRight
                         width: parent.width
@@ -618,6 +632,10 @@ Kirigami.Page {
                 readonly property string messageAppHtml: model.appHtml ? String(model.appHtml) : ""
                 readonly property string messageAppKey: model.appKey ? String(model.appKey) : ""
                 readonly property var messageCalls: model.calls ? model.calls : []
+                // A tool run's framing (issue #13): the one-line label and the
+                // thinking the core absorbed into it.
+                readonly property string messageSummary: model.summary ? model.summary : ""
+                readonly property string messageStepThought: model.stepThought ? model.stepThought : ""
 
                 readonly property bool isUser: mdel.messageRole === "user"
                 readonly property bool isAgent: mdel.messageRole === "agent"
@@ -667,6 +685,10 @@ Kirigami.Page {
                          : mdel.messageStatus === "failed" ? qsTr("failed") : mdel.messageStatus
                 }
                 function groupTitle() {
+                    // The run's own label first — the model's framing of what it
+                    // was doing. The call-count fallback is only for a run with
+                    // nothing to draw on.
+                    if (mdel.messageSummary.length > 0) return mdel.messageSummary
                     if (mdel.messageCalls.length === 0) return qsTr("Tool calls")
                     var first = String(mdel.messageCalls[0].title || qsTr("call"))
                     var same = true
@@ -682,6 +704,12 @@ Kirigami.Page {
                 function callStatus(call) {
                     return call.status === "completed" ? "✓ " + qsTr("done")
                          : call.status === "failed" ? qsTr("failed") : call.status
+                }
+                function toolChipTitle() {
+                    // A lone call framed by the model's thinking reads as that
+                    // framing; otherwise the raw tool title is all there is.
+                    if (mdel.messageSummary.length > 0) return mdel.messageSummary
+                    return qsTr("Tool") + ": " + (mdel.messageTitle || qsTr("call"))
                 }
 
                 height: mdel.isUser ? userBubble.implicitHeight
@@ -937,7 +965,8 @@ Kirigami.Page {
                                 Layout.alignment: Qt.AlignVCenter
                             }
                             Controls.Label {
-                                text: qsTr("Tool") + ": " + (mdel.messageTitle || qsTr("call"))
+                                text: mdel.toolChipTitle()
+                                textFormat: Text.PlainText
                                 font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.88))
                                 renderType: Text.NativeRendering
                                 color: Kirigami.Theme.disabledTextColor
@@ -948,15 +977,35 @@ Kirigami.Page {
                             Controls.Label {
                                 id: statusLabel
                                 text: mdel.statusText()
+                                textFormat: Text.PlainText
                                 color: mdel.messageStatus === "failed" ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.disabledTextColor
                                 font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
                                 renderType: Text.NativeRendering
                                 verticalAlignment: Text.AlignVCenter
                             }
                         }
+                        // The thinking the core folded into this chip: it is the
+                        // chip's label, so opening the chip shows what the model
+                        // was actually reasoning.
+                        //
+                        // Every label showing model/tool text below is PlainText: QQC2's
+                        // AutoText default parses markup-looking content as rich text, so
+                        // prompt-injected tool output echoed into a thought could render
+                        // <img src=…> and fire an outbound request. Nothing here is meant to
+                        // be rich (the transcript bubbles set their textFormat explicitly too).
+                        Controls.Label {
+                            visible: mdel.toolOpen && mdel.messageStepThought.length > 0
+                            text: mdel.messageStepThought
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            wrapMode: Text.Wrap
+                            opacity: 0.8
+                            bottomPadding: mdel.pad
+                        }
                         Controls.Label {
                             visible: mdel.toolOpen && mdel.messageOutput.length > 0
                             text: (mdel.messageDetail.length > 0 ? mdel.messageDetail + "\n\n" : "") + mdel.shortOutput()
+                            textFormat: Text.PlainText
                             width: parent.width
                             wrapMode: Text.Wrap
                             opacity: 0.8
@@ -1010,6 +1059,7 @@ Kirigami.Page {
                             }
                             Controls.Label {
                                 text: mdel.groupTitle()
+                                textFormat: Text.PlainText
                                 Layout.fillWidth: true
                                 elide: Text.ElideRight
                                 color: Kirigami.Theme.textColor
@@ -1029,15 +1079,28 @@ Kirigami.Page {
                             visible: mdel.toolOpen
                             width: parent.width
                             spacing: Kirigami.Units.smallSpacing
+                            // The loop, in order: each call is preceded by the
+                            // thinking the core absorbed for IT, so a long run
+                            // reads as think → act → think → act rather than as a
+                            // wall of "Thinking" blocks beside a wall of chips.
                             Repeater {
                                 model: mdel.messageCalls
                                 delegate: Column {
                                     width: parent.width
                                     spacing: 2
+                                    Controls.Label {
+                                        visible: !!modelData.thought
+                                        text: modelData.thought || ""
+                                        textFormat: Text.PlainText
+                                        width: parent.width
+                                        wrapMode: Text.Wrap
+                                        opacity: 0.8
+                                    }
                                     Row {
                                         width: parent.width
                                         Controls.Label {
                                             text: modelData.title || qsTr("Tool call")
+                                            textFormat: Text.PlainText
                                             width: parent.width - callStatusLabel.implicitWidth - parent.spacing
                                             elide: Text.ElideRight
                                             font.weight: Font.DemiBold
@@ -1045,6 +1108,7 @@ Kirigami.Page {
                                         Controls.Label {
                                             id: callStatusLabel
                                             text: mdel.callStatus(modelData)
+                                            textFormat: Text.PlainText
                                             color: modelData.status === "failed" ? Kirigami.Theme.negativeTextColor
                                                                                   : Kirigami.Theme.disabledTextColor
                                         }
@@ -1053,6 +1117,7 @@ Kirigami.Page {
                                         visible: !!modelData.detail || !!modelData.output
                                         text: (modelData.detail || "")
                                               + (modelData.output ? "\n" + modelData.output : "")
+                                        textFormat: Text.PlainText
                                         width: parent.width
                                         wrapMode: Text.Wrap
                                         font.family: "monospace"
@@ -1140,6 +1205,7 @@ Kirigami.Page {
                         Controls.Label {
                             text: qsTr("Pinned") + " · " + mdel.pinnedSlot
                                   + ": " + (mdel.messageTitle || qsTr("MCP app"))
+                            textFormat: Text.PlainText
                             Layout.fillWidth: true
                             elide: Text.ElideRight
                             color: Kirigami.Theme.disabledTextColor
@@ -1161,6 +1227,7 @@ Kirigami.Page {
                             width: parent.width
                             Controls.Label {
                                 text: qsTr("Visualization") + ": " + (mdel.messageTitle || qsTr("call"))
+                                textFormat: Text.PlainText
                                 font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.9
                                 color: Kirigami.Theme.disabledTextColor
                                 elide: Text.ElideRight
@@ -1180,6 +1247,7 @@ Kirigami.Page {
                         Controls.Label {
                             visible: mdel.toolOpen
                             text: mdel.messageDetail
+                            textFormat: Text.PlainText
                             width: parent.width
                             wrapMode: Text.Wrap
                             opacity: 0.8
@@ -1277,6 +1345,7 @@ Kirigami.Page {
                         Controls.Label {
                             visible: mdel.thoughtOpen
                             text: mdel.messageText
+                            textFormat: Text.PlainText
                             width: parent.width
                             wrapMode: Text.Wrap
                             opacity: 0.7
@@ -1301,6 +1370,7 @@ Kirigami.Page {
                     Controls.Label {
                         id: errCol
                         text: mdel.messageText
+                        textFormat: Text.PlainText
                         color: Kirigami.Theme.negativeTextColor
                         wrapMode: Text.Wrap
                         anchors.fill: parent
@@ -1571,17 +1641,7 @@ Kirigami.Page {
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Attach files")
                     // Native KDE file picker (any file type) via the Manager.
-                    onClicked: {
-                        const files = Mgr.pickAttachmentFiles()
-                        if (files.length === 0)
-                            return
-                        const added = []
-                        for (let i = 0; i < files.length; i++)
-                            if (page.pendingFiles.indexOf(files[i]) < 0)
-                                added.push(files[i])
-                        if (added.length > 0)
-                            page.pendingFiles = page.pendingFiles.concat(added)
-                    }
+                    onClicked: page.addPendingFiles(Mgr.pickAttachmentFiles())
                 }
 
                 Controls.TextArea {
@@ -1604,6 +1664,16 @@ Kirigami.Page {
                         if (event.key === Qt.Key_Return && !(event.modifiers & Qt.ShiftModifier)) {
                             page.send()
                             event.accepted = true
+                            return
+                        }
+                        // Ctrl+V that carries an image (a screenshot, or an image file copied
+                        // in the file manager) attaches it instead of inserting a path or
+                        // silently doing nothing — a TextArea has no image paste of its own.
+                        // Anything else falls through to its normal text paste, so only accept
+                        // when something was actually attached.
+                        if (event.key === Qt.Key_V && (event.modifiers & Qt.ControlModifier)) {
+                            if (page.addPendingFiles(Mgr.clipboardAttachmentFiles()))
+                                event.accepted = true
                         }
                     }
                 }

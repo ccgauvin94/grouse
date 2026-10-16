@@ -86,6 +86,7 @@ Controls.Dialog {
             Controls.Label {
                 text: dialog.proj() && dialog.proj().root
                       ? qsTr("Root: ") + dialog.proj().root : ""
+                textFormat: Text.PlainText
                 color: Kirigami.Theme.disabledTextColor
                 visible: text.length > 0
                 elide: Text.ElideMiddle
@@ -112,6 +113,7 @@ Controls.Dialog {
         Controls.Label {
             text: dialog.proj() && dialog.proj().description
                   ? qsTr("Description: ") + dialog.proj().description : ""
+            textFormat: Text.PlainText
             color: Kirigami.Theme.disabledTextColor
             visible: text.length > 0
             wrapMode: Text.Wrap

@@ -20,6 +20,8 @@
 #include <QStyleHints>
 #include <QUrl>
 #include <QClipboard>
+#include <QImage>
+#include <QMimeData>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -52,6 +54,14 @@ Manager::Manager(QObject *parent)
     m_messageModel = new MessageListModel(this);
     m_roamModel = new RoamListModel(this);
 
+    // The sidebar's collapsed groups are the user's own state, not a per-launch
+    // default: restore what was last chosen and persist every toggle. Without
+    // this the tree resets to "everything expanded" on each start.
+    m_sessionsModel->setCollapsedSections(m_store.value("sidebar_collapsed").toStringList());
+    connect(m_sessionsModel, &SessionListModel::collapsedChanged, this, [this] {
+        m_store.setValue("sidebar_collapsed", m_sessionsModel->collapsedSections());
+    });
+
     // Coalesce transcript updates while a turn streams (same rate-limit as the
     // old per-chunk path): the signal fires at most every 50ms.
     m_peekTimer = new QTimer(this);
@@ -83,6 +93,7 @@ bool Manager::useTls() const { return m_store.value("wss", true).toBool(); }
 bool Manager::autoConnectEnabled() const { return m_store.value("auto_connect", true).toBool(); }
 bool Manager::notificationsEnabled() const { return m_store.value("notify_events", true).toBool(); }
 bool Manager::configuredProvidersOnly() const { return m_store.value("configured_providers_only", true).toBool(); }
+bool Manager::runSummaries() const { return m_store.value("run_summaries", true).toBool(); }
 QString Manager::workingDir() const { return m_store.value("cwd", "").toString(); }
 bool Manager::roamEnabled() const { return m_store.value("roam_enabled", false).toBool(); }
 
@@ -113,6 +124,20 @@ void Manager::setConfiguredProvidersOnly(bool v)
     emit settingsChanged();
     emit providersChanged();   // the pickers filter on this
 }
+void Manager::setRunSummaries(bool v)
+{
+    m_store.setValue("run_summaries", v);
+    emit settingsChanged();
+    syncRunSummariesToCore();
+}
+
+void Manager::syncRunSummariesToCore()
+{
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    m_bridge->api().grouse_set_run_summaries(m_bridge->handle(), runSummaries() ? 1 : 0);
+}
+
 void Manager::setWorkingDir(const QString &v)
 {
     m_store.setValue("cwd", v.trimmed().remove(QRegularExpression(QStringLiteral("/+$"))));
@@ -630,15 +655,13 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
     const QString expectJson = m_currentSessionId.isEmpty()
         ? QString() : QStringLiteral("{\"session_id\":\"%1\"}").arg(m_currentSessionId);
     const bool ready = m_bridge && m_bridge->isAvailable() && m_bridge->api().grouse_ready(m_bridge->handle());
-    // Local echo of the question (Android's send() does the same): the live wire
-    // carries NO user_message_chunk — the prompt only appears in the next
-    // session/load replay — so without this the bubble surfaces after the reply.
-    // A replay's Clear rebuilds the model from the store anyway, so no duplicate.
-    QVariantMap userRow;
-    userRow["id"] = QString();
-    userRow["role"] = QStringLiteral("user");
-    userRow["text"] = text;
-    userRow["html"] = markdownToHtml(text);
+    // The core echoes a PURE-TEXT prompt into the transcript itself: the live wire
+    // carries NO user_message_chunk for our own send, so the core keeps its own copy
+    // (otherwise the question is never recorded, and a reopen that trusts the cache
+    // shows the replies with the questions missing — see grouse-core's
+    // `spawn_prompt`). Attachments are the exception: the item model has no image
+    // field, so the client keeps its own row for those — which is also what renders
+    // the thumbnails (a replayed session reconstructs text only).
     QVariantList shown;
     for (const auto &v : blocks) {
         const QVariantMap b = v.toMap();
@@ -653,11 +676,18 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
                                  {"name", QFileInfo(b.value("resource").toMap()
                                                     .value("uri").toString()).fileName()}};
     }
-    if (!shown.isEmpty())
-        userRow["images"] = shown;
-    m_messageModel->append(userRow);
-    m_currentIndex = m_messageModel->count() - 1;
-    requestMessagesUpdate();
+    if (!blocks.isEmpty()) {
+        QVariantMap userRow;
+        userRow["id"] = QString();
+        userRow["role"] = QStringLiteral("user");
+        userRow["text"] = text;
+        userRow["html"] = markdownToHtml(text);
+        if (!shown.isEmpty())
+            userRow["images"] = shown;
+        m_messageModel->append(userRow);
+        m_currentIndex = m_messageModel->count() - 1;
+        requestMessagesUpdate();
+    }
     if (ready && !m_prompting) {
         m_prompting = true;
         m_promptingSessionId = m_currentSessionId;
@@ -777,6 +807,44 @@ QStringList Manager::pickAttachmentFiles()
         m_store.setValue(QStringLiteral("last_attach_dir"), info.absolutePath());
     }
     return files;
+}
+
+QStringList Manager::clipboardAttachmentFiles()
+{
+    const QMimeData *mime = QGuiApplication::clipboard()->mimeData();
+    if (!mime)
+        return {};
+    // A file copied from a file manager (Dolphin, Spectacle's "copy to clipboard"):
+    // attach the files themselves. Their bytes must not go through an image
+    // round-trip, and non-image files are attachable too.
+    QStringList files;
+    if (mime->hasUrls()) {
+        for (const QUrl &u : mime->urls()) {
+            if (!u.isLocalFile())
+                continue;
+            const QString path = u.toLocalFile();
+            if (!path.isEmpty() && QFileInfo::exists(path))
+                files << path;
+        }
+        if (!files.isEmpty())
+            return files;
+    }
+    // Raw image data with no file behind it (a screenshot copied out of a browser).
+    // An attachment is a file path end to end, so park it under a name that carries
+    // a real image extension — the transcript picks its thumbnail renderer from it.
+    if (!mime->hasImage())
+        return {};
+    const QImage image = qvariant_cast<QImage>(mime->imageData());
+    if (image.isNull())
+        return {};
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    if (dir.isEmpty())
+        return {};
+    const QString path = QStringLiteral("%1/grouse-paste-%2.png")
+                             .arg(dir, QString::number(QDateTime::currentMSecsSinceEpoch()));
+    if (!image.save(path, "PNG"))
+        return {};
+    return {path};
 }
 
 QVariantList Manager::buildAttachmentBlocks(const QVariantList &paths)
@@ -1514,6 +1582,7 @@ void Manager::coreOnStatus(const QString &json)
             syncRoamIdentityToCore();
             restoreRoamPeers();
         }
+        syncRunSummariesToCore();
         flushQueue();
         refreshSessions();
         refreshProjects();
@@ -2031,10 +2100,18 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
     const QString detail = item.value(QStringLiteral("detail")).toString();
     const QString output = item.value(QStringLiteral("output")).toString();
     const QString status = item.value(QStringLiteral("status")).toString();
+    // A tool run carries the model's own framing of it (issue #13): the thinking
+    // that preceded the run, absorbed by the core, and the one-line label drawn
+    // from it. Both are empty for a run with nothing to draw on, and the chip
+    // then falls back to the call titles. Each call also carries the thinking
+    // that preceded IT, which is what puts the loop back in order when expanded.
+    const QString summary = item.value(QStringLiteral("summary")).toString();
+    const QString stepThought = item.value(QStringLiteral("thought")).toString();
     if (kind == QLatin1String("Tool")) {
         return QVariantMap{{"id", id}, {"role", "tool"}, {"text", ""}, {"html", ""},
                            {"title", text}, {"detail", detail}, {"output", output},
-                           {"status", status}, {"toolCallId", id}};
+                           {"status", status}, {"toolCallId", id},
+                           {"summary", summary}, {"stepThought", stepThought}};
     }
     if (kind == QLatin1String("ToolGroup")) {
         QVariantList calls;
@@ -2044,10 +2121,12 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
                                  {"detail", c.value("detail").toString()},
                                  {"output", c.value("output").toString()},
                                  {"status", c.value("status").toString()},
+                                 {"thought", c.value("thought").toString()},
                                  {"toolCallId", c.value("id").toString()}};
         }
         return QVariantMap{{"id", id}, {"role", "toolgroup"}, {"text", ""},
-                           {"html", ""}, {"calls", calls}, {"status", status}};
+                           {"html", ""}, {"calls", calls}, {"status", status},
+                           {"summary", summary}, {"stepThought", stepThought}};
     }
     if (kind == QLatin1String("Chart")) {
         return QVariantMap{{"id", id}, {"role", "chart"}, {"text", ""},

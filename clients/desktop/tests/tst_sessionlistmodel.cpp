@@ -23,6 +23,7 @@ private slots:
     void unknownProjectSortsLastAndFallsBackToId();
     void peerSessionsGroupLast();
     void unchangedListDoesNotResetModel();
+    void collapsedSectionsRoundTrip();
 };
 
 static QVariantMap session(const QString &id, const QString &title,
@@ -242,6 +243,46 @@ void TstSessionListModel::unchangedListDoesNotResetModel()
     tweaked.insert(QStringLiteral("snippet"), QStringLiteral("x"));
     changed[0] = tweaked;
     model.setSessions(changed);
+    QCOMPARE(resetSpy.count(), 1);
+}
+
+void TstSessionListModel::collapsedSectionsRoundTrip()
+{
+    // Manager persists collapsedSections() across launches; the model hands back
+    // exactly what was toggled and re-applies it on the next start. The restore
+    // must NOT re-emit collapsedChanged: that would echo into the save loop.
+    const QVariantList sessions{
+        session(QStringLiteral("s-proj-1"), QStringLiteral("In project"), QStringLiteral("2026-08-02"),
+                QStringLiteral("p1")),
+        session(QStringLiteral("s-chat-1"), QStringLiteral("Chat one"), QStringLiteral("2026-08-01")),
+    };
+    const QVariantList projects{project(QStringLiteral("p1"), QStringLiteral("Alpha"))};
+
+    SessionListModel model;
+    model.setSessions(sessions);
+    model.setProjects(projects);
+
+    QSignalSpy changedSpy(&model, &SessionListModel::collapsedChanged);
+    model.toggleSection(QStringLiteral("projects"));
+    model.toggleSection(QStringLiteral("proj:p1"));
+    QCOMPARE(changedSpy.count(), 2);
+    QStringList keys = model.collapsedSections();
+    keys.sort();
+    QCOMPARE(keys, QStringList({QStringLiteral("proj:p1"), QStringLiteral("projects")}));
+
+    // A fresh model (as after a restart) restoring the same keys reproduces the view.
+    SessionListModel restored;
+    restored.setSessions(sessions);
+    restored.setProjects(projects);
+    QSignalSpy restoreSpy(&restored, &SessionListModel::collapsedChanged);
+    QSignalSpy resetSpy(&restored, &QAbstractItemModel::modelReset);
+    restored.setCollapsedSections(model.collapsedSections());
+    QCOMPARE(restoreSpy.count(), 0);
+    QCOMPARE(resetSpy.count(), 1);
+    QCOMPARE(restored.rowCount(), model.rowCount());
+    QCOMPARE(rowAt(restored, 0).value("collapsed").toBool(), true);
+    // Re-applying the identical set is a no-op (no needless reset).
+    restored.setCollapsedSections(model.collapsedSections());
     QCOMPARE(resetSpy.count(), 1);
 }
 
