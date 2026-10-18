@@ -1942,8 +1942,23 @@ fn a_prompt_survives_a_reopen_because_the_core_echoes_it() {
 
     // And the cache SAVED FROM IT records the question. This is the claim that
     // matters: a reopen that trusts this file must still show what was asked.
-    let cache_file = std::fs::read_to_string(data_dir.join("sess-e2e.json"))
-        .expect("the turn's transcript is cached");
+    //
+    // POLLED, not read once: the save runs after the `session/info` freshness
+    // probe (see `probe_stamp_and_save`), so the write lands AFTER RunEnded and a
+    // single read can lose that race — it did, on CI. Same bounded wait the other
+    // cache assertions in this file use.
+    let cache_path = data_dir.join("sess-e2e.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let cache_file = loop {
+        if let Ok(body) = std::fs::read_to_string(&cache_path) {
+            break body;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the turn's transcript was never cached at {cache_path:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
     assert!(
         cache_file.contains("what did I ask?"),
         "the saved transcript must record the question: {cache_file}"
