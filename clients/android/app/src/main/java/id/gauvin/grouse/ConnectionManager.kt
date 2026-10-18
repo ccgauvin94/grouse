@@ -27,6 +27,7 @@ import uniffi.grouse_core.CoreListener
 import uniffi.grouse_core.NotifyContext
 import uniffi.grouse_core.PushEnvelope
 import uniffi.grouse_core.PushKind
+import uniffi.grouse_core.RefreshMode
 import uniffi.grouse_core.decideNotify
 import uniffi.grouse_core.GrouseUnstable
 import uniffi.grouse_core.GrouseUnstableListener
@@ -233,6 +234,9 @@ class ConnectionManager private constructor(context: Context) {
         }
         override fun onCommands(commands: List<String>) {
             main.post { this@ConnectionManager.commands.value = commands }
+        }
+        override fun onSessionOpenFailed(sessionId: String, message: String) {
+            main.post { onCoreSessionOpenFailed(sessionId, message) }
         }
     }, appContext.filesDir.absolutePath)
     private val unstable = GrouseUnstable(object : GrouseUnstableListener {
@@ -465,6 +469,11 @@ class ConnectionManager private constructor(context: Context) {
     // Last background RPC failure (sidebar refresh, config read...). Shown as a toast by the
     // UI and cleared; never a transcript bubble.
     val backgroundNotice = mutableStateOf<String?>(null)
+    /** Why the on-screen chat could not be loaded (`on_session_open_failed`,
+     *  grouse#19), or null. The core substitutes NOTHING on a failed open, so
+     *  without this the user is left looking at an empty chat and no reason —
+     *  cleared by the next successful open / Ready. */
+    val openFailed = mutableStateOf<String?>(null)
     // A session/export result waiting for the UI to hand to the Android share sheet.
     val exportData = mutableStateOf<String?>(null)
     // Handed in by OS entry points (share sheet, shortcut, tile), consumed by the UI.
@@ -1181,6 +1190,8 @@ class ConnectionManager private constructor(context: Context) {
         // the next send steer into nothing and wedge the app.
         resetTurnRouting()
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
+        // A new tap supersedes any earlier failure notice.
+        openFailed.value = null
         // Clearing the dot: opening the session consumes its staged content.
         sessions.value = sessions.value.map { if (it.sessionId == sessionId) it.copy(hasNew = false) else it }
         // Roam: the session lives on the peer -- the core routes the chat to it.
@@ -1202,17 +1213,32 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Force the on-screen chat to be re-fetched from the server, replacing a
      *  local view that drifted (a turn that dropped mid-stream left it partial).
-     *  Backs the "pull up to reload" gesture. */
-    fun refreshCurrent() {
+     *  Backs the "pull up to reload" gesture.
+     *
+     *  QUICK (grouse#18): the core decides by freshness — a current cache
+     *  suppresses the replay, a stale one merges a bounded tail, an incomplete
+     *  store still replays in full — and either way the replay is ingested
+     *  silently and painted once, so the chat lands on its newest messages. */
+    fun refreshCurrent() = reloadCurrent(full = false)
+
+    /** Replay the open chat from its first prompt, ignoring cache freshness
+     *  (grouse#18's FULL reload): the escape hatch when the local view is known
+     *  to have drifted, behind a deliberate hold gesture. */
+    fun reloadCurrentFromStart() = reloadCurrent(full = true)
+
+    private fun reloadCurrent(full: Boolean) {
         val sid = currentSession.value ?: return
         replayActive.value = true
         replayProgress.value = 0
+        openFailed.value = null
         val peer = currentRoamPeer
         if (peer != null) {
+            // A peer's load has no freshness/hold mode — it re-loads its own way.
             core.roamOpenSession(peer, sid)
             return
         }
-        core.refreshSession(sid)
+        core.refreshSession(sid, if (full) RefreshMode.FULL else RefreshMode.QUICK)
+        if (full) backgroundNotice.value = "Replaying this chat from the start…"
     }
 
     fun newSession(
@@ -1970,6 +1996,9 @@ class ConnectionManager private constructor(context: Context) {
                 coreKeyToAppId.clear()
                 olderPending.clear()
                 loadingOlder = false
+                // A fresh paint means the chat contents are being replaced: a
+                // previous open failure no longer describes what is on screen.
+                openFailed.value = null
                 if (pendingSends.isNotEmpty()) replayWiped = true
                 replayProgress.value = 0
                 // replayActive stays as openChat set it; a Window over a non-empty
@@ -2012,9 +2041,26 @@ class ConnectionManager private constructor(context: Context) {
                     replayActive.value = false
                     replayDoneTick.value++   // new content -> snap to bottom
                 }
+                // Content arrived for whatever is on screen: any earlier open
+                // failure is now history (grouse#19).
+                if (messages.isNotEmpty()) openFailed.value = null
                 replayProgress.value = 0
             }
         }
+    }
+
+    /** The core could not open the chat the user tapped and bound NOTHING in its
+     *  place (grouse#19). Stop the spinner, keep the failed session on screen
+     *  (its cache, if any), and record WHY so the chat can say it rather than
+     *  looking like an empty conversation nobody asked for. */
+    private fun onCoreSessionOpenFailed(sessionId: String, message: String) {
+        replayActive.value = false
+        replayProgress.value = 0
+        loadingOlder = false
+        olderPending.clear()
+        if (sessionId != currentSession.value) return  // a background tap that lost the race
+        val title = sessions.value.firstOrNull { it.sessionId == sessionId }?.title
+        openFailed.value = "Couldn't open ${title?.takeIf { it.isNotBlank() } ?: "that chat"} — $message"
     }
 
     /** Ask the core for older items (docs/TRANSCRIPT_MODEL.md). Outcomes arrive as

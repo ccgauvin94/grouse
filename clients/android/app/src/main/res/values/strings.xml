@@ -38,6 +38,7 @@
     <string name="compacting">Compacting…</string>
     <string name="compact">Compact</string>
     <string name="loading_conversation">Loading conversation…</string>
+    <string name="open_failed_title">Couldn\'t open this chat</string>
     <string name="wired_up_hint">Calendar, notes, web search, and memory are wired up — type below to start.</string>
     <string name="allow_tool">Allow tool?</string>
     <string name="decline">Decline</string>

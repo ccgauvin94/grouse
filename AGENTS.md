@@ -21,11 +21,16 @@ transport). Clients expose sessions, transcripts, tools, permissions, and recipe
 runs; the server owns sessions, memory, tools, and model choice — the clients
 hold only caches.
 
-One implementation of client logic exists: **two Rust crates in `core/`**, built on
-the official goose GDK (the `agent-client-protocol` SDK, Client role, with the
-`agent-client-protocol-http` WebSocket transport) as a daemon-based integration.
+One implementation of client logic exists: **the Rust core in `core/`** (three
+crates — see below), built on the official goose GDK (the
+`agent-client-protocol` SDK, Client role; the WebSocket transport is this repo's
+own `ConnectTo` implementation, because the stock `agent-client-protocol-http`
+client cannot send the `X-Secret-Key` header or verify TLS the way grouse needs).
 Every platform is a thin, native UI that drives that core and does not reimplement
-client logic. There is no cross-platform UI framework, no shared web view.
+client logic. There is no cross-platform UI framework and no shared app view —
+MCP App templates are the one HTML surface, rendered in a WebView (Android,
+desktop with QtWebEngine) or the user's browser (desktop loopback bridge), never
+as app chrome.
 
 ## Architecture & Data Flow
 
@@ -39,48 +44,60 @@ transport:
   prompt/streaming, tools, permissions, config, and the standard `session/update`
   tags. Owns the WebSocket transport (`transport.rs`: custom `ConnectTo` sending
   the `X-Secret-Key` header; WebPKI-verifying TLS with an `accept_invalid_certs`
-  opt-out).
+  opt-out). It also carries the hand-written C ABI (`capi.rs`) and the
+  client-shared policy modules (`notify.rs`, `speak.rs`, `summarize.rs`).
 - **`grouse-roam-core`** — the roam transport: iroh peer dialing, device identity,
-  connection cards, and the authenticated byte duplex ACP is framed over. Exposes
-  its own uniffi Kotlin bindings **and** a C ABI (`src/capi.rs`). Linked into
-  `grouse-core` (no separate shipped `.so` on Android).
-- **`grouse-unstable`** — the goose-fork compatibility shim: every
-  `_goose/unstable/*` method, plus the SDK's `unstable_elicitation` feature and
-  the goose-custom `status_message`/`message_usage` notifications. Marked for
-  retirement as the GDK absorbs each feature upstream.
+  connection cards, and the authenticated byte duplex ACP is framed over. An rlib
+  dependency of `grouse-core` (the roam uniffi package is exported from
+  `libgrouse_core.so`), so no separate `.so` ships; its own `grc_*` C ABI
+  (`src/capi.rs`) is currently unused in-tree — the desktop dials roam through the
+  core.
+- **`grouse-unstable`** — the retirement boundary for the goose-fork
+  `_goose/unstable/*` shim: it re-exports `GrouseUnstable` (implemented in
+  `grouse-core/src/unstable.rs` + the session mutators in `lib.rs`) and pins the
+  disconnected no-op contract. The shim also carries the SDK's
+  `unstable_elicitation` feature and the goose-custom
+  `status_message`/`message_usage` notifications, and shrinks as the GDK absorbs
+  each feature upstream.
 
 ### The uniffi contract is the API boundary
 
-The core's public surface is defined once as a uniffi interface. That interface
-is the contract every foreign-language UI consumes; nothing else may reach into
-the core.
+The core's public surface is defined once — as the uniffi interface — and exposed
+twice: the generated bindings, and a hand-written C ABI (`capi.rs`) that mirrors
+the same surface for the desktop. Nothing else may reach into the core.
 
 - **Android (Kotlin/Compose)** consumes the uniffi-generated Kotlin bindings.
 - **macOS (SwiftUI, later)** will consume the uniffi-generated Swift bindings.
-- **Linux desktop (Qt6/KF6 Kirigami, planned)** will consume a hand-written C ABI
-  (`extern "C"`, mirroring `core/grouse-roam-core/src/capi.rs`). **Not yet true.**
+- **Linux desktop (Qt6/KF6 Kirigami)** consumes the hand-written C ABI
+  (`extern "C"`, `core/grouse-core/src/capi.rs`), dlopened as `libgrouse_core.so`
+  by `src/corebridge.cpp`.
 - **CLI (Rust TUI, not yet written)** consumes the crates directly — no FFI.
 
 **Rule: a change to shared behavior changes the uniffi interface (and the C ABI)
 first, regenerates the bindings, then adapts each UI.** Never fork client logic
 into a UI to avoid changing the contract.
 
-### Known deviation: the desktop carries its own client
+### The desktop is a thin client over the C ABI
 
-`clients/desktop/` predates the Rust core and still implements the client logic
-in C++: `src/acpclient.{h,cpp}` is a second ACP wire client, `src/manager.{h,cpp}`
-a second session/chat state machine and cache (the format
-`core/grouse-core/src/cache.rs` mirrors), and `src/{websocket,roam}transport.*`
-second transports. It reaches the core only by dlopening `libgrouse_roam_core.so`
-for the iroh dial. This is migration debt, not a sanctioned pattern: **until it
-lands, protocol fixes must be applied to BOTH the Rust core and the desktop's
-C++**, and `clients/desktop/AGENTS.md` documents the C++ side.
+`clients/desktop/` no longer carries a client. `src/corebridge.{h,cpp}` dlopens
+`libgrouse_core.so` and resolves every `grouse_*` symbol; the C ABI exposes the
+whole core surface (stable + unstable) as JSON C-strings over a
+`GrouseCoreListener` callback table, and `src/manager.{h,cpp}` is a thin QML
+facade (`Mgr`) over it. There is no C++ ACP client, transport, or transcript
+store in the tree. **A protocol fix is made in `core/` only** — a new intent or
+event lands in `capi.rs` (and `corebridge`) alongside the uniffi export.
+`clients/desktop/AGENTS.md` documents the C++/QML side.
+
+Core modules that are NOT ACP plumbing, and are shared by every client:
+`notify.rs` (push envelope + show/don't-show policy, CONTRACT §5.5),
+`speak.rs` (markdown → sentence-sized TTS chunks), `summarize.rs` (model-written
+one-line labels for a run of tool calls), `capi.rs` (the C ABI above).
 
 ### Per-platform native toolkits
 
 |Platform|Toolkit|Binding|
 |---|---|---|
-|Linux desktop|Qt6 + KF6 Kirigami (QML/C++)|C ABI (planned; today: own C++ client)|
+|Linux desktop|Qt6 + KF6 Kirigami (QML/C++)|C ABI (`grouse_*`, dlopened `libgrouse_core.so`)|
 |Android|Kotlin + Jetpack Compose|uniffi Kotlin|
 |CLI|Rust TUI|direct crate dependency (placeholder — see Runtime/Tooling)|
 |macOS (later)|SwiftUI|uniffi Swift|
@@ -101,6 +118,14 @@ C++**, and `clients/desktop/AGENTS.md` documents the C++ side.
   reset on Ready; none on explicit `disconnect`). Remote-change resync debounces
   `session_info_update` (1.5s) → probes `_goose/unstable/session/info` → in-place
   `session/load` replay → re-probes at 8s ×3.
+- **The transcript crosses the boundary as rich items**, never as a republished
+  list: `on_item` carries `Upsert`/`AppendText`/`AppendOutput`/`Remove`/`Reset`/
+  `Window` ops keyed by item id, the core windows what it paints (newest ~60) and
+  serves older items on request. See `docs/TRANSCRIPT_MODEL.md`.
+- **Push is receive-only.** The repo ships no sender; the core only decodes the
+  envelope and decides whether to show (one policy, `notify.rs`), and each client
+  only registers/receives (Android's UnifiedPush connector, the desktop's
+  `pushclient.cpp`). See `docs/NOTIFICATIONS.md`.
 
 ### Protocol notes that matter
 
@@ -109,12 +134,20 @@ keep them when extending the core.
 
 - **`_goose/unstable/*` lives in `grouse-unstable`, a compatibility shim — not
   the core's identity.** Those methods come from a goose fork; the GDK is
-  absorbing them upstream. Prefer the GDK surface for new work. Set in use:
-  `session/steer`, `session/export`, `session/rename`, `session/archive`,
-  `session/unarchive`, `session/info`, `session/recipe/request-params`,
-  `tools/list`, `sources/list|create|delete|update` (`type: project|skill`),
-  `recipes/list`, `schedules/list`, `config/extensions/list|set-enabled|add`,
-  `session/extensions/list|add`.
+  absorbing them upstream. Prefer the GDK surface for new work. The shim's
+  methods are implemented in `grouse-core/src/unstable.rs` plus the session
+  mutators in `lib.rs`; the `grouse-unstable` crate is the retirement boundary
+  (re-export + the disconnected no-op contract tests). In use:
+  `session/steer|export|info|update|rename|archive|unarchive`,
+  `session/project/update`, `session/working-dir/update`,
+  `session/recipe/request-params`, `session/conversation/truncate`,
+  `session/extensions/list|add|remove`, `tools/list|call`,
+  `sources/list|create|update|delete` (`type: project|skill`),
+  `recipes/list|save|delete|schedule`, `schedules/list|update|pause|run-now`,
+  `config/read|upsert`, `config/extensions/list|set-enabled|add`,
+  `providers/list`, `providers/config/read`, `providers/supported-models/list`,
+  `resources/read`, `dictation/config|transcribe`. `session/delete` is the one
+  plain (non-`_goose`) method the clients use for deletion.
 - **`session_info_update`** is the server's notification that a session changed —
   including changes by another client. It carries `_meta.goose.activeRunId`, the
   live run id required to steer (`session/steer` sends `expectedRunId`). Debounce
@@ -123,8 +156,15 @@ keep them when extending the core.
   while a turn is in flight (or after it ended in error because the wire dropped
   mid-stream) is written with an empty `updatedAt`, so it can never suppress the
   replay that would complete it; a settled-but-stale cache merges a bounded tail,
-  an incomplete one full-replays. `refresh_session(id)` forces the full replay
-  (the clients' "reload chat" action) — the escape hatch after a drop.
+  an incomplete one full-replays. `refresh_session(id, mode)` is the clients'
+  "reload chat" action: `Quick` lets freshness decide (so an unchanged chat
+  reloads nothing, and a dropped turn — whose cache carries an empty stamp —
+  still full-replays), `Full` forces the replay. Either way the replay is
+  ingested silently and painted once, newest window first (grouse#18).
+- **A failed open never substitutes a session** (grouse#19). `session/load` a
+  server rejects (stale/archived) reports `on_session_open_failed` and leaves the
+  connection with no session bound; a fresh empty session silently becoming the
+  active chat is what made a tapped thread open blank.
 - **roam** is ACP over iroh direct peer streams (`goose serve --roam`): same
   JSON-RPC, newline-framed (ACP ByteStreams framing, identical to goose on stdio),
   over an iroh connection between two peers instead of a WebSocket to a host.
@@ -160,24 +200,27 @@ keep them when extending the core.
 - **WebSocket TLS verifies by default** (WebPKI chain + hostname; the public
   host serves a valid Let's Encrypt cert). `ServerConfig.accept_invalid_certs`
   is the documented trust-all opt-out for self-signed tailnet hosts, and
-  `ca_cert_pem` trusts a private CA. The desktop's own C++ `VerifyNone` path
-  is a known parity gap (it still trusts all) — keep it in mind when touching
-  transport code on either side.
+  `ca_cert_pem` trusts a private CA. There is no per-client TLS implementation
+  left — both clients pass `ServerConfig` through their binding, so the desktop's
+  remaining parity gap is a hardcoded `accept_invalid_certs = true` in
+  `Manager::serverConfigJson()` (`clients/desktop/src/manager.cpp`), while
+  Android has the user-facing verify toggle.
 
 ## Key Directories
 
 |Path|Purpose|
 |---|---|
 |`core/`|Rust workspace (`core/Cargo.toml` is the workspace root — the repo root has no Cargo.toml). The three crates above. `core/CONTRACT.md` = the uniffi interface spec; `core/grouse-core/INTERNAL.md` = pinned internal module seams + threading model.|
-|`core/grouse-core/src/`|`lib.rs` (uniffi surface + Core/GrouseUnstable objects), `transport.rs` (WsTransport), `spine.rs` (live connection + handshake + notification dispatch), `transcript.rs` (TranscriptStore: chunks → Message bubbles), `cache.rs` (CacheStore: per-session transcript + tools), `unstable.rs` (35 shim methods), `roam.rs` (peer registry). Bindings staged in `bindings/kotlin/`.|
-|`core/grouse-roam-core/src/`|iroh transport (`lib.rs`), C ABI (`capi.rs`).|
-|`clients/desktop/`|Qt6/KF6 Kirigami C++/QML desktop client + KRunner plugin (its own `AGENTS.md` is the C++-side contract).|
+|`core/grouse-core/src/`|`lib.rs` (uniffi surface + Core/GrouseUnstable objects), `capi.rs` (the `grouse_*` C ABI for the desktop), `transport.rs` (WsTransport), `spine.rs` (live connection + handshake + notification dispatch), `transcript.rs` (TranscriptStore: chunks → items, the 60-item window), `cache.rs` (CacheStore: per-session transcript + tools), `unstable.rs` (the `_goose/unstable/*` shim), `roam.rs` (peer registry), `notify.rs` (push policy), `speak.rs` (TTS chunking), `summarize.rs` (tool-run labels). Bindings staged in `bindings/kotlin/`.|
+|`core/grouse-roam-core/src/`|iroh transport (`lib.rs`), C ABI (`capi.rs`, `grc_*` symbols). An rlib dependency of `grouse-core` — no separate `.so` ships.|
+|`clients/desktop/`|Qt6/KF6 Kirigami thin client: QML + `corebridge` (dlopen of `libgrouse_core.so`, the only wire path), plus the host-side KRunner plugin (its own `AGENTS.md` is the C++-side contract).|
 |`clients/android/`|Kotlin/Compose client (app) + `grouse-core-aar` module carrying the uniffi bindings and native `.so`s.|
 |`clients/cli/`|Rust TUI — **README placeholder only, no `Cargo.toml` yet.**|
+|`docs/`|`TRANSCRIPT_MODEL.md` (the item stream the core emits) and `NOTIFICATIONS.md` (push envelope + policy).|
 |`design/`|Shared design tokens (`tokens.json` + `design-language.md`), owned by the design-language workstream, not platform dirs.|
 |`scripts/`|`build-android-libs.sh` (Android native libs + bindings), `dev-env.sh` (devcontainer wrapper on podman).|
-|`.github/workflows/`|CI: `core.yml`, `android.yml`, `flatpak.yml`, `secrets.yml`; `release.yml` (tag-triggered APK + Flatpak → GitHub Release).|
-|`.devcontainer/`|Rocky Linux 9 dev container for core + CLI only.|
+|`.github/workflows/`|CI: `core.yml`, `android.yml`, `codeql.yml`, `flatpak.yml`, `secrets.yml`; `release.yml` (tag-triggered APK + Flatpak → GitHub Release).|
+|`.devcontainer/`|Rocky Linux 9 dev container for the Rust core only (no Android NDK, no Qt).|
 
 ## Development Commands
 
@@ -251,9 +294,10 @@ gitleaks detect --source .    # CI-gated; a commit must not contain secrets
 
 |Workflow|What it runs|Required check|
 |---|---|---|
-|`core.yml`|`cargo test` + `cargo clippy --all-targets -- -D warnings` on stable|`Core / test`|
+|`core.yml`|`cargo test` + `cargo clippy --all-targets -- -D warnings`, pinned toolchain 1.97.1|`Core / test`|
 |`android.yml`|`./gradlew --no-daemon assembleDebug` + APK artifact|`Android / apk`|
-|`flatpak.yml`|KRunner + roam `.so` host build, then Flatpak bundle (org.kde.Platform 6.10)|`Flatpak / host-components`, `Flatpak / flatpak`|
+|`codeql.yml`|CodeQL analysis of the Android build (push + weekly schedule)|CodeQL `analyze`|
+|`flatpak.yml`|KRunner plugin + `libgrouse_core.so` host build (Fedora container), then Flatpak bundle (org.kde.Platform 6.10)|`Flatpak / host-components`, `Flatpak / flatpak`|
 |`secrets.yml`|gitleaks|`Secrets scan / gitleaks`|
 |`release.yml`|On a `v*` tag: signed release APK + desktop Flatpak, published as GitHub Release assets|— (not a PR check)|
 
@@ -275,8 +319,9 @@ change before tagging.
 ### Rust core
 
 - **Versioning/toolchain**: edition 2021, no `rust-toolchain.toml`, no pinned MSRV.
-  CI uses latest stable + clippy; the devcontainer pins 1.97.1. `uniffi = "0.32"`
-  and `tokio = "1"` across members.
+  CI pins stable 1.97.1 (`core.yml`, `components: clippy`) and the devcontainer
+  pins the same `RUST_VERSION`; `uniffi = "0.32"` and `tokio = "1"` across
+  members.
 - **Threading**: one tokio runtime on a worker thread; all `#[uniffi::export]`
   intents are synchronous (enqueue + return). `connect()` is the sole exception
   (bounded blocking until initialized). All network I/O, reply dispatch, and
@@ -288,12 +333,17 @@ change before tagging.
   transitively; the crates hand-write boundary errors. `Conn::rpc(...) ->
   Result<Value, AcpError>` is the ONLY seam slices use to talk to the server
   (`INTERNAL.md` §pinned seams).
-- **Module invariants**: `transcript.rs` and `cache.rs` do NO network. The
-  `TranscriptStore` owns bubble shaping: chunks append into a bubble keyed by
-  `(role, message_id)`; live output appends, the completion update replaces;
-  replay chunks are gated by message id; consecutive tool calls collapse into a
-  group. `CacheStore` is dumb I/O keyed by session id — freshness (via
-  `updatedAt`) is the caller's job.
+- **Module invariants**: `transcript.rs`, `cache.rs`, `notify.rs`, `speak.rs` and
+  `summarize.rs` do NO network (and no OS access). The `TranscriptStore` owns
+  bubble shaping: chunks append into a bubble keyed by `(role, message_id)`; live
+  output appends, the completion update replaces; replay chunks are gated by
+  message id; consecutive tool calls collapse into a group. `CacheStore` is dumb
+  I/O keyed by session id — freshness (via `updatedAt`) is the caller's job.
+- **The C ABI (`capi.rs`) is a second, hand-written face of the same core**: every
+  symbol is `#[no_mangle] extern "C"`, `catch_unwind`-wrapped, and passes records
+  as JSON C-strings that the consumer must copy inside the callback. A new intent
+  or listener event lands in `capi.rs` and `clients/desktop/src/corebridge.cpp`
+  in the same change — the desktop cannot reach the core any other way.
 - **Naming**: Rust is `snake_case`; protocol JSON is `camelCase` (except
   `recipes/*`/`schedules/*` params) — do not confuse the two; a misspelled param
   is silently dropped.
@@ -324,9 +374,11 @@ change before tagging.
 
 ### Cross-cutting
 
-- **Protocol fixes must land in BOTH `grouse-core` Rust and desktop C++** until
-  the desktop migration lands (and be reflected in `core/CONTRACT.md` +
-  `clients/desktop/AGENTS.md`).
+- **Shared behavior lands in the core, once.** A wire/protocol change is made in
+  `grouse-core`, reflected in `core/CONTRACT.md`, and reaches the UIs through the
+  bindings — uniffi for Android (and macOS later) and the C ABI (`capi.rs` ↔
+  `clients/desktop/src/corebridge.cpp`) for the desktop. The desktop holds no
+  protocol logic to mirror.
 - Never hardcode a machine-specific path into a shared file.
 
 ## Important Files
@@ -336,9 +388,12 @@ change before tagging.
 |`core/CONTRACT.md`|The uniffi interface spec — the API boundary. Read before touching the core's public surface.|
 |`core/grouse-core/INTERNAL.md`|Pinned internal module seams, threading model, event fan-out rules.|
 |`core/grouse-core/src/lib.rs`|uniffi surface: records/enums, `Core` + `GrouseUnstable` objects, listener fan-out, status machine, reconnect + resync orchestration.|
-|`core/grouse-core/src/{spine,transport,transcript,cache,unstable,roam}.rs`|The live connection / WebSocket transport / transcript store / cache store / shim / peer registry.|
-|`core/grouse-roam-core/src/capi.rs`|C ABI for the roam transport (the pattern the desktop's planned C ABI mirrors).|
+|`core/grouse-core/src/{spine,transport,transcript,cache,unstable,roam,notify,speak,summarize}.rs`|The live connection / WebSocket transport / transcript store / cache store / shim / peer registry / push policy / TTS chunking / tool-run labels.|
+|`core/grouse-core/src/capi.rs`|The `grouse_*` C ABI the desktop dlopens — the same core surface as uniffi, hand-written. Add a symbol here and to `corebridge.cpp` together.|
+|`clients/desktop/src/corebridge.{h,cpp}`|The desktop's only wire path: resolve `grouse_*`, install `GrouseCoreListener`, marshal events onto the Qt main thread.|
+|`core/grouse-roam-core/src/capi.rs`|C ABI for the roam transport (`grc_*` symbols) — the convention `capi.rs` above follows. No in-tree consumer today.|
 |`core/Cargo.toml`|The only Cargo workspace (members: `grouse-core`, `grouse-roam-core`, `grouse-unstable`). Release profile: `opt-level = "z"`, `codegen-units = 1`, `strip`, `lto`, `panic = "unwind"` (uniffi catch_unwind must turn panics into foreign exceptions).|
+|`docs/TRANSCRIPT_MODEL.md`, `docs/NOTIFICATIONS.md`|The core's item stream (ops, windowing, item ids) and the push envelope + notification policy.|
 |`Justfile`|Top-level build/test/scan entrypoints (see Development Commands).|
 |`CONTRIBUTING.md`|Contribution flow (one-core-first; devcontainer; per-platform extras; CI).|
 |`scripts/build-android-libs.sh`, `scripts/dev-env.sh`|Android native/bindings build; devcontainer wrapper.|
@@ -347,22 +402,27 @@ change before tagging.
 
 ## Runtime/Tooling Preferences
 
-- **Rust core** (`core/`): `cargo`; std test harness; tokio runtime. No pinned
-  toolchain — CI runs `dtolnay/rust-toolchain@stable` (+ clippy); devcontainer
-  pins 1.97.1. Workspace release profile is size-optimized (`opt-level "z"`,
-  `lto`, `strip`) because the cdylibs ship inside the APK.
+- **Rust core** (`core/`): `cargo`; std test harness; tokio runtime. No
+  `rust-toolchain.toml`, but both CI and the devcontainer pin 1.97.1
+  (`dtolnay/rust-toolchain@stable` with the explicit toolchain + clippy).
+  Workspace release profile is size-optimized (`opt-level "z"`, `lto`, `strip`)
+  because the cdylib ships inside the APK and the desktop bundle.
 - **Android**: Gradle wrapper 8.9, AGP 8.5.2, Kotlin 2.0.20 (Compose +
   serialization), JDK 17, compileSdk/targetSdk 34, minSdk 26. App id
   `id.gauvin.grouse`. Native libs via `cargo ndk` (targets `aarch64-linux-android`
   + `x86_64-linux-android`) + `uniffi-bindgen` (`cargo install uniffi --features
-  cli`); JNA 5.14.0@aar. Note: the desktop/roam `.so` is bundled only on desktop;
-  on Android only `libgrouse_core.so` ships (roam resolves to it).
-- **Desktop**: CMake ≥ 3.16, C++17, Qt6 (Quick/Qml/QuickControls2/WebSockets/
-  Widgets/DBus) + KF6 (Kirigami/CoreAddons) + ECM; built in a `kde-build`
-  distrobox (Fedora) or the org.kde.Platform 6.10 Flatpak SDK. No CMake linking
-  against cargo-built libs — `RoamTransport` dlopens `libgrouse_roam_core.so`.
+  cli`); JNA 5.14.0@aar. **Exactly one `.so` is shipped anywhere:
+  `libgrouse_core.so`** — `grouse-roam-core` is an rlib linked into it (the
+  `grouse_core` uniffi package exports the roam symbols), and the desktop
+  dlopens that same file.
+- **Desktop**: CMake ≥ 3.16, C++17, Qt6 (Quick/Qml/QuickControls2/Widgets/DBus/
+  Network; `WebEngineQuick` optional — MCP Apps render in the user's browser via
+  the `AppBridge` loopback host when it is absent) + KF6 (Kirigami/CoreAddons) +
+  ECM; built in a `kde-build` distrobox (Fedora) or the org.kde.Platform 6.10
+  Flatpak SDK. No CMake linking against cargo-built libs — `CoreBridge` dlopens
+  `libgrouse_core.so` (via `GROUSE_CORE`, the app image's `../lib`, or `/app/lib`).
 - **Devcontainer**: Rocky Linux 9 (matching the home-server deployment OS),
-  scoped to core + CLI only — no Android NDK or Qt inside. Run via
+  scoped to core only — no Android NDK or Qt inside. Run via
   `scripts/dev-env.sh` (rootless podman, `--userns=keep-id`, UID/GID build args).
 - **Secrets**: gitleaks must stay clean on every commit.
 - **Endpoints/config**: no secrets committed; local endpoint configuration is
@@ -376,15 +436,17 @@ change before tagging.
   proptest anywhere. Async spine tests drive a `FakeServer` on its own
   tokio-runtime thread via ports + recorded frames (std `mpsc`).
 - Location: inline `#[cfg(test)] mod tests` in library sources
-  (`grouse-core/src/cache.rs`, `roam.rs`, `transcript.rs`, `transport.rs`,
-  `unstable.rs`; `grouse-roam-core/src/lib.rs`) plus integration dirs:
+  (`grouse-core/src/{cache,notify,roam,speak,transcript,transport,unstable}.rs`;
+  `grouse-roam-core/src/lib.rs`) plus integration dirs:
   - `core/grouse-core/tests/spine.rs` — end-to-end against an in-process
-    **scripted WebSocket server** (the "Rust twin" of the desktop's
-    `tests/fakeserver.h`). It records every frame including the `X-Secret-Key`.
+    **scripted WebSocket server** (`FakeServer`, its own tokio runtime thread,
+    std `mpsc` for frames). It records every frame including the `X-Secret-Key`;
+    it is the only wire-level protocol test in the repo.
   - `core/grouse-roam-core/tests/core.rs` (identity/card units) and
-    `tests/e2e.rs` — **`#[ignore = "requires a live serve --roam host"]`**;
-    run with `cargo test --test e2e -- --ignored --nocapture`.
-- **`grouse-unstable` has no tests.**
+    `tests/e2e.rs` — **`#[ignore = "requires a live serve --roam host and
+    relay"]`**; run with `cargo test --test e2e -- --ignored --nocapture`.
+- **`grouse-unstable`** holds only the re-exports + the disconnected no-op
+  contract tests; the shim's behavior is tested in `grouse-core`.
 - Run: `cargo test --manifest-path core/Cargo.toml`. This is the only test suite
   CI runs (in `core.yml`).
 
@@ -392,13 +454,14 @@ change before tagging.
 
 - Qt Test (`QTEST_MAIN`/`QTEST_GUILESS_MAIN`) + QtQuickTest for QML; registered
   in `clients/desktop/tests/CMakeLists.txt` (built when `BUILD_TESTING` ON).
-- Suites: `tst_markdown`, `tst_messagelistmodel`, `tst_sessionlistmodel`,
-  `tst_acpclient` (wire tests vs `tests/fakeserver.h` — pin the protocol
-  gotchas), `tst_manager` (integration with fake goose), `tst_roamcodec`,
-  `tst_roamtransport` (dlopens the real `.so`; QSKIP unless `GROUSE_ROAM_CORE`
-  points at it), `tst_roamlistmodel`, `tst_qml` (ChartBubble + ComboBox).
+- Suites: `tst_markdown`, `tst_messagelistmodel` (deferred/coalesced model
+  updates), `tst_sessionlistmodel` (grouping / collapse / cwdFor / no-op reset
+  guard), `tst_roamlistmodel`, `tst_appbridge` (the loopback MCP-Apps host),
+  `tst_manager` (intent mapping: `Mgr` Q_INVOKABLE → `CoreBridge` → the ABI),
+  `tst_qml` (QtQuickTest: ChartBubble, ComboBox `valueRole`, RecipesDialog).
 - Run locally: `cd clients/desktop/build && ctest --output-on-failure`, or one
-  suite with `ctest -R tst_acpclient --verbose`. **CI runs none of these.**
+  suite with `ctest -R tst_manager --verbose`. **CI runs none of these** — the
+  desktop's protocol behavior is covered by `core/grouse-core/tests/spine.rs`.
 - Manual QA on top: `qmllint` (static QML), `xvfb-run` page-load (silence =
   success — offscreen won't catch page-internal type errors), and a live
   `goose serve` smoke test of the changed path.
@@ -419,8 +482,9 @@ gotchas and pure logic; keep them so — do not add coverage gates.
 
 ### Known stale scaffolding (do not fixate on these)
 
-- `clients/cli/` is a README placeholder; `.devcontainer/devcontainer.json`
-  references `clients/cli/Cargo.toml`, which does not exist yet.
+- `clients/cli/` is a README placeholder (no `Cargo.toml`); the `just build`
+  recipe deliberately builds only `core/`.
 - Android CI does not regenerate native libs — the `.so` + bindings are committed;
   regenerate with `just android-libs` after core changes.
-- The desktop README's "Not yet" list is stale.
+- The desktop README's "Not yet" list is stale (the features listed there exist;
+  see `clients/desktop/AGENTS.md`).

@@ -234,8 +234,22 @@ pub struct TranscriptWindow {
     pub has_older: bool,
 }
 
+/// How hard a session reload works (grouse#18).
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RefreshMode {
+    /// Catch up with what is already known: a settled-and-current cache
+    /// suppresses the replay, a settled-but-stale one merges a bounded tail, and
+    /// an incomplete store (a turn in flight, or a wire that dropped mid-turn)
+    /// still takes the full replay — silently, ending in one windowed paint.
+    /// This is the everyday "this chat looks stale" refresh.
+    Quick,
+    /// Ignore freshness and replay the whole session: the escape hatch for a
+    /// view known to have drifted.
+    Full,
+}
+
 /// Collapses the desktop's toolgroup/chart/mcpapp split (CONTRACT §3.4).
-#[derive(uniffi::Enum, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ToolCallKind {
     Plain,
     Chart { spec: String },
@@ -356,6 +370,16 @@ pub trait CoreListener: Send + Sync {
     fn on_active_run(&self, session_id: String, run_id: String);
     /// Slash commands the server can execute right now (gap 2: autocomplete).
     fn on_commands(&self, commands: Vec<String>);
+    /// An open/resume FAILED and nothing was substituted: the server rejected
+    /// `session/load` for `session_id` (a stale/archived id), or the core had
+    /// no connection configuration to attempt it with. The core binds NO new
+    /// session and repaints nothing — whatever the client is showing stands,
+    /// and the client decides: retry the open, or start a fresh chat
+    /// explicitly (`new_session`). An answer to an intent the client issued,
+    /// so it is never gated by which chat happens to be on screen
+    /// (grouse#19: a silent `session/new` here was the "tapped a thread, got a
+    /// blank one" defect).
+    fn on_session_open_failed(&self, session_id: String, message: String);
 }
 
 /// Unstable events (CONTRACT §5). Retiring with `grouse-unstable`.
@@ -746,14 +770,23 @@ impl Core {
         self.open_session_inner(session_id, false);
     }
 
-    /// Force a full `session/load` replay of `session_id`, ignoring cache
-    /// freshness, and rebuild the transcript from the server. The escape hatch
-    /// for a local view that has drifted — a turn that dropped mid-stream left a
-    /// truncated store, and the cache on disk may match it. Unlike a plain open
-    /// this never suppresses and never bounded-tail-merges: the cached window is
-    /// painted provisionally and the full replay replaces it.
-    pub fn refresh_session(&self, session_id: String) {
-        self.open_session_inner(session_id, true);
+    /// Reload `session_id`.
+    ///
+    /// [`RefreshMode::Full`] forces a full `session/load` replay, ignoring cache
+    /// freshness, and rebuilds the transcript from the server — the escape hatch
+    /// for a local view that has drifted (a turn that dropped mid-stream left a
+    /// truncated store, and the cache on disk may match it). It never suppresses
+    /// and never bounded-tail-merges: the cached window is painted provisionally
+    /// and the full replay replaces it.
+    ///
+    /// [`RefreshMode::Quick`] is the same open without the force: a settled,
+    /// current cache suppresses the replay, a settled-but-stale one merges a
+    /// bounded tail, and an INCOMPLETE store (a turn in flight, or a wire that
+    /// dropped mid-turn — whose cache carries an empty stamp by construction)
+    /// still takes the full replay. Either way the replay is ingested silently
+    /// and ends in one windowed paint (grouse#18).
+    pub fn refresh_session(&self, session_id: String, mode: RefreshMode) {
+        self.open_session_inner(session_id, matches!(mode, RefreshMode::Full));
     }
 
     fn open_session_inner(&self, session_id: String, force_replay: bool) {
@@ -792,7 +825,18 @@ impl Core {
             state.store_session_id = Some(session_id.clone());
             state.last_config.clone()
         };
-        let Some(config) = config else { return };
+        let Some(config) = config else {
+            // No connection configuration has ever been installed in this
+            // process, so there is nothing to load the session over. The client
+            // has ALREADY moved its screen to this session (and cleared its
+            // rows) by the time it calls this, so returning silently leaves it
+            // parked on a blank chat forever with no error to show (grouse#19).
+            self.on_session_open_failed(
+                session_id,
+                "not connected: no server configuration yet".to_string(),
+            );
+            return;
+        };
         // Live reuse: same host/port/key, already Ready — session/load on the
         // existing wire. Avoids the `old.shutdown()` churn that made every
         // session switch a full reconnect.
@@ -801,36 +845,27 @@ impl Core {
                 let this = self.clone();
                 let sid = session_id.clone();
                 let c = cwd.clone();
-                let cfg = config.clone();
                 crate::roam::runtime().spawn(async move {
-                    if conn.live_load_session_async(sid.clone(), c.clone(), suppress, merge).await.is_ok() {
-                        // Live reuse doesn't go through the handshake's
-                        // on_ready → on_conn_status(Ready) path, so without this
-                        // the UI stayed in `Loading…` (replayActive never
-                        // finalized) and queued prompts never flushed. This
-                        // Ready used to arrive indirectly from a spurious
-                        // resync replay of the session we just loaded.
-                        this.on_conn_status(ConnectionStatus::Ready);
+                    if let Err(error) =
+                        conn.live_load_session_async(sid.clone(), c.clone(), suppress, merge).await
+                    {
+                        // The live wire refused the load. Do NOT bind a
+                        // substitute session: the client asked for THIS one, and
+                        // a fresh empty session silently becoming the active
+                        // chat is the "tapped a thread, got a blank one" defect
+                        // (grouse#19). Report it and leave the wire as it is —
+                        // the client retries with `open_session`, or starts a
+                        // fresh chat explicitly with `new_session`.
+                        this.on_session_open_failed(sid, format!("session/load failed: {error}"));
                         return;
                     }
-                    // Stale session — try live new session before full reconnect.
-                    let conn2_opt = {
-                        let g = this.inner.conn.lock();
-                        g.clone()
-                    };
-                    if let Some(conn2) = conn2_opt {
-                        if conn2.is_ready() && conn2.config_matches(&cfg) {
-                            if let Ok(new_id) = conn2.live_new_session_async(None, None).await {
-                                {
-                                    let mut state = this.inner.state.lock();
-                                    state.store_session_id = Some(new_id);
-                                }
-                                this.on_conn_status(ConnectionStatus::Ready);
-                                return;
-                            }
-                        }
-                    }
-                    let _ = this.connect_impl(cfg, ConnectSpec::Resume { session_id: sid, cwd: c }, suppress, merge);
+                    // Live reuse doesn't go through the handshake's
+                    // on_ready → on_conn_status(Ready) path, so without this
+                    // the UI stayed in `Loading…` (replayActive never
+                    // finalized) and queued prompts never flushed. This
+                    // Ready used to arrive indirectly from a spurious
+                    // resync replay of the session we just loaded.
+                    this.on_conn_status(ConnectionStatus::Ready);
                 });
                 return;
             }
@@ -1290,6 +1325,7 @@ impl Core {
         conn.set_on_touched(self.touched_hook());
         conn.set_on_active_run(self.active_run_hook());
         conn.set_on_commands(self.commands_hook());
+        conn.set_on_open_failed(self.open_failed_hook());
         conn.set_on_config(self.config_hook());
         conn.set_on_ended(self.ended_hook(gen));
         crate::spine::set_current_conn(Some(conn.clone()));
@@ -1923,6 +1959,14 @@ impl Core {
         self.inner.listener.on_commands(commands);
     }
 
+    /// An open/resume failed; nothing was substituted (see the listener's
+    /// `on_session_open_failed`).
+    pub fn on_session_open_failed(&self, session_id: String, message: String) {
+        self.inner
+            .listener
+            .on_session_open_failed(session_id, message);
+    }
+
     fn mutate_session(&self, method: &str, params: Value) {
         let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or("");
         // Route session-bound mutations to the owning roam peer
@@ -2159,6 +2203,11 @@ impl Core {
         Arc::new(move |commands| core.on_commands(commands))
     }
 
+    fn open_failed_hook(&self) -> Arc<dyn Fn(String, String) + Send + Sync> {
+        let core = self.clone();
+        Arc::new(move |session_id, message| core.on_session_open_failed(session_id, message))
+    }
+
     fn ended_hook(&self, gen: u64) -> Arc<dyn Fn(Result<(), String>) + Send + Sync> {
         let core = self.clone();
         Arc::new(move |result| core.on_connection_ended(gen, result))
@@ -2366,6 +2415,13 @@ impl CoreListener for CoreListenerForwarder {
     fn on_commands(&self, commands: Vec<String>) {
         self.inner.on_commands(commands);
     }
+    fn on_session_open_failed(&self, session_id: String, message: String) {
+        // Turn CONTROL, not painting (like `on_run_ended`): this answers an
+        // intent the client issued. A backgrounded Main chat whose open failed
+        // while a roam peer owns the screen must still hear about it, or the
+        // spinner for that tap never resolves.
+        self.inner.on_session_open_failed(session_id, message);
+    }
 }
 
 #[cfg(test)]
@@ -2411,6 +2467,7 @@ mod forwarder_tests {
         fn on_peer_new_session(&self, _: String, _: String) {}
         fn on_active_run(&self, _: String, _: String) {}
         fn on_commands(&self, _: Vec<String>) {}
+        fn on_session_open_failed(&self, _: String, _: String) {}
     }
 
     fn fwd(active: Arc<RwLock<Option<String>>>) -> (CoreListenerForwarder, Arc<Recorder>) {

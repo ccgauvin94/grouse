@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! End-to-end spine tests against an in-process scripted WebSocket server
-//! (the Rust twin of the desktop's tests/fakeserver.h).
+//! (the only wire-level protocol coverage; the desktop is a thin client over
+//! the C ABI and has no C++ wire client to test).
 //!
 //! The fake server speaks just enough ACP JSON-RPC: initialize, session/new,
 //! session/list and session/prompt handlers, and it streams
@@ -49,6 +50,8 @@ enum Ev {
     PeerNewSession(String, String),
     ActiveRun(String, String),
     Commands(Vec<String>),
+    /// An open/resume failed; nothing was substituted (grouse#19).
+    OpenFailed(String, String),
 }
 
 struct RecordingListener {
@@ -106,6 +109,9 @@ impl CoreListener for RecordingListener {
     }
     fn on_active_run(&self, session_id: String, run_id: String) {
         let _ = self.tx.send(Ev::ActiveRun(session_id, run_id));
+    }
+    fn on_session_open_failed(&self, session_id: String, message: String) {
+        let _ = self.tx.send(Ev::OpenFailed(session_id, message));
     }
 }
 
@@ -180,6 +186,15 @@ struct FakeServer {
     /// `user_message_chunk` — the ONLY place a prompt reaches the client, since
     /// goose never echoes it live.
     last_prompt: Arc<Mutex<String>>,
+    /// When set, `session/load` answers with a JSON-RPC error (a stale/archived
+    /// session) instead of replaying. Drives the "an open failure must report,
+    /// never silently become a new session" coverage (grouse#19).
+    fail_load: Arc<std::sync::atomic::AtomicBool>,
+    /// When set, `session/load` streams its replay rows and then WAITS for
+    /// `release_load` before replying — the window in which the core must
+    /// ingest the replay silently (grouse#18).
+    gate_load: Arc<std::sync::atomic::AtomicBool>,
+    release_load: Arc<tokio::sync::Notify>,
 }
 
 impl FakeServer {
@@ -196,6 +211,9 @@ impl FakeServer {
             push: Arc::new(Mutex::new(None)),
             tool_turn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_prompt: Arc::new(Mutex::new(String::new())),
+            fail_load: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            gate_load: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            release_load: Arc::new(tokio::sync::Notify::new()),
         });
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -404,6 +422,12 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
                     }
                 });
                 let _ = tx.send(WsMessage::Text(info.to_string().into())).await;
+                // Test hook: hold the reply open after the rows are on the wire,
+                // so a test can assert the client saw NOTHING while the replay
+                // was being ingested (grouse#18).
+                if server.gate_load.load(std::sync::atomic::Ordering::SeqCst) {
+                    server.release_load.notified().await;
+                }
                 json!({
                     "sessionId": session,
                     "configOptions": [
@@ -540,7 +564,20 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
             }),
             _ => json!({}),
         };
-        let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+        let reply = if server.fail_load.load(std::sync::atomic::Ordering::SeqCst)
+            && method == "session/load"
+        {
+            // A stale/archived session: goose answers session/load with an
+            // error. The core must REPORT this, never substitute a session
+            // (grouse#19).
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32602, "message": "session not found" }
+            })
+        } else {
+            json!({ "jsonrpc": "2.0", "id": id, "result": result })
+        };
         let _ = tx.send(WsMessage::Text(reply.to_string().into())).await;
     }
 }
@@ -607,6 +644,283 @@ fn resume_replay_persists_the_fresh_cache() {
     assert_eq!(updated_at, "2026-08-12T13:00:00.000Z", "cache stamped from the session/info probe");
     let text: String = messages.iter().map(|m| m.text.clone()).collect::<Vec<_>>().join("");
     assert!(text.contains("replayed line one and two"), "cache holds the replayed content: {text}");
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+// ---------------------------------------------------------------------------
+// grouse#19: a failed open must REPORT, never silently bind a new session
+// ---------------------------------------------------------------------------
+
+/// A live-wire resume the server rejects (stale/archived id) must not become a
+/// fresh session behind the client's back. The client already moved its screen
+/// to the tapped session; a silent substitute is what made the app show a blank
+/// chat labelled with the selected one.
+#[test]
+fn rejected_resume_reports_and_binds_no_substitute_session() {
+    let _cache_guard = CACHE_TEST_LOCK.lock();
+    let data_dir = std::env::temp_dir().join(format!("grouse-failload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    std::env::set_var("XDG_DATA_HOME", &data_dir);
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    server.fail_load.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+        initial_project_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
+    assert_eq!(core.active_session_id().as_deref(), Some("sess-e2e"));
+
+    core.open_session("sess-gone".to_string());
+    match wait_for(&ev_rx, |ev| matches!(ev, Ev::OpenFailed(..)), "the open failure") {
+        Ev::OpenFailed(session_id, message) => {
+            assert_eq!(session_id, "sess-gone");
+            assert!(
+                message.contains("session/load"),
+                "the report names the failing call: {message}"
+            );
+        }
+        _ => panic!("expected OpenFailed from the rejected resume"),
+    }
+
+    // No substitute: only the connect's own transient session/new ever crossed
+    // the wire, and nothing is left bound — a rejected load must not leave the
+    // connection claiming a session it never loaded.
+    assert_eq!(
+        server.frames_for("session/new").len(),
+        1,
+        "the rejected resume must not create a session"
+    );
+    assert_eq!(
+        core.active_session_id(),
+        None,
+        "a rejected resume binds no session"
+    );
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// The same rejection on the COLD path (the handshake's resume, what a
+/// cold-start tap rides): report it, leave the wire with NO session, and never
+/// hand the client a chat it did not ask for.
+#[test]
+fn cold_resume_rejection_reports_and_binds_nothing() {
+    let _cache_guard = CACHE_TEST_LOCK.lock();
+    let data_dir =
+        std::env::temp_dir().join(format!("grouse-failload-cold-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    std::env::set_var("XDG_DATA_HOME", &data_dir);
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    server.fail_load.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
+    core.connect_resume(
+        grouse_core::ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            secret_key: "test-secret".to_string(),
+            use_tls: false,
+            accept_invalid_certs: false,
+            ca_cert_pem: None,
+            cwd: "/tmp".to_string(),
+            auto_connect: false,
+            client_id: "grouse-core-test".to_string(),
+            initial_recipe_id: None,
+            initial_project_id: None,
+        },
+        "sess-gone".to_string(),
+    );
+
+    match wait_for(&ev_rx, |ev| matches!(ev, Ev::OpenFailed(..)), "the cold open failure") {
+        Ev::OpenFailed(session_id, message) => {
+            assert_eq!(session_id, "sess-gone");
+            assert!(
+                message.contains("session/load"),
+                "the report names the failing call: {message}"
+            );
+        }
+        _ => panic!("expected OpenFailed from the rejected resume"),
+    }
+    // The wire is still usable, so Ready follows — but with nothing bound.
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "ready after failure");
+    assert!(server.frames_for("session/new").is_empty(), "no substitute session/new");
+    assert_eq!(
+        core.active_session_id(),
+        None,
+        "a rejected resume binds no session at all"
+    );
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+// ---------------------------------------------------------------------------
+// grouse#18: a replay is ingested silently and painted once
+// ---------------------------------------------------------------------------
+
+/// A reload must not walk the history from the top. While the server is still
+/// streaming the replay the client sees nothing new; the load's completion paints
+/// the newest window in ONE shot (Reset + rows + cursor), which is what lets a
+/// refresh land on the most recent messages with scroll-back for the rest.
+#[test]
+fn a_replay_is_ingested_silently_and_painted_once() {
+    let _cache_guard = CACHE_TEST_LOCK.lock();
+    let data_dir = std::env::temp_dir().join(format!("grouse-hold-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    std::env::set_var("XDG_DATA_HOME", &data_dir);
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    server.gate_load.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+        initial_project_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
+
+    core.open_session("sess-r".to_string());
+    // The replay's rows are on the wire and the reply is held open: nothing they
+    // contain may reach the client yet. (The open's own empty paint may.)
+    std::thread::sleep(Duration::from_millis(400));
+    let mut streamed = 0;
+    while let Ok(ev) = ev_rx.try_recv() {
+        if let Ev::Item(TranscriptOp::Upsert { .. }) = ev {
+            streamed += 1;
+        }
+    }
+    assert_eq!(streamed, 0, "the replay was painted row by row instead of held");
+
+    // Release the reply: the paint lands as one batch, Reset first.
+    server.release_load.notify_one();
+    match wait_for(&ev_rx, |ev| matches!(ev, Ev::Item(_)), "the paint") {
+        Ev::Item(TranscriptOp::Reset { .. }) => {}
+        _ => panic!("the paint must start with a Reset"),
+    }
+    let mut upserts = 0;
+    loop {
+        match wait_for(&ev_rx, |ev| matches!(ev, Ev::Item(_)), "more of the paint") {
+            Ev::Item(TranscriptOp::Upsert { .. }) => upserts += 1,
+            Ev::Item(TranscriptOp::Window { .. }) => break,
+            _ => panic!("unexpected op in the paint"),
+        }
+    }
+    // The paint is exactly the newest window of what the store now holds — one
+    // shot, not a stream of per-row updates.
+    let expected = core.rich_transcript().len().min(60);
+    assert!(expected >= 1, "the replay reached the store");
+    assert_eq!(upserts, expected, "the paint carries the newest window, once");
+
+    // The held rows did reach the store (silence is not loss).
+    let text: String = core
+        .transcript()
+        .iter()
+        .map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        text.contains("replayed line one and two"),
+        "the silently ingested replay is in the transcript: {text}"
+    );
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// The two reload strengths (grouse#18). QUICK lets freshness decide — a settled
+/// cache means a bounded tail, not a replay of the whole session — while FULL
+/// ignores the cache and always replays. Both are what the clients' "reload"
+/// gesture and its hold variant call.
+#[test]
+fn refresh_modes_differ_on_the_wire() {
+    let _cache_guard = CACHE_TEST_LOCK.lock();
+    let data_dir = std::env::temp_dir().join(format!("grouse-rmode-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        data_dir.to_string_lossy().to_string(),
+    );
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+        initial_project_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
+
+    // Open once so a settled cache exists for the reloads to reason about.
+    core.open_session("sess-a".to_string());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "first open");
+
+    core.refresh_session("sess-a".to_string(), grouse_core::RefreshMode::Quick);
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "quick reload ready");
+    let quick = server
+        .frames_for("session/load")
+        .last()
+        .cloned()
+        .expect("a session/load for the quick reload");
+    assert!(
+        quick.pointer("/params/_meta/replayTail").is_some(),
+        "a QUICK reload must let freshness pick the bounded path: {quick:?}"
+    );
+
+    core.refresh_session("sess-a".to_string(), grouse_core::RefreshMode::Full);
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "full reload ready");
+    let full = server
+        .frames_for("session/load")
+        .last()
+        .cloned()
+        .expect("a session/load for the full reload");
+    assert!(
+        full.pointer("/params/_meta").is_none(),
+        "a FULL reload must replay the session, not ask for a tail: {full:?}"
+    );
 
     core.disconnect();
     let _ = std::fs::remove_dir_all(&data_dir);

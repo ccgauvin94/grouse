@@ -615,12 +615,19 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
 pub struct TranscriptStore {
     listener: Box<dyn CoreListener>,
     state: Mutex<State>,
+    /// A `session/load` replay is being ingested: mutations update the store but
+    /// emit NOTHING (grouse#18, see [`TranscriptStore::hold_emissions`]). An
+    /// atomic, NOT a field of `state`: every mutation path already holds (or has
+    /// just released) the state lock when it emits, and re-locking there would
+    /// deadlock the runtime thread.
+    hold: std::sync::atomic::AtomicBool,
 }
 
 impl TranscriptStore {
     pub fn new(listener: Box<dyn CoreListener>) -> Self {
         Self {
             listener,
+            hold: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(State {
                 bubbles: Vec::new(),
                 stream_idx: None,
@@ -1015,18 +1022,21 @@ impl TranscriptStore {
     }
 
     /// Wipe the transcript and reset the stream state; emits an item `Reset` +
-    /// empty `Window`.
+    /// empty `Window` (suppressed while a replay is being ingested — the
+    /// release's own paint carries the wipe).
     pub fn clear(&self) {
         let session_id = {
             let mut st = self.state.lock();
             st.reset();
             st.session_id.clone()
         };
-        self.listener.on_item(TranscriptOp::Reset { session_id });
-        self.listener.on_item(TranscriptOp::Window {
-            oldest_id: String::new(),
-            has_older: false,
-        });
+        self.emit_ops(vec![
+            TranscriptOp::Reset { session_id },
+            TranscriptOp::Window {
+                oldest_id: String::new(),
+                has_older: false,
+            },
+        ]);
     }
 
     /// The session the held rows belong to (stamped on `Reset` ops).
@@ -1176,14 +1186,38 @@ impl TranscriptStore {
         };
         if dropped {
             // Tell the client the painted rows are gone, before the replay's
-            // Upserts arrive.
-            self.listener.on_item(TranscriptOp::Reset { session_id });
+            // Upserts arrive. Suppressed while the replay is held: the release
+            // emits its own Reset as part of the single windowed paint.
+            self.emit_ops(vec![TranscriptOp::Reset { session_id }]);
         }
     }
 
     fn emit_ops(&self, ops: Vec<TranscriptOp>) {
+        // While a replay is being ingested the rows update this store and stay
+        // OFF the wire: painting each one as it arrives is what made a reload
+        // walk the history from the top (grouse#18). The release emits one
+        // windowed paint of the result.
+        if self.hold.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         for op in ops {
             self.listener.on_item(op);
+        }
+    }
+
+    /// Hold (or drop) the per-mutation emissions for a replay (grouse#18). Held
+    /// rows still land in the store, the cache and the window.
+    pub fn hold_emissions(&self, hold: bool) {
+        self.hold.store(hold, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// End a held replay with ONE windowed paint — `Reset` + the newest
+    /// `CLIENT_WINDOW` items + the cursor (exactly what a fresh paint emits), so
+    /// the client lands on the most recent messages and walks back with
+    /// `load_older`. A no-op when nothing was held.
+    pub fn release_held_replay(&self) {
+        if self.hold.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.repaint_window();
         }
     }
 
@@ -1543,6 +1577,7 @@ mod tests {
         fn on_peer_new_session(&self, _label: String, _session_id: String) {}
         fn on_active_run(&self, _session_id: String, _run_id: String) {}
         fn on_commands(&self, _commands: Vec<String>) {}
+        fn on_session_open_failed(&self, _session_id: String, _message: String) {}
     }
 
     fn msgs(store: &TranscriptStore) -> Vec<(String, String, String)> {

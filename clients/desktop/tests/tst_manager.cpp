@@ -31,6 +31,7 @@ private slots:
     void turnOwnerMatches_ownerRule();
     void sessionExtensionsParseWrappedServerShape();
     void itemStreamDrivesTheModel();
+    void openFailureIsVisibleInStatus();
     void configuredProviderFilter();
     void configuredProvidersParse();
 };
@@ -190,6 +191,7 @@ void TstManager::invokableSurfaceRunsWithoutCrash()
     const QList<QByteArray> noArgs = {
         "connectToServer", "disconnect", "newChat", "beginChat", "cancelTurn",
         "refreshSessions", "refreshProjects", "refreshRecipes", "refreshSkills",
+        "reloadSessionFromStart",
         "refreshToolGroups", "refreshGlobalExtensions",
     };
     for (const QByteArray &n : noArgs)
@@ -276,6 +278,24 @@ void TstManager::configuredProvidersParse()
     const QString legacy = R"([{"providerId":"openai","configured":true}])";
     QCOMPARE(Manager::configuredProvidersFromJson(legacy),
              QStringList{QStringLiteral("openai")});
+}
+
+/**
+ * A rejected open must be VISIBLE (grouse#19). The core binds no session and
+ * substitutes none, so the status line is the only signal the user gets that
+ * the chat they tapped did not load — a silent core would leave them looking at
+ * an empty conversation.
+ */
+void TstManager::openFailureIsVisibleInStatus()
+{
+    Manager mgr;
+    QString message;
+    QSignalSpy spy(&mgr, &Manager::statusChanged);
+    mgr.coreOnSessionOpenFailed(QStringLiteral("sess-gone"),
+                                 QStringLiteral("session/load failed: session not found"));
+    QVERIFY2(mgr.status().contains(QStringLiteral("session not found")),
+             qPrintable(mgr.status()));
+    QVERIFY2(spy.count() >= 1, "the status change was emitted (the UI re-renders)");
 }
 
 void TstManager::bridgeLoadsWhenCorePresent()

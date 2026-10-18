@@ -259,6 +259,11 @@ static void cb_on_active_run(void *u, const char *a, const char *b) {
     marshal(u, nullptr, [=](Manager *m) { m->coreOnActiveRun(sa, sb); });
 }
 static void cb_on_commands(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnCommands(s); }); }
+static void cb_on_session_open_failed(void *u, const char *sessionId, const char *message) {
+    const QString sid = copyStr(sessionId);
+    const QString msg = copyStr(message);
+    marshal(u, nullptr, [=](Manager *m) { m->coreOnSessionOpenFailed(sid, msg); });
+}
 static void cb_on_export(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnExport(s); }); }
 static void cb_on_recipe_params(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnRecipeParams(s); }); }
 static void cb_on_elicitation(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnElicitation(s); }); }
@@ -348,6 +353,7 @@ void CoreBridge::installListener()
         // table is ABI-locked to the core's GrouseCoreListener.
         nullptr,   // on_dictation_config
         nullptr,   // on_transcript
+        cb_on_session_open_failed,
     };
     m_listener = &table;
 

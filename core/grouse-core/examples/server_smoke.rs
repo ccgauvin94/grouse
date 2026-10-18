@@ -46,6 +46,7 @@ impl CoreListener for L {
     fn on_peer_new_session(&self, _a: String, _b: String) {}
     fn on_active_run(&self, _a: String, _b: String) {}
     fn on_commands(&self, _c: Vec<String>) {}
+    fn on_session_open_failed(&self, _a: String, _b: String) {}
 }
 
 struct UL;
