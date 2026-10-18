@@ -695,6 +695,9 @@ internal interface UniffiCallbackInterfaceCoreListenerMethod13 : com.sun.jna.Cal
 internal interface UniffiCallbackInterfaceCoreListenerMethod14 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`commands`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfaceCoreListenerMethod15 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`message`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`data`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
@@ -758,7 +761,7 @@ internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod19 : com.s
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod20 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`method`: RustBuffer.ByValue,`message`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "onStatus", "onSessions", "onItem", "onUsage", "onRunEnded", "onSpeak", "onConfig", "onPermissionRequest", "onSessionTouched", "onProjects", "onRoamPeerStatus", "onRoamSessions", "onPeerNewSession", "onActiveRun", "onCommands")
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onStatus", "onSessions", "onItem", "onUsage", "onRunEnded", "onSpeak", "onConfig", "onPermissionRequest", "onSessionTouched", "onProjects", "onRoamPeerStatus", "onRoamSessions", "onPeerNewSession", "onActiveRun", "onCommands", "onSessionOpenFailed")
 internal open class UniffiVTableCallbackInterfaceCoreListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
     @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
@@ -777,6 +780,7 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
     @JvmField internal var `onPeerNewSession`: UniffiCallbackInterfaceCoreListenerMethod12? = null,
     @JvmField internal var `onActiveRun`: UniffiCallbackInterfaceCoreListenerMethod13? = null,
     @JvmField internal var `onCommands`: UniffiCallbackInterfaceCoreListenerMethod14? = null,
+    @JvmField internal var `onSessionOpenFailed`: UniffiCallbackInterfaceCoreListenerMethod15? = null,
 ) : Structure() {
     class UniffiByValue(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -796,7 +800,8 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
         `onPeerNewSession`: UniffiCallbackInterfaceCoreListenerMethod12? = null,
         `onActiveRun`: UniffiCallbackInterfaceCoreListenerMethod13? = null,
         `onCommands`: UniffiCallbackInterfaceCoreListenerMethod14? = null,
-    ): UniffiVTableCallbackInterfaceCoreListener(`uniffiFree`,`uniffiClone`,`onStatus`,`onSessions`,`onItem`,`onUsage`,`onRunEnded`,`onSpeak`,`onConfig`,`onPermissionRequest`,`onSessionTouched`,`onProjects`,`onRoamPeerStatus`,`onRoamSessions`,`onPeerNewSession`,`onActiveRun`,`onCommands`,), Structure.ByValue
+        `onSessionOpenFailed`: UniffiCallbackInterfaceCoreListenerMethod15? = null,
+    ): UniffiVTableCallbackInterfaceCoreListener(`uniffiFree`,`uniffiClone`,`onStatus`,`onSessions`,`onItem`,`onUsage`,`onRunEnded`,`onSpeak`,`onConfig`,`onPermissionRequest`,`onSessionTouched`,`onProjects`,`onRoamPeerStatus`,`onRoamSessions`,`onPeerNewSession`,`onActiveRun`,`onCommands`,`onSessionOpenFailed`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceCoreListener) {
         `uniffiFree` = other.`uniffiFree`
@@ -816,6 +821,7 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
         `onPeerNewSession` = other.`onPeerNewSession`
         `onActiveRun` = other.`onActiveRun`
         `onCommands` = other.`onCommands`
+        `onSessionOpenFailed` = other.`onSessionOpenFailed`
     }
 
 }
@@ -1105,6 +1111,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_corelistener_on_commands(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_corelistener_on_session_open_failed(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstablelistener_on_recipe_params(
@@ -1207,7 +1215,7 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_ready(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
-    external fun uniffi_grouse_core_fn_method_core_refresh_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_grouse_core_fn_method_core_refresh_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_rename_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1509,7 +1517,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_grouse_core_checksum_method_core_ready() != 64347) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_grouse_core_checksum_method_core_refresh_session() != 7988) {
+    if (lib.uniffi_grouse_core_checksum_method_core_refresh_session() != 22310) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_core_rename_session() != 51923) {
@@ -1726,6 +1734,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_corelistener_on_commands() != 24967) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_grouse_core_checksum_method_corelistener_on_session_open_failed() != 25102) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export() != 3482) {
@@ -2394,14 +2405,23 @@ public interface CoreInterface {
     fun `ready`(): kotlin.Boolean
     
     /**
-     * Force a full `session/load` replay of `session_id`, ignoring cache
-     * freshness, and rebuild the transcript from the server. The escape hatch
-     * for a local view that has drifted — a turn that dropped mid-stream left a
-     * truncated store, and the cache on disk may match it. Unlike a plain open
-     * this never suppresses and never bounded-tail-merges: the cached window is
-     * painted provisionally and the full replay replaces it.
+     * Reload `session_id`.
+     *
+     * [`RefreshMode::Full`] forces a full `session/load` replay, ignoring cache
+     * freshness, and rebuilds the transcript from the server — the escape hatch
+     * for a local view that has drifted (a turn that dropped mid-stream left a
+     * truncated store, and the cache on disk may match it). It never suppresses
+     * and never bounded-tail-merges: the cached window is painted provisionally
+     * and the full replay replaces it.
+     *
+     * [`RefreshMode::Quick`] is the same open without the force: a settled,
+     * current cache suppresses the replay, a settled-but-stale one merges a
+     * bounded tail, and an INCOMPLETE store (a turn in flight, or a wire that
+     * dropped mid-turn — whose cache carries an empty stamp by construction)
+     * still takes the full replay. Either way the replay is ingested silently
+     * and ends in one windowed paint (grouse#18).
      */
-    fun `refreshSession`(`sessionId`: kotlin.String)
+    fun `refreshSession`(`sessionId`: kotlin.String, `mode`: RefreshMode)
     
     /**
      * Rename a session; the reply re-lists sessions (desktop response table).
@@ -2939,20 +2959,30 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
-     * Force a full `session/load` replay of `session_id`, ignoring cache
-     * freshness, and rebuild the transcript from the server. The escape hatch
-     * for a local view that has drifted — a turn that dropped mid-stream left a
-     * truncated store, and the cache on disk may match it. Unlike a plain open
-     * this never suppresses and never bounded-tail-merges: the cached window is
-     * painted provisionally and the full replay replaces it.
-     */override fun `refreshSession`(`sessionId`: kotlin.String)
+     * Reload `session_id`.
+     *
+     * [`RefreshMode::Full`] forces a full `session/load` replay, ignoring cache
+     * freshness, and rebuilds the transcript from the server — the escape hatch
+     * for a local view that has drifted (a turn that dropped mid-stream left a
+     * truncated store, and the cache on disk may match it). It never suppresses
+     * and never bounded-tail-merges: the cached window is painted provisionally
+     * and the full replay replaces it.
+     *
+     * [`RefreshMode::Quick`] is the same open without the force: a settled,
+     * current cache suppresses the replay, a settled-but-stale one merges a
+     * bounded tail, and an INCOMPLETE store (a turn in flight, or a wire that
+     * dropped mid-turn — whose cache carries an empty stamp by construction)
+     * still takes the full replay. Either way the replay is ingested silently
+     * and ends in one windowed paint (grouse#18).
+     */override fun `refreshSession`(`sessionId`: kotlin.String, `mode`: RefreshMode)
         = 
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_grouse_core_fn_method_core_refresh_session(
         it,
         
-        FfiConverterString.lower(`sessionId`),_status)
+        FfiConverterString.lower(`sessionId`),
+        FfiConverterTypeRefreshMode.lower(`mode`),_status)
 }
     }
     
@@ -5896,6 +5926,54 @@ public object FfiConverterTypePushKind: FfiConverterRustBuffer<PushKind> {
 
 
 /**
+ * How hard a session reload works (grouse#18).
+ */
+
+enum class RefreshMode {
+    
+    /**
+     * Catch up with what is already known: a settled-and-current cache
+     * suppresses the replay, a settled-but-stale one merges a bounded tail, and
+     * an incomplete store (a turn in flight, or a wire that dropped mid-turn)
+     * still takes the full replay — silently, ending in one windowed paint.
+     * This is the everyday "this chat looks stale" refresh.
+     */
+    QUICK,
+    /**
+     * Ignore freshness and replay the whole session: the escape hatch for a
+     * view known to have drifted.
+     */
+    FULL;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRefreshMode: FfiConverterRustBuffer<RefreshMode> {
+    override fun read(buf: ByteBuffer) = try {
+        RefreshMode.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: RefreshMode) = 4UL
+
+    override fun write(value: RefreshMode, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
  * Collapses the desktop's toolgroup/chart/mcpapp split (CONTRACT §3.4).
  */
 sealed class ToolCallKind {
@@ -6293,6 +6371,19 @@ public interface CoreListener {
      */
     fun `onCommands`(`commands`: List<kotlin.String>)
     
+    /**
+     * An open/resume FAILED and nothing was substituted: the server rejected
+     * `session/load` for `session_id` (a stale/archived id), or the core had
+     * no connection configuration to attempt it with. The core binds NO new
+     * session and repaints nothing — whatever the client is showing stands,
+     * and the client decides: retry the open, or start a fresh chat
+     * explicitly (`new_session`). An answer to an intent the client issued,
+     * so it is never gated by which chat happens to be on screen
+     * (grouse#19: a silent `session/new` here was the "tapped a thread, got a
+     * blank one" defect).
+     */
+    fun `onSessionOpenFailed`(`sessionId`: kotlin.String, `message`: kotlin.String)
+    
     companion object
 }
 
@@ -6489,6 +6580,19 @@ internal object uniffiCallbackInterfaceCoreListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
+    internal object `onSessionOpenFailed`: UniffiCallbackInterfaceCoreListenerMethod15 {
+        override fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`message`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onSessionOpenFailed`(
+                    FfiConverterString.lift(`sessionId`),
+                    FfiConverterString.lift(`message`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
 
     internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
@@ -6520,6 +6624,7 @@ internal object uniffiCallbackInterfaceCoreListener {
         `onPeerNewSession`,
         `onActiveRun`,
         `onCommands`,
+        `onSessionOpenFailed`,
     )
 
     // Registers the foreign callback with the Rust side.

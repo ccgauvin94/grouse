@@ -219,6 +219,9 @@ public:
     Q_INVOKABLE void refreshSessions();
     Q_INVOKABLE void openSession(const QString &sessionId);
     Q_INVOKABLE void refreshSession();
+    /** Replay the whole session, ignoring cache freshness (grouse#18's FULL
+     *  reload; `refreshSession` is the quick one). */
+    Q_INVOKABLE void reloadSessionFromStart();
     Q_INVOKABLE void newChat();
     /** Step off the landing page into the staging chat (provider/model already chosen there). */
     Q_INVOKABLE void beginChat();
@@ -364,6 +367,8 @@ public:
     void coreOnPeerNewSession(const QString &label, const QString &sid);
     void coreOnActiveRun(const QString &sid, const QString &runId);
     void coreOnCommands(const QString &json);
+    /** An open/resume failed and nothing was substituted (grouse#19). */
+    void coreOnSessionOpenFailed(const QString &sessionId, const QString &message);
     void coreOnExport(const QString &data);
     void coreOnRecipeParams(const QString &parameters);
     void coreOnElicitation(const QString &schema);
@@ -426,6 +431,12 @@ signals:
 private:
     void setStatus(const QString &s);
     void setOnline(bool o);
+    /** The one refresh implementation: `full == 0` is the quick refresh, nonzero
+     *  replays the session from the start (grouse#18). */
+    void refreshSessionWith(int full);
+    /** Whether the session the UI is acting on is the one the CORE has bound —
+     *  the precondition for every session-scoped RPC (grouse#20). */
+    bool sessionIsOpen() const;
     /** The final assistant text in the transcript, elided — the body of the
      *  "turn finished" notification (the phone's nudge can't carry this). */
     QString lastAssistantText() const;

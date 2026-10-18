@@ -148,6 +148,9 @@ impl GrouseUnstable {
     /// List the session's active tools (`extension__tool` names); surfaces as `on_tools`.
     pub fn list_tools(&self, session_id: String) {
         let Some(conn) = self.route(&session_id) else { return };
+        if !self.require_bound_session(&*conn, &session_id, "_goose/unstable/tools/list") {
+            return;
+        }
         if let Some(result) =
             self.call(&*conn, "_goose/unstable/tools/list", json!({"sessionId": session_id}))
         {
@@ -159,6 +162,13 @@ impl GrouseUnstable {
     /// List the session's extensions; surfaces as `on_session_extensions`.
     pub fn session_extensions_list(&self, session_id: String) {
         let Some(conn) = self.route(&session_id) else { return };
+        if !self.require_bound_session(
+            &*conn,
+            &session_id,
+            "_goose/unstable/session/extensions/list",
+        ) {
+            return;
+        }
         if let Some(result) = self.call(
             &*conn,
             "_goose/unstable/session/extensions/list",
@@ -174,11 +184,23 @@ impl GrouseUnstable {
     pub fn session_extensions_add(&self, session_id: String, extension: String) {
         let Ok(extension) = serde_json::from_str::<Value>(&extension) else { return };
         let Some(conn) = self.route(&session_id) else { return };
-        self.call(
-            &*conn,
-            "_goose/unstable/session/extensions/add",
-            json!({"sessionId": session_id, "extension": extension}),
-        );
+        if !self.require_bound_session(&*conn, &session_id, "_goose/unstable/session/extensions/add")
+        {
+            return;
+        }
+        if self
+            .call(
+                &*conn,
+                "_goose/unstable/session/extensions/add",
+                json!({"sessionId": session_id, "extension": extension}),
+            )
+            .is_none()
+        {
+            // The add failed and `call` already reported it. The re-lists are
+            // CONSEQUENCES: firing them would report the same failure twice more,
+            // which is how one toggle produced three popups (grouse#20).
+            return;
+        }
         self.relist_tools(&*conn, &session_id);
         self.relist_session_extensions(&*conn, &session_id);
     }
@@ -191,6 +213,13 @@ impl GrouseUnstable {
     /// The paired add re-lists (desktop behavior).
     pub fn session_extensions_remove(&self, session_id: String, extension_key: String) {
         let Some(conn) = self.route(&session_id) else { return };
+        if !self.require_bound_session(
+            &*conn,
+            &session_id,
+            "_goose/unstable/session/extensions/remove",
+        ) {
+            return;
+        }
         self.call(
             &*conn,
             "_goose/unstable/session/extensions/remove",
@@ -705,6 +734,28 @@ impl GrouseUnstable {
                 None
             }
         }
+    }
+
+    /// Whether a session-bound call can be attempted at all.
+    ///
+    /// Goose rejects a session it does not know: `tools/list` and
+    /// `session/extensions/add|remove` answer "Resource not found: Session not
+    /// found: <id>", while the list pair answers "Internal error: Session not
+    /// found". A single user action fans out to three of those, and each one
+    /// surfaces its own message — three errors for one toggle, on a chat whose
+    /// transcript is still on screen because it was painted from the cache. A
+    /// chat can be open with NO session bound: a rejected `session/load` leaves
+    /// none (CONTRACT §3.2). Refuse once, naming the real cause, instead of
+    /// firing lookups that cannot succeed (grouse#20).
+    fn require_bound_session(&self, conn: &dyn RpcConn, session_id: &str, method: &str) -> bool {
+        if session_id.is_empty() || conn.active_session_id().is_none() {
+            self.listener.on_error(
+                method.to_string(),
+                "no session open — open a chat first".to_string(),
+            );
+            return false;
+        }
+        true
     }
 
     /// Stamp each inventory entry with `hasCredentials`: whether at least one of the
@@ -1411,6 +1462,7 @@ mod tests {
     fn session_extensions_add_relists_tools_and_extensions() {
         let _guard = TEST_LOCK.lock();
         let stub = StubConn::new();
+        stub.set_session("s1");
         stub.script(vec![
             Ok(Value::Null), // add reply
             Ok(json!({"tools": [{"name": "shell__run"}]})),
@@ -1443,6 +1495,7 @@ mod tests {
     fn session_extensions_remove_sends_extension_key() {
         let _guard = TEST_LOCK.lock();
         let stub = StubConn::new();
+        stub.set_session("s1");
         stub.script(vec![Ok(Value::Null)]);
         let (g, rec) = harness(stub.clone());
 
@@ -1460,6 +1513,7 @@ mod tests {
     fn list_tools_emits_names_and_session_extensions_list_emits_payload() {
         let _guard = TEST_LOCK.lock();
         let stub = StubConn::new();
+        stub.set_session("s1");
         stub.script(vec![
             Ok(json!({"tools": [{"name": "a__b"}, {"name": "c__d"}]})),
             Ok(json!({"extensions": [{"name": "e1"}, {"server": {"name": "e2"}}]})),
@@ -1664,6 +1718,101 @@ mod tests {
             "tools/call: arguments were not valid JSON".to_string(), true)]);
         // Nothing reached the server.
         assert_calls(&stub, &[]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Session-bound calls need a session (grouse#20)
+    // -----------------------------------------------------------------------
+
+    /// A chat can be on screen with NO session bound (a rejected `session/load`
+    /// leaves none). Every session-scoped RPC would then fail server-side, three
+    /// of them for one toggle: refuse once instead, and send nothing.
+    #[test]
+    fn session_bound_calls_refuse_without_an_open_session() {
+        let _guard = TEST_LOCK.lock();
+        for session in ["" , "s1"] {
+            let stub = StubConn::new(); // nothing bound
+            let (g, rec) = harness(stub.clone());
+
+            g.list_tools(session.to_string());
+            g.session_extensions_list(session.to_string());
+            g.session_extensions_add(session.to_string(), r#"{"name":"x"}"#.to_string());
+            g.session_extensions_remove(session.to_string(), "x".to_string());
+
+            let errors: Vec<Ev> = rec
+                .events()
+                .into_iter()
+                .filter(|e| matches!(e, Ev::Error(..)))
+                .collect();
+            assert_eq!(errors.len(), 4, "one refusal per call, not one per RPC: {errors:?}");
+            for e in &errors {
+                let Ev::Error(_, message) = e else { unreachable!() };
+                assert!(message.contains("no session open"), "names the cause: {message}");
+            }
+            assert_calls(&stub, &[], );
+        }
+    }
+
+    /// The add's re-lists are CONSEQUENCES of the add. When it fails, firing them
+    /// reported the same failure twice more — one toggle, three popups.
+    #[test]
+    fn a_failed_extension_add_does_not_re_list() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        stub.set_session("s1");
+        stub.script(vec![Err(err())]);
+        let (g, rec) = harness(stub.clone());
+
+        g.session_extensions_add("s1".to_string(), r#"{"name":"x"}"#.to_string());
+
+        match rec.events().as_slice() {
+            [Ev::Error(method, _)] => assert_eq!(method, "_goose/unstable/session/extensions/add"),
+            other => panic!("expected exactly one on_error, got {other:?}"),
+        }
+        assert_calls(
+            &stub,
+            &[(
+                "_goose/unstable/session/extensions/add",
+                json!({"sessionId": "s1", "extension": {"name": "x"}}),
+            )],
+        );
+    }
+
+    /// The happy path still re-lists both families, in order (the desktop relies
+    /// on the add being the moment the session's tool set is current).
+    #[test]
+    fn a_successful_extension_add_re_lists_tools_and_extensions() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        stub.set_session("s1");
+        stub.script(vec![
+            Ok(json!({})),
+            Ok(json!({"tools": []})),
+            Ok(json!({"extensions": []})),
+        ]);
+        let (g, rec) = harness(stub.clone());
+
+        g.session_extensions_add("s1".to_string(), r#"{"name":"x"}"#.to_string());
+
+        assert_calls(
+            &stub,
+            &[
+                (
+                    "_goose/unstable/session/extensions/add",
+                    json!({"sessionId": "s1", "extension": {"name": "x"}}),
+                ),
+                ("_goose/unstable/tools/list", json!({"sessionId": "s1"})),
+                (
+                    "_goose/unstable/session/extensions/list",
+                    json!({"sessionId": "s1"}),
+                ),
+            ],
+        );
+        assert!(
+            !rec.events().iter().any(|e| matches!(e, Ev::Error(..))),
+            "a clean add reports no error: {:?}",
+            rec.events()
+        );
     }
 
     #[test]
