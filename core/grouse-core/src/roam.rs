@@ -2321,6 +2321,9 @@ mod tests {
         fn on_run_ended(&self, stop_reason: String) {
             self.events.lock().push(format!("run_ended {stop_reason}"));
         }
+        fn on_speak(&self, text: String) {
+            self.events.lock().push(format!("speak {text}"));
+        }
         fn on_item(&self, op: crate::TranscriptOp) {
             use crate::TranscriptOp as Op;
             let line = match &op {

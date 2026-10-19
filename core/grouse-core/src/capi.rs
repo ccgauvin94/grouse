@@ -148,6 +148,9 @@ pub struct GrouseCoreListener {
     pub on_usage: Option<extern "C" fn(*mut c_void, i64, i64, f64, *const c_char)>,
     /// A turn finished; the C string is the server's stop reason.
     pub on_run_ended: Option<extern "C" fn(*mut c_void, *const c_char)>,
+    /// A sanitized, sentence-sized speakable chunk of the assistant's text
+    /// (docs/TRANSCRIPT_MODEL.md) — feed it to a TTS engine.
+    pub on_speak: Option<extern "C" fn(*mut c_void, *const c_char)>,
     /// `options` serialized as a JSON array of `ConfigOption`.
     pub on_config: Option<extern "C" fn(*mut c_void, *const c_char)>,
     /// `request` serialized as JSON (`PermissionRequest`).
@@ -363,6 +366,16 @@ impl CoreListener for CoreCallbackForwarder {
         unsafe {
             let table = &*self.table;
             if let Some(f) = table.on_run_ended {
+                f(self.user_data, p);
+            }
+            grouse_string_free(p);
+        }
+    }
+    fn on_speak(&self, text: String) {
+        let p = c_str(&text);
+        unsafe {
+            let table = &*self.table;
+            if let Some(f) = table.on_speak {
                 f(self.user_data, p);
             }
             grouse_string_free(p);

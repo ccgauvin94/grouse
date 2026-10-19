@@ -19,6 +19,7 @@ use std::collections::HashMap;
 
 use parking_lot::Mutex;
 
+use crate::speak::SpeakStream;
 use crate::{
     CoreListener, Item, ItemKind, Message, ToolCall, ToolCallKind, TranscriptOp, TranscriptWindow,
 };
@@ -247,6 +248,9 @@ struct State {
     /// Monotonic counter for ids on live text rows the server sent without a
     /// `message_id` (see [`Bubble::Text::uid`]).
     next_uid: u64,
+    /// The assistant's visible text, sanitized and chunked into speakable
+    /// sentences for a client's TTS engine (see [`crate::speak`]).
+    speak: SpeakStream,
 }
 
 /// Hard cap on retained bubbles (S-RC-4). A transcript is inherently
@@ -329,6 +333,7 @@ impl State {
         self.merging = false;
         self.merge_anchored = false;
         self.merge_overlap = false;
+        self.speak.reset();
     }
 
     /// Drop a provisional cache paint the moment real server content arrives
@@ -508,6 +513,7 @@ impl TranscriptStore {
                 emitted_from: 0,
                 has_older: false,
                 next_uid: 0,
+                speak: SpeakStream::new(),
             }),
         }
     }
@@ -525,7 +531,7 @@ impl TranscriptStore {
     /// an old message can end up reading as the newest.
     ///
     pub fn append_chunk(&self, role: &str, text: &str, message_id: Option<&str>, thought: bool) {
-        let ops = {
+        let (ops, speaks) = {
             let mut st = self.state.lock();
             st.anchor_merge(message_id.unwrap_or(""));
             let mut ops = Vec::new();
@@ -596,11 +602,21 @@ impl TranscriptStore {
                 }
             };
             ops.push(op);
+            // The assistant's *visible* text is what gets spoken; thoughts and
+            // user text are not. Emitted after the lock is released.
+            let speaks = if role == "agent" && !thought {
+                st.speak.push(text)
+            } else {
+                Vec::new()
+            };
             st.trim();
-            ops
+            (ops, speaks)
         };
 
         self.emit_ops(ops);
+        for sentence in speaks {
+            self.listener.on_speak(sentence);
+        }
     }
 
     /// A tool call. Consecutive `Plain` calls collapse into one toolgroup
@@ -822,14 +838,20 @@ impl TranscriptStore {
     /// `Upsert` (the streaming deltas never carried a completion) so a client
     /// renders the markdown once, then end the turn on the stream.
     pub fn run_ended(&self, stop_reason: &str) {
-        let op = {
-            let st = self.state.lock();
-            st.stream_idx
+        let (op, speak) = {
+            let mut st = self.state.lock();
+            let op = st
+                .stream_idx
                 .and_then(|idx| st.bubbles.get(idx))
-                .map(|b| TranscriptOp::Upsert { item: b.item() })
+                .map(|b| TranscriptOp::Upsert { item: b.item() });
+            let speak = st.speak.flush();
+            (op, speak)
         };
         if let Some(op) = op {
             self.listener.on_item(op);
+        }
+        for sentence in speak {
+            self.listener.on_speak(sentence);
         }
         self.listener.on_run_ended(stop_reason.to_string());
     }
@@ -1240,6 +1262,7 @@ mod tests {
     /// stay readable.
     struct TestListener {
         item_events: Arc<Mutex<Vec<String>>>,
+        speak_events: Arc<Mutex<Vec<String>>>,
     }
 
     /// A readable one-line rendering of an item op, so assertions stay terse.
@@ -1260,8 +1283,21 @@ mod tests {
 
     fn listener() -> (Box<dyn CoreListener>, Arc<Mutex<Vec<String>>>) {
         let i = Arc::new(Mutex::new(Vec::new()));
-        let l = TestListener { item_events: i.clone() };
+        let l = TestListener {
+            item_events: i.clone(),
+            speak_events: Arc::new(Mutex::new(Vec::new())),
+        };
         (Box::new(l), i)
+    }
+
+    /// A listener that records the speak stream instead of the item ops.
+    fn speak_listener() -> (Box<dyn CoreListener>, Arc<Mutex<Vec<String>>>) {
+        let s = Arc::new(Mutex::new(Vec::new()));
+        let l = TestListener {
+            item_events: Arc::new(Mutex::new(Vec::new())),
+            speak_events: s.clone(),
+        };
+        (Box::new(l), s)
     }
 
     impl CoreListener for TestListener {
@@ -1272,6 +1308,9 @@ mod tests {
         }
         fn on_usage(&self, _used: i64, _size: i64, _cost: f64, _currency: String) {}
         fn on_run_ended(&self, _stop_reason: String) {}
+        fn on_speak(&self, text: String) {
+            self.speak_events.lock().push(text);
+        }
         fn on_config(&self, _options: Vec<ConfigOption>) {}
         fn on_permission_request(&self, _request: PermissionRequest) {}
         fn on_session_touched(&self, _session_id: String, _title: String, _updated_at: String) {}
@@ -1918,6 +1957,28 @@ mod tests {
         assert_eq!(items[0].id, "@1");
         assert_ne!(items[1].id, "@1");
         assert_eq!(items[1].id, "@2");
+    }
+
+    #[test]
+    fn agent_text_emits_sanitized_sentences_to_the_speak_stream() {
+        let (l, speaks) = speak_listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("agent", "Here is the plan. It has ", Some("m1"), false);
+        store.append_chunk("agent", "`code` in it.", Some("m1"), false);
+        store.run_ended("end_turn");
+        // The first sentence streams before the turn ends; the flush emits the
+        // rest, with inline code stripped.
+        assert_eq!(&*speaks.lock(), &["Here is the plan.", "It has in it."]);
+    }
+
+    #[test]
+    fn user_and_thought_text_are_not_spoken() {
+        let (l, speaks) = speak_listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("user", "Do the thing.", Some("u1"), false);
+        store.append_chunk("thought", "Thinking about it.", None, true);
+        store.run_ended("end_turn");
+        assert!(speaks.lock().is_empty());
     }
 
     #[test]
