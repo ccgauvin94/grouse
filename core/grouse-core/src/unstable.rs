@@ -280,22 +280,15 @@ impl GrouseUnstable {
         }
     }
 
-    /// Create a project or skill. Projects are always `target.scope: "global"`;
-    /// skills can be project-scoped when `project_id` is `Some` (non-empty):
-    /// `target.scope: "projectId"` / `target.projectId: <id>`.
+    /// Create a project or skill (`target.scope: "global"`); re-lists the touched family.
     pub fn sources_create(
         &self,
         source_type: String,
         name: String,
         description: String,
         content: String,
-        project_id: Option<String>,
     ) {
         let Some(conn) = spine::current_conn() else { return };
-        let target = match project_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(pid) if source_type == "skill" => json!({"scope": "projectId", "projectId": pid}),
-            _ => json!({"scope": "global"}),
-        };
         self.call(
             &*conn,
             "_goose/unstable/sources/create",
@@ -304,34 +297,10 @@ impl GrouseUnstable {
                 "name": name,
                 "description": description,
                 "content": content,
-                "target": target,
+                "target": {"scope": "global"},
             }),
         );
         self.relist_sources(&*conn, &source_type);
-    }
-    /// Create a skill scoped to a project's directory (e.g. /projects/<name>).
-    /// Uses `target.scope: "projectDir"` which works even when the project's
-    /// `root` is not configured (unlike `projectId` scope).
-    pub fn sources_create_skill_for_project(
-        &self,
-        name: String,
-        description: String,
-        content: String,
-        project_dir: String,
-    ) {
-        let Some(conn) = spine::current_conn() else { return };
-        self.call(
-            &*conn,
-            "_goose/unstable/sources/create",
-            json!({
-                "type": "skill",
-                "name": name,
-                "description": description,
-                "content": content,
-                "target": {"scope": "projectDir", "projectDir": project_dir},
-            }),
-        );
-        self.relist_sources(&*conn, "skill");
     }
 
     /// Delete a project or skill by its source PATH; re-lists the touched family.
@@ -1307,7 +1276,7 @@ mod tests {
         ]);
         let (g, rec) = harness(stub.clone());
 
-        g.sources_create("project".to_string(), "New".to_string(), "desc".to_string(), String::new(), None);
+        g.sources_create("project".to_string(), "New".to_string(), "desc".to_string(), String::new());
 
         assert_eq!(
             rec.events(),

@@ -374,19 +374,6 @@ class ConnectionManager private constructor(context: Context) {
             }
         }
     }
-    fun createProjectSkill(projectId: String, name: String, description: String, content: String, onResult: (String?) -> Unit = {}) {
-        val projectDir = "/projects/$projectId"
-        pendingSkillError = null
-        io {
-            unstable.sourcesCreateSkillForProject(name, description, content, projectDir)
-            main.post {
-                val err = pendingSkillError
-                pendingSkillError = null
-                onResult(err)
-            }
-        }
-    }
-
     /** Replace a project's instructions (its projects/<name>.md content). Same
      *  whole-source sources/update as skills; the core re-lists projects on the
      *  reply, so [projects] reseeds the editor. Shares the pendingSkillError
@@ -395,22 +382,6 @@ class ConnectionManager private constructor(context: Context) {
         pendingSkillError = null
         io {
             unstable.sourcesUpdate("project", p.path, p.name, p.description, content)
-            main.post {
-                val err = pendingSkillError
-                pendingSkillError = null
-                onResult(err)
-            }
-        }
-    }
-
-    fun createSkill(name: String, description: String, content: String, projectId: String?, onResult: (String?) -> Unit = {}) {
-        val clean = name.trim()
-        if (clean.isEmpty() || clean.length > 64 || clean.contains(" ") || clean.contains("/")) {
-            onResult("Invalid skill name"); return
-        }
-        pendingSkillError = null
-        io {
-            unstable.sourcesCreate("skill", clean, description, content, projectId?.takeIf { it.isNotBlank() })
             main.post {
                 val err = pendingSkillError
                 pendingSkillError = null
