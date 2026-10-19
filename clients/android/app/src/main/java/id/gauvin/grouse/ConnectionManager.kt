@@ -842,6 +842,9 @@ class ConnectionManager private constructor(context: Context) {
      *  session; the Ready handler then opens the real target. */
     private var pendingResumeAfterConnect: String? = null
     private var pendingNewSessionAfterConnect: Boolean = false
+    /** The shown session a mismatched Ready already tried to re-open. One attempt per
+     *  tap: a genuinely unloadable session must surface its failure, not loop. */
+    private var reopenAttemptedFor: String? = null
     /** Saved provider/model/mode picks re-applied once per connection (the core does not
      *  re-apply them; the old client's applyDesired did). */
     private var desiredApplied = false
@@ -1850,10 +1853,10 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun onCoreReady() {
         live = true; connecting = false; online.value = true
-        val sid = core.activeSessionId()
-        if (sid == null) return
-        // A first-process connect() (or a config change) created a transient session first;
-        // the real target opens now. Skip the transient's bookkeeping entirely.
+        // Consume a deferred open BEFORE the active-session check: a first connect whose
+        // `connectResume` failed (or a transient session that never bound) reaches Ready
+        // with no active id, and returning first would drop the tap the user made while
+        // connecting — leaving the blank chat it was meant to replace (grouse#19).
         val deferred = pendingResumeAfterConnect
         if (deferred != null) {
             pendingResumeAfterConnect = null
@@ -1868,6 +1871,22 @@ class ConnectionManager private constructor(context: Context) {
             core.newSession(rid, pendingProjectId.also { pendingProjectId = null })
             return
         }
+        val sid = core.activeSessionId()
+        if (sid == null) return
+        // Latest tap wins: a Ready for a session the user already navigated away from
+        // (a superseded load, or the transient session a cold connect binds) must not
+        // stand. Re-open what is on screen once instead of adopting the stale id —
+        // then the normal Ready for THAT load adopts it. A load that genuinely cannot
+        // succeed reports via onCoreSessionOpenFailed, and the one-attempt guard keeps
+        // us from looping on it (grouse#19).
+        val shown = currentSession.value
+        if (currentRoamPeer == null && shown != null && shown != sid) {
+            if (reopenAttemptedFor != shown) {
+                reopenAttemptedFor = shown
+                core.openSession(shown)
+            }
+            return
+        }
         // A roam peer owns the chat: Ready here is the MAIN connection's — don't repoint the
         // on-screen session at it. AND: if the user is already explicitly looking at a
         // different Main chat (currentSession set to another id), a late/other Ready must
@@ -1875,6 +1894,7 @@ class ConnectionManager private constructor(context: Context) {
         // conversation" cold-start race. Adopt the wire's session only when nothing else is
         // shown (cold start) or it already matches what's on screen (reconnect resume).
         if (currentRoamPeer == null && (currentSession.value == null || currentSession.value == sid)) {
+            reopenAttemptedFor = null
             lastSessionId = sid
             store.lastSessionId = sid
             currentSession.value = sid
@@ -2616,6 +2636,8 @@ class ConnectionManager private constructor(context: Context) {
 
     @Synchronized
     private fun open(resume: String?, cwd: String? = null, kind: SessionKind? = null) {
+        // A fresh intent is a fresh chance to repair a superseded open (see onCoreReady).
+        reopenAttemptedFor = null
         // If a reset/create-assistant is pending but THIS open isn't the one that scheduled
         // it, abandon it so a later unrelated Ready can't complete a stale rename. (Explicit
         // newSession/openSession already clear the flag; this is the belt-and-suspenders.)
