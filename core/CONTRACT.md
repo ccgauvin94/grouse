@@ -167,7 +167,7 @@ channel; the legacy `on_transcript` / `on_stream` surface is deleted.
 ```rust
 pub enum ItemKind { User, Agent, Thought, Tool, ToolGroup, Chart, McpApp, Error }
 
-pub struct ToolCall { id, title, detail, output, status }
+pub struct ToolCall { id, title, detail, output, status, thought }
 
 pub struct Item {
     id: String,          // message_id (text) / tool_call_id, or a core "@n"
@@ -178,6 +178,8 @@ pub struct Item {
     status: String,      // tool lifecycle
     app_key: String,     // McpApp: "<extension>|<uri>"
     calls: Vec<ToolCall>,// ToolGroup children
+    thought: String,     // Tool/ToolGroup: the run's thinking, joined
+    summary: String,     // Tool/ToolGroup: the run's one-line label
 }
 
 pub enum TranscriptOp {
@@ -214,6 +216,41 @@ Rules:
 - `load_older(count)` walks the window back over the store's in-memory rows —
   no cache read and no wire call. A stock server has no history cursor, so once
   the store's start is reached `has_older` is `false`.
+- **The core echoes the prompt it sends.** goose does NOT send a
+  `user_message_chunk` for a prompt WE sent — the prompt next crosses the wire in
+  a later `session/load` replay (verified against a live serve). Without a local
+  copy the core's transcript, and the cache saved from it, holds no record of
+  what was asked, so a reopen that trusts the cache shows the replies with the
+  questions missing. `spawn_prompt` therefore appends a pure-text prompt to the
+  store as a `User` item. Attachments are the exception: `Item` has no image
+  field, so an attachment prompt stays the CLIENT's own local echo.
+- **A run IS the loop** (issue #13). Everything the model thought and did between
+  two visible messages is ONE `toolgroup` item, with the loop inside it: each
+  `ToolCall` carries the `thought` that immediately preceded IT (absorbed from the
+  `Thought` row, which is dropped with a `Remove`), so an expanded run reads
+  think → act → think → act. A thought therefore does NOT split a run — the model
+  thinking between two calls is the same loop, so a 20-call loop is one row, not
+  twenty. A **visible message** (the model's narration, or your next prompt) is
+  what ends a run. `Item.thought` is the run's thinking joined, and `Item.summary`
+  its label, derived from the first thinking it saw; both are empty when a run has
+  nothing to draw on and the client then falls back to the call titles. Thinking
+  that leads nowhere stays a `Thought` item of its own, and the turn's end seals
+  it so a later turn's call can never claim it.
+- **The label is rewritten by the model at the end of a turn.** `summary` as the
+  store sets it is provisional; after the turn the core asks the model for one
+  short line per run and replaces the label with an `Upsert`. The request runs on
+  a **hidden session** (`session/new` with `_meta.hidden` — goose's `hidden`
+  session type is not listable, so it can never appear as a chat), is emptied
+  after every use (`_goose/unstable/session/conversation/truncate`), and is one
+  inference per turn that never delays a reply. `set_run_summaries(bool)` /
+  `run_summaries()` toggle it (on by default); with it off, or wherever the model
+  does not answer, the provisional label stands.
+- **A replayed thought never becomes a row of its own.** goose re-sends the
+  reasoning trail on every `session/load`, but such a row would double the trail
+  and carries no stable id to reconcile by. The core holds it as the thinking of
+  the call that follows it (`replay_thought`), so a run's `summary`/`thought`
+  rebuild identically from a replay — the label is derived from the replayed rows,
+  never persisted against a `tool_call_id`.
 - **Roam peers** hold a rich item store of their own (`PeerStore`): live text,
   tool calls (kind and payload preserved), and staging/cache are all items, so
   a peer chart/app survives promotion and restart, and `rich_transcript()` /
@@ -293,7 +330,8 @@ Custom notifications (gated on `customNotifications`): `status_message` →
 > on `GrouseUnstableListener`: `on_recipes`, `on_projects`, `on_skills`,
 > `on_tools`, `on_extensions`, `on_session_extensions`, `on_supported_models`,
 > `on_providers`, `on_config_value`, `on_export`, `on_session_probe`,
-> `on_app_resource`, and `on_tool_result` (+ the error/compaction/message
+> `on_app_resource`, `on_tool_result`, and the dictation pair
+> `on_dictation_config` / `on_transcript` (+ the error/compaction/message
 > families). The fork wire shapes are intentionally NOT mirrored into typed
 > uniffi records here — the shim is slated for retirement (GDK absorbs each
 > feature), so the UI parses these JSON payloads directly and the shim is
@@ -304,6 +342,22 @@ Custom notifications (gated on `customNotifications`): `status_message` →
 > set — env vars count for secret keys), because goose's `configured` also marks
 > local endpoints and detected CLIs usable with nothing configured. A picker that
 > means "the user set this up" must require `configured && hasCredentials`.
+
+### Dictation (speech-to-text)
+
+`GrouseUnstable::dictation_config()` → `_goose/unstable/dictation/config`: the
+provider status map as raw JSON on `on_dictation_config` (same list-reply
+convention as the other shim families).
+
+`GrouseUnstable::dictation_transcribe(audio, mime_type, provider)` →
+`_goose/unstable/dictation/transcribe`: the decoded text on `on_transcript`.
+
+`audio` is base64; `mime_type` ∈ `audio/wav|webm|mp4|m4a|mpeg`; `provider` ∈
+`openai|groq|elevenlabs|local|model`. goose's dictation is **one-shot** — the
+clip is the whole utterance and there are no partials — and the call is a
+blocking round-trip (decode + provider), so a UI must call it off its UI thread.
+This is the STT half of the voice loop; the TTS half is client-side and is fed
+by the `on_speak` stream (§3.2, `docs/TRANSCRIPT_MODEL.md`).
 
 ---
 

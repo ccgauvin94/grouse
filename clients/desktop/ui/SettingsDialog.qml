@@ -27,6 +27,7 @@ Controls.Dialog {
         configuredOnlyBox.checked = Mgr.configuredProvidersOnly
         pushBox.checked = Push.enabled
         roamBox.checked = Mgr.roamEnabled
+        runSummariesBox.checked = Mgr.runSummaries
         dialog.testMessage = ""
     }
     onOpened: reload()
@@ -41,6 +42,7 @@ Controls.Dialog {
         Mgr.notificationsEnabled = notifyBox.checked
         Mgr.configuredProvidersOnly = configuredOnlyBox.checked
         Mgr.roamEnabled = roamBox.checked
+        Mgr.runSummaries = runSummariesBox.checked
     }
     onClosed: commit()
 
@@ -185,6 +187,14 @@ Controls.Dialog {
                 id: roamBox
                 text: qsTr("Show the Roam tab")
                 Kirigami.FormData.label: qsTr("Roam:")
+            }
+            // A run of tool calls is labelled with a short model-written line
+            // instead of a bare count. Costs one small inference per turn, on a
+            // hidden session that never appears as a chat.
+            Controls.CheckBox {
+                id: runSummariesBox
+                text: qsTr("Summarize tool runs with the model")
+                Kirigami.FormData.label: qsTr("Tool runs:")
             }
 
             Kirigami.Separator {

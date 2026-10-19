@@ -3,10 +3,8 @@
 package id.gauvin.grouse
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Base64
-import java.io.ByteArrayOutputStream
 
 /** Read a content Uri into a base64 image ContentBlock for a prompt. */
 fun readImage(context: Context, uri: Uri): ImageBlock? = runCatching {
@@ -36,10 +34,3 @@ private fun isProbablyText(bytes: ByteArray): Boolean {
     }
     return sample.isEmpty() || printable * 10 >= sample.size * 9
 }
-
-/** Encode a camera capture (bitmap) as a JPEG image block. */
-fun bitmapToImage(bitmap: Bitmap): ImageBlock = runCatching {
-    val out = ByteArrayOutputStream()
-    bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
-    ImageBlock("image/jpeg", Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP))
-}.getOrElse { ImageBlock("image/jpeg", "") }

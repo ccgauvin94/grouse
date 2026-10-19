@@ -48,6 +48,13 @@ import uniffi.grouse_roam_core.identityPublicKey
 /** The three drawer session categories. See ConnectionManager.sessionKind(). */
 enum class SessionKind { ASSISTANT, CHAT, CODE }
 
+/** The push-to-talk state machine, surfaced in the composer so the user can see it running. */
+enum class VoiceState { IDLE, LISTENING, TRANSCRIBING, SPEAKING }
+
+/** How long the model may stay silent in conversation mode before the loop says so out
+ *  loud. Warm turns answer in well under this; the filler is for the cold/slow ones. */
+private const val THINKING_FILLER_MS = 900L
+
 /**
  * Process-scoped owner of the grouse-core connection + chat state. A singleton (not a
  * ViewModel) so it survives navigation/config changes and can later be shared with a
@@ -145,6 +152,34 @@ class ConnectionManager private constructor(context: Context) {
     // emits onSessions before the first connect), so `main` MUST be initialized before
     // `core` — declared here, not with the other handlers below.
     private val main = Handler(Looper.getMainLooper())
+
+    // --- Voice: push-to-talk STT (goose dictation) + on-device TTS ------------
+    // The STT half is goose's dictation (the client records, the server transcribes
+    // via a configured provider); the TTS half is client-side, fed by the core's
+    // on_speak stream (CONTRACT §5). See docs/TRANSCRIPT_MODEL.md.
+    // Conversation mode's speaker. onIdle returns the loop to LISTENING when the last
+    // chunk finishes playing, so the state line follows the actual audio.
+    private val speaker = Speaker(appContext) {
+        main.post { if (voiceState.value == VoiceState.SPEAKING) voiceState.value = VoiceState.LISTENING }
+    }
+    /** True once the current turn's first real reply chunk has been spoken. */
+    private var replyStarted = false
+    /** Covers the wait before the model's first word: a silent loop reads as dead, and a
+     *  car is a bad place to wonder whether it heard you. Cancelled — and cut off — the
+     *  instant the reply speaks, so it never delays the real answer. */
+    private val thinkingFiller = Runnable {
+        if (voiceState.value == VoiceState.IDLE || replyStarted) return@Runnable
+        speaker.speak("Let me think for a moment.")
+    }
+    private var voiceLoop: VoiceLoop? = null
+    /** Conversation mode: IDLE (off), LISTENING, TRANSCRIBING, SPEAKING. */
+    val voiceState = mutableStateOf(VoiceState.IDLE)
+    /** Mic level 0..1 while listening — the "it is actually running" indicator. */
+    val voiceLevel = mutableStateOf(0f)
+    /** A one-line voice message for the composer ("didn't catch that", a failure). */
+    val voiceNotice = mutableStateOf<String?>(null)
+    /** Raw JSON of goose's dictation provider status (backs an eventual STT picker). */
+    val dictationProviders = mutableStateOf("")
     // The core owns the socket, reconnect/backoff, the transcript, and the caches. `unstable`
     // is the _goose/unstable/* shim (recipes, schedules, skills, extensions, tools, config).
     private val core = Core(object : CoreListener {
@@ -157,10 +192,23 @@ class ConnectionManager private constructor(context: Context) {
             main.post { usage.value = AcpEvent.Usage(used.toInt(), size.toInt(), cost, currency) }
         }
         override fun onRunEnded(stopReason: String) { main.post { onRunEnded(stopReason) } }
-        // Sanitized, sentence-sized speakable text (docs/TRANSCRIPT_MODEL.md).
-        // No playback yet — the on-device TTS engine lands with the voice
-        // workstream; accepted and dropped for now.
-        override fun onSpeak(text: String) {}
+        // Sanitized, sentence-sized speakable text (docs/TRANSCRIPT_MODEL.md) — one
+        // TTS utterance per chunk, played in order as it arrives. Speech belongs to
+        // conversation mode: with the mic off a reply is read, not heard.
+        override fun onSpeak(text: String) {
+            if (voiceState.value == VoiceState.IDLE) return
+            main.post {
+                if (!replyStarted) {
+                    replyStarted = true
+                    main.removeCallbacks(thinkingFiller)
+                    // Anything playing this early is the thinking filler: cut it so
+                    // the real answer starts now instead of queueing behind it.
+                    speaker.stop()
+                }
+                if (voiceState.value != VoiceState.SPEAKING) voiceState.value = VoiceState.SPEAKING
+                speaker.speak(text)
+            }
+        }
         override fun onConfig(options: List<CoreConfigOption>) { main.post { onCoreConfig(options) } }
         override fun onPermissionRequest(request: PermissionRequest) { main.post { onCorePermission(request) } }
         override fun onSessionTouched(sessionId: String, title: String, updatedAt: String) {
@@ -220,6 +268,12 @@ class ConnectionManager private constructor(context: Context) {
         // The core emits this only in response to a direct tools_call; the app issues none
         // since fetchProjectInfo was removed (the server requires Auto mode for those).
         override fun onToolResult(text: String, isError: Boolean) { }
+        override fun onDictationConfig(providers: String) {
+            main.post { this@ConnectionManager.dictationProviders.value = providers }
+        }
+        override fun onTranscript(text: String) {
+            main.post { this@ConnectionManager.onVoiceTranscript(text) }
+        }
         override fun onError(method: String, message: String) { main.post { onUnstableError(method, message) } }
     })
 
@@ -671,6 +725,9 @@ class ConnectionManager private constructor(context: Context) {
 
     fun setDynamicColor(v: Boolean) { store.dynamicColor = v; dynamicColor.value = v }
     fun setShowAllProviders(v: Boolean) { store.showAllProviders = v; showAllProviders.value = v }
+
+    /** Toggle the model-written run labels (issue #13): store it and push it to the core. */
+    fun setRunSummaries(v: Boolean) { store.runSummaries = v; core.setRunSummaries(v) }
 
     // The unstable shim's intents are SYNCHRONOUS RPCs (round-trip the server on the
     // calling thread) — unlike the core's own async intents. Calling them on the main
@@ -1381,10 +1438,17 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     fun send(text: String, images: List<ImageBlock> = emptyList(), files: List<FileBlock> = emptyList()) {
-        // Keep the images ON the message so the bubble renders the actual thumbnail(s), not a
-        // "[📎 N]" placeholder. (Live-session only — a session reloaded from the server replays
-        // text; images aren't reconstructed from the replayed content blocks.)
-        messages.add(ChatMessage("user", text, images, files)); busy.value = true
+        // The core echoes a PURE-TEXT prompt into the transcript itself: the wire carries
+        // no user_message_chunk for our own send, so the core keeps its own copy
+        // (otherwise the question is never recorded, and a reopen that trusts the cache
+        // shows the replies with the questions missing). Attachments are the exception —
+        // the item model has no image field — so the client keeps its own bubble for
+        // those, which is also what renders the thumbnail(s), not a "[📎 N]" placeholder.
+        // (A reloaded session replays text; images are never reconstructed.)
+        if (images.isNotEmpty() || files.isNotEmpty()) {
+            messages.add(ChatMessage("user", text, images, files))
+        }
+        busy.value = true
         lastMessageUsage.value = null   // stale stats from the previous turn shouldn't linger
         startService()   // keep the socket alive if the user backgrounds mid-turn
         dispatch(text, images, files)
@@ -1439,6 +1503,13 @@ class ConnectionManager private constructor(context: Context) {
         images.forEach { img -> blocks.add(PromptBlock.Image(img.mimeType, img.dataB64)) }
         files.forEach { f -> blocks.add(PromptBlock.Resource(f.name, f.mimeType, f.text, f.blobB64)) }
         if (blocks.isEmpty()) { busy.value = false; turnInFlight = false; turnInFlightSession = null; return }
+        speaker.stop()   // a new prompt supersedes any reply still being spoken
+        // Conversation mode: the model's first word is a second or more away, so arm
+        // the spoken filler to cover the silence. The reply cancels it; a turn that
+        // never speaks (an error) is caught by RunEnded.
+        replyStarted = false
+        main.removeCallbacks(thinkingFiller)
+        if (voiceState.value != VoiceState.IDLE) main.postDelayed(thinkingFiller, THINKING_FILLER_MS)
         core.sendPrompt(Prompt(blocks), expect?.let { SendExpect(it) })
     }
 
@@ -1564,11 +1635,95 @@ class ConnectionManager private constructor(context: Context) {
      *  business and survives. */
     fun cancel() {
         core.cancel()
+        main.removeCallbacks(thinkingFiller)
+        speaker.stop()   // Stop means stop — spoken replies included
         busy.value = false
         turnInFlight = false   // wire is free again; without this the queue never drains
         turnInFlightSession = null
         clearQueueFor(currentSession.value)   // Stop means stop: nothing queued here fires after
     }
+
+    // --- Conversation mode -----------------------------------------------------
+    //
+    // One tap arms it; from then on the loop owns the turn: the mic stays open, a
+    // local VAD cuts your speech into utterances on trailing silence, each one is
+    // transcribed through goose's dictation and sent as a prompt, the reply is
+    // spoken, and the mic is already listening again. Talking over the reply stops
+    // it (barge-in) and starts a new utterance.
+
+    /** The mic button: one tap in, one tap out. */
+    fun toggleConversation() {
+        if (voiceState.value == VoiceState.IDLE) startConversation() else stopConversation()
+    }
+
+    fun startConversation() {
+        if (voiceLoop != null) return
+        speaker.stop()
+        voiceNotice.value = null
+        val loop = VoiceLoop(
+            onUtterance = { wav -> onVoiceUtterance(wav) },
+            onLevel = { lvl -> main.post { voiceLevel.value = lvl } },
+            onBargeIn = { main.post { onVoiceBargeIn() } },
+            isSpeaking = { speaker.speaking },
+        )
+        if (!loop.start()) {
+            voiceNotice.value = "Couldn't start the microphone — check the permission"
+            return
+        }
+        voiceLoop = loop
+        voiceState.value = VoiceState.LISTENING
+    }
+
+    fun stopConversation() {
+        voiceLoop?.stop()
+        voiceLoop = null
+        main.removeCallbacks(thinkingFiller)
+        speaker.stop()
+        voiceState.value = VoiceState.IDLE
+        voiceLevel.value = 0f
+    }
+
+    /** A VAD-cut utterance: transcribe it. The text returns on `onTranscript`. */
+    private fun onVoiceUtterance(wav: ByteArray) {
+        if (voiceState.value == VoiceState.IDLE) return
+        voiceState.value = VoiceState.TRANSCRIBING
+        val b64 = android.util.Base64.encodeToString(wav, android.util.Base64.NO_WRAP)
+        // A wedged server must not leave the loop stuck out of listening.
+        main.postDelayed({
+            if (voiceState.value == VoiceState.TRANSCRIBING) {
+                voiceNotice.value = "Transcription timed out"
+                voiceState.value = VoiceState.LISTENING
+            }
+        }, 20_000)
+        io { unstable.dictationTranscribe(b64, "audio/wav", store.dictationProvider) }
+    }
+
+    /** A dictation transcript landed: send it as a prompt, exactly as if it were typed —
+     *  including the local echo, which is the ONLY way the utterance reaches the chat (the
+     *  live wire carries no user_message_chunk; it appears only in the next session/load
+     *  replay), and the same queue/steer rules a typed message gets. */
+    fun onVoiceTranscript(text: String) {
+        if (voiceState.value == VoiceState.IDLE) return   // mode was switched off mid-flight
+        val t = text.trim()
+        if (t.isEmpty()) {
+            voiceState.value = VoiceState.LISTENING
+            return
+        }
+        voiceNotice.value = null
+        voiceState.value = VoiceState.LISTENING   // the mic is open while the model thinks
+        send(t)
+    }
+
+    /** The user spoke over the reply: stop the audio and abort the turn. */
+    private fun onVoiceBargeIn() {
+        main.removeCallbacks(thinkingFiller)
+        speaker.stop()
+        if (busy.value) cancel()
+        if (voiceState.value == VoiceState.SPEAKING) voiceState.value = VoiceState.LISTENING
+    }
+
+    /** Ask goose which dictation providers are configured (backs an eventual STT picker). */
+    fun refreshDictation() { io { unstable.dictationConfig() } }
 
     /** Compact the conversation history to reclaim context (goose /compact command). */
     fun compact() {
@@ -1742,12 +1897,14 @@ class ConnectionManager private constructor(context: Context) {
             replayDoneTick.value++   // ChatScreen: new content -> snap to bottom
         }
         // Prompts still waiting in the queue aren't in the server history (they haven't
-        // been sent). Re-add their bubbles on top, in queue order, so the user's unsent
-        // messages don't vanish from the screen (the rebuild wiped them).
+        // been sent), so their bubbles must be re-added on top or they vanish from the
+        // screen (the rebuild wiped them). Only ATTACHMENT prompts: a pure-text one is
+        // echoed by the core when it finally goes out, and re-adding it here would show
+        // the same message twice.
         if (replayWiped) {
             replayWiped = false
             // Only THIS session's unsent prompts -- the transcript on screen is this chat's.
-            pendingSends.filter { it.sessionId == sid }
+            pendingSends.filter { it.sessionId == sid && (it.images.isNotEmpty() || it.files.isNotEmpty()) }
                 .forEach { messages.add(ChatMessage("user", it.text, it.images, it.files)) }
         }
         // Send ONE queued prompt (bubbles were already added when queued); RunEnded drains
@@ -1880,9 +2037,16 @@ class ConnectionManager private constructor(context: Context) {
 
     /** One rich item as UI rows (a ToolGroup is one row per call). */
     private fun itemRows(item: Item): List<Pair<String, ChatMessage>> = when (item.kind) {
-        ItemKind.TOOL_GROUP -> item.calls.map { c ->
+        // A group expands to one row per call (the chat UI re-groups them); the
+        // run's framing rides on the first row, which is the group's anchor.
+        ItemKind.TOOL_GROUP -> item.calls.mapIndexed { i, c ->
             c.id to ChatMessage("tool", c.title, detail = c.detail, toolCallId = c.id,
-                                status = c.status, output = c.output, id = appIdFor(c.id))
+                                status = c.status, output = c.output, id = appIdFor(c.id),
+                                summary = if (i == 0) item.summary else "",
+                                // Each call carries the thinking that preceded IT, so the
+                                // expanded run reads as think → act → think → act.
+                                stepThought = c.thought,
+                                stepId = item.id)
         }
         ItemKind.CHART -> listOf(item.id to ChatMessage("chart", item.detail, id = appIdFor(item.id)))
         ItemKind.MCP_APP -> listOf(item.id to ChatMessage(
@@ -1892,7 +2056,8 @@ class ConnectionManager private constructor(context: Context) {
         ).also { fetchAppTemplate(item.appKey) })
         ItemKind.TOOL -> listOf(item.id to ChatMessage(
             itemRole(item.kind), item.text, detail = item.detail, toolCallId = item.id,
-            status = item.status, output = item.output, id = appIdFor(item.id)))
+            status = item.status, output = item.output, id = appIdFor(item.id),
+            summary = item.summary, stepThought = item.thought, stepId = item.id))
         ItemKind.USER, ItemKind.THOUGHT, ItemKind.ERROR, ItemKind.AGENT ->
             listOf(item.id to ChatMessage(itemRole(item.kind), item.text, id = appIdFor(item.id)))
     }
@@ -1927,6 +2092,8 @@ class ConnectionManager private constructor(context: Context) {
     private fun onRunEnded(stopReason: String) {
         compacting.value = false
         turnInFlight = false
+        // The turn is over: a filler still waiting has nothing left to cover.
+        main.removeCallbacks(thinkingFiller)
         // The chat whose run just ended is the one whose queue is now releasable. Fall back to
         // the visible chat only when no owner was ever recorded; draining the global head into
         // whatever was on screen is exactly the cross-talk this replaces.
@@ -2152,6 +2319,12 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     private fun onUnstableError(method: String, message: String) {
+        // A dead dictation call must clear "Transcribing…" and say why, without
+        // dropping out of conversation mode (the loop is still listening).
+        if (method.startsWith("_goose/unstable/dictation")) {
+            voiceNotice.value = message
+            if (voiceState.value == VoiceState.TRANSCRIBING) voiceState.value = VoiceState.LISTENING
+        }
         // A failed sidebar/config refresh is not the conversation's problem: no
         // transcript bubble. But the flags those calls set MUST clear, or the failure
         // sticks: a dead tools/list left `discovering` armed and the NEXT tools reply
@@ -2428,6 +2601,9 @@ class ConnectionManager private constructor(context: Context) {
             liveModelsFetchedFor = null
             desiredApplied = false
         }
+        // The core defaults the model-written run labels ON and keeps the flag for the
+        // process; push the stored preference so an OFF setting survives a restart.
+        core.setRunSummaries(store.runSummaries)
         // Resuming means content is on its way — show "Loading…" from the tap,
         // not from whenever the core's first event happens to land. onCoreTranscript
         // turns it straight back off if a cached snapshot paints (content on screen

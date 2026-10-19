@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The one directory the camera app may write into: our cache, so a capture never
+     lands in shared storage and is dropped when the app is cleaned up. -->
+<paths>
+    <cache-path name="captures" path="captures/" />
+</paths>

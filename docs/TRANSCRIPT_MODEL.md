@@ -82,22 +82,79 @@ projection + `transcript()` getter, and the provisional-merge machinery
 An **Item** is the only unit the client knows. It is self-describing and
 round-trips through the cache.
 
-| kind | text | detail | output | app_key | calls |
-|---|---|---|---|---|---|
-| user / agent / thought / error | body | — | — | — | — |
-| tool | title | tool input | tool result | — | — |
-| toolgroup | — | — | — | — | children |
+| kind | text | detail | output | app_key | calls | thought / summary |
+|---|---|---|---|---|---|---|
+| user / agent / thought / error | body | — | — | — | — | — |
+| tool | title | tool input | tool result | — | — | the run's framing |
+| toolgroup | — | — | — | — | children | the run's framing |
 | chart | title | chart spec | — | — | — |
 | mcpapp | title | app input | — | `<ext>\|<uri>` | — |
 
 `id` is the server's `message_id` for text, or the `tool_call_id` for tool-ish
 rows. A `toolgroup`'s id is its first child's id.
 
+**The core echoes the prompt it sends.** goose does not send a
+`user_message_chunk` for a prompt *we* sent — the prompt next crosses the wire in
+a later `session/load` replay (verified against a live serve). So without a local
+copy the transcript, and the cache saved from it, holds no record of what was
+asked, and a reopen that trusts the cache shows the replies with the questions
+missing. `spawn_prompt` therefore appends a pure-text prompt to the store as a
+`user` item. Attachments are the exception — `Item` has no image field — so an
+attachment prompt stays the *client's* own local echo (which is also what renders
+the thumbnails; a replay reconstructs text only).
+
 A whitespace-only agent/thought message is **not** an item: goose emits the
 assistant's text as `"\n\n"` between tool calls, and the core drops a chunk that
 would open a bubble with only whitespace (whitespace folded into an already-open
 bubble is kept — that is real intra-message spacing). Cache paints and replays
 drop such rows too, so a stale cache cannot re-create an empty bubble.
+
+### Run summaries
+
+A run of consecutive tool calls currently collapses to a bare count — "11 tool
+calls" — which says nothing about what the agent was doing. Instead, **the run is
+the whole loop**: everything the model thought and did between two visible
+messages is ONE `toolgroup` item, and the loop lives inside it.
+
+- **`ToolCall.thought`** — the thinking that immediately preceded that call,
+  absorbed from the `Thought` item it used to render as (which is dropped with a
+  `Remove`). Held *per call*, so the expanded run reads in order: think → act →
+  think → act.
+- **`Item.thought`** — the run's thinking, joined (what the label was drawn from).
+- **`Item.summary`** — the run's one-line label, from the first thinking it saw
+  (first sentence, capped). Empty when the run has nothing to draw on, and the
+  client then falls back to the call titles.
+
+A thought therefore does **not** split a run: the model thinking between two calls
+is still the same loop, so a 20-call loop is one row, not twenty. What *does* end
+a run is a **visible message** — the model's own narration, or your next prompt —
+which is where one loop stops and the next begins. Thinking that leads nowhere
+(no call follows before the turn ends) stays a `Thought` item of its own, and the
+turn's end seals it so a later turn's call can never claim it.
+
+This is exactly the shape goose emits: a burst of thinking, a whitespace-only
+agent message (`"\n\n"`, dropped — see above), then the call, repeated. Because
+those agent chunks are empty they do not break the loop; a real narration does.
+
+**The rewrite.** The label above is *provisional*. At the end of a turn the core
+asks the model — on a **hidden session** (`_meta.hidden`, so goose's unlistable
+`hidden` session type keeps it out of `session/list` and it can never appear as a
+chat) — for one short line per run, and the answer replaces the label with an
+`Upsert`. It is one small inference per turn, sent after the turn is over (so it
+never delays a reply), skipped when the client turns it off
+(`set_run_summaries`), and skipped for a run with no thinking to condense.
+Wherever the model does not answer, the provisional label stands. The hidden
+session is emptied after every request
+(`_goose/unstable/session/conversation/truncate`) so its context cannot grow
+turn on turn.
+
+**Replay.** goose re-sends the reasoning trail on every `session/load`, but a
+standalone replayed thought would double the trail and carries no stable id to
+reconcile by (a merge cannot match it). It is therefore held only as the thinking
+of the call that follows it, never emitted as a row: a run's label is *derived
+from the replayed rows*, never persisted against a `tool_call_id` (which the
+server re-assigns on every replay). Both fields round-trip through the cache, so
+a reloaded chat keeps its labels and its loops.
 
 ### Ops
 
@@ -183,6 +240,7 @@ pub enum ItemKind { User, Agent, Thought, Tool, ToolGroup, Chart, McpApp, Error 
 pub struct ToolCall {
     pub id: String, pub title: String, pub detail: String,
     pub output: String, pub status: String,
+    pub thought: String,  // the thinking that preceded THIS call
 }
 
 pub struct Item {
@@ -194,6 +252,8 @@ pub struct Item {
     pub status: String,   // tool lifecycle
     pub app_key: String,  // mcpapp: "<ext>|<uri>"
     pub calls: Vec<ToolCall>, // toolgroup children
+    pub thought: String,  // tool/toolgroup: the thinking the run absorbed
+    pub summary: String,  // tool/toolgroup: the run's one-line label
 }
 
 pub enum TranscriptOp {

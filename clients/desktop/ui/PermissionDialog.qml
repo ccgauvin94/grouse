@@ -17,6 +17,7 @@ Controls.Dialog {
 
         Kirigami.Heading {
             text: dialog.appTitle || qsTr("Tool approval requested")
+            textFormat: Text.PlainText
             level: 3
             width: parent.width
             wrapMode: Text.Wrap
@@ -33,6 +34,7 @@ Controls.Dialog {
             model: Mgr.permissionOptions()
             delegate: Controls.Button {
                 text: modelData.name
+                textFormat: Text.PlainText
                 flat: true
                 width: parent.width
                 onClicked: {

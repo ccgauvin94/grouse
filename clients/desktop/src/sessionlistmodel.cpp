@@ -227,6 +227,25 @@ void SessionListModel::toggleSection(const QString &key)
     else
         m_collapsed.insert(key);
     rebuild();
+    emit collapsedChanged();
+}
+
+QStringList SessionListModel::collapsedSections() const
+{
+    QStringList keys;
+    keys.reserve(m_collapsed.size());
+    for (const QString &k : m_collapsed)
+        keys << k;
+    return keys;
+}
+
+void SessionListModel::setCollapsedSections(const QStringList &keys)
+{
+    const QSet<QString> next(keys.constBegin(), keys.constEnd());
+    if (next == m_collapsed)
+        return;
+    m_collapsed = next;
+    rebuild();
 }
 
 QString SessionListModel::cwdFor(const QString &sessionId) const

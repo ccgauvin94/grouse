@@ -38,6 +38,10 @@ struct ToolRow {
     app_key: String,
     /// `Chart` only: the chart spec, retained for the same reason.
     spec: String,
+    /// The thinking that immediately preceded THIS call, absorbed from the
+    /// `Thought` rows above it (issue #13). Held per call, not per run, so the
+    /// expanded run shows the loop in order: think, call, think, call.
+    thought: String,
 }
 
 impl ToolRow {
@@ -51,6 +55,7 @@ impl ToolRow {
             status: "in_progress".to_string(),
             app_key: String::new(),
             spec: String::new(),
+            thought: String::new(),
         }
     }
 
@@ -62,7 +67,40 @@ impl ToolRow {
             detail: self.detail.clone(),
             output: self.output.clone(),
             status: self.status.clone(),
+            thought: self.thought.clone(),
         }
+    }
+}
+
+/// A run's thinking, joined — what its label was drawn from, and what the
+/// summarizer is asked to condense.
+fn run_thought(calls: &[ToolRow]) -> String {
+    calls
+        .iter()
+        .map(|c| c.thought.trim())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A one-line label for a run, from the model's own words for it. The thinking
+/// is prose ("Let me check the existing todo…"), so take its first sentence and
+/// cap it — this is a chip label, not a paragraph. Provisional: the model
+/// rewrite replaces it at the end of the turn.
+fn summarize(thought: &str) -> String {
+    let line = thought
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .trim_start_matches(['#', '-', '*', '>', ' '])
+        .trim();
+    let end = line.find(['.', '!', '?']).map(|i| i + 1).unwrap_or(line.len());
+    let s = line[..end].trim_end_matches(['…', '.', '!', '?', ' ']).trim();
+    if s.chars().count() > 80 {
+        format!("{}…", s.chars().take(79).collect::<String>().trim_end())
+    } else {
+        s.to_string()
     }
 }
 
@@ -83,9 +121,11 @@ enum Bubble {
         thought: bool,
     },
     /// A lone plain tool call (collapses into a `ToolGroup` on the next call).
-    Tool(ToolRow),
-    /// Consecutive plain tool calls collapsed into one bubble.
-    ToolGroup(Vec<ToolRow>),
+    /// The `String` is the run's one-line label (issue #13); the thinking rides
+    /// on the row.
+    Tool(ToolRow, String),
+    /// Consecutive plain tool calls collapsed into one run, with the run's label.
+    ToolGroup(Vec<ToolRow>, String),
     /// `ToolCallKind::Chart` — always a standalone bubble (desktop "chart" row).
     Chart(ToolRow),
     /// `ToolCallKind::McpApp` — always a standalone bubble (desktop "mcpapp" row).
@@ -105,13 +145,13 @@ impl Bubble {
                 content: text.clone(),
                 output: String::new(),
             },
-            Bubble::Tool(r) => Message {
+            Bubble::Tool(r, _) => Message {
                 id: r.tool_call_id.clone(),
                 role: "tool".to_string(),
                 content: r.title.clone(),
                 output: String::new(),
             },
-            Bubble::ToolGroup(calls) => {
+            Bubble::ToolGroup(calls, _) => {
                 let first = &calls[0];
                 Message {
                     id: first.tool_call_id.clone(),
@@ -144,20 +184,26 @@ impl Bubble {
                 text: text.clone(),
                 ..empty_item()
             },
-            Bubble::Tool(r) => Item {
+            Bubble::Tool(r, label) => Item {
                 id: r.tool_call_id.clone(),
                 kind: ItemKind::Tool,
                 text: r.title.clone(),
                 detail: r.detail.clone(),
                 output: r.output.clone(),
                 status: r.status.clone(),
+                thought: r.thought.clone(),
+                summary: label.clone(),
                 ..empty_item()
             },
-            Bubble::ToolGroup(calls) => Item {
+            Bubble::ToolGroup(calls, label) => Item {
                 // Anchored on the first call (the legacy projection's rule too).
                 id: calls[0].tool_call_id.clone(),
                 kind: ItemKind::ToolGroup,
                 calls: calls.iter().map(ToolRow::to_call).collect(),
+                // The run's thinking, joined. Each child also carries its own
+                // (that is what puts the loop back in order when expanded).
+                thought: run_thought(calls),
+                summary: label.clone(),
                 ..empty_item()
             },
             Bubble::Chart(r) => Item {
@@ -167,6 +213,7 @@ impl Bubble {
                 // The spec, not the tool input: a chart row has no result.
                 detail: r.spec.clone(),
                 status: r.status.clone(),
+                thought: r.thought.clone(),
                 ..empty_item()
             },
             Bubble::McpApp(r) => Item {
@@ -176,6 +223,7 @@ impl Bubble {
                 detail: r.detail.clone(),
                 status: r.status.clone(),
                 app_key: r.app_key.clone(),
+                thought: r.thought.clone(),
                 ..empty_item()
             },
         }
@@ -193,6 +241,8 @@ fn empty_item() -> Item {
         status: String::new(),
         app_key: String::new(),
         calls: Vec::new(),
+        thought: String::new(),
+        summary: String::new(),
     }
 }
 
@@ -251,6 +301,12 @@ struct State {
     /// The assistant's visible text, sanitized and chunked into speakable
     /// sentences for a client's TTS engine (see [`crate::speak`]).
     speak: SpeakStream,
+    /// A REPLAYED thought, waiting for the tool call that absorbs it. A LIVE
+    /// thought needs no buffer — it is a bubble, and [`State::take_thoughts`]
+    /// reads it from there — but a replayed one must never be emitted as a row
+    /// of its own (it has no stable id to reconcile by, and would double the
+    /// trail), so it waits here until a call claims it.
+    pending_thought: Option<String>,
 }
 
 /// Hard cap on retained bubbles (S-RC-4). A transcript is inherently
@@ -270,10 +326,10 @@ pub(crate) const CLIENT_WINDOW: usize = 60;
 fn index_bubbles(map: &mut HashMap<String, usize>, bubbles: &[Bubble]) {
     for (i, b) in bubbles.iter().enumerate() {
         match b {
-            Bubble::Tool(r) | Bubble::Chart(r) | Bubble::McpApp(r) => {
+            Bubble::Tool(r, _) | Bubble::Chart(r) | Bubble::McpApp(r) => {
                 map.insert(r.tool_call_id.clone(), i);
             }
-            Bubble::ToolGroup(calls) => {
+            Bubble::ToolGroup(calls, _) => {
                 for call in calls {
                     map.insert(call.tool_call_id.clone(), i);
                 }
@@ -334,6 +390,62 @@ impl State {
         self.merge_anchored = false;
         self.merge_overlap = false;
         self.speak.reset();
+        self.pending_thought = None;
+    }
+
+    /// Close the turn: a trailing `Thought` bubble is FINISHED reasoning, not
+    /// something a later turn's tool call may claim (see [`State::take_thoughts`]).
+    /// The bubble's `thought` flag is the absorbability marker — its item kind
+    /// comes from its role, so clearing the flag keeps the row a `Thought`.
+    fn seal_thoughts(&mut self) {
+        self.pending_thought = None;
+        for b in self.bubbles.iter_mut().rev() {
+            match b {
+                Bubble::Text { thought, .. } if *thought => *thought = false,
+                _ => break,
+            }
+        }
+    }
+
+    /// Take the thinking a tool call is about to absorb: every `Thought` bubble
+    /// directly above it (the model thinks before it acts, and one burst
+    /// accumulates into one bubble — but it can think, narrate, then think again,
+    /// so take the whole contiguous run), plus a REPLAYED thought, which never
+    /// became a bubble (see [`TranscriptStore::replay_thought`]).
+    ///
+    /// The bubbles are popped and the client told to drop those rows, so a long
+    /// loop leaves no wall of "Thinking" blocks beside the run it explains — the
+    /// thinking ends up INSIDE the run, in order, next to the call it produced.
+    fn take_thoughts(&mut self, ops: &mut Vec<TranscriptOp>) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        loop {
+            let popped = match self.bubbles.last() {
+                Some(Bubble::Text { uid, thought: true, text, .. }) => {
+                    Some((uid.clone(), text.clone()))
+                }
+                _ => None,
+            };
+            let Some((uid, text)) = popped else { break };
+            self.bubbles.pop();
+            ops.push(TranscriptOp::Remove { id: uid });
+            parts.push(text);
+        }
+        if let Some(pending) = self.pending_thought.take() {
+            parts.push(pending);
+        }
+        if parts.is_empty() {
+            return String::new();
+        }
+        // Oldest first: the loop reads in the order the model worked.
+        parts.reverse();
+        self.emitted_from = self.emitted_from.min(self.bubbles.len());
+        // A popped bubble may have been the live stream anchor.
+        if self.stream_idx.map(|i| i >= self.bubbles.len()).unwrap_or(false) {
+            self.stream_idx = None;
+            self.stream_role.clear();
+            self.stream_msg_id.clear();
+        }
+        parts.join("\n")
     }
 
     /// Drop a provisional cache paint the moment real server content arrives
@@ -391,8 +503,8 @@ impl State {
 fn bubble_owns(b: &Bubble, id: &str) -> bool {
     match b {
         Bubble::Text { id: bid, .. } => !bid.is_empty() && bid == id,
-        Bubble::Tool(r) | Bubble::Chart(r) | Bubble::McpApp(r) => r.tool_call_id == id,
-        Bubble::ToolGroup(calls) => calls.iter().any(|r| r.tool_call_id == id),
+        Bubble::Tool(r, _) | Bubble::Chart(r) | Bubble::McpApp(r) => r.tool_call_id == id,
+        Bubble::ToolGroup(calls, _) => calls.iter().any(|r| r.tool_call_id == id),
     }
 }
 
@@ -400,8 +512,8 @@ fn bubble_owns(b: &Bubble, id: &str) -> bool {
 fn bubble_uid(b: &Bubble) -> String {
     match b {
         Bubble::Text { uid, .. } => uid.clone(),
-        Bubble::Tool(r) | Bubble::Chart(r) | Bubble::McpApp(r) => r.tool_call_id.clone(),
-        Bubble::ToolGroup(calls) => {
+        Bubble::Tool(r, _) | Bubble::Chart(r) | Bubble::McpApp(r) => r.tool_call_id.clone(),
+        Bubble::ToolGroup(calls, _) => {
             calls.first().map(|c| c.tool_call_id.clone()).unwrap_or_default()
         }
     }
@@ -417,6 +529,7 @@ fn call_to_row(c: &ToolCall) -> ToolRow {
         status: c.status.clone(),
         app_key: String::new(),
         spec: String::new(),
+        thought: c.thought.clone(),
     }
 }
 
@@ -449,20 +562,27 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
                 thought: matches!(it.kind, ItemKind::Thought),
             })
         }
-        ItemKind::Tool => Some(Bubble::Tool(ToolRow {
-            title: it.text.clone(),
-            detail: it.detail.clone(),
-            tool_call_id: it.id.clone(),
-            output: it.output.clone(),
-            status: it.status.clone(),
-            app_key: String::new(),
-            spec: String::new(),
-        })),
+        ItemKind::Tool => Some(Bubble::Tool(
+            ToolRow {
+                title: it.text.clone(),
+                detail: it.detail.clone(),
+                tool_call_id: it.id.clone(),
+                output: it.output.clone(),
+                status: it.status.clone(),
+                app_key: String::new(),
+                spec: String::new(),
+                thought: it.thought.clone(),
+            },
+            it.summary.clone(),
+        )),
         ItemKind::ToolGroup => {
             if it.calls.is_empty() {
                 None
             } else {
-                Some(Bubble::ToolGroup(it.calls.iter().map(call_to_row).collect()))
+                Some(Bubble::ToolGroup(
+                    it.calls.iter().map(call_to_row).collect(),
+                    it.summary.clone(),
+                ))
             }
         }
         ItemKind::Chart => Some(Bubble::Chart(ToolRow {
@@ -474,6 +594,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
             app_key: String::new(),
             // The item's `detail` is the spec for a chart.
             spec: it.detail.clone(),
+            thought: it.thought.clone(),
         })),
         ItemKind::McpApp => Some(Bubble::McpApp(ToolRow {
             title: it.text.clone(),
@@ -483,6 +604,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
             status: it.status.clone(),
             app_key: it.app_key.clone(),
             spec: String::new(),
+            thought: it.thought.clone(),
         })),
     }
 }
@@ -514,6 +636,7 @@ impl TranscriptStore {
                 has_older: false,
                 next_uid: 0,
                 speak: SpeakStream::new(),
+                pending_thought: None,
             }),
         }
     }
@@ -619,6 +742,18 @@ impl TranscriptStore {
         }
     }
 
+    /// A thought from a `session/load` replay. goose re-sends the reasoning trail
+    /// on every replay, but a standalone replayed row would double it and carries
+    /// no stable id to reconcile by — so it is held here (never emitted as a row)
+    /// until the next tool call absorbs it as that call's thinking. A run's
+    /// label therefore rebuilds identically from a replay.
+    pub fn replay_thought(&self, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        self.state.lock().pending_thought = Some(text.to_string());
+    }
+
     /// A tool call. Consecutive `Plain` calls collapse into one toolgroup
     /// bubble (first call appended, later calls update it); `Chart`/`McpApp`
     /// calls always append their own standalone bubble (desktop
@@ -634,6 +769,11 @@ impl TranscriptStore {
             if st.supersede_provisional() {
                 ops.push(TranscriptOp::Reset { session_id: st.session_id.clone() });
             }
+            // The thinking this call absorbs: every `Thought` row directly above
+            // it (plus a replayed one). Folding it in here, per call, is what
+            // makes a 20-call loop read as ONE run with the loop inside it,
+            // instead of a wall of "Thinking" blocks beside per-call chips.
+            let thought = st.take_thoughts(&mut ops);
             // A tool call ends the text stream: finalize the pending bubble.
             if let Some(prev) = st.stream_idx {
                 if let Some(b) = st.bubbles.get(prev) {
@@ -641,6 +781,7 @@ impl TranscriptStore {
                 }
             }
             let mut row = ToolRow::new(title, detail, tool_call_id);
+            row.thought = thought;
             // Retain the payload the flat Message projection drops, so the cache
             // round-trips a chart's spec and an app's key.
             match &kind {
@@ -652,32 +793,44 @@ impl TranscriptStore {
             let row_id = row.tool_call_id.clone();
             let plain = matches!(&kind, ToolCallKind::Plain);
             let last = st.bubbles.last().map(|b| match b {
-                Bubble::Tool(_) => LastRow::Tool,
-                Bubble::ToolGroup(_) => LastRow::Group,
+                Bubble::Tool(..) => LastRow::Tool,
+                Bubble::ToolGroup(..) => LastRow::Group,
                 _ => LastRow::Other,
             });
+            // A thought does NOT open a run: the run is the whole LOOP, so a call
+            // joins the run above it even though the model thought in between
+            // (issue #13). The run's label comes from the first thinking it saw,
+            // and the model rewrite replaces it at the end of the turn.
+            let label = summarize(&row.thought);
 
             let idx = if plain {
                 match last {
                     Some(LastRow::Tool) => {
-                        // Convert the lone first call into a group.
+                        // Convert the lone first call into a run, keeping the
+                        // label of the call that opened it.
                         let idx = st.bubbles.len() - 1;
                         let first = match &st.bubbles[idx] {
-                            Bubble::Tool(r) => r.clone(),
+                            Bubble::Tool(r, existing) => {
+                                let label = if existing.is_empty() { label } else { existing.clone() };
+                                (r.clone(), label)
+                            }
                             _ => unreachable!("last row is Tool"),
                         };
-                        st.bubbles[idx] = Bubble::ToolGroup(vec![first, row]);
+                        st.bubbles[idx] = Bubble::ToolGroup(vec![first.0, row], first.1);
                         idx
                     }
                     Some(LastRow::Group) => {
                         let idx = st.bubbles.len() - 1;
-                        if let Bubble::ToolGroup(calls) = &mut st.bubbles[idx] {
+                        if let Bubble::ToolGroup(calls, existing) = &mut st.bubbles[idx] {
+                            if existing.is_empty() && !label.is_empty() {
+                                *existing = label.clone();
+                            }
                             calls.push(row);
                         }
                         idx
                     }
                     _ => {
-                        st.bubbles.push(Bubble::Tool(row));
+                        st.bubbles.push(Bubble::Tool(row, label));
                         st.bubbles.len() - 1
                     }
                 }
@@ -723,7 +876,7 @@ impl TranscriptStore {
             let idx = st.tool_by_id.get(id).copied().filter(|i| *i < st.bubbles.len());
             if let Some(idx) = idx {
                 let found = match &mut st.bubbles[idx] {
-                    Bubble::Tool(r) if r.tool_call_id == id => {
+                    Bubble::Tool(r, _) if r.tool_call_id == id => {
                         r.status = status.to_string();
                         apply_output(&mut r.output, output, live);
                         true
@@ -732,7 +885,7 @@ impl TranscriptStore {
                         r.status = status.to_string();
                         true
                     }
-                    Bubble::ToolGroup(calls) => {
+                    Bubble::ToolGroup(calls, _) => {
                         let mut found = false;
                         for call in calls.iter_mut() {
                             if call.tool_call_id == id {
@@ -752,7 +905,7 @@ impl TranscriptStore {
                     // app status) is an authoritative Upsert.
                     let standalone_live = live
                         && !output.is_empty()
-                        && matches!(&st.bubbles[idx], Bubble::Tool(r) if r.tool_call_id == id);
+                        && matches!(&st.bubbles[idx], Bubble::Tool(r, _) if r.tool_call_id == id);
                     ops.push(if standalone_live {
                         TranscriptOp::AppendOutput { id: id.to_string(), chunk: output.to_string() }
                     } else {
@@ -788,19 +941,22 @@ impl TranscriptStore {
                 return;
             }
             let row = match &st.bubbles[idx] {
-                Bubble::Tool(r) if r.tool_call_id == id => Some(r.clone()),
-                Bubble::ToolGroup(calls) => calls.iter().find(|c| c.tool_call_id == id).cloned(),
+                Bubble::Tool(r, _) if r.tool_call_id == id => Some(r.clone()),
+                Bubble::ToolGroup(calls, _) => {
+                    calls.iter().find(|c| c.tool_call_id == id).cloned()
+                }
                 _ => None, // already an app/chart bubble, or a stale index
             };
             let Some(mut row) = row else { return };
             // The app's resource key travels on the row so the cache keeps it.
             row.app_key = format!("{extension}|{uri}");
 
-            if matches!(&st.bubbles[idx], Bubble::Tool(_)) {
+            if matches!(&st.bubbles[idx], Bubble::Tool(..)) {
                 st.bubbles[idx] = Bubble::McpApp(row);
                 vec![TranscriptOp::Upsert { item: st.bubbles[idx].item() }]
             } else {
-                let Bubble::ToolGroup(calls) = &st.bubbles[idx] else { unreachable!() };
+                let Bubble::ToolGroup(calls, label) = &st.bubbles[idx] else { unreachable!() };
+                let label = label.clone();
                 let pos = calls.iter().position(|c| c.tool_call_id == id).unwrap();
                 let mut calls = calls.clone();
                 calls.remove(pos);
@@ -808,7 +964,7 @@ impl TranscriptStore {
                     st.bubbles[idx] = Bubble::McpApp(row);
                     vec![TranscriptOp::Upsert { item: st.bubbles[idx].item() }]
                 } else {
-                    st.bubbles[idx] = Bubble::ToolGroup(calls);
+                    st.bubbles[idx] = Bubble::ToolGroup(calls, label);
                     st.bubbles.insert(idx + 1, Bubble::McpApp(row));
                     for j in st.tool_by_id.values_mut() {
                         if *j > idx {
@@ -840,6 +996,8 @@ impl TranscriptStore {
     pub fn run_ended(&self, stop_reason: &str) {
         let (op, speak) = {
             let mut st = self.state.lock();
+            // Thinking that led nowhere must not frame the NEXT turn's tools.
+            st.seal_thoughts();
             let op = st
                 .stream_idx
                 .and_then(|idx| st.bubbles.get(idx))
@@ -942,6 +1100,67 @@ impl TranscriptStore {
             .iter()
             .find(|b| matches!(b, Bubble::Text { uid, .. } if uid == id))
             .map(Bubble::item)
+    }
+
+    /// The run (the tool / toolgroup ITEM) a tool call landed in, as its item
+    /// id. A toolgroup is anchored on its first call, so a call in the middle of
+    /// a run answers with the run's own id — which is what the summarizer
+    /// addresses a run by.
+    pub fn run_id_for(&self, tool_call_id: &str) -> Option<String> {
+        let st = self.state.lock();
+        let b = st.bubbles.get(*st.tool_by_id.get(tool_call_id)?)?;
+        match b {
+            Bubble::Tool(r, _) => Some(r.tool_call_id.clone()),
+            Bubble::ToolGroup(calls, _) => calls.first().map(|c| c.tool_call_id.clone()),
+            _ => None,
+        }
+    }
+
+    /// A run's framing for the summarizer: the thinking it absorbed and its call
+    /// titles. `None` when the run has no thinking — there is nothing to condense,
+    /// so the inference would be spent for nothing.
+    pub fn run_framing(&self, id: &str) -> Option<(String, Vec<String>)> {
+        let st = self.state.lock();
+        let b = st.bubbles.get(*st.tool_by_id.get(id)?)?;
+        let calls: &[ToolRow] = match b {
+            Bubble::Tool(r, _) => std::slice::from_ref(r),
+            Bubble::ToolGroup(calls, _) => calls,
+            _ => return None,
+        };
+        let thought = run_thought(calls);
+        if thought.trim().is_empty() {
+            return None;
+        }
+        Some((
+            thought,
+            calls.iter().map(|c| c.title.clone()).collect(),
+        ))
+    }
+
+    /// Replace a run's label with the model's rewrite, emitting the `Upsert` the
+    /// client needs. The absorbed thinking is untouched: it is still what the
+    /// expanded run shows.
+    pub fn set_run_summary(&self, id: &str, summary: &str) {
+        let op = {
+            let mut st = self.state.lock();
+            let Some(&idx) = st.tool_by_id.get(id) else { return };
+            {
+                let Some(b) = st.bubbles.get_mut(idx) else { return };
+                let label = match b {
+                    Bubble::Tool(_, label) => label,
+                    Bubble::ToolGroup(_, label) => label,
+                    _ => return,
+                };
+                if *label == summary {
+                    return;
+                }
+                *label = summary.to_string();
+            }
+            Some(st.bubbles[idx].item())
+        };
+        if let Some(item) = op {
+            self.emit_ops(vec![TranscriptOp::Upsert { item }]);
+        }
     }
 
     /// Drop a provisional cache paint (see [`State::provisional`]) — the spine
@@ -1189,15 +1408,19 @@ impl TranscriptStore {
                 if m.role == "tool" {
                     let idx = st.bubbles.len();
                     st.tool_by_id.insert(m.id.clone(), idx);
-                    st.bubbles.push(Bubble::Tool(ToolRow {
-                        title: m.content.clone(),
-                        detail: String::new(),
-                        tool_call_id: m.id.clone(),
-                        output: String::new(),
-                        status: String::new(),
-                        app_key: String::new(),
-                        spec: String::new(),
-                    }));
+                    st.bubbles.push(Bubble::Tool(
+                        ToolRow {
+                            title: m.content.clone(),
+                            detail: String::new(),
+                            tool_call_id: m.id.clone(),
+                            output: String::new(),
+                            status: String::new(),
+                            app_key: String::new(),
+                            spec: String::new(),
+                            thought: String::new(),
+                        },
+                        String::new(),
+                    ));
                 } else {
                     let uid = if m.id.is_empty() { st.new_uid() } else { m.id.clone() };
                     st.bubbles.push(Bubble::Text {
@@ -1256,7 +1479,7 @@ mod tests {
         PermissionRequest, ProjectSummary, SessionSummary, ToolCall, ToolCallKind,
     };
 
-    use super::{Bubble, TranscriptStore};
+    use super::{summarize, Bubble, TranscriptStore};
 
     /// Records the item ops the store fans out, as plain strings so assertions
     /// stay readable.
@@ -1374,7 +1597,7 @@ mod tests {
         );
         let rows = store.rows_for_test();
         match &rows[0] {
-            Bubble::ToolGroup(calls) => assert_eq!(calls.len(), 3),
+            Bubble::ToolGroup(calls, _) => assert_eq!(calls.len(), 3),
             other => panic!("expected a toolgroup, got {other:?}"),
         }
 
@@ -1417,7 +1640,7 @@ mod tests {
         store2.tool_call("B", "y", "g2", ToolCallKind::Plain);
         store2.tool_app("g2", "ui://b", "extb");
         match &store2.rows_for_test()[0] {
-            Bubble::ToolGroup(calls) => assert_eq!(calls.len(), 1),
+            Bubble::ToolGroup(calls, _) => assert_eq!(calls.len(), 1),
             other => panic!("group should shrink to one call, got {other:?}"),
         }
         store2.tool_update("g2", "completed", "out", false);
@@ -1458,7 +1681,7 @@ mod tests {
         // Live output accumulates.
         let rows = store.rows_for_test();
         let out = match &rows[0] {
-            Bubble::Tool(r) => &r.output,
+            Bubble::Tool(r, _) => &r.output,
             other => panic!("expected a tool bubble, got {other:?}"),
         };
         assert_eq!(out, "line1\nline2\n");
@@ -1467,7 +1690,7 @@ mod tests {
         store.tool_update("t1", "completed", "final output", false);
         let rows = store.rows_for_test();
         match &rows[0] {
-            Bubble::Tool(r) => {
+            Bubble::Tool(r, _) => {
                 assert_eq!(r.output, "final output");
                 assert_eq!(r.status, "completed");
             }
@@ -1478,7 +1701,7 @@ mod tests {
         store.tool_update("t1", "completed", "", false);
         let rows = store.rows_for_test();
         match &rows[0] {
-            Bubble::Tool(r) => assert_eq!(r.output, "final output"),
+            Bubble::Tool(r, _) => assert_eq!(r.output, "final output"),
             other => panic!("expected a tool bubble, got {other:?}"),
         }
 
@@ -1488,7 +1711,7 @@ mod tests {
         store.tool_update("t2", "completed", "done", false);
         let rows = store.rows_for_test();
         match &rows[0] {
-            Bubble::ToolGroup(calls) => {
+            Bubble::ToolGroup(calls, _) => {
                 assert_eq!(calls[1].output, "done");
                 assert_eq!(calls[1].status, "completed");
             }
@@ -1787,6 +2010,8 @@ mod tests {
             status: String::new(),
             app_key: String::new(),
             calls: Vec::new(),
+            thought: String::new(),
+            summary: String::new(),
         }
     }
 
@@ -1997,6 +2222,8 @@ mod tests {
                 status: "completed".into(),
                 app_key: String::new(),
                 calls: Vec::new(),
+                thought: String::new(),
+                summary: String::new(),
             },
             Item {
                 id: "a1".into(),
@@ -2007,6 +2234,8 @@ mod tests {
                 status: "completed".into(),
                 app_key: "ext|ui://d".into(),
                 calls: Vec::new(),
+                thought: String::new(),
+                summary: String::new(),
             },
             Item {
                 id: "t1".into(),
@@ -2023,15 +2252,17 @@ mod tests {
                         detail: "ls".into(),
                         output: "x".into(),
                         status: "completed".into(),
-                    },
+                    thought: String::new(),                    },
                     ToolCall {
                         id: "t2".into(),
                         title: "Read".into(),
                         detail: "f".into(),
                         output: "y".into(),
                         status: "completed".into(),
-                    },
+                    thought: String::new(),                    },
                 ],
+                thought: String::new(),
+                summary: String::new(),
             },
         ];
         store.replace_rich(items.clone(), false);
@@ -2125,5 +2356,228 @@ mod tests {
         let (l, _i_evts) = listener();
         let store = TranscriptStore::new(l);
         store.append_chunk("thought", "hmm", None, true);
+    }
+
+    // -----------------------------------------------------------------------
+    // Run summaries (issue #13): the thinking that precedes a tool run frames it
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn summarize_takes_the_first_sentence_and_caps_it() {
+        assert_eq!(summarize("Let me check the calendar. Then reply."), "Let me check the calendar");
+        assert_eq!(summarize("\n\n  ## Look it up  \nmore"), "Look it up");
+        assert_eq!(summarize("   "), "");
+        assert_eq!(summarize("No terminator here"), "No terminator here");
+        let capped = summarize(&"x".repeat(200));
+        assert_eq!(capped.chars().count(), 80);
+        assert!(capped.ends_with('…'));
+    }
+
+    #[test]
+    fn a_thought_frames_the_run_it_precedes() {
+        let (l, i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        i_evts.lock().clear();
+
+        store.append_chunk("thought", "Let me check the calendar. Then reply.", None, true);
+        store.tool_call("Bash", "date", "t1", ToolCallKind::Plain);
+
+        // The thinking is absorbed: its own row is folded away and the run carries
+        // it, so a long loop reads as one run with the reasoning inside it.
+        let ops = i_evts.lock().clone();
+        assert!(ops.iter().any(|o| o.starts_with("remove:@1")), "thought row dropped: {ops:?}");
+        assert_eq!(msgs(&store).len(), 1, "only the tool row survives");
+        match &store.rows_for_test()[0] {
+            Bubble::Tool(r, label) => {
+                assert_eq!(label, "Let me check the calendar");
+                assert!(r.thought.starts_with("Let me check the calendar"));
+            }
+            other => panic!("expected a tool bubble, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_thought_that_leads_nowhere_stays_its_own_block() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("thought", "Hmm, let me think about this.", None, true);
+        store.append_chunk("agent", "Here is the answer.", Some("m1"), false);
+
+        // Nothing followed the thinking, so it is not folded into anything: it
+        // stays a collapsed "Thinking" block above the reply.
+        assert_eq!(
+            msgs(&store),
+            vec![
+                // The flat projection reports no id for a synthetic row (the
+                // rich item carries `@1`); the desktop keys history on it.
+                ("thought".to_string(), String::new(), "Hmm, let me think about this.".to_string()),
+                ("agent".to_string(), "m1".to_string(), "Here is the answer.".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_whole_loop_is_one_run() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("thought", "First, look it up.", None, true);
+        store.tool_call("Search", "q1", "t1", ToolCallKind::Plain);
+        store.append_chunk("thought", "Now read the page.", None, true);
+        store.tool_call("Read", "u1", "t2", ToolCallKind::Plain);
+
+        // A thought does NOT split the run: the model thinking between calls is
+        // still the SAME loop, so this is one run with the loop inside it — not
+        // one chip per call (issue #13).
+        let rows = store.rows_for_test();
+        assert_eq!(rows.len(), 1, "one run, got {rows:?}");
+        match &rows[0] {
+            Bubble::ToolGroup(calls, label) => {
+                assert_eq!(calls.len(), 2);
+                // The label comes from the first thinking the run saw...
+                assert_eq!(label, "First, look it up");
+                // ...and each call keeps its own, so the run expands in order.
+                assert_eq!(calls[0].thought, "First, look it up.");
+                assert_eq!(calls[1].thought, "Now read the page.");
+            }
+            other => panic!("expected one run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_visible_message_ends_the_run() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("thought", "Look it up.", None, true);
+        store.tool_call("Search", "q", "t1", ToolCallKind::Plain);
+        // The model narrates. That narration is a VISIBLE message, and it is where
+        // one loop ends and the next begins — thinking does not hop across it.
+        store.append_chunk("agent", "Let me check the results.", Some("m1"), false);
+        store.tool_call("Read", "u", "t2", ToolCallKind::Plain);
+
+        let rows = store.rows_for_test();
+        assert_eq!(rows.len(), 3, "run, narration, run: {rows:?}");
+        assert!(matches!(rows[0], Bubble::Tool(..)), "first loop");
+        assert!(matches!(rows[1], Bubble::Text { .. }), "narration stays visible");
+        match &rows[2] {
+            Bubble::Tool(r, label) => {
+                assert_eq!(r.thought, "", "the narration is a boundary");
+                assert_eq!(label, "");
+            }
+            other => panic!("expected a second run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn calls_without_a_thought_still_collapse_into_one_run() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.tool_call("Bash", "ls", "t1", ToolCallKind::Plain);
+        store.tool_call("Bash", "pwd", "t2", ToolCallKind::Plain);
+        match &store.rows_for_test()[0] {
+            Bubble::ToolGroup(calls, label) => {
+                assert_eq!(calls.len(), 2);
+                assert_eq!(label, "", "no framing to draw on");
+            }
+            other => panic!("expected a toolgroup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_replayed_thought_frames_the_run_without_a_row_of_its_own() {
+        // goose re-sends the reasoning trail on every `session/load`, but a
+        // replayed thought has no stable id to reconcile by and must not render
+        // as its own row. It is held only as the framing for the run it precedes,
+        // so a run's label rebuilds identically from a replay.
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.replay_thought("Look up the charging issue.");
+        store.tool_call("Search", "q", "t1", ToolCallKind::Plain);
+        store.tool_call("Read", "u", "t2", ToolCallKind::Plain);
+
+        let rows = store.rows_for_test();
+        assert_eq!(rows.len(), 1, "no standalone thought row: {rows:?}");
+        match &rows[0] {
+            Bubble::ToolGroup(calls, label) => {
+                assert_eq!(calls.len(), 2);
+                assert_eq!(label, "Look up the charging issue");
+            }
+            other => panic!("expected a toolgroup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_run_answers_with_its_own_id_and_framing() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("thought", "Look it up. Then read the page.", None, true);
+        store.tool_call("Search", "q", "t1", ToolCallKind::Plain);
+        store.tool_call("Read", "u", "t2", ToolCallKind::Plain);
+
+        // A run is anchored on its first call, so either call answers with it.
+        assert_eq!(store.run_id_for("t1").as_deref(), Some("t1"));
+        assert_eq!(store.run_id_for("t2").as_deref(), Some("t1"));
+        let (thought, tools) = store.run_framing("t2").expect("framing");
+        assert_eq!(thought, "Look it up. Then read the page.");
+        assert_eq!(tools, vec!["Search".to_string(), "Read".to_string()]);
+    }
+
+    #[test]
+    fn a_run_without_thinking_has_no_framing() {
+        // Nothing to condense: the inference would be spent for nothing.
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.tool_call("Bash", "ls", "t1", ToolCallKind::Plain);
+        assert!(store.run_framing("t1").is_none());
+    }
+
+    #[test]
+    fn the_model_rewrite_replaces_the_label_and_upserts() {
+        let (l, i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("thought", "Let me check the calendar.", None, true);
+        store.tool_call("Bash", "date", "t1", ToolCallKind::Plain);
+        i_evts.lock().clear();
+
+        store.set_run_summary("t1", "Check the calendar");
+        match &store.rows_for_test()[0] {
+            Bubble::Tool(r, label) => {
+                assert_eq!(label, "Check the calendar");
+                // The absorbed thinking is untouched: the run still shows it.
+                assert_eq!(r.thought, "Let me check the calendar.");
+            }
+            other => panic!("expected a tool bubble, got {other:?}"),
+        }
+        let ops = i_evts.lock().clone();
+        assert_eq!(ops.len(), 1, "{ops:?}");
+        assert!(ops[0].starts_with("upsert:t1"), "{ops:?}");
+
+        // Idempotent: the same label does not re-announce.
+        i_evts.lock().clear();
+        store.set_run_summary("t1", "Check the calendar");
+        assert!(i_evts.lock().is_empty());
+    }
+
+    #[test]
+    fn thinking_that_leads_nowhere_does_not_frame_the_next_turn() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("thought", "Just musing.", None, true);
+        store.run_ended("end_turn");
+        store.tool_call("Bash", "ls", "t1", ToolCallKind::Plain);
+
+        // The turn is over: its trailing thinking is a finished block, not
+        // something a later turn's tool call may claim.
+        let rows = store.rows_for_test();
+        match rows.last() {
+            Some(Bubble::Tool(r, label)) => {
+                assert_eq!(label, "", "a finished turn's thinking must not label a later run");
+                assert_eq!(r.thought, "");
+            }
+            other => panic!("expected a tool bubble last, got {other:?}"),
+        }
+        assert!(
+            rows.iter().any(|b| matches!(b, Bubble::Text { role, .. } if role == "thought")),
+            "and it is still on screen as its own block: {rows:?}"
+        );
     }
 }

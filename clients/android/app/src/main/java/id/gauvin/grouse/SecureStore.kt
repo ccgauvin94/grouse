@@ -115,10 +115,12 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("dynamic_color", true)
         set(v) = cfg.edit().putBoolean("dynamic_color", v).apply()
 
-    /** Gate app open / stored-key reconnect behind a biometric (or device-credential) prompt.
-     *  Default OFF — the transport is tailnet-only and the lock is friction most users don't
-     *  want; opt in from Settings › Security. Only takes effect when the device actually has an
-     *  authenticator enrolled (Biometric.available). */
+    /** Gate app open / stored-key reconnect behind a biometric prompt bound to an
+     *  AndroidKeyStore key (CryptoObject). Default OFF — the transport is tailnet-only and the
+     *  lock is friction most users don't want; opt in from Settings › Security. Only takes
+     *  effect when the device actually has a strong biometric enrolled (Biometric.available);
+     *  a PIN/pattern-only device is not gated, because a CryptoObject cannot be combined with
+     *  device-credential auth. */
     var biometricLock: Boolean
         get() = cfg.getBoolean("biometric_lock", false)
         set(v) = cfg.edit().putBoolean("biometric_lock", v).apply()
@@ -222,6 +224,19 @@ class SecureStore(context: Context) {
     // works offline. These opt into the box's own models instead -- Kokoro sounds far better than
     // the stock Android voice, and Whisper transcribes better than on-device recognition. LocalAI
     // publishes 0.0.0.0:8080 so the phone reaches it directly; goose is not in this path.
+
+    /** Whether each run of tool calls gets a short model-written label at the end of a turn
+     *  (issue #13). One small inference per turn, on a hidden session; off keeps the label the
+     *  run's own thinking gives. On by default. */
+    var runSummaries: Boolean
+        get() = cfg.getBoolean("run_summaries", true)
+        set(v) = cfg.edit().putBoolean("run_summaries", v).apply()
+
+    /** Which goose dictation provider push-to-talk transcribes with. "openai" is the
+     *  provider repointed at the box's own STT server; the enum is goose's, not ours. */
+    var dictationProvider: String
+        get() = cfg.getString("dictation_provider", "openai") ?: "openai"
+        set(v) = cfg.edit().putString("dictation_provider", v).apply()
     /** Models the user has confirmed DO accept images, by sending anyway past the warning.
      *  isLikelyVisionModel() is a substring heuristic over model names and cannot be right in
      *  general -- it missed Qwen3.6-35B-A3B, which is vision-capable via its mmproj, and every
@@ -320,5 +335,19 @@ class SecureStore(context: Context) {
     var roamEnabled: Boolean
         get() = cfg.getBoolean("roam_enabled", false)
         set(v) = cfg.edit().putBoolean("roam_enabled", v).apply()
+
+    // --- Sidebar ------------------------------------------------------------
+    // The drawer's expansion is the user's own state, remembered across launches so the
+    // sidebar opens the way it was left instead of resetting to "everything expanded".
+
+    /** The PROJECTS section's collapsed state — the master toggle above the project cards. */
+    var projectsCollapsed: Boolean
+        get() = cfg.getBoolean("projects_collapsed", false)
+        set(v) = cfg.edit().putBoolean("projects_collapsed", v).apply()
+
+    /** Project ids whose cards the user expanded in the drawer. */
+    var expandedProjects: Set<String>
+        get() = cfg.getStringSet("expanded_projects", emptySet()) ?: emptySet()
+        set(v) = cfg.edit().putStringSet("expanded_projects", v).apply()
 
 }

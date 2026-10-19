@@ -117,10 +117,13 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
     query: String = "", onClearQuery: () -> Unit = {}) {
     var showNewProject by remember { mutableStateOf(false) }
     var actionsFor by remember { mutableStateOf<SessionInfo?>(null) }
-    var expanded by rememberSaveable { mutableStateOf(listOf<String>()) }
+    // Expansion is the user's own state, kept in the store so the drawer opens the way it
+    // was left instead of resetting every launch. rememberSaveable carries it through
+    // config changes; the store carries it across process death.
+    var expanded by rememberSaveable { mutableStateOf(cm.store.expandedProjects.toList()) }
     // Entire PROJECTS section collapsed/expanded (master toggle), independent of
     // per-project `expanded`.
-    var projectsCollapsed by rememberSaveable { mutableStateOf(false) }
+    var projectsCollapsed by rememberSaveable { mutableStateOf(cm.store.projectsCollapsed) }
 
     actionsFor?.let { s -> SessionActionsDialog(cm, s) { actionsFor = null } }
     if (showNewProject) NewProjectDialog(
@@ -234,7 +237,10 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
       // Section chrome disappears under a query; only matches and the empty state remain.
       if (!nothingFound) {
         item {
-          Row(Modifier.fillMaxWidth().clickable { projectsCollapsed = !projectsCollapsed }
+          Row(Modifier.fillMaxWidth().clickable {
+                  projectsCollapsed = !projectsCollapsed
+                  cm.store.projectsCollapsed = projectsCollapsed
+              }
               .padding(start = 10.dp, top = 10.dp, bottom = 2.dp),
               verticalAlignment = Alignment.CenterVertically) {
               Text(stringResource(R.string.projects), style = MaterialTheme.typography.labelMedium,
@@ -271,7 +277,10 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
                             Row(Modifier.fillMaxWidth()
                                 .clip(RoundedCornerShape(14.dp))
                                 .combinedClickable(
-                                    onClick = { expanded = if (open) expanded - proj.id else expanded + proj.id },
+                                    onClick = {
+                                        expanded = if (open) expanded - proj.id else expanded + proj.id
+                                        cm.store.expandedProjects = expanded.toSet()
+                                    },
                                     onLongClick = { onOpenProject(p) })
                                 .padding(start = 14.dp, end = 4.dp).padding(vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically) {

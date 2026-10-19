@@ -234,6 +234,17 @@ data class ChatMessage(
     // row until it lands, and forever if it never does.
     val appKey: String = "",
     val appHtml: String = "",
+    // Tool-run framing (issue #13): the model's thinking that preceded a run of
+    // tool calls, absorbed by the core so the run reads as one meaningful step
+    // instead of a bare call count, and the one-line label drawn from it. On a
+    // group, only the FIRST call's row carries them (the core anchors the group
+    // on its first call and this client re-groups the rows at render time).
+    val summary: String = "",
+    val stepThought: String = "",
+    // The core's step (run) this tool row belongs to — the toolgroup item's id,
+    // shared by all its calls. The chat list re-groups rows at render time, and
+    // grouping by role alone would merge the core's steps back into one wall.
+    val stepId: String = "",
 )
 
 /** The UI role a rich transcript item renders as (docs/TRANSCRIPT_MODEL.md). A

@@ -40,8 +40,10 @@ void TstMessageListModel::roleNamesAreExplicit()
     QVERIFY2(names.key("chartData") != 0, "chartData role");
     QVERIFY2(names.key("toolCallId") != 0, "toolCallId role");
     QVERIFY2(names.key("calls") != 0, "calls role");
+    QVERIFY2(names.key("summary") != 0, "summary role");
+    QVERIFY2(names.key("stepThought") != 0, "stepThought role");
     QVERIFY2(names.key("expanded") != 0, "expanded role");
-    QCOMPARE(names.size(), 17);
+    QCOMPARE(names.size(), 19);
 }
 
 void TstMessageListModel::appendGrowsAndSignals()

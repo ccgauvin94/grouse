@@ -39,6 +39,7 @@ pub mod notify;
 pub mod roam;
 pub mod speak;
 pub mod spine;
+mod summarize;
 pub mod transcript;
 pub mod transport;
 pub mod unstable;
@@ -162,6 +163,11 @@ pub struct ToolCall {
     pub detail: String,
     pub output: String,
     pub status: String,
+    /// The thinking that immediately preceded THIS call, absorbed from the
+    /// `Thought` rows above it (issue #13). Per call, not per run, so an expanded
+    /// run shows the loop in order: think, call, think, call.
+    #[serde(default)]
+    pub thought: String,
 }
 
 /// A rich transcript item — the unit the new clients render
@@ -186,6 +192,16 @@ pub struct Item {
     pub app_key: String,
     /// `ItemKind::ToolGroup` only: the collapsed calls.
     pub calls: Vec<ToolCall>,
+    /// `ItemKind::ToolGroup` / `Tool` only: the model's own framing of the step —
+    /// the thinking that preceded the run, absorbed so a 20-call loop reads as a
+    /// few meaningful rows instead of a wall of chips. Shown when the chip opens.
+    #[serde(default)]
+    pub thought: String,
+    /// `ItemKind::ToolGroup` / `Tool` only: a one-line label for the step. The
+    /// core fills it from the run's thinking; empty means the client falls back
+    /// to the call titles.
+    #[serde(default)]
+    pub summary: String,
 }
 
 /// One transcript mutation carried by `CoreListener::on_item`
@@ -375,6 +391,13 @@ pub trait GrouseUnstableListener: Send + Sync {
     fn on_providers(&self, providers: String);
     fn on_session_probe(&self, session_id: String, updated_at: String, message_count: i64);
     fn on_tool_result(&self, text: String, is_error: bool);
+    /// Dictation provider status (`_goose/unstable/dictation/config`): which
+    /// speech-to-text providers the server has configured, as a raw JSON map of
+    /// provider name → status entry (the shim's list-reply convention).
+    fn on_dictation_config(&self, providers: String);
+    /// A dictation transcript (`_goose/unstable/dictation/transcribe`): the text
+    /// decoded from the audio clip the UI sent; empty when the clip was silent.
+    fn on_transcript(&self, text: String);
     fn on_error(&self, method: String, message: String);
 }
 
@@ -439,6 +462,10 @@ struct CoreState {
     resync_ticks: i32,
     /// Last probed (updatedAt, messageCount) — the "did it move?" comparison.
     sync_stamp: Option<(String, i64)>,
+    /// Ask the model to rewrite each tool run's label at the end of a turn
+    /// (issue #13). On by default; costs one short inference per turn, spent on
+    /// a hidden session so it never appears in a chat.
+    run_summaries: bool,
 }
 
 /// How to paint a session's cached transcript and which wire load it owes. See
@@ -506,7 +533,7 @@ impl Core {
                 listener,
                 store,
                 cache: Arc::new(CacheStore::new(cache_dir)),
-                state: Mutex::new(CoreState::default()),
+                state: Mutex::new(CoreState { run_summaries: true, ..Default::default() }),
                 conn: Mutex::new(None),
                 conn_task: Mutex::new(None),
                 peers: Mutex::new(Vec::new()),
@@ -1168,6 +1195,18 @@ impl Core {
     pub fn config(&self) -> Vec<ConfigOption> {
         self.inner.state.lock().config.clone()
     }
+
+    /// Rewrite each tool run's label with a short model-written line at the end
+    /// of a turn (issue #13). On by default; the request runs on a hidden
+    /// session after the turn, so it never delays a reply or appears in a chat.
+    pub fn set_run_summaries(&self, on: bool) {
+        self.inner.state.lock().run_summaries = on;
+    }
+
+    /// Whether the model rewrites run labels (issue #13).
+    pub fn run_summaries(&self) -> bool {
+        self.inner.state.lock().run_summaries
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1566,6 +1605,24 @@ impl Core {
         let params = prompt_params(&prompt, &session_id);
         let core = self.clone();
         let store = self.inner.store.clone();
+        // Local echo of the prompt. goose does NOT send a `user_message_chunk`
+        // for a prompt WE sent (verified against a live serve): the prompt next
+        // crosses the wire in a later `session/load` replay. Without this the
+        // core's transcript — and the cache it saves — holds no record of what
+        // was asked, so a reopen that trusts the cache shows the replies with the
+        // questions missing. Only pure text can be echoed: `Item` has no image
+        // field, so an attachment prompt stays the client's own local echo.
+        //
+        // The echo lands here, at the send, so exactly one row appears per prompt
+        // that reaches the wire. A prompt parked in a client's own queue (the wire
+        // was down) therefore shows up when it is finally sent, not when it was
+        // typed — the clients no longer echo it themselves, which is what keeps
+        // the two from doubling.
+        if let Some(text) = pure_text(&prompt) {
+            store.append_chunk("user", &text, None, false);
+        }
+        // A new turn's runs are a fresh worklist for the summarizer.
+        conn.clear_turn_runs();
         {
             let mut state = self.inner.state.lock();
             state.prompting = true;
@@ -1593,8 +1650,88 @@ impl Core {
                     store.run_ended("error");
                 }
             }
+            // The turn is over: rewrite its tool runs' labels (issue #13). After
+            // the reply, on a hidden session, so it costs the user no latency.
+            core.spawn_run_summaries(conn.clone());
             core.on_prompt_done(result.is_ok());
         });
+    }
+
+    /// Ask the model for a one-line label per tool run of the turn that just
+    /// ended. The provisional label (the run's own thinking, condensed by the
+    /// store) stands wherever the model does not answer, so this is pure
+    /// improvement — and it runs after the turn, so it never delays a reply.
+    fn spawn_run_summaries(&self, conn: Arc<crate::spine::Conn>) {
+        if !self.inner.state.lock().run_summaries {
+            conn.clear_turn_runs();
+            return;
+        }
+        let runs: Vec<(String, String, Vec<String>)> = conn
+            .take_turn_runs()
+            .into_iter()
+            .filter_map(|id| {
+                conn.store().run_framing(&id).map(|(thought, tools)| (id, thought, tools))
+            })
+            .collect();
+        if runs.is_empty() {
+            return;
+        }
+        let core = self.clone();
+        crate::roam::runtime().spawn(async move {
+            core.rewrite_run_labels(conn, runs).await;
+        });
+    }
+
+    async fn rewrite_run_labels(
+        &self,
+        conn: Arc<crate::spine::Conn>,
+        runs: Vec<(String, String, Vec<String>)>,
+    ) {
+        let Some(session_id) = self.summarizer_session(&conn).await else {
+            return;
+        };
+        let body = crate::summarize::prompt(
+            &runs.iter().map(|(_, t, tools)| (t.clone(), tools.clone())).collect::<Vec<_>>(),
+        );
+        let params = prompt_params(
+            &Prompt { blocks: vec![PromptBlock::Text { text: body }] },
+            &session_id,
+        );
+        let sent = conn.rpc_async("session/prompt", params).await.is_ok();
+        let text = conn.take_summary_reply();
+        // Empty the hidden session: its context must not grow turn on turn.
+        let _ = conn
+            .rpc_async(
+                "_goose/unstable/session/conversation/truncate",
+                json!({ "sessionId": session_id, "truncateFrom": 0 }),
+            )
+            .await;
+        if !sent {
+            return;
+        }
+        for (n, label) in crate::summarize::parse_labels(&text) {
+            if let Some((id, _, _)) = runs.get(n - 1) {
+                conn.store().set_run_summary(id, &label);
+            }
+        }
+    }
+
+    /// The hidden summarizer session, created on first use. `_meta.hidden` keeps
+    /// it out of `session/list` (goose's `hidden` session type is not listable),
+    /// so it can never show up as a chat in any client.
+    async fn summarizer_session(&self, conn: &Arc<crate::spine::Conn>) -> Option<String> {
+        if let Some(id) = conn.summarizer_session() {
+            return Some(id);
+        }
+        let params = json!({
+            "cwd": conn.cwd(),
+            "mcpServers": [],
+            "_meta": { "hidden": true },
+        });
+        let reply = conn.rpc_async("session/new", params).await.ok()?;
+        let id = reply.get("sessionId").and_then(Value::as_str)?.to_string();
+        conn.set_summarizer_session(id.clone());
+        Some(id)
     }
 
     fn spawn_set_config(&self, conn: Arc<crate::spine::Conn>, session_id: String, config_id: String, value: String) {
@@ -2086,6 +2223,27 @@ impl Core {
 // Wire-format helpers
 // ---------------------------------------------------------------------------
 
+/// The prompt's text when it is PURE text — the only shape the item model can
+/// carry (see the local echo in `spawn_prompt`). `None` when it has an image or
+/// resource block: those stay the client's own local echo, because `Item` has no
+/// image field to represent them.
+fn pure_text(prompt: &Prompt) -> Option<String> {
+    let mut text = String::new();
+    for block in &prompt.blocks {
+        match block {
+            PromptBlock::Text { text: t } => {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(t);
+            }
+            _ => return None,
+        }
+    }
+    let text = text.trim();
+    if text.is_empty() { None } else { Some(text.to_string()) }
+}
+
 /// Turn `Prompt` content blocks into the ACP `session/prompt` params
 /// (desktop sendPrompt: text/image/resource shapes pass through verbatim).
 fn prompt_params(prompt: &Prompt, session_id: &str) -> Value {
@@ -2322,6 +2480,8 @@ mod forwarder_tests {
             status: String::new(),
             app_key: String::new(),
             calls: Vec::new(),
+            thought: String::new(),
+            summary: String::new(),
         }];
 
         let core = Core::new(

@@ -3,6 +3,7 @@
 #include <QAbstractListModel>
 #include <QHash>
 #include <QSet>
+#include <QStringList>
 #include <QVariantList>
 
 /**
@@ -51,6 +52,17 @@ public:
 
     /** Collapse/expand the group with the given section key ("proj:x", "chats", "peer:y"). */
     Q_INVOKABLE void toggleSection(const QString &key);
+
+    /** Every section key the user has collapsed — the sidebar state Manager
+     *  persists across launches so the tree opens the way it was left. */
+    QStringList collapsedSections() const;
+    /** Restore a previously persisted set of collapsed keys (no signal — this is
+     *  the restore, not a user change). */
+    void setCollapsedSections(const QStringList &keys);
+
+signals:
+    /** The collapsed set changed, so the owner can persist it. */
+    void collapsedChanged();
 
 private:
     void rebuild();

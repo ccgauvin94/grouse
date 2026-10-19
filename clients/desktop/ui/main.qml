@@ -212,6 +212,7 @@ Controls.ApplicationWindow {
                                 }
                                 Controls.Label {
                                     text: title
+                                    textFormat: Text.PlainText
                                     font.weight: Font.DemiBold
                                     // Project names read bigger than session text.
                                     font.pixelSize: root.sidebarTextSize + 2
@@ -328,6 +329,7 @@ Controls.ApplicationWindow {
                             spacing: 3
                             Controls.Label {
                                 text: title
+                                textFormat: Text.PlainText
                                 width: parent.width
                                 elide: Text.ElideRight
                                 font.weight: del.sel ? Font.DemiBold : Font.Normal
@@ -338,6 +340,7 @@ Controls.ApplicationWindow {
                                 // Header rows lack the snippet/messagecount roles — guard
                                 // so the binding doesn't throw while the column is hidden.
                                 text: snippet && snippet.length > 0 ? snippet : (messagecount || 0) + " msg"
+                                textFormat: Text.PlainText
                                 width: parent.width
                                 elide: Text.ElideRight
                                 color: Kirigami.Theme.disabledTextColor
@@ -517,6 +520,7 @@ Controls.ApplicationWindow {
                                         }
                                         Controls.Label {
                                             text: label
+                                            textFormat: Text.PlainText
                                             font.weight: Font.DemiBold
                                             font.pixelSize: root.sidebarTextSize
                                             Layout.fillWidth: true
@@ -532,6 +536,7 @@ Controls.ApplicationWindow {
                                         }
                                         Controls.Label {
                                             text: status
+                                            textFormat: Text.PlainText
                                             color: Kirigami.Theme.disabledTextColor
                                             font.pixelSize: root.sidebarSmallTextSize
                                             Layout.maximumWidth: 130
@@ -605,6 +610,7 @@ Controls.ApplicationWindow {
                                         spacing: 2
                                         Controls.Label {
                                             text: title
+                                            textFormat: Text.PlainText
                                             width: parent.width
                                             elide: Text.ElideRight
                                             font.pixelSize: root.sidebarTextSize
@@ -613,6 +619,7 @@ Controls.ApplicationWindow {
                                         Controls.Label {
                                             text: snippet && snippet.length > 0 ? snippet
                                                 : (messageCount || 0) + " msg"
+                                            textFormat: Text.PlainText
                                             width: parent.width
                                             elide: Text.ElideRight
                                             color: Kirigami.Theme.disabledTextColor
@@ -876,6 +883,7 @@ Controls.ApplicationWindow {
                         }
                         Controls.Label {
                             text: tdel.gName
+                            textFormat: Text.PlainText
                             elide: Text.ElideRight
                             Layout.fillWidth: true
                             font.bold: true
@@ -912,6 +920,7 @@ Controls.ApplicationWindow {
                                 }
                                 Controls.Label {
                                     text: modelData.name
+                                    textFormat: Text.PlainText
                                     elide: Text.ElideRight
                                     Layout.fillWidth: true
                                 }
