@@ -331,7 +331,7 @@ Separate `GrouseUnstable` interface, clearly marked for retirement. Methods
 - `session_project(session_id, project_id?)` — move between projects
 - `list_tools(session_id)`, `session_extensions_list/add/remove(session_id, …)` — `remove` takes the extension's KEY (session list `extensionKey` = global list `configKey`), not the display name: goose renamed the wire param and rejects `name` now. UIs must match rows by key, since `extension.name` can differ from the key ("Extension Manager" vs `extensionmanager`)
 - `list_global_extensions()`, `set_extension_enabled(config_key, enabled)`, `add_extension(…)` — `set_extension_enabled` takes the global list's `configKey` (goose renamed the wire param from `name` and rejects it now)
-- `sources_list/create/delete/update` (projects + skills) — `create` is `sourcesCreate(type, name, description, content, projectId?)` where `projectId` scopes a skill to a project (`global` if null; projects themselves are always global)
+- `sources_list/create/delete/update` (projects + skills) — `sourcesCreate(type, name, description, content)` creates a GLOBAL source; project-scoped skills were removed (goose is migrating sources CRUD out of the server — grouse#5)
 - `config_read(key)`, `config_upsert(key, value)`, `supported_models(provider)`
 - `resources_read(session_id, uri, extension)` → app html
 - `recipes_list/schedule/save/delete`, `schedules_list/pause/unpause/run_now/delete/update`
