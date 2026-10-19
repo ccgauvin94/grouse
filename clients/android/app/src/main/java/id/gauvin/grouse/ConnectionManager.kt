@@ -1291,7 +1291,7 @@ class ConnectionManager private constructor(context: Context) {
         // no project, phantom success.
         pendingCreateError = null
         io {
-            unstable.sourcesCreate("project", name, "", "", null)
+            unstable.sourcesCreate("project", name, "", "")
             // on_error rides main.post too (CoreListener posts to main) and was
             // enqueued before this call returned, so reading on main is FIFO-
             // deterministic: the capture, then this.
