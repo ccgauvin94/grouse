@@ -1603,6 +1603,14 @@ impl Core {
         let Some(conn) = self.inner.conn.lock().clone() else {
             return Err((prompt, expect));
         };
+        // Not ready = mid-connect or mid-reconnect. Spawning the RPC on this
+        // conn would fail into a dead socket and the turn would be lost (the
+        // "typed while Loading…0, then re-typed" defect, grouse#1). Queue it:
+        // Ready flushes pending in order and the prompt reaches the resumed
+        // session.
+        if !conn.is_ready() {
+            return Err((prompt, expect));
+        }
         let Some(sid) = conn.active_session_id() else {
             return Err((prompt, expect));
         };
@@ -1630,6 +1638,11 @@ impl Core {
         let Some(conn) = self.inner.conn.lock().clone() else {
             return Err((config_id, value));
         };
+        // Same rule as prompts: a config change during the reconnect window
+        // cannot reach the wire, so queue it for Ready instead of dropping it.
+        if !conn.is_ready() {
+            return Err((config_id, value));
+        }
         let Some(sid) = conn.active_session_id() else {
             return Err((config_id, value));
         };

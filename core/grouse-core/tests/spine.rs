@@ -1519,6 +1519,86 @@ fn reconnect_replaces_the_live_transcript_not_appends() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
+/// grouse#1: a prompt typed while the socket is down (the reconnect window)
+/// must be QUEUED, not fired into the dead wire — and must reach the resumed
+/// session once Ready arrives, with no substitute session created.
+#[test]
+fn prompt_while_reconnecting_is_queued_and_flushed_after_ready() {
+    let _guard = CACHE_TEST_LOCK.lock();
+    let data_dir =
+        std::env::temp_dir().join(format!("grouse-reattach-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        data_dir.to_string_lossy().to_string(),
+    );
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+        initial_project_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
+    core.open_session("sess-r".to_string());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "open ready");
+    let sessions_before = server.frames_for("session/new").len();
+
+    // Drop the wire and WAIT until the core has observed it: sending before the
+    // drop is noticed would hit the still-live socket, which is a different
+    // (and valid) path — this test is about the window after.
+    server.drop_connections();
+    wait_for(
+        &ev_rx,
+        |ev| matches!(ev, Ev::Status(ConnectionStatus::Error { .. })),
+        "the drop is observed",
+    );
+
+    core.send_prompt(
+        Prompt { blocks: vec![PromptBlock::Text { text: "typed-while-down".to_string() }] },
+        Some(SendExpect { session_id: "sess-r".to_string() }),
+    );
+    // Nothing may go out on the dead wire: the prompt is queued instead.
+    assert_eq!(
+        server.frames_for("session/prompt").len(),
+        0,
+        "a prompt in the reconnect window must not be fired at the dead socket"
+    );
+
+    // Ready flushes it to the RESUMED session (no fresh session/new).
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while server.frames_for("session/prompt").is_empty() {
+        assert!(Instant::now() < deadline, "the queued prompt never reached the resumed wire");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let frame = server.frames_for("session/prompt")[0].clone();
+    assert_eq!(frame.pointer("/params/sessionId").and_then(Value::as_str), Some("sess-r"));
+    assert_eq!(
+        frame.pointer("/params/prompt/0/text").and_then(Value::as_str),
+        Some("typed-while-down")
+    );
+    assert_eq!(
+        server.frames_for("session/new").len(),
+        sessions_before,
+        "the reconnect must resume the session, not substitute a new one"
+    );
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 1: the rich item transcript paints the cache, then the replay replaces
 // it — with the row's KIND intact (a paint is lossless now).
