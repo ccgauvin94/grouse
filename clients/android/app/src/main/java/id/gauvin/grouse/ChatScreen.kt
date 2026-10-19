@@ -25,6 +25,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.StrokeCap
@@ -338,9 +339,10 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
 
     if (showComposer) {
         ComposerSheet(cm,
-            // Close the sheet first: the camera is a whole other app, and returning to
-            // a sheet that covers the input hides the thumbnail you just took.
-            onCamera = { showComposer = false; launchCamera() },
+            // Every tile closes the sheet first (ComposerSheet does it): each
+            // opens a whole other app, and a sheet that covers the input hides
+            // the thumbnail/attachment the user just picked (grouse#17).
+            onCamera = { launchCamera() },
             onPhotos = { picker.launch(PickVisualMediaRequest(
                 ActivityResultContracts.PickVisualMedia.ImageOnly)) },
             onFiles = { filePicker.launch(arrayOf("*/*")) },
@@ -591,15 +593,31 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center
                         ) {
-                            Icon(Icons.Filled.Psychology, contentDescription = null,
-                                modifier = Modifier.size(56.dp), tint = MaterialTheme.colorScheme.primary)
-                            Spacer(Modifier.height(12.dp))
-                            Text(if (cm.online.value) "Ask Grouse anything" else "Connecting…",
-                                style = MaterialTheme.typography.titleMedium)
-                            Spacer(Modifier.height(4.dp))
-                            Text(stringResource(R.string.wired_up_hint),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.outline, textAlign = TextAlign.Center)
+                            // A chat that FAILED to open must say so: the core
+                            // substitutes no session (grouse#19), so the copy
+                            // below would read as "this chat is empty" over a
+                            // thread whose contents never loaded.
+                            val failure = cm.openFailed.value
+                            if (failure != null) {
+                                Icon(Icons.Filled.ErrorOutline, contentDescription = null,
+                                    modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.error)
+                                Spacer(Modifier.height(12.dp))
+                                Text(stringResource(R.string.open_failed_title),
+                                    style = MaterialTheme.typography.titleMedium)
+                                Spacer(Modifier.height(4.dp))
+                                Text(failure, style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.outline, textAlign = TextAlign.Center)
+                            } else {
+                                Icon(Icons.Filled.Psychology, contentDescription = null,
+                                    modifier = Modifier.size(56.dp), tint = MaterialTheme.colorScheme.primary)
+                                Spacer(Modifier.height(12.dp))
+                                Text(if (cm.online.value) "Ask Grouse anything" else "Connecting…",
+                                    style = MaterialTheme.typography.titleMedium)
+                                Spacer(Modifier.height(4.dp))
+                                Text(stringResource(R.string.wired_up_hint),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.outline, textAlign = TextAlign.Center)
+                            }
                         }
                     } else {
                         // reverseLayout: index 0 renders at the BOTTOM. Typing indicator first (very
@@ -663,6 +681,7 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         else scope.launch { listState.animateScrollToItem(0) }
                     },
                     onTail = { scope.launch { listState.animateScrollToItem(0) } },
+                    onReloadFromStart = { cm.reloadCurrentFromStart() },
                 )
 
                 // Slash-command autocomplete (goose's available commands).
@@ -957,12 +976,15 @@ private fun BoxScope.PinnedDock(
  *  reload of the chat from the server (a dropped turn can leave the local view
  *  partial, and nothing else re-fetches it); a short drag or tap just tails to
  *  the newest message. A dedicated handle rather than a list-edge swipe: the
- *  transcript is reverseLayout, where an upward drag is ordinary scroll-back. */
+ *  transcript is reverseLayout, where an upward drag is ordinary scroll-back.
+ *  Holding it replays the chat from the start (grouse#18's FULL reload). */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ReloadHandle(
     hint: String?,
     onPullUp: () -> Unit,
     onTail: () -> Unit,
+    onReloadFromStart: () -> Unit,
 ) {
     val density = LocalDensity.current
     val threshold = with(density) { 44.dp.toPx() }
@@ -985,7 +1007,13 @@ private fun ReloadHandle(
                     },
                 )
             }
-            .clickable { onTail() },
+            .combinedClickable(
+                onClick = { onTail() },
+                // The heavier reload (grouse#18's FULL: replay from the first
+                // prompt) stays behind a deliberate hold so the everyday pull-up
+                // remains the quick one.
+                onLongClick = { onReloadFromStart() },
+            ),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(
@@ -1227,7 +1255,15 @@ private fun ComposerSheet(
                     Surface(
                         shape = RoundedCornerShape(14.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant,
-                        modifier = Modifier.weight(1f).padding(end = 8.dp).clickable { action() },
+                        // Dismiss BEFORE the action: the tile opens the system
+                        // picker/camera, and coming back to a sheet that covers
+                        // the input hides the attachment just picked. Done here
+                        // (not per call site) so a new tile cannot reintroduce
+                        // the leak (grouse#17).
+                        modifier = Modifier.weight(1f).padding(end = 8.dp).clickable {
+                            onDismiss()
+                            action()
+                        },
                     ) {
                         Column(
                             Modifier.fillMaxWidth().padding(vertical = 14.dp),

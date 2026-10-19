@@ -29,17 +29,30 @@ transport.rs   WsTransport (DONE) — ConnectTo<Client>, X-Secret-Key + WebPKI-v
 spine.rs       the live connection: owns the SDK Client + WsTransport, the
                initialize → new/resume handshake, the notification dispatch
                (SessionNotification → seams below), and server-request answers.
-transcript.rs  TranscriptStore: chunk accumulation → bubbles; emits
-               on_stream + on_transcript (legacy) AND on_item (the rich item
-               stream, docs/TRANSCRIPT_MODEL.md). Also owns the window cursor
-               (oldest_id / has_older) and the rich snapshot/rebuild. NO network.
+transcript.rs  TranscriptStore: chunk accumulation → bubbles; emits on_item
+               (the rich item stream, docs/TRANSCRIPT_MODEL.md), on_speak
+               (speak.rs), and on_run_ended. Also owns the window cursor
+               (oldest_id / has_older), the rich snapshot/rebuild, and the
+               replay hold (hold_emissions/release_held_replay: a load's rows
+               land silently, then ONE windowed paint). NO network.
 cache.rs       CacheStore: per-session RICH item list + tools, freshness check,
                under the UI-supplied CacheDir. TRANSCRIPT_CACHE_VERSION gates
                the format; a pre-rich file reads absent. NO network.
-unstable.rs    the GrouseUnstable impl (the 35 shim methods) — each is
+unstable.rs    the GrouseUnstable impl (the `_goose/unstable/*` shim) — each is
                conn.rpc + a reply handler (re-list pattern). Owns its own file;
                if uniffi rejects cross-file impl blocks, export via a single
                #[uniffi::export] re-export and note it.
+notify.rs      push envelope + show/don't-show policy, shared by every client
+               (CONTRACT §5.5, docs/NOTIFICATIONS.md). Pure: no network, no OS.
+speak.rs       SpeakStream: raw assistant markdown → sanitized, sentence-sized
+               TTS chunks. Pure text, no uniffi exports, no network.
+summarize.rs   model-written one-line labels for a completed run of tool calls
+               (issue #13): prompt shaping is pure; the hidden summarizer
+               session + reply routing live on Core/Conn.
+capi.rs        the `grouse_*` C ABI the desktop dlopens: forwarder from the
+               typed listener traits to the GrouseCoreListener C table, plus a
+               JSON C-string for every record/enum. Mirrors the uniffi surface —
+               a new intent/event is added here in the same change.
 roam.rs        the peer registry: RoamPeer { label, client, sessions },
                browse mode, roam_connect/disconnect/open_session. Parallel
                connections; Core's roam intents are thin wrappers here. It holds
@@ -101,12 +114,19 @@ roam.rs        the peer registry: RoamPeer { label, client, sessions },
   `session/load` replay → re-probe at 8s ×3) — this lives in lib.rs.
 - Permission/recipe-params/elicitation server requests → `CoreListener`
   events; the UI answers via `respond_*` intents (see CONTRACT §5).
+- A FAILED open/resume → `on_session_open_failed(session_id, message)`
+  (`lib.rs` `open_session_inner` for "no config"; `spine.rs`'s Resume arm and
+  `live_load_session_async` for a rejected `session/load`, relayed through
+  `Conn::set_on_open_failed`; `roam.rs`'s peer `load_session`). Nothing is
+  substituted: a failed load leaves NO session bound and the gate naming
+  nothing, so the store's paint stays provisional and `save_cache` cannot
+  re-stamp it (grouse#19).
 
 ## Build & test
 
 - `cargo check`/`cargo test` via `distrobox enter kde-build`.
 - Tests: pure unit tests for stores/unstable (no server). For the spine, a
-  minimal in-process scripted WS server (tokio-tungstenite) mirroring the
-  desktop's tests/fakeserver.h — initialize/new/load/prompt handlers that
-  stream chunks. The desktop reference (same logic, C++): the grouse-desktop
-  repo's src/{acpclient,manager}.{h,cpp}.
+  minimal in-process scripted WS server (tokio-tungstenite). The desktop is no
+  longer a reference implementation: it is a thin client over the C ABI
+  (`src/capi.rs` + `clients/desktop/src/corebridge.cpp`), so the core is the
+  only place wire logic lives.

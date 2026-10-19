@@ -27,6 +27,7 @@ import uniffi.grouse_core.CoreListener
 import uniffi.grouse_core.NotifyContext
 import uniffi.grouse_core.PushEnvelope
 import uniffi.grouse_core.PushKind
+import uniffi.grouse_core.RefreshMode
 import uniffi.grouse_core.decideNotify
 import uniffi.grouse_core.GrouseUnstable
 import uniffi.grouse_core.GrouseUnstableListener
@@ -234,6 +235,9 @@ class ConnectionManager private constructor(context: Context) {
         override fun onCommands(commands: List<String>) {
             main.post { this@ConnectionManager.commands.value = commands }
         }
+        override fun onSessionOpenFailed(sessionId: String, message: String) {
+            main.post { onCoreSessionOpenFailed(sessionId, message) }
+        }
     }, appContext.filesDir.absolutePath)
     private val unstable = GrouseUnstable(object : GrouseUnstableListener {
         override fun onExport(data: String) { main.post { exportData.value = data } }
@@ -370,19 +374,6 @@ class ConnectionManager private constructor(context: Context) {
             }
         }
     }
-    fun createProjectSkill(projectId: String, name: String, description: String, content: String, onResult: (String?) -> Unit = {}) {
-        val projectDir = "/projects/$projectId"
-        pendingSkillError = null
-        io {
-            unstable.sourcesCreateSkillForProject(name, description, content, projectDir)
-            main.post {
-                val err = pendingSkillError
-                pendingSkillError = null
-                onResult(err)
-            }
-        }
-    }
-
     /** Replace a project's instructions (its projects/<name>.md content). Same
      *  whole-source sources/update as skills; the core re-lists projects on the
      *  reply, so [projects] reseeds the editor. Shares the pendingSkillError
@@ -391,22 +382,6 @@ class ConnectionManager private constructor(context: Context) {
         pendingSkillError = null
         io {
             unstable.sourcesUpdate("project", p.path, p.name, p.description, content)
-            main.post {
-                val err = pendingSkillError
-                pendingSkillError = null
-                onResult(err)
-            }
-        }
-    }
-
-    fun createSkill(name: String, description: String, content: String, projectId: String?, onResult: (String?) -> Unit = {}) {
-        val clean = name.trim()
-        if (clean.isEmpty() || clean.length > 64 || clean.contains(" ") || clean.contains("/")) {
-            onResult("Invalid skill name"); return
-        }
-        pendingSkillError = null
-        io {
-            unstable.sourcesCreate("skill", clean, description, content, projectId?.takeIf { it.isNotBlank() })
             main.post {
                 val err = pendingSkillError
                 pendingSkillError = null
@@ -465,6 +440,11 @@ class ConnectionManager private constructor(context: Context) {
     // Last background RPC failure (sidebar refresh, config read...). Shown as a toast by the
     // UI and cleared; never a transcript bubble.
     val backgroundNotice = mutableStateOf<String?>(null)
+    /** Why the on-screen chat could not be loaded (`on_session_open_failed`,
+     *  grouse#19), or null. The core substitutes NOTHING on a failed open, so
+     *  without this the user is left looking at an empty chat and no reason —
+     *  cleared by the next successful open / Ready. */
+    val openFailed = mutableStateOf<String?>(null)
     // A session/export result waiting for the UI to hand to the Android share sheet.
     val exportData = mutableStateOf<String?>(null)
     // Handed in by OS entry points (share sheet, shortcut, tile), consumed by the UI.
@@ -833,6 +813,9 @@ class ConnectionManager private constructor(context: Context) {
      *  session; the Ready handler then opens the real target. */
     private var pendingResumeAfterConnect: String? = null
     private var pendingNewSessionAfterConnect: Boolean = false
+    /** The shown session a mismatched Ready already tried to re-open. One attempt per
+     *  tap: a genuinely unloadable session must surface its failure, not loop. */
+    private var reopenAttemptedFor: String? = null
     /** Saved provider/model/mode picks re-applied once per connection (the core does not
      *  re-apply them; the old client's applyDesired did). */
     private var desiredApplied = false
@@ -1181,6 +1164,8 @@ class ConnectionManager private constructor(context: Context) {
         // the next send steer into nothing and wedge the app.
         resetTurnRouting()
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
+        // A new tap supersedes any earlier failure notice.
+        openFailed.value = null
         // Clearing the dot: opening the session consumes its staged content.
         sessions.value = sessions.value.map { if (it.sessionId == sessionId) it.copy(hasNew = false) else it }
         // Roam: the session lives on the peer -- the core routes the chat to it.
@@ -1202,17 +1187,32 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Force the on-screen chat to be re-fetched from the server, replacing a
      *  local view that drifted (a turn that dropped mid-stream left it partial).
-     *  Backs the "pull up to reload" gesture. */
-    fun refreshCurrent() {
+     *  Backs the "pull up to reload" gesture.
+     *
+     *  QUICK (grouse#18): the core decides by freshness — a current cache
+     *  suppresses the replay, a stale one merges a bounded tail, an incomplete
+     *  store still replays in full — and either way the replay is ingested
+     *  silently and painted once, so the chat lands on its newest messages. */
+    fun refreshCurrent() = reloadCurrent(full = false)
+
+    /** Replay the open chat from its first prompt, ignoring cache freshness
+     *  (grouse#18's FULL reload): the escape hatch when the local view is known
+     *  to have drifted, behind a deliberate hold gesture. */
+    fun reloadCurrentFromStart() = reloadCurrent(full = true)
+
+    private fun reloadCurrent(full: Boolean) {
         val sid = currentSession.value ?: return
         replayActive.value = true
         replayProgress.value = 0
+        openFailed.value = null
         val peer = currentRoamPeer
         if (peer != null) {
+            // A peer's load has no freshness/hold mode — it re-loads its own way.
             core.roamOpenSession(peer, sid)
             return
         }
-        core.refreshSession(sid)
+        core.refreshSession(sid, if (full) RefreshMode.FULL else RefreshMode.QUICK)
+        if (full) backgroundNotice.value = "Replaying this chat from the start…"
     }
 
     fun newSession(
@@ -1291,7 +1291,7 @@ class ConnectionManager private constructor(context: Context) {
         // no project, phantom success.
         pendingCreateError = null
         io {
-            unstable.sourcesCreate("project", name, "", "", null)
+            unstable.sourcesCreate("project", name, "", "")
             // on_error rides main.post too (CoreListener posts to main) and was
             // enqueued before this call returned, so reading on main is FIFO-
             // deterministic: the capture, then this.
@@ -1824,10 +1824,10 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun onCoreReady() {
         live = true; connecting = false; online.value = true
-        val sid = core.activeSessionId()
-        if (sid == null) return
-        // A first-process connect() (or a config change) created a transient session first;
-        // the real target opens now. Skip the transient's bookkeeping entirely.
+        // Consume a deferred open BEFORE the active-session check: a first connect whose
+        // `connectResume` failed (or a transient session that never bound) reaches Ready
+        // with no active id, and returning first would drop the tap the user made while
+        // connecting — leaving the blank chat it was meant to replace (grouse#19).
         val deferred = pendingResumeAfterConnect
         if (deferred != null) {
             pendingResumeAfterConnect = null
@@ -1842,6 +1842,22 @@ class ConnectionManager private constructor(context: Context) {
             core.newSession(rid, pendingProjectId.also { pendingProjectId = null })
             return
         }
+        val sid = core.activeSessionId()
+        if (sid == null) return
+        // Latest tap wins: a Ready for a session the user already navigated away from
+        // (a superseded load, or the transient session a cold connect binds) must not
+        // stand. Re-open what is on screen once instead of adopting the stale id —
+        // then the normal Ready for THAT load adopts it. A load that genuinely cannot
+        // succeed reports via onCoreSessionOpenFailed, and the one-attempt guard keeps
+        // us from looping on it (grouse#19).
+        val shown = currentSession.value
+        if (currentRoamPeer == null && shown != null && shown != sid) {
+            if (reopenAttemptedFor != shown) {
+                reopenAttemptedFor = shown
+                core.openSession(shown)
+            }
+            return
+        }
         // A roam peer owns the chat: Ready here is the MAIN connection's — don't repoint the
         // on-screen session at it. AND: if the user is already explicitly looking at a
         // different Main chat (currentSession set to another id), a late/other Ready must
@@ -1849,6 +1865,7 @@ class ConnectionManager private constructor(context: Context) {
         // conversation" cold-start race. Adopt the wire's session only when nothing else is
         // shown (cold start) or it already matches what's on screen (reconnect resume).
         if (currentRoamPeer == null && (currentSession.value == null || currentSession.value == sid)) {
+            reopenAttemptedFor = null
             lastSessionId = sid
             store.lastSessionId = sid
             currentSession.value = sid
@@ -1970,6 +1987,9 @@ class ConnectionManager private constructor(context: Context) {
                 coreKeyToAppId.clear()
                 olderPending.clear()
                 loadingOlder = false
+                // A fresh paint means the chat contents are being replaced: a
+                // previous open failure no longer describes what is on screen.
+                openFailed.value = null
                 if (pendingSends.isNotEmpty()) replayWiped = true
                 replayProgress.value = 0
                 // replayActive stays as openChat set it; a Window over a non-empty
@@ -2012,9 +2032,26 @@ class ConnectionManager private constructor(context: Context) {
                     replayActive.value = false
                     replayDoneTick.value++   // new content -> snap to bottom
                 }
+                // Content arrived for whatever is on screen: any earlier open
+                // failure is now history (grouse#19).
+                if (messages.isNotEmpty()) openFailed.value = null
                 replayProgress.value = 0
             }
         }
+    }
+
+    /** The core could not open the chat the user tapped and bound NOTHING in its
+     *  place (grouse#19). Stop the spinner, keep the failed session on screen
+     *  (its cache, if any), and record WHY so the chat can say it rather than
+     *  looking like an empty conversation nobody asked for. */
+    private fun onCoreSessionOpenFailed(sessionId: String, message: String) {
+        replayActive.value = false
+        replayProgress.value = 0
+        loadingOlder = false
+        olderPending.clear()
+        if (sessionId != currentSession.value) return  // a background tap that lost the race
+        val title = sessions.value.firstOrNull { it.sessionId == sessionId }?.title
+        openFailed.value = "Couldn't open ${title?.takeIf { it.isNotBlank() } ?: "that chat"} — $message"
     }
 
     /** Ask the core for older items (docs/TRANSCRIPT_MODEL.md). Outcomes arrive as
@@ -2570,6 +2607,8 @@ class ConnectionManager private constructor(context: Context) {
 
     @Synchronized
     private fun open(resume: String?, cwd: String? = null, kind: SessionKind? = null) {
+        // A fresh intent is a fresh chance to repair a superseded open (see onCoreReady).
+        reopenAttemptedFor = null
         // If a reset/create-assistant is pending but THIS open isn't the one that scheduled
         // it, abandon it so a later unrelated Ready can't complete a stale rename. (Explicit
         // newSession/openSession already clear the flag; this is the belt-and-suspenders.)

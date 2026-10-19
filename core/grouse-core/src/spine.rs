@@ -339,6 +339,9 @@ struct ConnInner {
     on_active_run: Mutex<Option<Arc<dyn Fn(String, String) + Send + Sync>>>,
     /// Slash-command availability hook (`available_commands_update` names).
     on_commands: Mutex<Option<Arc<dyn Fn(Vec<String>) + Send + Sync>>>,
+    /// Open/resume failure hook: `(session_id, message)`. Fired instead of
+    /// silently binding a different session (grouse#19).
+    on_open_failed: Mutex<Option<Arc<dyn Fn(String, String) + Send + Sync>>>,
     /// `configOptions` hook (Core mirrors the config getter).
     on_config: Mutex<Option<Arc<dyn Fn(Vec<ConfigOption>) + Send + Sync>>>,
     /// Connection-ended hook (Core: reconnect decision).
@@ -399,6 +402,7 @@ impl Conn {
                 on_touched: Mutex::new(None),
                 on_active_run: Mutex::new(None),
                 on_commands: Mutex::new(None),
+                on_open_failed: Mutex::new(None),
                 on_config: Mutex::new(None),
                 on_ended: Mutex::new(None),
                 permission: Mutex::new(HashMap::new()),
@@ -459,10 +463,11 @@ impl Conn {
     /// screen. Pre-binding collapses a round trip of exposure to none: the gate
     /// moves in the same call the UI switches in.
     ///
-    /// Safe against the load failing: the Resume handshake re-assigns this same
-    /// value, and a failed load falls through to `start_new_session`, which
-    /// overwrites it — the ordering the handshake's own pre-load assignment
-    /// already relies on.
+    /// Safe against the load failing: a failed load leaves this id unset again
+    /// (`live_load_session_async` / the handshake's Resume arm), so the gate
+    /// names no session rather than the one that never loaded — and the failure
+    /// is reported to the client instead of a substitute session being bound
+    /// (grouse#19).
     pub fn prebind_session(&self, session_id: &str) {
         *self.inner.session_id.lock() = Some(session_id.to_string());
     }
@@ -550,6 +555,20 @@ impl Conn {
 
     pub(crate) fn set_on_commands(&self, f: Arc<dyn Fn(Vec<String>) + Send + Sync>) {
         *self.inner.on_commands.lock() = Some(f);
+    }
+
+    pub(crate) fn set_on_open_failed(&self, f: Arc<dyn Fn(String, String) + Send + Sync>) {
+        *self.inner.on_open_failed.lock() = Some(f);
+    }
+
+    /// Report an open/resume failure to Core. The connection binds NO session
+    /// for it — a stale id must not become a fresh chat behind the client's
+    /// back (grouse#19).
+    fn report_open_failed(&self, session_id: impl Into<String>, message: impl Into<String>) {
+        let hook = self.inner.on_open_failed.lock().clone();
+        if let Some(hook) = hook {
+            hook(session_id.into(), message.into());
+        }
     }
 
     pub(crate) fn set_on_config(&self, f: Arc<dyn Fn(Vec<ConfigOption>) + Send + Sync>) {
@@ -709,6 +728,10 @@ impl Conn {
         match spec {
             Some(ConnectSpec::Resume { session_id, cwd }) => {
                 self.inner.replaying.store(true, Ordering::SeqCst);
+                // Ingest the replay SILENTLY and paint the result once (grouse#18):
+                // the rows still land in the store, the cache and the window, but
+                // the client does not watch the history arrive from the top.
+                self.inner.store.hold_emissions(true);
                 // Set the open-session id BEFORE the load request: the server
                 // may stream replay chunks ahead of the reply (the spine's own
                 // gateway test does), and the session-membership gate must not
@@ -755,15 +778,25 @@ impl Conn {
                         }
                         *self.inner.session_id.lock() = Some(session_id);
                         self.emit_config(&reply);
+                        // The replay is in: paint the newest window (or the empty
+                        // transcript) in ONE shot.
+                        self.inner.store.release_held_replay();
                     }
-                    Err(_) => {
-                        // A stale/archived session cannot be resumed — fall
-                        // back to a fresh session (desktop response()
-                        // session/load error branch) rather than wedging. Any
-                        // painted rows belong to the session we just failed to
-                        // resume, so they must not linger in the new one.
-                        self.drop_painted_cache();
-                        self.start_new_session(&cx, None, None).await?;
+                    Err(error) => {
+                        // A stale/archived session cannot be resumed. Do NOT
+                        // fall back to a fresh session: the client asked for
+                        // THIS one, and a silent `session/new` is what made a
+                        // tapped thread open as a blank chat (grouse#19). Keep
+                        // the painted cache (the best copy of the chat we have —
+                        // it stays provisional, so it can never suppress the
+                        // replay of a later successful load) and report; the
+                        // client decides to retry or to start a new chat.
+                        *self.inner.session_id.lock() = None;
+                        // Discard the hold WITHOUT painting: the rows on screen
+                        // are the provisional cache paint, which is the right
+                        // thing to keep for a chat that failed to load.
+                        self.inner.store.hold_emissions(false);
+                        self.report_open_failed(session_id, format!("session/load failed: {error}"));
                     }
                 }
             }
@@ -897,9 +930,15 @@ impl Conn {
         suppress_replay: bool,
         merge_replay: bool,
     ) -> Result<(), AcpError> {
+        // NOTE: the gate/session id is ALREADY this session (`prebind_session`,
+        // called by the open before the cwd round trip), so a failure cannot be
+        // "restored" to the previous chat from here — see the Err arm below for
+        // what a failed load leaves behind.
         self.inner.session_id.lock().replace(session_id.clone());
         self.inner.suppress_replay.store(suppress_replay, Ordering::SeqCst);
         self.inner.merge_replay.store(merge_replay, Ordering::SeqCst);
+        // Ingest the replay SILENTLY and paint it once at the end (grouse#18).
+        self.inner.store.hold_emissions(true);
         let mut params = json!({
             "sessionId": session_id,
             "cwd": cwd,
@@ -916,7 +955,20 @@ impl Conn {
         // it would have every replayed row dropped — an empty transcript.
         self.inner.suppress_replay.store(false, Ordering::SeqCst);
         self.inner.merge_replay.store(false, Ordering::SeqCst);
-        let reply: Value = reply?;
+        let reply: Value = match reply {
+            Ok(reply) => reply,
+            Err(error) => {
+                // The load never happened, so the connection must NOT keep
+                // claiming this session (grouse#19): nothing is bound, and the
+                // gate names nothing, until a retry or a new chat binds one.
+                *self.inner.session_id.lock() = None;
+                // Drop the hold without painting — the rows on screen are the
+                // provisional cache paint, which is what a failed load should
+                // leave behind.
+                self.inner.store.hold_emissions(false);
+                return Err(error);
+            }
+        };
         // Merge gap: the tail started past the cached prefix — clear and reload
         // the whole transcript (see the handshake Resume branch).
         if self.inner.store.end_merge() {
@@ -930,6 +982,8 @@ impl Conn {
         }
         *self.inner.session_id.lock() = Some(session_id);
         self.emit_config(&reply);
+        // The replay is in: paint the newest window in ONE shot (grouse#18).
+        self.inner.store.release_held_replay();
         Ok(())
     }
 

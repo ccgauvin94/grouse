@@ -30,7 +30,8 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
 ## Architecture & Data Flow
 
 - `Manager` (QML context property `Mgr`) is the thin native facade. It owns NO
-  wire client; it holds the two QAbstractListModels and a single `CoreBridge`
+  wire client; it holds the three QAbstractListModels (`messageModel`,
+  `sessionsModel`, `roamModel`) and a single `CoreBridge`
   (dlopen of `libgrouse_core.so` -> the `grouse_*` C ABI). Events from the core
   arrive on the listing thread, are marshalled onto the Qt main thread by
   `CoreBridge`, and drive the models.
@@ -104,9 +105,12 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
   what renders the thumbnails).
 - Recipe sessions that declare parameters hard-fail unless
   `clientCapabilities._meta.goose.recipeParameterRequests` is true.
-- **WebSocket TLS is deliberately trust-all** (`setSslConfiguration(VerifyNone)`):
-  goosed uses a self-signed cert; we are tailnet-only and authed by the
-  `X-Secret-Key` header. A regenerated cert must not lock us out.
+- **TLS is the core's, and this client asks it not to verify.**
+  `Manager::serverConfigJson()` sends `accept_invalid_certs = true` (historical:
+  goosed used a self-signed cert, we are tailnet-only and authed by the
+  `X-Secret-Key` header, and a regenerated cert must not lock us out). There is
+  no C++ TLS code any more — the core verifies by default (WebPKI) and only
+  skips it because of this flag; Android exposes the same flag as a user toggle.
 - Streaming chat: the server sends HTML; the delegate shows `Text.RichText` only
   once `model.html` is set (at finalize), `Text.PlainText` while streaming —
   RichText re-parses the whole chunk every frame (quadratic).
@@ -120,7 +124,7 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
 
 |Dir|What lives there|
 |---|---|
-|`src/`|C++ core: `corebridge.{h,cpp}` (dlopen of `libgrouse_core.so`, the ONLY wire path), `manager.{h,cpp}` (thin facade, `Mgr`), `messagelistmodel`, `sessionlistmodel`, `markdown.{h,cpp}`, `dbusadapter.{h,cpp}` (session-bus service for KRunner), `main.cpp`|
+|`src/`|C++ core: `corebridge.{h,cpp}` (dlopen of `libgrouse_core.so`, the ONLY wire path), `manager.{h,cpp}` (thin facade, `Mgr`), `messagelistmodel`, `sessionlistmodel`, `roamlistmodel` (Roam tab), `markdown.{h,cpp}`, `appbridge.{h,cpp}` (loopback MCP-Apps host), `notifier.{h,cpp}` (freedesktop notifications), `pushclient.{h,cpp}` (UnifiedPush receive), `dbusadapter.{h,cpp}` (session-bus service for KRunner), `main.cpp`|
 |`krunner/`|Host-side KRunner plugin (searches/opens sessions via the DBus service); standalone-buildable CMake, excluded from the flatpak (`BUILD_KRUNNER=OFF`)|
 |`ui/`|All QML, embedded into the binary via `qt_add_resources` (PREFIX `/`): `main.qml` (window root, sidebar, all dialog instances), `ChatPage.qml` (transcript/input/attachments/charts), feature dialogs|
 |`data/`|Desktop file + SVG icon (single scalable icon; no size dirs, no index.theme)|
@@ -256,13 +260,15 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
 |`src/messagelistmodel.h/.cpp`|Transcript model, 16 roles (role/text/html/title/detail/output/status/images/usage/chartData/appHtml/calls/…); `updateDeferred` coalesces dataChanged on a 120 ms QTimer; `commitDeferred` guards the cleared-model race.|
 |`src/sessionlistmodel.h/.cpp`|Sidebar model, 11 roles; flat list of group-header + session rows; sections prefixed `proj:`/`peer:` (id = `section.substring(5)`); `cwdFor()` is the source of cwd for `session/load` — never invent one; `toggleSection()`; no-op guard so unchanged lists never reset the model. The collapsed set is the user's state: Manager restores it from QSettings (`sidebar_collapsed`) at startup and persists it on `collapsedChanged` (`collapsedSections()`/`setCollapsedSections()`), so the sidebar opens the way it was left.|
 |`src/markdown.h/.cpp`|`markdownToHtml()` — Qt CommonMark → HTML, escapes input.|
+|`src/appbridge.h/.cpp`|Loopback HTTP host for MCP Apps (the flatpak runtime has no QtWebEngine): serves the app template with a host shim injected on 127.0.0.1, answers `ui/initialize`, and delivers `ui/message` back into the originating chat. Routes are scoped by per-app opaque tokens; template + shim are server-supplied and untrusted.|
+|`src/notifier.h/.cpp`, `src/pushclient.h/.cpp`|Notifications: freedesktop notifications driven by the core's shared policy (this client supplies `app_visible`/window state), plus the UnifiedPush receive path (register + decode the envelope; the repo ships no sender).|
 |`src/main.cpp`|QApplication (widgets needed for QFileDialog), QSettings org/app, `org.kde.desktop` style, `Mgr` context property, `manager.autoConnect()`.|
 |`ui/main.qml`|Window shell: `Controls.ApplicationWindow` (NOT Kirigami's — its `contentItem` is read-only, so a sidebar+chat split can't be injected there); sidebar + ChatPage/landing page; every dialog instance and inline menu/dialog; landing provider/model ComboBoxes.|
 |`ui/ChatPage.qml`|Transcript ListView with pinned-to-end scroll logic, input bar, mode menu, attachments, ChartBubble, permission routing.|
 |`ui/*Dialog.qml`|ConnectDialog, SettingsDialog, ProvidersDialog, GlobalExtensionsDialog, SkillsDialog, RecipesDialog (carries the schedule controls too — no separate Scheduler screen), ProjectDialog, PermissionDialog.|
-|`CMakeLists.txt`|Qt6 (Quick Qml QuickControls2 WebSockets Widgets) + ECM + KF6 (Kirigami CoreAddons); `qt_add_resources` embeds ALL `ui/*.qml`; app install rules only — the test targets live under `tests/` (wired via `include(CTest)` + `add_subdirectory(tests)`).|
-|`id.gauvin.Grouse.json` / `build-flatpak.sh`|Flatpak manifest (org.kde.Platform/Sdk 6.10, cmake-ninja Release) + bundle script.|
-|`.github/workflows/flatpak.yml`|CI: builds and uploads the Flatpak bundle only — no native build, no tests, no lint gates.|
+|`CMakeLists.txt`|Qt6 (Quick Qml QuickControls2 Widgets DBus Network, plus optional `WebEngineQuick` for inline MCP Apps) + ECM + KF6 (Kirigami CoreAddons); `qt_add_resources` embeds ALL `ui/*.qml`; app install rules only — the test targets live under `tests/` (wired via `include(CTest)` + `add_subdirectory(tests)`).|
+|`id.gauvin.Grouse.json` / `build-flatpak.sh`|Flatpak manifest (org.kde.Platform/Sdk 6.10, `io.qt.qtwebengine.BaseApp`, cmake-ninja Release) + bundle script.|
+|`.github/workflows/flatpak.yml` (repo root)|CI: `host-components` builds the KRunner plugin and `libgrouse_core.so`, then `flatpak` bundles them — no tests, no lint gates.|
 
 ## Runtime/Tooling Preferences
 
@@ -284,15 +290,20 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
   `ctest -R tst_manager --verbose`.
 - Suite layout (all share the `grouse_core` static lib = `src/*` minus
   `main.cpp`):
-  - `tst_markdown`, `tst_messagelistmodel`, `tst_sessionlistmodel` — unit tests
-    for the pure logic (escaping, deferred/coalesced model updates, grouping /
-    collapse / cwdFor / no-op reset guard).
+  - `tst_markdown`, `tst_messagelistmodel`, `tst_sessionlistmodel`,
+    `tst_roamlistmodel` — unit tests for the pure logic (escaping,
+    deferred/coalesced model updates, grouping / collapse / cwdFor / no-op reset
+    guard, peer headers + sessions).
+  - `tst_appbridge` — the loopback MCP-Apps host: per-app token scoping, the
+    injected host shim, and `ui/message` delivery back into the chat.
   - `tst_manager` — thin-client intent-mapping smoke: Manager Q_INVOKABLE ->
     CoreBridge routing and model invariant checks. The wire-level protocol
     (handshake, session/load, permissions, streaming, every reply parser) is
-    covered by the grouse-core Rust crate (`cargo test -p grouse-core`).
+    covered by the grouse-core Rust crate (`cargo test -p grouse-core`), not
+    here — there is no C++ wire client to test.
   - `tst_qml` — QtQuickTest run of `tests/qml/`: ChartBubble (chart-spec parsing
-    and axis math) and ComboBox `valueRole` (provider/model wiring contract).
+    and axis math), ComboBox `valueRole` (provider/model wiring contract), and
+    RecipesDialog.
 - QML test gotcha: QuickTest resolves relative imports against neither the test
   file nor CWD. The `ui/` import URL is baked in at configure time via
   `configure_file` (template `tests/qml/tst_chartbubble.qml.in` → generated file

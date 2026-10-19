@@ -220,6 +220,15 @@ Cold open:
    (authoritative), new items Upsert in order.
 3. New live ops as they arrive.
 
+**The catch-up is ingested SILENTLY** (grouse#18). While the replay is in flight
+the store takes every row — transcript, cache and window all end up complete —
+but emits nothing; the load's completion paints the newest `CLIENT_WINDOW` items
+once (`Reset` + Upserts + `Window`). Painting each replayed row as it arrived made
+a reopen/refresh re-render the whole history from the first prompt, one row at a
+time, and left the newest messages below the fold. A failed load releases the
+hold *without* painting, so the provisional cache paint stays on screen (see
+`open_session`'s contract in `core/CONTRACT.md` §3.2).
+
 **A stock goose ignores `_meta.replayTail` and replays the WHOLE session, and it
 re-assigns `tool_call_id`s from `call_0` on every replay.** A replayed row's id
 therefore does NOT reliably match the live row it restates, so a replay must

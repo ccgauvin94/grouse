@@ -49,7 +49,7 @@ public:
         void (*grouse_disconnect)(void *h);
         void (*grouse_new_session)(void *h, const char *recipe_id, const char *project_id, char **out_err);
         void (*grouse_open_session)(void *h, const char *session_id);
-        void (*grouse_refresh_session)(void *h, const char *session_id);
+        void (*grouse_refresh_session)(void *h, const char *session_id, int full);
         void (*grouse_list_sessions)(void *h);
         void (*grouse_load_cached_transcript)(void *h, const char *session_id);
         void (*grouse_flush_caches)(void *h);
@@ -221,5 +221,9 @@ struct GrouseCoreListener {
     // -- dictation (speech-to-text) --
     void (*on_dictation_config)(void *, const char *);
     void (*on_transcript)(void *, const char *);
+    // A session open/resume FAILED and nothing was substituted (grouse#19):
+    // (session_id, message). Appended last to match the core's table exactly —
+    // every earlier slot keeps its offset.
+    void (*on_session_open_failed)(void *, const char *, const char *);
 };
 }

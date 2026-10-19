@@ -1409,17 +1409,15 @@ impl RoamPeer {
                 self.emit_config(&reply);
             }
             Err(error) => {
-                // Fallback: the tapped session is stale/archived — a fresh
-                // session is better than a wedged chat. NO
-                // on_peer_new_session here: that event opens the app's UI,
-                // and the user asked for THIS session (the fallback silently
-                // serves a proxy).
-                match self.create_session(cx, &cwd, false).await {
-                    Ok(()) => {}
-                    Err(_) => {
-                        self.fail(format!("roam session/load: {error}"));
-                    }
-                }
+                // The tapped session is stale/archived — do NOT quietly proxy
+                // it with a fresh session on the peer: the user asked for THIS
+                // session, and a blank replacement is the defect (grouse#19).
+                // Report it against the prefixed id the client knows, and leave
+                // the peer's own status alone (the connection is fine).
+                self.listener.on_session_open_failed(
+                    format!("roam:{}:{}", self.label, raw),
+                    format!("session/load failed: {error}"),
+                );
             }
         }
         Ok(())
@@ -2381,6 +2379,7 @@ mod tests {
         }
 
         fn on_commands(&self, _commands: Vec<String>) {}
+        fn on_session_open_failed(&self, _session_id: String, _message: String) {}
     }
 
     fn test_listener() -> Arc<RecordingListener> {

@@ -83,7 +83,7 @@ defaulting to real verification; roam byte stream). The UI supplies only
 | `disconnect()` | — | explicit close, no reconnect |
 | `new_session(recipe_id: Option<String>, project_id: Option<String>)` | — | `session/new` with `_meta.client` + cwd; `recipeId`/`projectId` when given. `projectId` is persisted by stock goose at creation, so a project chat needs no post-creation `session/project/update` |
 | `open_session(session_id: String)` | — | `session/load` with the real cwd (core resolves it); a settled, matching cache paints authoritatively and suppresses the replay, a settled-but-stale one merges a bounded tail, an incomplete one full-replays |
-| `refresh_session(session_id: String)` | — | Force a full `session/load` replay, ignoring cache freshness; the "reload this chat" escape hatch after a turn dropped mid-stream |
+| `refresh_session(session_id: String, mode: RefreshMode)` | — | `RefreshMode::Quick` lets freshness decide (a settled, current cache suppresses the replay; a settled-but-stale one merges a bounded tail; an incomplete store still replays in full); `RefreshMode::Full` forces the full `session/load` replay regardless. Either way the replay is ingested silently and ends in one windowed paint (grouse#18) |
 | `list_sessions()` | — | refreshes `session/list` |
 | `send_prompt(prompt: Prompt, expect: Option<SendExpect>)` | — | text/image/resource blocks |
 | `cancel()` | — | `session/cancel` (notification) |
@@ -118,8 +118,33 @@ pub trait CoreListener {
     fn on_active_run(&self, session_id: String, run_id: String);
     // Slash commands the server can execute right now (available_commands_update).
     fn on_commands(&self, commands: Vec<String>);
+    // An open/resume FAILED and nothing was substituted: `session/load` was
+    // rejected for `session_id` (stale/archived), or no connection config
+    // existed to attempt it with. The core binds NO session for it and repaints
+    // nothing — the client decides to retry the open or to start a fresh chat
+    // explicitly with `new_session`. An answer to an intent, so it is not gated
+    // by which chat is on screen (grouse#19).
+    fn on_session_open_failed(&self, session_id: String, message: String);
 }
 ```
+
+**A failed open never substitutes a session** (grouse#19). `open_session`/
+`refresh_session` either load the requested session or report
+`on_session_open_failed`; they never leave a different (fresh, empty) session
+bound in its place, and a failed load leaves the connection with **no** session
+bound (`active_session_id()` → `None`, the chat-event gate names nothing). The
+store keeps whatever the client's cache painted for the requested session — it
+stays provisional, so it can never suppress the replay of a later successful
+load — and `save_cache` is inert while the store's session and the bound session
+disagree, so a rejected open cannot re-stamp a cache it never confirmed.
+
+**An open/reload paints ONCE, at the end** (grouse#18). While a `session/load`
+replay is in flight the store ingests every row silently; on completion the client
+receives exactly one paint — `Reset` + the newest `window()` items as `Upsert`s +
+`Window`. A client therefore lands on the most recent messages and reaches the
+rest through `load_older`; it never watches the history re-render from the first
+prompt. A failed load releases the hold without painting, leaving the provisional
+cache paint in place.
 
 ### 3.3 State getters (snapshots the UI may read)
 
@@ -306,7 +331,7 @@ Separate `GrouseUnstable` interface, clearly marked for retirement. Methods
 - `session_project(session_id, project_id?)` — move between projects
 - `list_tools(session_id)`, `session_extensions_list/add/remove(session_id, …)` — `remove` takes the extension's KEY (session list `extensionKey` = global list `configKey`), not the display name: goose renamed the wire param and rejects `name` now. UIs must match rows by key, since `extension.name` can differ from the key ("Extension Manager" vs `extensionmanager`)
 - `list_global_extensions()`, `set_extension_enabled(config_key, enabled)`, `add_extension(…)` — `set_extension_enabled` takes the global list's `configKey` (goose renamed the wire param from `name` and rejects it now)
-- `sources_list/create/delete/update` (projects + skills) — `create` is `sourcesCreate(type, name, description, content, projectId?)` where `projectId` scopes a skill to a project (`global` if null; projects themselves are always global)
+- `sources_list/create/delete/update` (projects + skills) — `sourcesCreate(type, name, description, content)` creates a GLOBAL source; project-scoped skills were removed (goose is migrating sources CRUD out of the server — grouse#5)
 - `config_read(key)`, `config_upsert(key, value)`, `supported_models(provider)`
 - `resources_read(session_id, uri, extension)` → app html
 - `recipes_list/schedule/save/delete`, `schedules_list/pause/unpause/run_now/delete/update`

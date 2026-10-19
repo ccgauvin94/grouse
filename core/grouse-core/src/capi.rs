@@ -38,8 +38,8 @@ use serde::Serialize;
 use crate::unstable::GrouseUnstable;
 use crate::{
     ConfigOption, ConnectionStatus, Core, CoreListener, GrouseUnstableListener,
-    PermissionOutcome, PermissionRequest, ProjectSummary, Prompt, SendExpect, ServerConfig,
-    SessionSummary, TranscriptOp,
+    PermissionOutcome, PermissionRequest, ProjectSummary, Prompt, RefreshMode, SendExpect,
+    ServerConfig, SessionSummary, TranscriptOp,
 };
 
 /// malloc-allocated UTF-8 copy of `s`; NULL when the input contains an interior
@@ -198,6 +198,12 @@ pub struct GrouseCoreListener {
     pub on_dictation_config: Option<extern "C" fn(*mut c_void, *const c_char)>,
     /// A dictation transcript (the decoded text of the audio the UI sent).
     pub on_transcript: Option<extern "C" fn(*mut c_void, *const c_char)>,
+    /// A session open/resume FAILED and nothing was substituted: `(session_id,
+    /// message)` (grouse#19). Appended at the END so every earlier field keeps
+    /// its offset — the desktop's `corebridge.h` mirrors this struct layout, and
+    /// the two are always built together.
+    pub on_session_open_failed:
+        Option<extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
 }
 
 /// Bridges the core's typed listener traits to the installed C table. The raw
@@ -453,6 +459,16 @@ impl CoreListener for CoreCallbackForwarder {
             grouse_string_free(p);
         }
     }
+    fn on_session_open_failed(&self, session_id: String, message: String) {
+        unsafe {
+            cb_str2(
+                table_fn!(self, on_session_open_failed),
+                self.user_data,
+                &session_id,
+                &message,
+            )
+        };
+    }
 }
 
 impl GrouseUnstableListener for CoreCallbackForwarder {
@@ -639,12 +655,17 @@ pub extern "C" fn grouse_open_session(h: *mut c_void, session_id: *const c_char)
     catch_unwind(AssertUnwindSafe(|| handle(h).core.open_session(session_id))).ok();
 }
 
-/// Force a full reload of `session_id` (the client's "refresh chat" action):
-/// ignore cache freshness and replay the server's transcript.
+/// Reload `session_id` (the client's "refresh chat" action). `full == 0` is a
+/// QUICK refresh (freshness decides: suppress / bounded tail / full replay);
+/// nonzero forces a full replay regardless (grouse#18). Either way the replay is
+/// ingested silently and painted once, newest window first.
 #[no_mangle]
-pub extern "C" fn grouse_refresh_session(h: *mut c_void, session_id: *const c_char) {
+pub extern "C" fn grouse_refresh_session(h: *mut c_void, session_id: *const c_char, full: i32) {
     let Some(session_id) = (unsafe { c_param(session_id) }).map(str::to_owned) else { return };
-    catch_unwind(AssertUnwindSafe(|| handle(h).core.refresh_session(session_id))).ok();
+    // `full != 0` = RefreshMode::Full; the enum is a plain discriminant
+    // (grouse#18). 0 = Quick.
+    let mode = if full != 0 { RefreshMode::Full } else { RefreshMode::Quick };
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.refresh_session(session_id, mode))).ok();
 }
 
 #[no_mangle]
@@ -1054,42 +1075,7 @@ pub extern "C" fn grouse_unstable_sources_create(h: *mut c_void, source_type: *c
     ) else {
         return;
     };
-    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.sources_create(source_type, name, description, content, None))).ok();
-}
-
-#[no_mangle]
-pub extern "C" fn grouse_unstable_sources_create_with_project(h: *mut c_void, source_type: *const c_char, name: *const c_char, description: *const c_char, content: *const c_char, project_id: *const c_char) {
-    let (Some(source_type), Some(name), Some(description), Some(content)) = (
-        (unsafe { c_param(source_type) }).map(str::to_owned),
-        (unsafe { c_param(name) }).map(str::to_owned),
-        (unsafe { c_param(description) }).map(str::to_owned),
-        (unsafe { c_param(content) }).map(str::to_owned),
-    ) else {
-        return;
-    };
-    let project_id = (unsafe { c_param(project_id) }).map(str::to_owned);
-    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.sources_create(source_type, name, description, content, project_id))).ok();
-}
-#[no_mangle]
-pub extern "C" fn grouse_unstable_sources_create_skill_for_project(
-    h: *mut c_void,
-    name: *const c_char,
-    description: *const c_char,
-    content: *const c_char,
-    project_dir: *const c_char,
-) {
-    let (Some(name), Some(description), Some(content), Some(project_dir)) = (
-        (unsafe { c_param(name) }).map(str::to_owned),
-        (unsafe { c_param(description) }).map(str::to_owned),
-        (unsafe { c_param(content) }).map(str::to_owned),
-        (unsafe { c_param(project_dir) }).map(str::to_owned),
-    ) else {
-        return;
-    };
-    catch_unwind(AssertUnwindSafe(|| {
-        handle(h).unstable.sources_create_skill_for_project(name, description, content, project_dir)
-    }))
-    .ok();
+    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.sources_create(source_type, name, description, content))).ok();
 }
 
 #[no_mangle]

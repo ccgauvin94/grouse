@@ -350,14 +350,20 @@ Kirigami.Page {
                 // otherwise no way to force it to catch up (the core suppresses a
                 // replay when its cache looks current). The core paints the cached
                 // window provisionally and the full replay replaces it.
+                //
+                // Two strengths (grouse#18): the click is the QUICK refresh
+                // (freshness decides, the replay is ingested silently and painted
+                // once, so the chat lands on its newest messages); press-and-hold
+                // replays from the start, for a view known to have drifted.
                 Controls.Button {
                     id: reloadPill
                     visible: Mgr.currentSessionId.length > 0
                     icon.name: "view-refresh"
                     text: qsTr("Reload")
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Re-fetch this conversation from the server")
+                    ToolTip.text: qsTr("Re-fetch this conversation from the server · hold to replay it from the start")
                     onClicked: Mgr.refreshSession()
+                    onPressAndHold: Mgr.reloadSessionFromStart()
                 }
 
                 // Per-conversation tool indicator: toggles the tools panel open

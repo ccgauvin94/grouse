@@ -187,6 +187,17 @@ QString Manager::activeSessionId() const
     return m_bridge->takeString(m_bridge->api().grouse_active_session_id(m_bridge->handle()));
 }
 
+bool Manager::sessionIsOpen() const
+{
+    // The UI's idea of the current session must agree with the core's bound one.
+    // They diverge exactly when a chat is on screen without a session behind it
+    // — a `session/load` the server rejected leaves NO session bound, while its
+    // cached transcript keeps painting (CONTRACT §3.2, grouse#19).
+    if (m_currentSessionId.isEmpty())
+        return false;
+    return activeSessionId() == m_currentSessionId;
+}
+
 // ---------------------------------------------------------------------------
 // ServerConfig JSON (input to grouse_connect)
 // ---------------------------------------------------------------------------
@@ -577,11 +588,31 @@ void Manager::openSession(const QString &sessionId)
 
 void Manager::refreshSession()
 {
+    // QUICK (grouse#18): freshness decides — a current cache suppresses the
+    // replay, a stale one merges a bounded tail, an incomplete store still
+    // replays in full. Either way it is ingested silently and painted once, so
+    // the chat lands on its newest messages instead of re-rendering from the
+    // top.
+    refreshSessionWith(0);
+}
+
+void Manager::reloadSessionFromStart()
+{
+    // FULL: ignore freshness and replay the whole session — the escape hatch for
+    // a view known to have drifted. It is the slower, heavier of the two, so it
+    // stays behind an explicit gesture.
+    setStatus(QStringLiteral("reloading from the start…"));
+    refreshSessionWith(1);
+}
+
+void Manager::refreshSessionWith(int full)
+{
     if (!m_bridge || !m_bridge->isAvailable() || m_currentSessionId.isEmpty())
         return;
-    setStatus(QStringLiteral("reloading…"));
+    if (full == 0)
+        setStatus(QStringLiteral("reloading…"));
     const QByteArray sid = m_currentSessionId.toUtf8();
-    m_bridge->api().grouse_refresh_session(m_bridge->handle(), sid.constData());
+    m_bridge->api().grouse_refresh_session(m_bridge->handle(), sid.constData(), full);
 }
 
 void Manager::newChat()
@@ -1300,6 +1331,14 @@ void Manager::setSessionToolEnabled(const QString &extName, const QString &toolN
     const ExtDef *d = extDef(extName);
     if (!d)
         return;
+    // Acting on a session needs one open: these RPCs carry the session id, and
+    // goose answers every one it cannot resolve with its own error — three of
+    // them for one toggle, on a chat whose transcript is still on screen from
+    // the cache (grouse#20). Browsing the catalog stays fine; only acting needs
+    // a chat. Android has guarded all of these with `activeSessionId() ?: return`
+    // from the start.
+    if (!sessionIsOpen())
+        return;
     const QString prefix = d->key + QStringLiteral("__");
     if (!m_sessionExts.contains(extName)) {
         // Ticking a tool on a DETACHED row attaches the extension restricted
@@ -1413,6 +1452,8 @@ void Manager::setSessionTools(const QString &extName, const QStringList &allowed
 {
     const ExtDef *d = extDef(extName);
     if (!d)
+        return;
+    if (!sessionIsOpen())
         return;
     const QStringList full = m_toolCatalog.value(extName);
     const QStringList list =
@@ -1853,6 +1894,16 @@ void Manager::coreOnCommands(const QString &json)
     onCommands(commands);
 }
 
+void Manager::coreOnSessionOpenFailed(const QString &sessionId, const QString &message)
+{
+    // The core bound NOTHING for a failed open (grouse#19): the chat keeps
+    // whatever the cache painted and the wire has no session. Surface the
+    // failure where "reloading…" was, so an open that never loaded is visible
+    // instead of looking like an empty conversation.
+    Q_UNUSED(sessionId);
+    setStatus(QStringLiteral("couldn't open that chat — %1").arg(message));
+}
+
 void Manager::coreOnExport(const QString &data)
 {
     onExportResult(data);
@@ -2061,7 +2112,11 @@ void Manager::coreOnToolResult(const QString &text, int isError)
 
 void Manager::coreOnError(const QString &method, const QString &message)
 {
-    Q_UNUSED(method);
+    // The METHOD is what identifies the failing call in a bug report; the UI
+    // shows the message alone. Dropping it here is why a session-id failure took
+    // a server-side probe to attribute (grouse#20).
+    qWarning("grouse: core error from %s: %s",
+             qUtf8Printable(method), qUtf8Printable(message));
     onError(message, false);
 }
 

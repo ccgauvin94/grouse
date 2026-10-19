@@ -34,7 +34,13 @@ Controls.Dialog {
             model: Mgr.permissionOptions()
             delegate: Controls.Button {
                 text: modelData.name
-                textFormat: Text.PlainText
+                // NO textFormat here: `Controls.Button` has no such property, and
+                // assigning one does not merely warn — the whole type fails to
+                // construct, which takes `PermissionDialog` (and therefore
+                // main.qml, since every dialog is a declared instance) down with
+                // it. Button text is already plain: rich text is a Label/Text
+                // feature, so the "render server text as plain text" rule needs
+                // nothing here.
                 flat: true
                 width: parent.width
                 onClicked: {
