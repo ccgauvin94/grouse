@@ -17,14 +17,29 @@ test:
 desktop:
     cd clients/desktop && ./build-flatpak.sh
 
+# Build the Android build image (Rust android targets + cargo-ndk + uniffi + JDK 17
+# + Android SDK/NDK). Everything else android-* runs inside it.
+android-image:
+    ./scripts/android-env.sh --build-only
+
 # Rebuild the Android native libs + uniffi bindings and stage them into the
-# grouse-core-aar module. Run after any change to core/.
+# grouse-core-aar module. Run after ANY change to core/ — the committed
+# libgrouse_core.so is what ships inside the APK, so skipping this ships stale code.
 android-libs:
-    ./scripts/build-android-libs.sh
+    ./scripts/android-env.sh ./scripts/build-android-libs.sh
 
 # Build the Android debug APK.
 android:
-    cd clients/android && ./gradlew assembleDebug
+    ./scripts/android-env.sh ./gradlew assembleDebug
+
+# Build the signed release APK (needs the GROUSE_* signing vars in your env; without
+# them gradle falls back to the debug keystore, which is not distributable).
+android-release:
+    ./scripts/android-env.sh ./gradlew assembleRelease
+
+# Verify + publish the release APK to Nextcloud. `just publish-apk <slug>`
+publish-apk slug:
+    ./scripts/publish-apk.sh {{slug}}
 
 # Scan for committed secrets.
 scan:

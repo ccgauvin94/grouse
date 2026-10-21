@@ -1,0 +1,92 @@
+# grouse Android build image: Rust core -> libgrouse_core.so -> APK.
+#
+# Base: Rocky Linux 9, the same OS the deployment box and the core devcontainer
+# (.devcontainer/Containerfile) run — one distro to reason about.
+#
+# This image exists because the APK needs a toolchain the HOST does not have:
+# the Android NDK (to link the cargo-built cdylib), cargo-ndk, and an Android
+# SDK. The committed libgrouse_core.so is what ships inside the APK, so a core
+# change that is not followed by `just android-libs` never reaches the phone —
+# which is exactly the bug this image makes routine to avoid.
+#
+# Everything version-bearing is a build arg so CI and the box can be kept in
+# step deliberately, not by drift.
+#
+#   podman build -f .devcontainer/android/Containerfile \
+#       --build-arg UID=$(id -u) --build-arg GID=$(id -g) -t grouse-android .
+#
+# Driven by scripts/android-env.sh (same shape as scripts/dev-env.sh).
+
+FROM rockylinux:9
+
+ARG RUST_VERSION=1.97.1
+ARG UID=1000
+ARG GID=1000
+# NDK must match AGP 8.5.2's default, or AGP warns / fails to find it.
+ARG NDK_VERSION=27.0.12077973
+ARG BUILD_TOOLS=34.0.0
+ARG ANDROID_PLATFORM=34
+ARG CMDLINE_TOOLS=11076708
+ARG CARGO_NDK_VERSION=3.1.2
+
+# JDK 17 (AGP 8.5 requires it), plus the Rust core's native deps: the same set
+# the core devcontainer carries, because this image also does the host debug
+# build that library-mode bindgen reads metadata from.
+RUN dnf -y install --setopt=install_weak_deps=False \
+        java-17-openjdk-headless \
+        gcc gcc-c++ make cmake clang \
+        openssl-devel pkgconf pkgconf-pkg-config \
+        perl git ca-certificates unzip which findutils tar gzip \
+    && dnf -y clean all \
+    && rm -rf /var/cache/dnf
+
+ENV JAVA_HOME=/usr/lib/jvm/jre-17
+ENV ANDROID_HOME=/opt/android-sdk \
+    ANDROID_SDK_ROOT=/opt/android-sdk
+ENV PATH=${JAVA_HOME}/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}
+
+# Android SDK: cmdline-tools, then the platform/build-tools the app declares,
+# then the NDK cargo-ndk links against. Licenses are accepted here (non-
+# interactive) so a container run never stops on a prompt.
+RUN mkdir -p "${ANDROID_HOME}/cmdline-tools" \
+    && curl -fsSL -o /tmp/cmdline-tools.zip \
+        "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS}_latest.zip" \
+    && unzip -q /tmp/cmdline-tools.zip -d "${ANDROID_HOME}/cmdline-tools" \
+    && mv "${ANDROID_HOME}/cmdline-tools/cmdline-tools" "${ANDROID_HOME}/cmdline-tools/latest" \
+    && rm -f /tmp/cmdline-tools.zip \
+    && (yes | sdkmanager --licenses > /tmp/licenses.log 2>&1 || { tail -20 /tmp/licenses.log; exit 1; }) \
+    && (sdkmanager --install \
+        "platform-tools" \
+        "platforms;android-${ANDROID_PLATFORM}" \
+        "build-tools;${BUILD_TOOLS}" \
+        "ndk;${NDK_VERSION}" > /tmp/sdk.log 2>&1 || { tail -30 /tmp/sdk.log; exit 1; }) \
+    && rm -rf "${ANDROID_HOME}/.temp" "${ANDROID_HOME}/.downloadIntermediates"
+
+ENV ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}
+
+# Non-root build user, uid/gid matched to the invoker so repo artifacts (target/,
+# staged .so files) stay owned by them under `--userns=keep-id`.
+RUN groupadd --gid "${GID}" dev \
+    && useradd --uid "${UID}" --gid "${GID}" --create-home --shell /bin/bash dev
+
+USER dev
+ENV CARGO_HOME=/home/dev/.cargo \
+    RUSTUP_HOME=/home/dev/.rustup \
+    PATH=/home/dev/.cargo/bin:${PATH}
+# The two Android targets are the ones the app ships (arm64-v8a devices,
+# x86_64 emulators); adding more here would only build ABIs we do not package.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain "${RUST_VERSION}" --profile minimal \
+    && rustup target add aarch64-linux-android x86_64-linux-android \
+    && cargo --version && rustc --version
+
+# cargo-ndk (the NDK linker wiring) and uniffi-bindgen (the bindings half of
+# `just android-libs`). uniffi's CLI must match the library version in
+# core/Cargo.toml (0.32), or bindgen refuses the metadata.
+RUN cargo install cargo-ndk --version "${CARGO_NDK_VERSION}" --locked \
+    && cargo install uniffi --version 0.32.1 --features cli \
+    && cargo ndk --version && uniffi-bindgen --version
+
+USER root
+WORKDIR /workspace
+CMD ["/bin/bash"]
