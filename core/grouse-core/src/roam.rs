@@ -3936,6 +3936,45 @@ mod tests {
         assert_eq!(items[2].text, "real answer", "the overlap row is re-supplied, not doubled");
     }
 
+    /// A tail whose anchor is in the MIDDLE of the seed. The truncation drops
+    /// rows (and their index entries) that the replay then re-supplies: a stale
+    /// `text_idx` here appends into the wrong row or indexes past the end.
+    #[test]
+    fn a_tail_replay_anchoring_mid_seed_rebuilds_its_indexes() {
+        let listener = test_listener();
+        let (peer, _) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let seed = vec![
+            item("u1", ItemKind::User, "q"),
+            item("a1", ItemKind::Agent, "first"),
+            item("a2", ItemKind::Agent, "stale second"),
+            item("a3", ItemKind::Agent, "stale third"),
+        ];
+        assert!(peer.cache.save_transcript(
+            "roam:laptop:s1",
+            &seed,
+            "2026-01-01T00:00:00Z"
+        ));
+        peer.apply_sessions(&list_response(&[("s1", "Sky", "2026-01-01T00:00:00Z")]));
+        peer.open("s1".to_string());
+
+        peer.begin_replay(ReplayMode::Tail);
+        // a2 overlaps at index 2, so a2 AND a3 are dropped and re-supplied.
+        peer.dispatch(text_notif("s1", "agent", "real second", Some("a2")));
+        peer.dispatch(text_notif("s1", "agent", "real third", Some("a3")));
+        assert_eq!(peer.finish_replay(), ReplayOutcome::Done);
+
+        let items = peer.items();
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["u1", "a1", "a2", "a3"], "{items:?}");
+        let texts: Vec<&str> = items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["q", "first", "real second", "real third"],
+            "each replayed row landed in its own row: {items:?}"
+        );
+    }
+
     /// grouse#24 (2): a tail that never overlaps what we hold covers a hole, so
     /// the peer must say so and re-replay in full rather than show the gap.
     #[test]
