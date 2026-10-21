@@ -2303,7 +2303,10 @@ class ConnectionManager private constructor(context: Context) {
                     core.activeSessionId() == sid) {
                     if (replayWiped) {
                         replayWiped = false
-                        pendingSends.filter { it.sessionId == sid }
+                        // Only ATTACHMENT prompts: the core echoes a pure-text
+                        // prompt as a User item at send time, so re-adding one
+                        // here would show the question twice.
+                        pendingSends.filter { it.sessionId == sid && (it.images.isNotEmpty() || it.files.isNotEmpty()) }
                             .forEach { messages.add(ChatMessage("user", it.text, it.images, it.files)) }
                     }
                     if (!turnInFlight) {

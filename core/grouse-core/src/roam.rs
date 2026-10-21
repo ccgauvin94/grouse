@@ -943,6 +943,24 @@ impl RoamPeer {
             .map(|id| format!("roam:{}:{id}", self.label))
     }
 
+    /// Local echo of a prompt we are about to send — the peer-side twin of
+    /// `Core::spawn_prompt`'s echo.
+    ///
+    /// goose sends no `user_message_chunk` for a prompt a client sent, so
+    /// without this the question only appears when a later `session/load` replay
+    /// delivers it: i.e. after a refresh, at whatever position the replay puts
+    /// it. It also CLOSES the open live-text bubble — a user row is a new item,
+    /// so the reply that follows opens its own bubble instead of appending onto
+    /// the previous turn's (two replies merged into one paragraph).
+    pub fn echo_prompt(&self, text: &str) {
+        let Some(session_id) = self.inner.lock().open_session_id.clone() else { return };
+        if text.is_empty() {
+            return;
+        }
+        let mutation = self.accumulate(&session_id, "user", text, "");
+        self.emit_mutation(mutation);
+    }
+
     /// The accumulated transcript of the open session, flat-projected (the
     /// legacy getter). The rich store is the source of truth.
     pub fn transcript(&self) -> Vec<Message> {
@@ -3407,6 +3425,62 @@ mod tests {
                 .iter()
                 .any(|e| e == "touched roam:laptop:s1 named by goose 2026-08-23T11:00:00Z"),
             "title must carry the prefixed id: {events:?}"
+        );
+    }
+
+    #[test]
+    fn the_prompt_echo_is_what_keeps_turns_apart() {
+        // goose sends no `user_message_chunk` for a prompt a client sent, and
+        // roam's live text bubble stays open until something closes it. This
+        // pins BOTH halves: without the echo two turns share one paragraph (and
+        // the question is missing entirely until a replay), with it each turn is
+        // its own row. `Core::send_prompt`'s roam branch performs the echo.
+        let chunk = |text: &str| {
+            SessionNotification::new(
+                "s1",
+                SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                    TextContent::new(text),
+                ))),
+            )
+        };
+        let rows = |peer: &Arc<RoamPeer>| -> Vec<String> {
+            peer.inner
+                .lock()
+                .store
+                .items
+                .iter()
+                .map(|i| format!("{:?}:{}", i.kind, i.text))
+                .collect()
+        };
+
+        // No echo (the old behaviour): the second reply lands in the first bubble.
+        let (bare, _rx1) = offline_peer(
+            "laptop",
+            test_listener(),
+            gate(Arc::new(AtomicBool::new(true))),
+        );
+        bare.open("s1".to_string());
+        bare.dispatch(chunk("first reply"));
+        bare.dispatch(chunk("second reply"));
+        assert_eq!(rows(&bare), vec!["Agent:first replysecond reply"]);
+
+        // With the echo: a user row between the two replies, and both replies whole.
+        let (echoed, _rx2) = offline_peer(
+            "laptop2",
+            test_listener(),
+            gate(Arc::new(AtomicBool::new(true))),
+        );
+        echoed.open("s1".to_string());
+        echoed.dispatch(chunk("first reply"));
+        echoed.echo_prompt("second question");
+        echoed.dispatch(chunk("second reply"));
+        assert_eq!(
+            rows(&echoed),
+            vec![
+                "Agent:first reply",
+                "User:second question",
+                "Agent:second reply",
+            ]
         );
     }
 

@@ -932,10 +932,18 @@ impl Core {
     /// session. Routes to the active roam peer when one owns the chat.
     pub fn send_prompt(&self, prompt: Prompt, expect: Option<SendExpect>) {
         if let Some(peer) = self.active_peer() {
-            let params = prompt_params(
-                &prompt,
-                &peer.active_session_id().unwrap_or_default(),
-            );
+            let sid = peer.active_session_id().unwrap_or_default();
+            // Same local echo as `spawn_prompt` (which the roam branch returns
+            // before reaching): goose does not send a `user_message_chunk` for a
+            // prompt we sent, and the peer has its own store rather than the
+            // spine's. Without it the question shows up only on a later replay —
+            // and because roam's live text bubble then stays open, the next
+            // turn's reply appends onto the previous reply instead of opening
+            // its own bubble.
+            if let Some(text) = crate::pure_text(&prompt) {
+                peer.echo_prompt(&text);
+            }
+            let params = prompt_params(&prompt, &sid);
             crate::roam::runtime().spawn_blocking(move || {
                 let _ = peer.rpc("session/prompt", params);
             });
