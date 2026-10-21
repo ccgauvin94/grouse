@@ -38,7 +38,7 @@
 //! resumes the session that was open. Only an explicit [`RoamPeer::close`]
 //! (or [`Core::roam_disconnect`]) ends a peer for good.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock, mpsc as std_mpsc};
 
 use parking_lot::Mutex;
@@ -435,6 +435,21 @@ struct PeerStore {
     tool_idx: HashMap<String, usize>,
     /// The live text bubble currently accumulating: (index, role, item id).
     stream: Option<(usize, String, String)>,
+    /// The SERVER's identity for a text item: message id -> index.
+    ///
+    /// The one thing that makes a replay safe without comparing strings: goose
+    /// stamps every chunk with its message id — live and replayed alike
+    /// (`content_chunk_for_message`) — so the same message is always the same
+    /// row. It also holds the adoption of a locally echoed prompt (see
+    /// `pending_echo`), which has no server id until the server names it.
+    msg_idx: HashMap<String, usize>,
+    /// Message ids the replay in progress has already rewritten. The first
+    /// replayed chunk of an id starts that row over; the rest append.
+    rewritten: HashSet<String>,
+    /// Prompts echoed locally that the server has not named YET, oldest first.
+    /// A queue, not a map: the server names them in order, and only an exact
+    /// text match adopts one.
+    pending_echo: VecDeque<(String, usize)>,
     next_uid: u64,
     /// Oldest item the client holds (the window origin).
     emitted_from: usize,
@@ -444,8 +459,30 @@ impl PeerStore {
     /// A store seeded from items (a cache/staging promotion).
     fn from_items(items: Vec<Item>) -> Self {
         let mut store = Self { items, ..Self::default() };
+        // Carry the uid counter past anything the cache already holds: these
+        // ids are the client's row keys, and restarting the count handed a new
+        // row an id an old row still owned (so a fresh chunk overwrote an
+        // unrelated earlier message).
+        store.next_uid = store
+            .items
+            .iter()
+            .filter_map(|i| i.id.strip_prefix("roam-item-"))
+            .filter_map(|n| n.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
         store.cap();
         store.reindex();
+        // A cached user row with a local id is a prompt we echoed, i.e. one the
+        // server may not have named yet. Queue them so a replay that DOES name
+        // them adopts these rows instead of appending a second copy — this is
+        // what keeps a tail replay after a restart from duplicating the question.
+        store.pending_echo = store
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| i.kind == ItemKind::User && i.id.starts_with("roam-item-"))
+            .map(|(idx, i)| (i.text.clone(), idx))
+            .collect();
         store
     }
 
@@ -459,7 +496,16 @@ impl PeerStore {
 
     fn reindex(&mut self) {
         self.tool_idx.clear();
+        // Text identity is by item id; a locally echoed prompt also answers to
+        // the server's id once one arrived, so keep those aliases.
+        let aliases = std::mem::take(&mut self.msg_idx);
         for (i, it) in self.items.iter().enumerate() {
+            match it.kind {
+                ItemKind::User | ItemKind::Agent | ItemKind::Thought | ItemKind::Error => {
+                    self.msg_idx.insert(it.id.clone(), i);
+                }
+                _ => {}
+            }
             match it.kind {
                 ItemKind::Tool | ItemKind::Chart | ItemKind::McpApp => {
                     self.tool_idx.insert(it.id.clone(), i);
@@ -470,6 +516,11 @@ impl PeerStore {
                     }
                 }
                 _ => {}
+            }
+        }
+        for (id, idx) in aliases {
+            if idx < self.items.len() {
+                self.msg_idx.insert(id, idx);
             }
         }
     }
@@ -486,6 +537,11 @@ impl PeerStore {
         self.items.drain(0..drop);
         self.emitted_from = self.emitted_from.saturating_sub(drop);
         self.stream = None;
+        self.pending_echo = self
+            .pending_echo
+            .drain(..)
+            .filter_map(|(text, idx)| idx.checked_sub(drop).map(|i| (text, i)))
+            .collect();
         self.reindex();
     }
 
@@ -517,16 +573,42 @@ impl PeerStore {
     ) -> Mutation {
         let kind = kind_for_role(role);
         if !message_id.is_empty() {
-            // A replayed id: append into that item, deduped against what a
-            // staging promotion already put on screen.
-            if let Some(idx) = self.items.iter().position(|i| i.id == message_id) {
-                let it = &mut self.items[idx];
-                if replaying && it.text.contains(text) {
-                    return Mutation::none();
+            // The server's own identity for this message. It is the same id on
+            // the live stream and on every replay of it, so the row is FOUND —
+            // there is nothing to compare text against.
+            if let Some(idx) = self.msg_idx.get(message_id).copied() {
+                if replaying {
+                    // A replay is authoritative for the messages it re-delivers:
+                    // its first chunk starts that row over, the rest append. That
+                    // is what makes a replay idempotent — appending it onto what
+                    // is already there doubled the text; skipping by text match
+                    // swallowed legitimate repeated words.
+                    let first = self.rewritten.insert(message_id.to_string());
+                    let it = &mut self.items[idx];
+                    if first {
+                        it.text = text.to_string();
+                    } else {
+                        it.text.push_str(text);
+                    }
+                } else {
+                    self.items[idx].text.push_str(text);
                 }
-                it.text.push_str(text);
-                let item = it.clone();
+                let item = self.items[idx].clone();
+                self.stream = Some((idx, role.to_string(), message_id.to_string()));
                 return self.at(idx, TranscriptOp::Upsert { item });
+            }
+            // A prompt we echoed locally, now named by the server: adopt that row
+            // instead of appending a second copy of the same question. Only the
+            // oldest pending echo is a candidate, and only on an exact match —
+            // the server names prompts in the order it received them.
+            if role == "user" {
+                if let Some((_, idx)) = self.pending_echo.pop_front() {
+                    if idx < self.items.len() && self.items[idx].text == text {
+                        self.msg_idx.insert(message_id.to_string(), idx);
+                        self.stream = Some((idx, role.to_string(), message_id.to_string()));
+                        return self.at(idx, TranscriptOp::Upsert { item: self.items[idx].clone() });
+                    }
+                }
             }
             // No item for this id yet: a fresh bubble.
             let item = Item {
@@ -536,9 +618,17 @@ impl PeerStore {
                 ..empty_item()
             };
             self.items.push(item.clone());
-            self.stream = None;
-            self.cap();
             let idx = self.items.len() - 1;
+            self.msg_idx.insert(message_id.to_string(), idx);
+            // Created BY this replay: it is already the replay's content, so its
+            // remaining chunks append (without this the second chunk truncated
+            // the first, and a three-chunk message lost its opening).
+            if replaying {
+                self.rewritten.insert(message_id.to_string());
+            }
+            self.stream = Some((idx, role.to_string(), message_id.to_string()));
+            self.cap();
+            let idx = idx.min(self.items.len().saturating_sub(1));
             return self.at(idx, TranscriptOp::Upsert { item });
         }
         // No server id: the live stream. Append to the open bubble of this role
@@ -546,14 +636,9 @@ impl PeerStore {
         if let Some((idx, srole, sid)) = self.stream.clone() {
             if srole == role && idx < self.items.len() && self.items[idx].id == sid {
                 let it = &mut self.items[idx];
-                // Serve parity: a live chunk normally appends, but a stalled
-                // stream re-delivering the shown tail must not restart the
-                // paragraph.
-                if (replaying && it.text.contains(text))
-                    || (!replaying && it.text.ends_with(text) && it.text != text)
-                {
-                    return Mutation::none();
-                }
+                // Fallback only: a server that stamps message ids never reaches
+                // this branch, and without ids there is no honest way to tell a
+                // repeated word from a re-delivery — so this appends, plainly.
                 it.text.push_str(text);
                 let id = it.id.clone();
                 return self.at(
@@ -570,11 +655,39 @@ impl PeerStore {
             text: text.to_string(),
             ..empty_item()
         });
+        self.msg_idx.insert(id.clone(), self.items.len() - 1);
         self.stream = Some((self.items.len() - 1, role.to_string(), id));
         self.cap();
         let idx = self.items.len() - 1;
         let item = self.items[idx].clone();
         self.at(idx, TranscriptOp::Upsert { item })
+    }
+
+    /// Echo a prompt we sent: ALWAYS a new row.
+    ///
+    /// Not `accumulate_text`'s no-id path: that appends to the open bubble of the
+    /// same role, which would fuse two prompts sent back to back into one. A
+    /// prompt is a turn boundary, so it also closes the live text bubble — that
+    /// is what makes the reply that follows its own row instead of continuing
+    /// the previous turn's paragraph.
+    fn echo_prompt(&mut self, text: &str, _replaying: bool) -> Mutation {
+        self.next_uid += 1;
+        let id = format!("roam-item-{}", self.next_uid);
+        self.stream = None;
+        self.items.push(Item {
+            id: id.clone(),
+            kind: ItemKind::User,
+            text: text.to_string(),
+            ..empty_item()
+        });
+        let idx = self.items.len() - 1;
+        self.msg_idx.insert(id, idx);
+        // The server has no id for this row yet. When it names the prompt, that
+        // chunk adopts this row (see `accumulate_text`).
+        self.pending_echo.push_back((text.to_string(), idx));
+        self.cap();
+        let idx = idx.min(self.items.len().saturating_sub(1));
+        self.at(idx, TranscriptOp::Upsert { item: self.items[idx].clone() })
     }
 
     /// Create or replace a tool row (the peer's `accumulate_tool`). The kind is
@@ -953,11 +1066,17 @@ impl RoamPeer {
     /// so the reply that follows opens its own bubble instead of appending onto
     /// the previous turn's (two replies merged into one paragraph).
     pub fn echo_prompt(&self, text: &str) {
-        let Some(session_id) = self.inner.lock().open_session_id.clone() else { return };
         if text.is_empty() {
             return;
         }
-        let mutation = self.accumulate(&session_id, "user", text, "");
+        let mutation = {
+            let mut inner = self.inner.lock();
+            if inner.open_session_id.is_none() {
+                return;
+            }
+            let replaying = inner.replaying;
+            inner.store.echo_prompt(text, replaying)
+        };
         self.emit_mutation(mutation);
     }
 
@@ -1645,6 +1764,7 @@ impl RoamPeer {
             // (or cached) content; dedupe against it during this replay only,
             // cleared once a live turn begins (dispatch SessionInfoUpdate).
             inner.replaying = true;
+            inner.store.rewritten.clear();
             // Promotion (or simply visiting) clears the green dot: has_new is
             // gone with the staging entry, and sessions() re-reads it live.
         }
@@ -3146,23 +3266,39 @@ mod tests {
      *  mid-stream" report: it fires wherever the model repeats itself (a doubled word,
      *  a repeated "\n", an em-dash), which is to say at random. */
     #[test]
-    fn live_thought_repeating_its_own_tail_never_opens_a_second_bubble() {
+    fn a_replayed_thought_rewrites_one_bubble_rather_than_doubling_it() {
+        // Chunks sharing a message id are one row, live and replayed alike. The
+        // old rule compared TEXT (skip a chunk already contained in the row),
+        // which also swallowed legitimate repeats; identity comes from the id.
         let listener = test_listener();
         let (peer, _cmd_rx) =
             offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(false))));
         peer.open("s1".to_string());
+        peer.inner.lock().replaying = false; // a live turn, not a replay
 
-        for t in ["thi", "ng about", " the count", " the count"] {
-            peer.dispatch(SessionNotification::new(
+        let thought = |t: &str| {
+            SessionNotification::new(
                 "s1",
                 SessionUpdate::AgentThoughtChunk(
-                    ContentChunk::new(ContentBlock::Text(TextContent::new(t))),
+                    ContentChunk::new(ContentBlock::Text(TextContent::new(t))).message_id("t1"),
                 ),
-            ));
+            )
+        };
+        for t in ["thi", "ng about", " the count"] {
+            peer.dispatch(thought(t));
         }
-
         let tr = peer.transcript();
-        assert_eq!(tr.len(), 1, "one chunk stream must stay one bubble, got {tr:?}");
+        assert_eq!(tr.len(), 1, "one message id is one bubble, got {tr:?}");
+        assert_eq!(tr[0].content, "thing about the count");
+
+        // The same message re-delivered by a replay: rewritten, same one bubble.
+        peer.inner.lock().replaying = true;
+        peer.inner.lock().store.rewritten.clear();
+        for t in ["thi", "ng about", " the count"] {
+            peer.dispatch(thought(t));
+        }
+        let tr = peer.transcript();
+        assert_eq!(tr.len(), 1, "a replay must not add a row, got {tr:?}");
         assert_eq!(tr[0].content, "thing about the count");
     }
 
@@ -3426,6 +3562,121 @@ mod tests {
                 .any(|e| e == "touched roam:laptop:s1 named by goose 2026-08-23T11:00:00Z"),
             "title must carry the prefixed id: {events:?}"
         );
+    }
+
+    // --- transcript identity: the server's message id is the row ---------------
+
+    fn store_rows(store: &PeerStore) -> Vec<String> {
+        store
+            .items
+            .iter()
+            .map(|i| format!("{:?}:{}", i.kind, i.text))
+            .collect()
+    }
+
+    #[test]
+    fn a_replayed_message_rewrites_its_row_instead_of_doubling() {
+        // The same message id arrives live and then again in a replay (a
+        // reconnect, or a tail replay after the wire came back). Appending the
+        // replay onto what is already shown doubled the text; the replay is
+        // authoritative for a message it re-delivers.
+        let mut store = PeerStore::default();
+        store.accumulate_text("agent", "Hello", "m1", false);
+        store.accumulate_text("agent", " world", "m1", false);
+        assert_eq!(store_rows(&store), vec!["Agent:Hello world"]);
+
+        store.rewritten.clear(); // a replay begins
+        store.accumulate_text("agent", "Hello", "m1", true);
+        store.accumulate_text("agent", " world", "m1", true);
+        assert_eq!(store_rows(&store), vec!["Agent:Hello world"]);
+    }
+
+    #[test]
+    fn a_replay_completes_a_row_whose_live_stream_was_cut_short() {
+        // The live leg dropped mid-message; the replay carries the whole text
+        // and must end up as the row's content, not as an addition to it.
+        let mut store = PeerStore::default();
+        store.accumulate_text("agent", "Hello", "m1", false);
+
+        store.rewritten.clear();
+        store.accumulate_text("agent", "Hello", "m1", true);
+        store.accumulate_text("agent", " world", "m1", true);
+        assert_eq!(store_rows(&store), vec!["Agent:Hello world"]);
+    }
+
+    #[test]
+    fn the_servers_copy_of_an_echoed_prompt_adopts_the_echo_row() {
+        // The question is shown when it is sent; the server later names it (a
+        // user message WITH an id). Two rows for one question was the visible
+        // duplicate — and the stray row landed at the end of the transcript.
+        let mut store = PeerStore::default();
+        store.echo_prompt("what time is it", false);
+        assert_eq!(store_rows(&store), vec!["User:what time is it"]);
+
+        store.accumulate_text("user", "what time is it", "u1", false);
+        assert_eq!(store_rows(&store), vec!["User:what time is it"]);
+
+        // And the reply that follows is its own row, not a continuation.
+        store.accumulate_text("agent", "Seven.", "a1", false);
+        assert_eq!(
+            store_rows(&store),
+            vec!["User:what time is it", "Agent:Seven."]
+        );
+    }
+
+    #[test]
+    fn two_prompts_in_a_row_are_two_rows() {
+        let mut store = PeerStore::default();
+        store.echo_prompt("first", false);
+        store.echo_prompt("second", false);
+        assert_eq!(store_rows(&store), vec!["User:first", "User:second"]);
+    }
+
+    #[test]
+    fn a_cached_echo_row_is_adopted_by_the_replay_after_a_restart() {
+        // The cached row keeps its local id (the alias to the server's id is not
+        // persisted), so a TAIL replay — the fast path — used to append a second
+        // copy of a question that was already on screen.
+        let cached = vec![
+            Item {
+                id: "roam-item-4".to_string(),
+                kind: ItemKind::User,
+                text: "what time is it".to_string(),
+                ..empty_item()
+            },
+            Item {
+                id: "a1".to_string(),
+                kind: ItemKind::Agent,
+                text: "Seven.".to_string(),
+                ..empty_item()
+            },
+        ];
+        let mut store = PeerStore::from_items(cached);
+        store.rewritten.clear();
+        store.accumulate_text("user", "what time is it", "u1", true);
+
+        assert_eq!(
+            store_rows(&store),
+            vec!["User:what time is it", "Agent:Seven."],
+            "the replay adopts the cached echo row"
+        );
+    }
+
+    #[test]
+    fn a_reloaded_store_does_not_reissue_the_ids_it_already_holds() {
+        // `from_items` restarted the counter at zero, so the next row took an id
+        // a cached row still owned — and an upsert by id then overwrote that
+        // unrelated earlier message on the client.
+        let cached = vec![Item {
+            id: "roam-item-5".to_string(),
+            kind: ItemKind::User,
+            text: "from the cache".to_string(),
+            ..empty_item()
+        }];
+        let mut store = PeerStore::from_items(cached);
+        store.echo_prompt("fresh", false);
+        let ids: Vec<&str> = store.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["roam-item-5", "roam-item-6"]);
     }
 
     #[test]

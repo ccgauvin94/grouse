@@ -102,6 +102,43 @@ roam.rs        the peer registry: RoamPeer { label, client, sessions },
    - `Core` owns `Vec<Arc<RoamPeer>>` + the active-peer label; routing follows
      CONTRACT §6 (chat routes to the last-opened session's owner).
 
+## Roam transcript synchronisation (the rules, so they stop being rediscovered)
+
+A peer session has FOUR sources that all describe the same rows: the live
+stream, a local echo of the prompt the client sent, a `session/load` replay
+(full, or a *tail* when the cache is provably current), and the cache itself.
+Only one thing keeps them from fighting: **the server's message id is the row.**
+
+1. **Identity.** goose stamps every chunk it sends with the stored message's id
+   (`content_chunk_for_message`, and `ensure_message_event_id` guarantees every
+   live message has one). The same message therefore carries the same id live
+   and in every replay. `PeerStore::msg_idx` maps id → row; a chunk either finds
+   its row or opens one. No text comparison, ever.
+2. **A replay rewrites; it does not append.** The first replayed chunk of a
+   message starts that row over (`rewritten` tracks which ids this replay has
+   touched, cleared when a replay begins); the rest append. So a tail replay
+   that re-delivers rows the cache already holds is idempotent, a replay can
+   complete a row whose live stream was cut short, and re-delivered text cannot
+   double. An item the replay does not mention keeps its content — that is what
+   makes a *tail* replay safe.
+3. **The prompt echo is a row, and a boundary.** goose sends no
+   `user_message_chunk` for a prompt a client sent (`spawn_prompt` echoes it on
+   the spine for exactly this reason), so `RoamPeer::echo_prompt` writes the
+   question into the peer's store at send time. It always opens a NEW row — a
+   prompt is a turn boundary, which is also what stops the next reply from
+   continuing the previous turn's paragraph. When the server later names that
+   prompt, the user chunk adopts the echo row (`pending_echo`, oldest first,
+   exact text) instead of appending a second copy of the question.
+4. **No id, no guessing.** A chunk without an id falls back to one open bubble
+   per role and appends plainly. There is no honest way to tell a repeated word
+   from a re-delivery without identity, and the old `contains`/`ends_with`
+   guards silently swallowed legitimate repeats. A modern server never reaches
+   this branch.
+
+Anything that compares transcript TEXT to decide what to draw is a bug in this
+model: it is what produced merged replies, questions duplicated at the end of
+the transcript, and text lost to "dedupe".
+
 ## Event fan-out rules (who emits what)
 
 - Transcript content → TranscriptStore emits `CoreListener::on_item(...)`
