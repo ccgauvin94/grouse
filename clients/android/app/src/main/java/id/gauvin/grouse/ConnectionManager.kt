@@ -124,6 +124,17 @@ class ConnectionManager private constructor(context: Context) {
         pendingSends.removeAll { it.sessionId == sessionId }
         refreshQueuedCount()
     }
+    /** Re-key prompts typed before any chat was bound onto the session that just became
+     *  ready. They carry `sessionId == null`, which matches no real chat, so every drain
+     *  (`dequeueFor(sid)` on Ready, `dequeueFor(owner)` on RunEnded) skips them and they sit
+     *  in the chip forever. */
+    private fun bindOrphanSends(sessionId: String) {
+        if (pendingSends.none { it.sessionId == null }) return
+        val orphans = pendingSends.filter { it.sessionId == null }
+        pendingSends.removeAll { it.sessionId == null }
+        orphans.forEach { pendingSends.add(it.copy(sessionId = sessionId)) }
+        refreshQueuedCount()
+    }
     // True between sendPrompt and RunEnded — or, reconciled, while the server reports a
     // live run id for the on-screen session (an adopted turn: started here before a
     // reconnect, or by another client). `busy` is UI state and is also set while merely
@@ -141,7 +152,14 @@ class ConnectionManager private constructor(context: Context) {
     private fun resetTurnRouting() {
         activeRunId = null
         activeRunIdState.value = null
+        turnInFlight = false
         turnInFlightSession = null
+        // `busy`/`compacting` describe the chat ON SCREEN. `open()` clears them, but a roam
+        // open bypasses it (and every tap reaches here), so without this a turn from the chat
+        // you left kept "Grouse is thinking…" under every chat opened next — including a
+        // brand-new one — and pull-to-refresh could not clear it.
+        busy.value = false
+        compacting.value = false
         // The chip describes THIS chat's queue, and the queue is now per-chat -- so re-point it
         // at the session being opened. Prompts parked for the chat you left stay parked there.
         refreshQueuedCount()
@@ -1459,8 +1477,16 @@ class ConnectionManager private constructor(context: Context) {
         // bound session — a send in that window used to ERROR ("not ready — no session")
         // instead of queueing, which was the visible "app must reconnect" failure. Queue;
         // the Ready handler flushes.
+        // The gate is the CHAT's wire, not the main socket: a roam chat rides its own iroh
+        // connection and must still send while the main connection is down. It is also the
+        // core's BOUND session: sending while the core is bound elsewhere is silently
+        // rejected (`expect` mismatch in try_send_prompt), leaving the bubble without a turn
+        // forever. Anything that cannot go out now is queued — see the flush on the main
+        // Ready and on a peer's `ready`.
         val targetSid = currentSession.value
-        if (live && core.ready()) {
+        val targetPeer = roamPeer(targetSid)
+        val wireReady = if (targetPeer != null) roamStatus[targetPeer] == "ready" else online.value
+        if (targetSid != null && wireReady && core.activeSessionId() == targetSid) {
             // A run is a per-session/connection thing. Only a follow-up send in the SAME
             // session that owns the in-flight turn may steer into it; a send in a DIFFERENT
             // session (or none) starts its own run there — it must not block on or steer a
@@ -1907,6 +1933,10 @@ class ConnectionManager private constructor(context: Context) {
             io { unstable.providersList() }
             core.listSessions()   // so the Assistant thread can be resolved by title
         }
+        // A prompt typed before the chat bound (currentSession was null) has no session key.
+        // Bind it to the session that just became ready so the drain below sends it instead
+        // of leaving it in the queue forever.
+        if (currentSession.value == sid) bindOrphanSends(sid)
         // A rebuild (replay or cache path) just finished: unpin the list and snap to bottom
         // when content actually streamed in.
         if (replayActive.value) {
@@ -2262,6 +2292,29 @@ class ConnectionManager private constructor(context: Context) {
                 if (currentRoamPeer == label && replayActive.value) {
                     replayActive.value = false
                     replayDoneTick.value++      // ChatScreen: snap to bottom, as main does
+                }
+                // A prompt typed while this peer was re-dialing (or while its
+                // session/load was still binding) was queued, not sent. Now that the wire
+                // is up and bound to the chat on screen, flush ONE — RunEnded drains the
+                // rest, exactly like the main Ready path. Without this the queue waits for
+                // a RunEnded that will never come.
+                val sid = currentSession.value
+                if (currentRoamPeer == label && sid != null &&
+                    core.activeSessionId() == sid) {
+                    if (replayWiped) {
+                        replayWiped = false
+                        pendingSends.filter { it.sessionId == sid }
+                            .forEach { messages.add(ChatMessage("user", it.text, it.images, it.files)) }
+                    }
+                    if (!turnInFlight) {
+                        dequeueFor(sid)?.let { p ->
+                            store.pendingPushSessionId = sid
+                            turnInFlight = true
+                            turnInFlightSession = sid
+                            busy.value = true
+                            sendPromptBlocks(p.text, p.images, p.files, expect = sid)
+                        }
+                    }
                 }
             }
             st == "disconnected" -> {
