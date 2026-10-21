@@ -562,18 +562,23 @@ impl PeerStore {
     /// chunk continues it.
     fn replay_anchor(&mut self, existing: Option<usize>) -> Option<usize> {
         let replay = self.replay.as_mut()?;
-        if replay.mode == ReplayMode::Full {
+        if replay.mode == ReplayMode::Full && !replay.dropped {
             // The seed is a stale/incomplete copy: the reply is the transcript.
             // Drop it ONCE, on the first replayed row, and reset the origin.
-            if !replay.dropped {
-                self.items.clear();
-                self.tool_idx.clear();
-                self.emitted_from = 0;
-                replay.from = 0;
-                replay.dropped = true;
-            }
+            self.items.clear();
+            self.tool_idx.clear();
+            self.emitted_from = 0;
+            self.stream = None;
+            replay.from = 0;
+            replay.dropped = true;
+            // `existing` was found in the seed we just dropped, so it indexes a
+            // list that no longer exists. This row starts the transcript.
             return None;
         }
+        // A row already appended BY THIS REPLAY is a continuing message (its
+        // next chunk), never a new one. This applies to Full too: returning
+        // None here made every chunk of a replayed message its own row, which
+        // split the last turn's answer into fragments.
         match existing {
             Some(idx) if idx >= replay.from => Some(idx),
             Some(idx) => {
@@ -1852,15 +1857,27 @@ impl RoamPeer {
     /// paint the snapshot once from the rebuild and again from the events, so
     /// every cached message doubled on open.
     fn open(&self, raw_session_id: String) {
-        // Persist the PREVIOUS open session's transcript before switching: the
-        // next time it's opened, the cache paints it instantly.
-        self.save_open_transcript();
-        // Off-lock: the cache is file I/O and `inner` guards the live dispatch.
-        let cached = self
-            .cache
-            .load_transcript(&self.cache_key(&raw_session_id))
-            .map(|(items, _)| items);
-        {
+        // Re-opening the session that is ALREADY open is a refresh: the live
+        // store is the newest copy of it (it holds the turn that just ran), so
+        // nothing may replace it. Seeding from `staging`/the cache here threw
+        // away the final turn and painted an older snapshot — a full refresh
+        // then only showed the last turn again if the replay happened to
+        // re-deliver it.
+        let already_open = self.inner.lock().open_session_id.as_deref()
+            == Some(raw_session_id.as_str());
+        if already_open {
+            // Still persist, so a crash keeps what we have.
+            self.save_open_transcript();
+        } else {
+            // Persist the PREVIOUS open session's transcript before switching:
+            // the next time it's opened, the cache paints it instantly.
+            self.save_open_transcript();
+            // Off-lock: the cache is file I/O and `inner` guards the live
+            // dispatch.
+            let cached = self
+                .cache
+                .load_transcript(&self.cache_key(&raw_session_id))
+                .map(|(items, _)| items);
             let mut inner = self.inner.lock();
             inner.open_session_id.take();
             let staged = inner.staging.remove(&raw_session_id).map(|s| s.store.items);
@@ -3761,6 +3778,66 @@ mod tests {
             2,
             "one paint when the seed was shown, one at the end: {events:?}"
         );
+    }
+
+    /// A full replay re-delivers each message in CHUNKS. Every chunk after the
+    /// first must accumulate into the row the replay itself created — treating
+    /// them as new rows split the last turn's answer into fragments.
+    #[test]
+    fn a_full_replay_keeps_a_multi_chunk_message_on_one_row() {
+        let listener = test_listener();
+        let (peer, _) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        assert!(peer.cache.save_transcript(
+            "roam:laptop:s1",
+            &[item("old", ItemKind::Agent, "stale")],
+            "2026-01-01T00:00:00Z"
+        ));
+        peer.apply_sessions(&list_response(&[("s1", "Sky", "2026-01-01T00:00:00Z")]));
+        peer.open("s1".to_string());
+
+        peer.begin_replay(ReplayMode::Full);
+        for chunk in ["because ", "of Rayleigh ", "scattering"] {
+            peer.dispatch(text_notif("s1", "agent", chunk, Some("a1")));
+        }
+        assert_eq!(peer.finish_replay(), ReplayOutcome::Done);
+
+        let items = peer.items();
+        assert_eq!(items.len(), 1, "one row per message, not per chunk: {items:?}");
+        assert_eq!(items[0].id, "a1");
+        assert_eq!(items[0].text, "because of Rayleigh scattering");
+    }
+
+    /// A refresh re-opens the session that is ALREADY open. The live store is
+    /// the newest copy — the only one holding the turn that just ran — so it must
+    /// not be replaced by the cache/staging seed. Doing that is why a full
+    /// refresh appeared to "drop the final turn".
+    #[test]
+    fn reopening_the_open_session_keeps_its_live_rows() {
+        let listener = test_listener();
+        let (peer, _) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        assert!(peer.cache.save_transcript(
+            "roam:laptop:s1",
+            &[item("a1", ItemKind::Agent, "cached")],
+            "2026-01-01T00:00:00Z"
+        ));
+        peer.apply_sessions(&list_response(&[("s1", "Sky", "2026-01-01T00:00:00Z")]));
+        peer.open("s1".to_string());
+        // A live turn lands after the cache was written.
+        peer.dispatch(text_notif("s1", "user", "why", Some("u2")));
+        peer.dispatch(text_notif("s1", "agent", "the last answer", Some("a2")));
+        assert_eq!(peer.items().len(), 3);
+
+        // Pull-to-refresh: `load_session` opens the same session again.
+        peer.open("s1".to_string());
+        assert_eq!(
+            peer.items().len(),
+            3,
+            "the refresh must keep the live rows, not re-seed from the cache: {:?}",
+            peer.items()
+        );
+        assert_eq!(peer.items()[2].text, "the last answer");
     }
 
     /// grouse#24 (2): a bounded tail stitches onto the rows we hold. The first

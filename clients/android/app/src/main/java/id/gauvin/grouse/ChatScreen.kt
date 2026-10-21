@@ -40,7 +40,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -95,7 +96,6 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
 import android.widget.Toast
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
@@ -978,6 +978,10 @@ private fun BoxScope.PinnedDock(
  *  the newest message. A dedicated handle rather than a list-edge swipe: the
  *  transcript is reverseLayout, where an upward drag is ordinary scroll-back.
  *  Holding it replays the chat from the start (grouse#18's FULL reload). */
+/** How long a press on the reload handle must stay put to mean "replay from the
+ *  start". Long enough not to fire while reaching for a pull-up. */
+private const val HOLD_MS = 600L
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ReloadHandle(
@@ -988,32 +992,54 @@ private fun ReloadHandle(
 ) {
     val density = LocalDensity.current
     val threshold = with(density) { 44.dp.toPx() }
+    val holdSlop = with(density) { 6.dp.toPx() }
     var drag by remember { mutableStateOf(0f) }
     val armed = drag <= -threshold
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 18.dp)
+            // ONE gesture detector. This used to be `detectVerticalDragGestures`
+            // plus `combinedClickable(onLongClick = ...)` on the same node, and
+            // the two competed: any finger drift let the drag detector consume
+            // the press, so the hold-to-reload only fired about half the time.
+            // A hold (stationary, past HOLD_MS) now means FULL; a drag past
+            // `threshold` means QUICK; anything less tails to the bottom.
             .pointerInput(Unit) {
-                detectVerticalDragGestures(
-                    onDragEnd = {
-                        if (drag <= -threshold) onPullUp() else if (drag < -8f) onTail()
-                        drag = 0f
-                    },
-                    onDragCancel = { drag = 0f },
-                    onVerticalDrag = { change, amount ->
-                        drag = (drag + amount).coerceIn(-threshold * 1.3f, 0f)
-                        change.consume()
-                    },
-                )
-            }
-            .combinedClickable(
-                onClick = { onTail() },
-                // The heavier reload (grouse#18's FULL: replay from the first
-                // prompt) stays behind a deliberate hold so the everyday pull-up
-                // remains the quick one.
-                onLongClick = { onReloadFromStart() },
-            ),
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val startedAt = System.currentTimeMillis()
+                    var travelled = 0f
+                    var held = false
+                    var moved = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        travelled = change.position.y - down.position.y
+                        if (travelled < -8f) moved = true
+                        val elapsed = System.currentTimeMillis() - startedAt
+                        if (!held && !moved && elapsed >= HOLD_MS) {
+                            held = true
+                            onReloadFromStart()
+                        }
+                        if (held) {
+                            change.consume()
+                        } else {
+                            drag = travelled.coerceIn(-threshold * 1.3f, 0f)
+                            if (moved) change.consume()
+                        }
+                        if (!change.pressed) break
+                    }
+                    if (!held) {
+                        when {
+                            travelled <= -threshold -> onPullUp()
+                            travelled < -8f -> onTail()
+                            else -> onTail()
+                        }
+                    }
+                    drag = 0f
+                }
+            },
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(
