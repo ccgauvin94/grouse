@@ -44,7 +44,10 @@ podman image exists "${IMAGE_NAME}" || {
 rel_apk="${APK#${REPO_ROOT}/}"
 [[ "${rel_apk}" != "${APK}" ]] || { echo "publish-apk: APK must live under ${REPO_ROOT}" >&2; exit 1; }
 
-NAME="$(podman run --rm --security-opt label=disable --userns=keep-id \
+# -i is load-bearing: the verification script arrives on stdin to `bash -s`.
+# Without it bash reads EOF, verifies nothing, and exits 0 — which is how a
+# first version of this copied an unchecked APK under the name "grouse-.apk".
+NAME="$(podman run --rm -i --security-opt label=disable --userns=keep-id \
   --user "$(id -u):$(id -g)" \
   --volume "${REPO_ROOT}:/workspace:ro" \
   --volume "${PUBLISH_DIR}:/publish:ro" \
@@ -86,13 +89,15 @@ printf '%s\n' "${vname}-${SLUG}"
 IN_CONTAINER
 )"
 
+[[ -n "${NAME}" ]] || { echo "publish-apk: verification produced no name" >&2; exit 5; }
 DEST="${PUBLISH_DIR}/grouse-${NAME}.apk"
 [[ -e "${DEST}" ]] && { echo "publish-apk: ${DEST} already exists" >&2; exit 4; }
 cp "${APK}" "${DEST}"
 chmod 644 "${DEST}"
 
-# Index it now: the file watcher does not exist, and an unscanned file is 404 in
-# the web UI even though it is on disk. Match the container's data-dir view.
-podman exec -u www-data nextcloud php occ files:scan --path="/colin/files" >/dev/null
+# Index just this file: the file watcher does not exist, so an unscanned file is
+# 404 in the web UI even though it is on disk — but a whole-directory scan blocks
+# on I/O for minutes, so scope it.
+podman exec -u www-data nextcloud php occ files:scan --path="/colin/files/$(basename "${DEST}")" >/dev/null
 echo "published: ${DEST}"
 echo "nextcloud: https://cloud.gauvin.id/remote.php/dav/files/colin/$(basename "${DEST}")"

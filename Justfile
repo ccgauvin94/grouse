@@ -30,12 +30,12 @@ android-libs:
 
 # Build the Android debug APK.
 android:
-    ./scripts/android-env.sh ./gradlew assembleDebug
+    ./scripts/android-env.sh clients/android/gradlew -p clients/android assembleDebug
 
 # Build the signed release APK (needs the GROUSE_* signing vars in your env; without
 # them gradle falls back to the debug keystore, which is not distributable).
 android-release:
-    ./scripts/android-env.sh ./gradlew assembleRelease
+    ./scripts/android-env.sh clients/android/gradlew -p clients/android assembleRelease
 
 # Verify + publish the release APK to Nextcloud. `just publish-apk <slug>`
 publish-apk slug:

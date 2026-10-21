@@ -93,7 +93,12 @@ if [[ -n "${GROUSE_KEYSTORE:-}" && -e "${GROUSE_KEYSTORE}" ]]; then
   mounts+=(--volume "${ks_dir}:${ks_dir}:ro")
 fi
 
-exec podman run --rm -it \
+# -it only when there is a terminal: the APK build runs from CI or a non-tty
+# wrapper too, and podman warns loudly otherwise.
+tty=()
+[[ -t 0 ]] && tty=(-it)
+
+exec podman run --rm "${tty[@]}" \
   --userns=keep-id \
   --user "$(id -u):$(id -g)" \
   --env HOME=/home/dev \
