@@ -4,6 +4,28 @@ All notable changes to Grouse are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A roam turn could wedge the app busy forever.** A prompt sent while the
+  peer was re-dialing has no connection to go out on, and `rpc()` returned
+  without ending the turn — so `busy` stayed set with nothing left to clear it.
+  Every `session/prompt` exit now ends the turn, so the client shows an error
+  instead of a permanent "Grouse is thinking…".
+- **Peer titles never reached the drawer.** A peer's live `session_info_update`
+  carried the raw server id, which matches no `roam:<label>:<id>` chat, so
+  auto-generated titles and renames only appeared after a full session re-list.
+  They now carry the prefixed id.
+- **Android: a send could be lost, or a queued one stranded.** The send gate was
+  the *main* socket's readiness, so a roam send went out on a peer that was
+  re-dialing (and died) and a send made while the core was bound elsewhere was
+  silently rejected. It is now the target chat's own wire plus the core's bound
+  session, and anything that cannot go out is queued — with a flush on the
+  peer's `ready` to match the main Ready path. A prompt typed before any chat
+  was bound is re-keyed onto the session that binds, and switching chats
+  (roam included) clears the previous chat's busy/compacting state.
+
 ## [0.2.0] - 2026-10-12
 
 ### Fixed
