@@ -695,7 +695,21 @@ impl TranscriptStore {
                     }
                 }
                 let uid = match message_id.filter(|m| !m.is_empty()) {
-                    Some(m) => m.to_string(),
+                    // A message id can carry BOTH a thought and a text block (a
+                    // turn-final `[thinking + text]`): the role disambiguates the
+                    // item id, or the two rows collide on a keyed client and the
+                    // answer renders inside the thinking row.
+                    Some(m) => {
+                        let taken = st
+                            .bubbles
+                            .iter()
+                            .any(|b| matches!(b, Bubble::Text { uid, .. } if uid == m));
+                        if taken {
+                            format!("{m}:{role}")
+                        } else {
+                            m.to_string()
+                        }
+                    }
                     None => st.new_uid(),
                 };
                 st.bubbles.push(Bubble::Text {
@@ -2406,6 +2420,25 @@ mod tests {
         let capped = summarize(&"x".repeat(200));
         assert_eq!(capped.chars().count(), 80);
         assert!(capped.ends_with('…'));
+    }
+
+    /// A turn-final `[thinking + text]` message: goose sends the thought and the
+    /// text under ONE message id, so the two rows need distinct item ids or a
+    /// keyed client folds the answer into the thinking row.
+    #[test]
+    fn a_thought_and_text_sharing_a_message_id_stay_two_rows() {
+        let (l, _e) = listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("thought", "weighing it", Some("m1"), true);
+        store.append_chunk("agent", "the answer", Some("m1"), false);
+
+        let items = store.rich_transcript();
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[0].kind, ItemKind::Thought);
+        assert_eq!(items[0].text, "weighing it");
+        assert_eq!(items[1].kind, ItemKind::Agent, "the answer keeps its own row");
+        assert_eq!(items[1].text, "the answer");
+        assert_ne!(items[0].id, items[1].id, "client keys must stay unique");
     }
 
     #[test]

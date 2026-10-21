@@ -482,6 +482,15 @@ struct PeerStore {
     emitted_from: usize,
     /// The `session/load` replay streaming into this store, if one is open.
     replay: Option<Replay>,
+    /// `(message id, role)` → index of that text row.
+    ///
+    /// A message id alone does NOT identify a row: a turn-final `[thinking +
+    /// text]` message is replayed as an `AgentThoughtChunk` and an
+    /// `AgentMessageChunk` carrying the SAME id (goose's `load_session` builds
+    /// both with `content_chunk_for_message(message, ..)`). Keying by id alone
+    /// appended the answer's text into the thinking row, so the final answer
+    /// never appeared as a row of its own.
+    text_idx: HashMap<(String, String), usize>,
 }
 
 impl PeerStore {
@@ -498,8 +507,21 @@ impl PeerStore {
         self.stream = None;
         self.emitted_from = 0;
         self.replay = None;
+        self.text_idx.clear();
         self.cap();
         self.reindex();
+    }
+
+    /// The row for a `(message id, role)` pair, if this store holds it.
+    fn text_row(&self, message_id: &str, role: &str) -> Option<usize> {
+        self.text_idx
+            .get(&(message_id.to_string(), role.to_string()))
+            .copied()
+    }
+
+    /// Every text row this message id already occupies (any role).
+    fn message_id_taken(&self, message_id: &str) -> bool {
+        self.text_idx.keys().any(|(id, _)| id == message_id)
     }
 
     /// Arm a `session/load` replay. Called BEFORE the request goes out, so the
@@ -547,11 +569,11 @@ impl PeerStore {
     /// Drop everything from `idx` on — the stale suffix a tail replay replaces.
     fn truncate_from(&mut self, idx: usize) {
         self.items.truncate(idx);
-        self.tool_idx.retain(|_, i| *i < idx);
         if self.emitted_from > idx {
             self.emitted_from = idx;
         }
         self.stream = None;
+        self.reindex();
     }
 
     /// Reconcile a replayed row against the seed.
@@ -567,6 +589,7 @@ impl PeerStore {
             // Drop it ONCE, on the first replayed row, and reset the origin.
             self.items.clear();
             self.tool_idx.clear();
+            self.text_idx.clear();
             self.emitted_from = 0;
             self.stream = None;
             replay.from = 0;
@@ -595,6 +618,7 @@ impl PeerStore {
 
     fn reindex(&mut self) {
         self.tool_idx.clear();
+        self.text_idx.clear();
         for (i, it) in self.items.iter().enumerate() {
             match it.kind {
                 ItemKind::Tool | ItemKind::Chart | ItemKind::McpApp => {
@@ -605,7 +629,12 @@ impl PeerStore {
                         self.tool_idx.insert(c.id.clone(), i);
                     }
                 }
-                _ => {}
+                // Text rows: the id is the message id, or `<id>::<role>` when the
+                // same message already claimed it for another role.
+                _ => {
+                    let base = it.id.split("::").next().unwrap_or(&it.id).to_string();
+                    self.text_idx.insert((base, role_for_kind(it.kind)), i);
+                }
             }
         }
     }
@@ -674,7 +703,7 @@ impl PeerStore {
         let kind = kind_for_role(role);
         let replaying = self.is_replaying();
         if !message_id.is_empty() {
-            let existing = self.items.iter().position(|i| i.id == message_id);
+            let existing = self.text_row(message_id, role);
             // Reconcile with the seed (or drop it, on a full replay).
             if replaying {
                 if let Some(idx) = self.replay_anchor(existing) {
@@ -693,9 +722,17 @@ impl PeerStore {
                 let item = it.clone();
                 return self.at(idx, TranscriptOp::Upsert { item });
             }
-            // No row for this id yet: a fresh bubble, appended in wire order.
+            // No row for this (id, role) yet: a fresh bubble, appended in wire
+            // order. The ITEM id must stay unique even when goose reuses the
+            // message id for another block of the same message (thinking + text),
+            // or a keyed client would fold the answer into the thinking row.
+            let id = if self.message_id_taken(message_id) {
+                format!("{message_id}::{role}")
+            } else {
+                message_id.to_string()
+            };
             let item = Item {
-                id: message_id.to_string(),
+                id: id.clone(),
                 kind,
                 text: text.to_string(),
                 ..empty_item()
@@ -704,6 +741,7 @@ impl PeerStore {
             self.stream = None;
             self.cap();
             let idx = self.items.len() - 1;
+            self.text_idx.insert((message_id.to_string(), role.to_string()), idx);
             // Held during a replay: the window is painted once at the end.
             if replaying {
                 return Mutation::none();
@@ -3806,6 +3844,31 @@ mod tests {
         assert_eq!(items.len(), 1, "one row per message, not per chunk: {items:?}");
         assert_eq!(items[0].id, "a1");
         assert_eq!(items[0].text, "because of Rayleigh scattering");
+    }
+
+    /// THE reported symptom: a turn-final `[thinking + text]` message. goose
+    /// replays one message id as a THOUGHT chunk and then a TEXT chunk, so the
+    /// store must keep two rows — keying by id alone appended the answer into
+    /// the thinking row and the final answer never appeared.
+    #[test]
+    fn a_replayed_thought_and_text_with_one_message_id_are_two_rows() {
+        let listener = test_listener();
+        let (peer, _) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        peer.open("s1".to_string());
+        peer.begin_replay(ReplayMode::Full);
+
+        peer.dispatch(text_notif("s1", "thought", "weighing the options", Some("m1")));
+        peer.dispatch(text_notif("s1", "agent", "the deployment is verified", Some("m1")));
+        assert_eq!(peer.finish_replay(), ReplayOutcome::Done);
+
+        let items = peer.items();
+        assert_eq!(items.len(), 2, "thinking and text are two rows: {items:?}");
+        assert_eq!(items[0].kind, ItemKind::Thought);
+        assert_eq!(items[0].text, "weighing the options");
+        assert_eq!(items[1].kind, ItemKind::Agent, "the answer needs its own row");
+        assert_eq!(items[1].text, "the deployment is verified");
+        assert_ne!(items[0].id, items[1].id, "client keys must stay unique");
     }
 
     /// A refresh re-opens the session that is ALREADY open. The live store is
