@@ -616,6 +616,12 @@ impl PeerStore {
         let drop = self.items.len() - keep;
         self.items.drain(0..drop);
         self.emitted_from = self.emitted_from.saturating_sub(drop);
+        // A replay in flight indexes rows by absolute position; keep its
+        // origin pointing at the same row after the drain (a huge replay can
+        // cross the cap mid-flight).
+        if let Some(replay) = self.replay.as_mut() {
+            replay.from = replay.from.saturating_sub(drop);
+        }
         self.stream = None;
         self.reindex();
     }
