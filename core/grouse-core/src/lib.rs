@@ -804,19 +804,29 @@ impl Core {
                 .iter()
                 .find(|peer| peer.label() == label)
                 .cloned();
-            if let Some(peer) = peer {
-                *self.inner.active_peer_label.write() = Some(label.to_string());
-                let cwd = self
-                    .inner
-                    .state
-                    .lock()
-                    .last_config
-                    .as_ref()
-                    .map(|config| config.cwd.clone())
-                    .unwrap_or_default();
-                peer.open_session_with(raw.to_string(), cwd, force_replay);
+            let Some(peer) = peer else {
+                // The peer is gone (disconnected, or the registry was replaced).
+                // Falling through here would carry a `roam:<label>:<id>` id onto
+                // the MAIN wire: `prebind_session` would bind the chat gate to a
+                // dead id and `session/load` would address a session the main
+                // server has never heard of. Report the real cause instead.
+                self.on_session_open_failed(
+                    session_id,
+                    "not connected: the roam peer is not connected".to_string(),
+                );
                 return;
-            }
+            };
+            *self.inner.active_peer_label.write() = Some(label.to_string());
+            let cwd = self
+                .inner
+                .state
+                .lock()
+                .last_config
+                .as_ref()
+                .map(|config| config.cwd.clone())
+                .unwrap_or_default();
+            peer.open_session_with(raw.to_string(), cwd, force_replay);
+            return;
         }
         *self.inner.active_peer_label.write() = None;
         self.reset_chat_state();
