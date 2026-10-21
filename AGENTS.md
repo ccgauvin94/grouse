@@ -281,7 +281,13 @@ clients/android/gradlew -p clients/android testDebugUnitTest     # JVM unit test
 - `scripts/publish-apk.sh` refuses an APK signed by anything but the release key
   (SHA-256 `95b51fd4…dd84474e`) or one whose `versionCode` is not ahead of what is
   already published, then copies into `/mnt/data/nextcloud/colin/files` and runs
-  `occ files:scan` on that one file. Bump `versionCode` in `app/build.gradle.kts`
+  `occ files:scan` on **that one file**.
+  **Scan per-file, never `--path=/colin/files`.** The Nextcloud account also holds
+  an intentional synced copy of a grouse source tree
+  (`colin/files/Documents/Software/Grouse/grouse/`), Rust `target/` dirs included;
+  a directory-wide scan walks tens of thousands of those files and sits in
+  D-state for many minutes (measured: killed at 13). The sync is deliberate —
+  do not "clean it up". Bump `versionCode` in `app/build.gradle.kts`
   before every sideloaded build — a same-code install is silently skipped.
 - `clients/android/env.sh` is only for a host that HAS the SDK (it sets
   `JAVA_HOME`/`ANDROID_HOME`); the container does not need it.
