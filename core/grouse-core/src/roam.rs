@@ -275,7 +275,10 @@ impl ConnectTo<Client> for RoamTransport {
 /// Commands the spine's intents enqueue for the peer's connection task.
 #[derive(Debug)]
 enum PeerCommand {
-    OpenSession { session_id: String, cwd: String },
+    /// Open (or reload) a session. `full` forces a full replay, ignoring the
+    /// cached tail: the peer's half of `RefreshMode::Full` (grouse#18), so a
+    /// long-press does the same thing on both transports.
+    OpenSession { session_id: String, cwd: String, full: bool },
     NewSession { cwd: String },
     Relist,
     Close,
@@ -341,13 +344,6 @@ struct PeerInner {
     /// The live turn's run id (`_meta.goose.activeRunId`); None when no turn
     /// is running. Mirrors the spine's active_run_id.
     active_run: Option<String>,
-    /// True while a `session/load` (or reconnect) replay is streaming its
-    /// history back. Dedupe is scoped to this: re-delivered staged content must
-    /// not double, but LIVE chunks must always append (they never dedupe — that
-    /// would swallow legitimately repeated streamed text, the way serve only
-    /// pushes text with no containment guard). Cleared when the first live turn
-    /// of the session starts.
-    replaying: bool,
     /// The SDK connection handle, set once `initialize` succeeds.
     conn: Option<agent_client_protocol::ConnectionTo<Agent>>,
     /// Peer-owned rich transcript of the open session (docs/TRANSCRIPT_MODEL.md).
@@ -423,11 +419,57 @@ fn text_message(item: &Item) -> Message {
     }
 }
 
+/// Which `session/load` replay is streaming into the store.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReplayMode {
+    /// The reply IS the transcript: whatever the store held was a stale or
+    /// incomplete copy, so the first replayed row drops it wholesale (the main
+    /// store's `provisional` rule).
+    Full,
+    /// We asked for a bounded tail (`replayTail`) and the store holds a settled
+    /// prefix: the first replayed row that matches a held id truncates there,
+    /// and the replay re-supplies that row onward.
+    Tail,
+}
+
+/// A replay in progress. Rows land in the store in wire order and stay OFF the
+/// client stream; the end of the replay paints ONE window.
+#[derive(Clone, Copy)]
+struct Replay {
+    mode: ReplayMode,
+    /// The first replayed row matched a held id (a tail stitched onto the
+    /// prefix). A tail that never anchors covers a gap: it must not be trusted.
+    anchored: bool,
+    /// Index where the replayed rows begin. Rows at or past it arrived DURING
+    /// this replay (a continuing message), rows before it came from the seed.
+    from: usize,
+    /// A full replay dropped the seed already (one-shot: the rows it appends
+    /// must not drop themselves on the next call).
+    dropped: bool,
+}
+
+/// How a replay ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ReplayOutcome {
+    /// No replay was running.
+    Idle,
+    /// The replay reconciled with the seed (or was a full replay).
+    Done,
+    /// A tail replay never overlapped what we held: there is a hole behind it,
+    /// and the caller owes a full replay.
+    Gap,
+}
+
 /// The peer's rich transcript store (docs/TRANSCRIPT_MODEL.md roam parity).
 ///
 /// Same item semantics as the main `TranscriptStore`, but with the peer's own
-/// replay dedupe (a `session/load` re-delivers staged content) and no toolgroup
-/// collapsing — the clients group consecutive tool rows themselves.
+/// replay reconciliation (a `session/load` re-delivers staged content) and no
+/// toolgroup collapsing — the clients group consecutive tool rows themselves.
+///
+/// The replay rules are the main store's, not a weaker copy: rows are matched
+/// by IDENTITY (never by text), a full replay replaces the seed, a tail replay
+/// truncates at the first overlap, and the client sees one windowed paint at
+/// the end instead of the history walking by row by row.
 #[derive(Default)]
 struct PeerStore {
     items: Vec<Item>,
@@ -438,6 +480,8 @@ struct PeerStore {
     next_uid: u64,
     /// Oldest item the client holds (the window origin).
     emitted_from: usize,
+    /// The `session/load` replay streaming into this store, if one is open.
+    replay: Option<Replay>,
 }
 
 impl PeerStore {
@@ -453,8 +497,95 @@ impl PeerStore {
         self.items = items;
         self.stream = None;
         self.emitted_from = 0;
+        self.replay = None;
         self.cap();
         self.reindex();
+    }
+
+    /// Arm a `session/load` replay. Called BEFORE the request goes out, so the
+    /// rows the reply streams land here (reconciled against the seed) instead of
+    /// replacing the store afterwards — which is what used to discard the
+    /// replay and leave a mis-ordered transcript.
+    fn begin_replay(&mut self, mode: ReplayMode) {
+        self.stream = None;
+        self.replay = Some(Replay {
+            mode,
+            anchored: false,
+            from: self.items.len(),
+            dropped: false,
+        });
+    }
+
+    /// The load failed: drop the replay without repainting (the seed the client
+    /// already holds stays on screen; the caller reports the failure).
+    fn abort_replay(&mut self) {
+        self.replay = None;
+        self.stream = None;
+        self.reindex();
+    }
+
+    fn is_replaying(&self) -> bool {
+        self.replay.is_some()
+    }
+
+    /// The replay is over: index the rows, enforce the cap, and report whether a
+    /// tail ever reconciled. The caller paints the window on `Done`.
+    fn end_replay(&mut self) -> ReplayOutcome {
+        let Some(replay) = self.replay.take() else {
+            return ReplayOutcome::Idle;
+        };
+        self.stream = None;
+        self.cap();
+        self.reindex();
+        if replay.mode == ReplayMode::Tail && !replay.anchored {
+            ReplayOutcome::Gap
+        } else {
+            ReplayOutcome::Done
+        }
+    }
+
+    /// Drop everything from `idx` on — the stale suffix a tail replay replaces.
+    fn truncate_from(&mut self, idx: usize) {
+        self.items.truncate(idx);
+        self.tool_idx.retain(|_, i| *i < idx);
+        if self.emitted_from > idx {
+            self.emitted_from = idx;
+        }
+        self.stream = None;
+    }
+
+    /// Reconcile a replayed row against the seed.
+    ///
+    /// `existing` is the index of a held row with this id, if any. Returns
+    /// `None` when the row starts something new (the caller appends it), or
+    /// `Some(idx)` when the id is a row this replay already started and the
+    /// chunk continues it.
+    fn replay_anchor(&mut self, existing: Option<usize>) -> Option<usize> {
+        let replay = self.replay.as_mut()?;
+        if replay.mode == ReplayMode::Full {
+            // The seed is a stale/incomplete copy: the reply is the transcript.
+            // Drop it ONCE, on the first replayed row, and reset the origin.
+            if !replay.dropped {
+                self.items.clear();
+                self.tool_idx.clear();
+                self.emitted_from = 0;
+                replay.from = 0;
+                replay.dropped = true;
+            }
+            return None;
+        }
+        match existing {
+            Some(idx) if idx >= replay.from => Some(idx),
+            Some(idx) => {
+                // First overlap with the seed: everything from here is about to
+                // be re-supplied by this replay.
+                replay.anchored = true;
+                replay.from = idx;
+                self.truncate_from(idx);
+                None
+            }
+            None => None,
+        }
     }
 
     fn reindex(&mut self) {
@@ -493,6 +624,13 @@ impl PeerStore {
         self.items.iter().map(text_message).collect()
     }
 
+    /// Close the live text stream: the next chunk opens a fresh bubble. A
+    /// composed message (the prompt echo) is complete on arrival, so appending
+    /// to it would glue two prompts into one row.
+    fn close_stream(&mut self) {
+        self.stream = None;
+    }
+
     /// A mutation for the item at `idx`: the item op is emitted only when the row
     /// is inside the client's window. A replay can touch rows older than the
     /// paint (the peer asks for a 100-message tail but paints 60); emitting their
@@ -507,28 +645,44 @@ impl PeerStore {
     }
 
     /// Append a text chunk (the peer's `accumulate`). `message_id` empty means
-    /// a live stream bubble; `replaying` enables the replay dedupe.
+    /// a live stream bubble.
+    ///
+    /// A row with an id is reconciled BY IDENTITY, never by looking at the text:
+    /// a replayed row either continues a row this replay already started, or
+    /// (first overlap with the seed) truncates the stale suffix there, or is a
+    /// fresh row appended in wire order. The old substring dedupe both missed
+    /// re-deliveries (chunk boundaries differ, so `contains` failed) and
+    /// swallowed legitimate repeats.
     fn accumulate_text(
         &mut self,
         role: &str,
         text: &str,
         message_id: &str,
-        replaying: bool,
+        _replaying: bool,
     ) -> Mutation {
         let kind = kind_for_role(role);
+        let replaying = self.is_replaying();
         if !message_id.is_empty() {
-            // A replayed id: append into that item, deduped against what a
-            // staging promotion already put on screen.
-            if let Some(idx) = self.items.iter().position(|i| i.id == message_id) {
+            let existing = self.items.iter().position(|i| i.id == message_id);
+            // Reconcile with the seed (or drop it, on a full replay).
+            if replaying {
+                if let Some(idx) = self.replay_anchor(existing) {
+                    // A message this replay already started: its next chunk.
+                    self.items[idx].text.push_str(text);
+                    return Mutation::none();
+                }
+            } else if let Some(idx) = existing {
+                // Live re-delivery of a known id (a reconnect resuming a
+                // stream): append only the part we do not already hold.
                 let it = &mut self.items[idx];
-                if replaying && it.text.contains(text) {
+                if it.text.ends_with(text) {
                     return Mutation::none();
                 }
                 it.text.push_str(text);
                 let item = it.clone();
                 return self.at(idx, TranscriptOp::Upsert { item });
             }
-            // No item for this id yet: a fresh bubble.
+            // No row for this id yet: a fresh bubble, appended in wire order.
             let item = Item {
                 id: message_id.to_string(),
                 kind,
@@ -539,6 +693,10 @@ impl PeerStore {
             self.stream = None;
             self.cap();
             let idx = self.items.len() - 1;
+            // Held during a replay: the window is painted once at the end.
+            if replaying {
+                return Mutation::none();
+            }
             return self.at(idx, TranscriptOp::Upsert { item });
         }
         // No server id: the live stream. Append to the open bubble of this role
@@ -546,16 +704,16 @@ impl PeerStore {
         if let Some((idx, srole, sid)) = self.stream.clone() {
             if srole == role && idx < self.items.len() && self.items[idx].id == sid {
                 let it = &mut self.items[idx];
-                // Serve parity: a live chunk normally appends, but a stalled
-                // stream re-delivering the shown tail must not restart the
-                // paragraph.
-                if (replaying && it.text.contains(text))
-                    || (!replaying && it.text.ends_with(text) && it.text != text)
-                {
+                // A stalled stream re-delivering the shown tail must not restart
+                // the paragraph.
+                if it.text.ends_with(text) && it.text != text {
                     return Mutation::none();
                 }
                 it.text.push_str(text);
                 let id = it.id.clone();
+                if replaying {
+                    return Mutation::none();
+                }
                 return self.at(
                     idx,
                     TranscriptOp::AppendText { id, chunk: text.to_string() },
@@ -574,14 +732,33 @@ impl PeerStore {
         self.cap();
         let idx = self.items.len() - 1;
         let item = self.items[idx].clone();
+        if replaying {
+            return Mutation::none();
+        }
         self.at(idx, TranscriptOp::Upsert { item })
     }
 
     /// Create or replace a tool row (the peer's `accumulate_tool`). The kind is
     /// preserved, so a chart/app survives the cache and staging.
     fn tool_call(&mut self, id: &str, title: &str, detail: &str, kind: &ToolCallKind) -> Mutation {
+        let replaying = self.is_replaying();
         let item = item_for_tool(kind, title, detail, id, "", "in_progress");
-        match self.tool_idx.get(id).copied() {
+        let existing = self.tool_idx.get(id).copied();
+        if replaying {
+            match self.replay_anchor(existing) {
+                // Already replayed (or live-started) in this window: refresh it.
+                Some(idx) => self.items[idx] = item.clone(),
+                None => {
+                    self.items.push(item.clone());
+                    self.tool_idx.insert(id.to_string(), self.items.len() - 1);
+                }
+            }
+            // A tool call closes the text stream (the next chunk opens a bubble).
+            self.stream = None;
+            self.cap();
+            return Mutation::none();
+        }
+        match existing {
             Some(idx) => self.items[idx] = item.clone(),
             None => {
                 self.items.push(item.clone());
@@ -598,8 +775,36 @@ impl PeerStore {
     /// A tool lifecycle update (the peer's `accumulate_tool[_append]`). The
     /// TITLE never changes (the client renders the title from the call); only
     /// status and output do.
-    fn tool_update(&mut self, id: &str, status: &str, output: &str, live: bool) -> Mutation {
+    ///
+    /// An update the store has no call for is CREATED rather than dropped: a
+    /// bounded tail replay can start mid-turn, and the old `Mutation::none()`
+    /// silently lost the chip — the reported "tool chips disappear after a
+    /// refresh". `title` is only used on that create path.
+    fn tool_update(
+        &mut self,
+        id: &str,
+        title: &str,
+        status: &str,
+        output: &str,
+        live: bool,
+    ) -> Mutation {
+        let replaying = self.is_replaying();
         let Some(&idx) = self.tool_idx.get(id) else {
+            if title.is_empty() && output.is_empty() {
+                return Mutation::none();
+            }
+            let item = item_for_tool(
+                &ToolCallKind::Plain,
+                title,
+                "",
+                id,
+                output,
+                status,
+            );
+            self.items.push(item);
+            self.tool_idx.insert(id.to_string(), self.items.len() - 1);
+            self.stream = None;
+            self.cap();
             return Mutation::none();
         };
         let item = {
@@ -615,6 +820,9 @@ impl PeerStore {
             }
             it.clone()
         };
+        if replaying {
+            return Mutation::none();
+        }
         let op = if live && !output.is_empty() && matches!(item.kind, ItemKind::Tool) {
             TranscriptOp::AppendOutput { id: id.to_string(), chunk: output.to_string() }
         } else {
@@ -668,7 +876,6 @@ impl PeerInner {
             active_run: None,
             conn: None,
             store: PeerStore::default(),
-            replaying: false,
             pending_permission: None,
             stream: None,
             closing: false,
@@ -975,6 +1182,12 @@ impl RoamPeer {
     /// (Disconnected/Error after the supervisor gives up) must NOT accept
     /// them — nothing will ever drain the queue.
     pub fn open_session(&self, session_id: String, cwd: String) {
+        self.open_session_with(session_id, cwd, false);
+    }
+
+    /// [`Self::open_session`] with the reload strength: `full` replays from the
+    /// server instead of trusting the cached tail (RefreshMode::Full).
+    pub fn open_session_with(&self, session_id: String, cwd: String, full: bool) {
         match self.status() {
             ConnectionStatus::Ready | ConnectionStatus::Connecting => {}
             _ => return,
@@ -994,6 +1207,7 @@ impl RoamPeer {
         let _ = self.cmd_tx.send(PeerCommand::OpenSession {
             session_id: raw,
             cwd,
+            full,
         });
     }
 
@@ -1056,12 +1270,22 @@ impl RoamPeer {
         // The store is already rich: save it as-is, so peer charts/apps survive
         // a restart (the old flat projection did not).
         let items = inner.store.items.clone();
-        let updated = inner
-            .sessions
-            .iter()
-            .find(|s| s.id.ends_with(&format!(":{open}")))
-            .map(|s| s.updated_at.clone())
-            .unwrap_or_default();
+        // A store a replay or a live turn is still rewriting is NOT a settled
+        // copy of the session: stamp it empty so the next open can never treat
+        // it as current. Without this, a save taken mid-turn/mid-replay looked
+        // fresh, `replay_tail` asked only for a tail, and the missing rows were
+        // never replayed — the "it is still wrong after a refresh" trap.
+        let settled = !inner.store.is_replaying() && inner.active_run.is_none();
+        let updated = if settled {
+            inner
+                .sessions
+                .iter()
+                .find(|s| s.id.ends_with(&format!(":{open}")))
+                .map(|s| s.updated_at.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         drop(inner);
         self.cache.save_transcript(&key, &items, &updated);
     }
@@ -1324,7 +1548,7 @@ impl RoamPeer {
                 .get(&raw)
                 .cloned()
                 .unwrap_or_default();
-            if let Err(error) = self.load_session(&cx, raw, cwd).await {
+            if let Err(error) = self.load_session(&cx, raw, cwd, false).await {
                 self.fail(format!("roam resume: {error}"));
             }
         }
@@ -1336,9 +1560,9 @@ impl RoamPeer {
         let mut cmd_rx = self.cmd_rx.lock().await;
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
-                PeerCommand::OpenSession { session_id, cwd } => {
+                PeerCommand::OpenSession { session_id, cwd, full } => {
                     let raw = self.strip_prefix(&session_id);
-                    if let Err(error) = self.load_session(&cx, raw, cwd).await {
+                    if let Err(error) = self.load_session(&cx, raw, cwd, full).await {
                         self.fail(format!("roam session/open: {error}"));
                     }
                 }
@@ -1388,27 +1612,63 @@ impl RoamPeer {
         cx: &agent_client_protocol::ConnectionTo<Agent>,
         raw: String,
         cwd: String,
+        full: bool,
     ) -> Result<(), AcpError> {
-        let mut params = json!({ "sessionId": raw, "cwd": cwd, "mcpServers": [] });
         // Bounded replay when the cache is current (see `replay_tail`). This
         // covers BOTH paths that reach load_session: a user tap (OpenSession)
-        // and a reconnect resume — the resume dedupes the tail against the
+        // and a reconnect resume — the resume reconciles the tail against the
         // transcript the peer kept across the drop, same as the tap does
         // against the cache.
-        if let Some(tail) = self.replay_tail(&raw) {
+        // A forced reload never trusts the cache: no tail, and the replay is
+        // treated as the transcript (ReplayMode::Full).
+        let tail = if full { None } else { self.replay_tail(&raw) };
+        let mut params = json!({ "sessionId": raw.clone(), "cwd": cwd.clone(), "mcpServers": [] });
+        if let Some(tail) = tail {
             params["_meta"] = json!({ "replayTail": tail });
         }
+        // Promote what we already hold and ARM the replay BEFORE the request.
+        // Doing this on the reply (the old order) ingested the replay into the
+        // previous store, then replaced the store from the cache — discarding
+        // the replay and painting a mis-ordered transcript.
+        self.open(raw.clone());
+        self.begin_replay(if tail.is_some() { ReplayMode::Tail } else { ReplayMode::Full });
         let load = cx
             .send_request(UntypedMessage::new("session/load", params)?)
             .block_task()
             .await;
         match load {
             Ok(reply) => {
-                self.open(raw);
+                if self.finish_replay() == ReplayOutcome::Gap {
+                    // The tail never overlapped what we held: there is a hole
+                    // behind it, so replay in full instead of leaving a gap in
+                    // the middle of the transcript. One retry, unbounded.
+                    self.begin_replay(ReplayMode::Full);
+                    let full = json!({ "sessionId": raw.clone(), "cwd": cwd, "mcpServers": [] });
+                    match cx
+                        .send_request(UntypedMessage::new("session/load", full)?)
+                        .block_task()
+                        .await
+                    {
+                        Ok(reply) => {
+                            self.finish_replay();
+                            self.emit_status("ready");
+                            self.emit_config(&reply);
+                        }
+                        Err(error) => {
+                            self.abort_replay();
+                            self.listener.on_session_open_failed(
+                                format!("roam:{}:{}", self.label, raw),
+                                format!("session/load failed: {error}"),
+                            );
+                        }
+                    }
+                    return Ok(());
+                }
                 self.emit_status("ready");
                 self.emit_config(&reply);
             }
             Err(error) => {
+                self.abort_replay();
                 // The tapped session is stale/archived — do NOT quietly proxy
                 // it with a fresh session on the peer: the user asked for THIS
                 // session, and a blank replacement is the defect (grouse#19).
@@ -1600,10 +1860,9 @@ impl RoamPeer {
             let staged = inner.staging.remove(&raw_session_id).map(|s| s.store.items);
             inner.store.replace(staged.or(cached).unwrap_or_default());
             inner.open_session_id = Some(raw_session_id.clone());
-            // The session/load replay that follows re-delivers the promoted
-            // (or cached) content; dedupe against it during this replay only,
-            // cleared once a live turn begins (dispatch SessionInfoUpdate).
-            inner.replaying = true;
+            // The replay is armed by the caller BEFORE it sends `session/load`
+            // (`begin_replay`): the rows then reconcile against this seed
+            // instead of replacing it after the fact.
             // Promotion (or simply visiting) clears the green dot: has_new is
             // gone with the staging entry, and sessions() re-reads it live.
         }
@@ -1618,6 +1877,77 @@ impl RoamPeer {
                 self.listener.on_item(op);
             }
         }
+    }
+
+    /// Arm the replay that the `session/load` about to be sent will stream into
+    /// the open session's store. Must run BEFORE the request: the replay's rows
+    /// are then reconciled against the seed we painted, and the client sees one
+    /// windowed paint at the end instead of every row walking by.
+    fn begin_replay(&self, mode: ReplayMode) {
+        self.inner.lock().store.begin_replay(mode);
+    }
+
+    /// The replay is over: paint ONE window (`Reset` + newest items + cursor)
+    /// and report whether a bounded tail ever overlapped what we held.
+    fn finish_replay(&self) -> ReplayOutcome {
+        let (outcome, ops) = {
+            let mut inner = self.inner.lock();
+            let outcome = inner.store.end_replay();
+            let ops = if outcome == ReplayOutcome::Done {
+                // The prefixed id the client knows (every op carries it).
+                let session = inner
+                    .open_session_id
+                    .clone()
+                    .map(|raw| format!("roam:{}:{raw}", self.label))
+                    .unwrap_or_default();
+                inner.store.paint(&session)
+            } else {
+                Vec::new()
+            };
+            (outcome, ops)
+        };
+        if (self.is_active)() {
+            for op in ops {
+                self.listener.on_item(op);
+            }
+        }
+        outcome
+    }
+
+    /// The load failed: drop the replay, keep the seed the client already holds.
+    fn abort_replay(&self) {
+        self.inner.lock().store.abort_replay();
+    }
+
+    /// Echo a prompt we are about to send into the open session's transcript.
+    ///
+    /// goose sends no `user_message_chunk` for a prompt the client itself sent
+    /// (verified against a live serve), so without this the question is missing
+    /// from the transcript, from the cache and from the screen — and the next
+    /// replay then appends it after the answers, which is what "Goose's reply
+    /// appears before my question" was. Returns false when this peer cannot take
+    /// a prompt right now (no live connection or no open session), so the caller
+    /// does not paint a row for a message that never left.
+    pub fn echo_prompt(&self, prompt: &crate::Prompt) -> bool {
+        let Some(text) = crate::pure_text(prompt) else {
+            return false;
+        };
+        let session = {
+            let inner = self.inner.lock();
+            if inner.conn.is_none() {
+                return false;
+            }
+            match inner.open_session_id.clone() {
+                Some(session) => session,
+                None => return false,
+            }
+        };
+        let mutation = self.accumulate(&session, "user", &text, "");
+        // The echoed prompt is a whole message: close the stream so the next
+        // prompt does not append to it (a `user`-role chunk would, otherwise).
+        self.inner.lock().store.close_stream();
+        self.emit_mutation(mutation);
+        true
     }
 
     /// The link ended. `Ok` = clean (close command, or the peer was torn
@@ -1744,9 +2074,10 @@ impl RoamPeer {
             }
             SessionUpdate::ToolCallUpdate(update) => {
                 let id = update.tool_call_id.to_string();
+                let title = update.fields.title.clone().unwrap_or_default();
                 let (status, output, live) = tool_update(&update);
                 let mutation =
-                    self.accumulate_tool_update(&session_id, &id, &status, &output, live);
+                    self.accumulate_tool_update(&session_id, &id, &title, &status, &output, live);
                 if active && mine {
                     self.emit_mutation(mutation);
                 }
@@ -1778,10 +2109,6 @@ impl RoamPeer {
                             && self.inner.lock().active_run.take().is_some();
                         if let Some(run_id) = started {
                             self.inner.lock().active_run = Some(run_id.clone());
-                            // The load/reconnect replay is done; a live turn is
-                            // streaming now. From here on chunks never dedupe
-                            // (that would swallow legitimately repeated text).
-                            self.inner.lock().replaying = false;
                             self.listener.on_active_run(
                                 format!("roam:{}:{session_id}", self.label),
                                 run_id,
@@ -1856,15 +2183,14 @@ impl RoamPeer {
     fn accumulate(&self, session_id: &str, role: &str, text: &str, message_id: &str) -> Mutation {
         let mut inner = self.inner.lock();
         let mine = inner.open_session_id.as_deref() == Some(session_id);
-        let replaying = inner.replaying;
         let mut staged_new = false;
         let m = if mine {
-            inner.store.accumulate_text(role, text, message_id, replaying)
+            inner.store.accumulate_text(role, text, message_id, false)
         } else {
             let st = inner.staging.entry(session_id.to_string()).or_default();
             staged_new = !st.has_new;
             st.has_new = true;
-            st.store.accumulate_text(role, text, message_id, replaying)
+            st.store.accumulate_text(role, text, message_id, false)
         };
         drop(inner);
         if !mine && staged_new {
@@ -1907,6 +2233,7 @@ impl RoamPeer {
         &self,
         session_id: &str,
         tool_call_id: &str,
+        title: &str,
         status: &str,
         output: &str,
         live: bool,
@@ -1915,12 +2242,12 @@ impl RoamPeer {
         let mine = inner.open_session_id.as_deref() == Some(session_id);
         let mut staged_new = false;
         let m = if mine {
-            inner.store.tool_update(tool_call_id, status, output, live)
+            inner.store.tool_update(tool_call_id, title, status, output, live)
         } else {
             let st = inner.staging.entry(session_id.to_string()).or_default();
             staged_new = !st.has_new;
             st.has_new = true;
-            st.store.tool_update(tool_call_id, status, output, live)
+            st.store.tool_update(tool_call_id, title, status, output, live)
         };
         drop(inner);
         if !mine && staged_new {
@@ -2432,6 +2759,64 @@ mod tests {
         (peer, cmd_rx)
     }
 
+    /// Attach a live-but-silent `ConnectionTo<Agent>` to `peer`, so the paths
+    /// that require a live link (the prompt echo, `rpc`) can run without a
+    /// server. The returned sender keeps the connection open; drop it to close.
+    fn attach_silent_conn(peer: &RoamPeer) -> tokio::sync::oneshot::Sender<()> {
+        let (transport, _silent) = Channel::duplex();
+        let holder: Arc<Mutex<Option<agent_client_protocol::ConnectionTo<Agent>>>> =
+            Arc::new(Mutex::new(None));
+        let (ready_tx, ready_rx) = std_mpsc::channel();
+        let (keep_tx, keep_rx) = tokio::sync::oneshot::channel::<()>();
+        let holder2 = holder.clone();
+        runtime().spawn(async move {
+            let _ = Client
+                .builder()
+                .name("grouse")
+                .connect_with(transport, async move |cx: agent_client_protocol::ConnectionTo<Agent>| {
+                    *holder2.lock() = Some(cx);
+                    let _ = ready_tx.send(());
+                    let _ = keep_rx.await;
+                    Ok(())
+                })
+                .await;
+        });
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("connection not established");
+        peer.inner.lock().conn = holder.lock().take();
+        keep_tx
+    }
+
+    /// An item for seeding stores / caches in a test.
+    fn item(id: &str, kind: ItemKind, text: &str) -> Item {
+        Item {
+            id: id.to_string(),
+            kind,
+            text: text.to_string(),
+            ..empty_item()
+        }
+    }
+
+    fn text_notif(
+        session: &str,
+        role: &str,
+        text: &str,
+        id: Option<&str>,
+    ) -> SessionNotification {
+        use agent_client_protocol::schema::v1::ContentChunk;
+        let mut chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+        if let Some(id) = id {
+            chunk = chunk.message_id(agent_client_protocol::schema::v1::MessageId::new(id));
+        }
+        let update = match role {
+            "user" => SessionUpdate::UserMessageChunk(chunk),
+            "thought" => SessionUpdate::AgentThoughtChunk(chunk),
+            _ => SessionUpdate::AgentMessageChunk(chunk),
+        };
+        SessionNotification::new(session.to_string(), update)
+    }
+
     fn list_response(ids: &[(&str, &str, &str)]) -> ListSessionsResponse {
         ListSessionsResponse::new(
             ids.iter()
@@ -2520,7 +2905,7 @@ mod tests {
         // Prefixed id (what the UI holds) is stripped back to the raw id.
         peer.open_session("roam:laptop:s1".to_string(), "/home/user".to_string());
         match cmd_rx.try_recv() {
-            Ok(PeerCommand::OpenSession { session_id, cwd }) => {
+            Ok(PeerCommand::OpenSession { session_id, cwd, .. }) => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(cwd, "/home/user");
             }
@@ -2539,7 +2924,10 @@ mod tests {
         assert!(matches!(peer.status(), ConnectionStatus::Connecting));
         peer.open_session("s1".to_string(), "/home/user".to_string());
         match cmd_rx.try_recv() {
-            Ok(PeerCommand::OpenSession { session_id, .. }) => assert_eq!(session_id, "s1"),
+            Ok(PeerCommand::OpenSession { session_id, full, .. }) => {
+                assert_eq!(session_id, "s1");
+                assert!(!full, "a plain open keeps the cache-aware load");
+            }
             other => panic!("expected OpenSession queued while connecting, got {other:?}"),
         }
         // Dead peer: nothing will drain the queue, so the intent is rejected.
@@ -2559,7 +2947,7 @@ mod tests {
         // the session's own cwd from session/list, not fail the load.
         peer.open_session("s1".to_string(), String::new());
         match cmd_rx.try_recv() {
-            Ok(PeerCommand::OpenSession { session_id, cwd }) => {
+            Ok(PeerCommand::OpenSession { session_id, cwd, .. }) => {
                 assert_eq!(session_id, "s1");
                 assert!(!cwd.is_empty());
             }
@@ -3234,6 +3622,272 @@ mod tests {
         assert_eq!(crate::spine::permission_option_kind_str(&PermissionOptionKind::AllowAlways), "allow_always");
         assert_eq!(crate::spine::permission_option_kind_str(&PermissionOptionKind::RejectOnce), "reject_once");
         assert_eq!(crate::spine::permission_option_kind_str(&PermissionOptionKind::RejectAlways), "reject_always");
+    }
+
+    // -- roam transcript: echo, replay reconciliation, settled saves -----------
+
+    /// grouse#24 (1): a prompt the client sends must appear in the transcript.
+    /// The remote goose sends no `user_message_chunk` for our own prompt, so the
+    /// echo at the send is the only thing that puts the question on screen and
+    /// in the cache.
+    #[test]
+    fn echo_prompt_lands_in_the_open_transcript() {
+        let listener = test_listener();
+        let (peer, _) =
+            offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
+        let _keep = attach_silent_conn(&peer);
+        peer.inner.lock().open_session_id = Some("s1".to_string());
+
+        let prompt = crate::Prompt {
+            blocks: vec![crate::PromptBlock::Text { text: "why is the sky blue".to_string() }],
+        };
+        assert!(peer.echo_prompt(&prompt), "a live link should accept the echo");
+
+        let items = peer.items();
+        assert_eq!(items.len(), 1, "exactly one row: {items:?}");
+        assert_eq!(items[0].kind, ItemKind::User);
+        assert_eq!(items[0].text, "why is the sky blue");
+        assert!(
+            listener
+                .events
+                .lock()
+                .iter()
+                .any(|e| e.starts_with("item Upsert roam-item-1 kind=User")),
+            "the client is told about the echo: {:?}",
+            listener.events.lock()
+        );
+    }
+
+    /// Two prompts in a row are two rows: the echo closes the stream it opened.
+    #[test]
+    fn two_echoed_prompts_stay_separate_rows() {
+        let listener = test_listener();
+        let (peer, _) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let _keep = attach_silent_conn(&peer);
+        peer.inner.lock().open_session_id = Some("s1".to_string());
+        for text in ["first question", "second question"] {
+            let prompt = crate::Prompt {
+                blocks: vec![crate::PromptBlock::Text { text: text.to_string() }],
+            };
+            assert!(peer.echo_prompt(&prompt));
+        }
+        let items = peer.items();
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[0].text, "first question");
+        assert_eq!(items[1].text, "second question");
+    }
+
+    /// The echo never paints a row for a message that cannot be sent, and it
+    /// refuses with no open session.
+    #[test]
+    fn echo_prompt_needs_a_live_link_and_an_open_session() {
+        let listener = test_listener();
+        let (peer, _) =
+            offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
+        let prompt = crate::Prompt {
+            blocks: vec![crate::PromptBlock::Text { text: "hello".to_string() }],
+        };
+        assert!(!peer.echo_prompt(&prompt), "no connection yet");
+        assert!(peer.items().is_empty());
+        let _keep = attach_silent_conn(&peer);
+        assert!(!peer.echo_prompt(&prompt), "no open session yet");
+        assert!(peer.items().is_empty());
+    }
+
+    /// grouse#24 (2): a FULL replay replaces the seed. The cache that lost the
+    /// question (the old echo bug) used to keep its rows and have the replayed
+    /// question APPENDED after the answers — "Goose's reply before my message".
+    /// The replay's wire order is the transcript's order, and no row doubles.
+    #[test]
+    fn a_full_replay_replaces_the_seed_in_wire_order() {
+        let listener = test_listener();
+        let (peer, _) =
+            offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
+        // A seed with the answer but not the question, stamped current so the
+        // open trusts it (the shape the echo bug produced).
+        assert!(peer.cache.save_transcript(
+            "roam:laptop:s1",
+            &[item("a1", ItemKind::Agent, "because of Rayleigh scattering")],
+            "2026-01-01T00:00:00Z"
+        ));
+        peer.apply_sessions(&list_response(&[("s1", "Sky", "2026-01-01T00:00:00Z")]));
+
+        peer.open("s1".to_string());
+        peer.begin_replay(ReplayMode::Full);
+        peer.dispatch(text_notif("s1", "user", "why is the sky blue", Some("u1")));
+        peer.dispatch(text_notif("s1", "agent", "because of Rayleigh scattering", Some("a1")));
+        peer.dispatch(SessionNotification::new(
+            "s1",
+            SessionUpdate::ToolCall(ToolCall::new(ToolCallId::new("t1"), "Bash")),
+        ));
+        assert_eq!(peer.finish_replay(), ReplayOutcome::Done);
+
+        let items = peer.items();
+        let summary: Vec<(&str, ItemKind)> =
+            items.iter().map(|i| (i.id.as_str(), i.kind)).collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("u1", ItemKind::User),
+                ("a1", ItemKind::Agent),
+                ("t1", ItemKind::Tool)
+            ],
+            "the replay's order is the transcript's order: {items:?}"
+        );
+        assert_eq!(items[1].text, "because of Rayleigh scattering", "no doubled text");
+
+        // One windowed paint at the end, not a row-by-row walk: the replay
+        // emits NOTHING until `finish_replay`, which repaints the whole window.
+        let events = listener.events.lock().clone();
+        let last_reset = events.iter().rposition(|e| e == "item Reset").unwrap();
+        let painted: Vec<&String> = events[last_reset..]
+            .iter()
+            .filter(|e| e.starts_with("item Upsert"))
+            .collect();
+        assert_eq!(
+            painted.len(),
+            3,
+            "the end-of-replay paint carries all three rows: {events:?}"
+        );
+        assert_eq!(
+            events.iter().filter(|e| e.as_str() == "item Reset").count(),
+            2,
+            "one paint when the seed was shown, one at the end: {events:?}"
+        );
+    }
+
+    /// grouse#24 (2): a bounded tail stitches onto the rows we hold. The first
+    /// replayed row that matches a held id truncates the stale suffix there, so
+    /// a refresh neither duplicates nor re-points the overlap.
+    #[test]
+    fn a_tail_replay_stitches_at_the_first_overlapping_row() {
+        let listener = test_listener();
+        let (peer, _) =
+            offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
+        let seed = vec![
+            item("u1", ItemKind::User, "q"),
+            item("a1", ItemKind::Agent, "a"),
+            item("a2", ItemKind::Agent, "stale answer"),
+        ];
+        assert!(peer.cache.save_transcript(
+            "roam:laptop:s1",
+            &seed,
+            "2026-01-01T00:00:00Z"
+        ));
+        peer.apply_sessions(&list_response(&[("s1", "Sky", "2026-01-01T00:00:00Z")]));
+        peer.open("s1".to_string());
+
+        peer.begin_replay(ReplayMode::Tail);
+        // The overlap row arrives with its full text, then the new one.
+        peer.dispatch(text_notif("s1", "agent", "real answer", Some("a2")));
+        peer.dispatch(text_notif("s1", "agent", "and more", Some("a3")));
+        assert_eq!(peer.finish_replay(), ReplayOutcome::Done);
+
+        let items = peer.items();
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["u1", "a1", "a2", "a3"], "prefix kept, tail replaced: {items:?}");
+        assert_eq!(items[2].text, "real answer", "the overlap row is re-supplied, not doubled");
+    }
+
+    /// grouse#24 (2): a tail that never overlaps what we hold covers a hole, so
+    /// the peer must say so and re-replay in full rather than show the gap.
+    #[test]
+    fn a_tail_that_never_overlaps_reports_a_gap() {
+        let listener = test_listener();
+        let (peer, _) =
+            offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
+        assert!(peer.cache.save_transcript(
+            "roam:laptop:s1",
+            &[item("u1", ItemKind::User, "q")],
+            "2026-01-01T00:00:00Z"
+        ));
+        peer.apply_sessions(&list_response(&[("s1", "Sky", "2026-01-01T00:00:00Z")]));
+        peer.open("s1".to_string());
+
+        peer.begin_replay(ReplayMode::Tail);
+        peer.dispatch(text_notif("s1", "agent", "unrelated", Some("z9")));
+        assert_eq!(peer.finish_replay(), ReplayOutcome::Gap);
+    }
+
+    /// grouse#24 (2), tool chips: an update whose call is not in the store (a
+    /// tail replay can start mid-turn) is CREATED, not dropped. The old code
+    /// returned nothing for it, which is the reported "tool chips disappear".
+    #[test]
+    fn a_tool_update_without_its_call_is_created() {
+        use agent_client_protocol::schema::v1::{ToolCallUpdate, ToolCallUpdateFields};
+        let listener = test_listener();
+        let (peer, _) =
+            offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
+        peer.open("s1".to_string());
+        peer.begin_replay(ReplayMode::Tail);
+
+        let update = ToolCallUpdate::new(
+            ToolCallId::new("t9"),
+            ToolCallUpdateFields::new()
+                .title("Bash")
+                .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed),
+        );
+        peer.dispatch(SessionNotification::new("s1", SessionUpdate::ToolCallUpdate(update)));
+        peer.finish_replay();
+
+        let items = peer.items();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].id, "t9");
+        assert_eq!(items[0].kind, ItemKind::Tool);
+        assert_eq!(items[0].text, "Bash");
+    }
+
+    /// grouse#24 (3): a cache written while a replay or a turn is still
+    /// rewriting the store carries NO stamp, so the next open can never trust
+    /// it — the "it is still wrong after a refresh" trap.
+    #[test]
+    fn a_save_during_a_replay_carries_no_stamp() {
+        let listener = test_listener();
+        let (peer, _) =
+            offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
+        peer.apply_sessions(&list_response(&[("s1", "Sky", "2026-01-01T00:00:00Z")]));
+        peer.open("s1".to_string());
+        peer.begin_replay(ReplayMode::Full);
+        peer.dispatch(text_notif("s1", "user", "q", Some("u1")));
+        peer.save_open_transcript();
+        let (items, stamp) = peer
+            .cache
+            .load_transcript("roam:laptop:s1")
+            .expect("the save wrote a file");
+        assert_eq!(items.len(), 1);
+        assert!(
+            stamp.is_empty(),
+            "a mid-replay store must not look current (stamp {stamp:?})"
+        );
+
+        // Settled: no replay running, no live run -> the listed stamp is kept.
+        peer.finish_replay();
+        peer.save_open_transcript();
+        let (_, stamp) = peer.cache.load_transcript("roam:laptop:s1").unwrap();
+        assert_eq!(stamp, "2026-01-01T00:00:00Z");
+    }
+
+    /// RefreshMode::Full on a peer: the command carries `full`, so the load
+    /// skips the cached tail and replays from the server (grouse#18 parity).
+    #[test]
+    fn a_forced_reload_queues_a_full_open() {
+        let listener = test_listener();
+        let (peer, mut cmd_rx) = offline_peer(
+            "laptop",
+            listener,
+            gate(Arc::new(AtomicBool::new(true))),
+        );
+        peer.inner.lock().status = ConnectionStatus::Ready;
+        peer.open_session_with("roam:laptop:s1".to_string(), "/home/user".to_string(), true);
+        match cmd_rx.try_recv() {
+            Ok(PeerCommand::OpenSession { session_id, cwd, full }) => {
+                assert_eq!(session_id, "s1", "the peer's raw id");
+                assert_eq!(cwd, "/home/user");
+                assert!(full, "Full must not trust the cached tail");
+            }
+            other => panic!("expected a full OpenSession, got {other:?}"),
+        }
     }
 
     #[test]

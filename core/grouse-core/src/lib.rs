@@ -790,6 +790,34 @@ impl Core {
     }
 
     fn open_session_inner(&self, session_id: String, force_replay: bool) {
+        // ONE verb for both transports: a `roam:<label>:<id>` id routes to the
+        // peer that owns it, with the same open/reload semantics. Before this,
+        // `refresh_session` had no roam branch at all — it cleared the peer
+        // label and tried to `session/load` a prefixed id on the main wire — so
+        // clients had to special-case roam themselves and RefreshMode::Full was
+        // a no-op there.
+        if let Some((label, raw)) = split_roam_session(&session_id) {
+            let peer = self
+                .inner
+                .peers
+                .lock()
+                .iter()
+                .find(|peer| peer.label() == label)
+                .cloned();
+            if let Some(peer) = peer {
+                *self.inner.active_peer_label.write() = Some(label.to_string());
+                let cwd = self
+                    .inner
+                    .state
+                    .lock()
+                    .last_config
+                    .as_ref()
+                    .map(|config| config.cwd.clone())
+                    .unwrap_or_default();
+                peer.open_session_with(raw.to_string(), cwd, force_replay);
+                return;
+            }
+        }
         *self.inner.active_peer_label.write() = None;
         self.reset_chat_state();
         // Move the chat-event gate BEFORE anything that can block. Everything
@@ -932,6 +960,22 @@ impl Core {
     /// session. Routes to the active roam peer when one owns the chat.
     pub fn send_prompt(&self, prompt: Prompt, expect: Option<SendExpect>) {
         if let Some(peer) = self.active_peer() {
+            // Echo the prompt into the peer's transcript FIRST, exactly like the
+            // main path's `spawn_prompt`: the remote goose sends no
+            // `user_message_chunk` for a prompt this client sent, so without the
+            // echo the question is missing live, missing from the cache, and the
+            // next replay appends it after the answers.
+            if !peer.echo_prompt(&prompt) {
+                // Not ready (no live link, or no session bound). Do not paint a
+                // row for a message that never left, and never drop it silently:
+                // CoreListener has no error channel (that lives on the unstable
+                // listener), so this is the core's own log, like the rejection
+                // below.
+                eprintln!(
+                    "grouse-core: send_prompt not sent — the roam peer has no live connection or no open session"
+                );
+                return;
+            }
             let params = prompt_params(
                 &prompt,
                 &peer.active_session_id().unwrap_or_default(),
@@ -1072,15 +1116,6 @@ impl Core {
     /// Open a session on a roam peer; the peer becomes the chat owner until a
     /// Main session is opened. Its transcript is peer-owned (never cached).
     pub fn roam_open_session(&self, label: String, session_id: String) {
-        let peer = self
-            .inner
-            .peers
-            .lock()
-            .iter()
-            .find(|peer| peer.label() == label)
-            .cloned();
-        let Some(peer) = peer else { return };
-        *self.inner.active_peer_label.write() = Some(label);
         // Peer sessions are not in the main session list; the working dir is
         // the only known-good cwd (session/load rewrites working_dir when the
         // cwd differs, so the caller's pick wins on the peer side).
@@ -1092,7 +1127,16 @@ impl Core {
             .as_ref()
             .map(|config| config.cwd.clone())
             .unwrap_or_default();
-        peer.open_session(session_id, cwd);
+        let room = self
+            .inner
+            .peers
+            .lock()
+            .iter()
+            .find(|peer| peer.label() == label)
+            .cloned();
+        let Some(peer) = room else { return };
+        *self.inner.active_peer_label.write() = Some(label);
+        peer.open_session_with(session_id, cwd, false);
     }
 
     /// Create a fresh session on a roam peer; the peer becomes the chat owner
@@ -2276,7 +2320,15 @@ impl Core {
 /// carry (see the local echo in `spawn_prompt`). `None` when it has an image or
 /// resource block: those stay the client's own local echo, because `Item` has no
 /// image field to represent them.
-fn pure_text(prompt: &Prompt) -> Option<String> {
+/// Split a roam-owned session id (`roam:<label>:<raw>`) into its label and the
+/// raw id the remote goose knows. `None` for a main-connection id.
+pub(crate) fn split_roam_session(session_id: &str) -> Option<(&str, &str)> {
+    let rest = session_id.strip_prefix("roam:")?;
+    let (label, raw) = rest.split_once(':')?;
+    (!label.is_empty() && !raw.is_empty()).then_some((label, raw))
+}
+
+pub(crate) fn pure_text(prompt: &Prompt) -> Option<String> {
     let mut text = String::new();
     for block in &prompt.blocks {
         match block {

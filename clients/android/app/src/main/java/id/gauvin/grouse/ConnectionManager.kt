@@ -1178,7 +1178,9 @@ class ConnectionManager private constructor(context: Context) {
             // peer's snapshot, so a short quiet window is the good signal.
             replayActive.value = true
             replayProgress.value = 0
-            core.roamOpenSession(peer, sessionId)
+            // ONE open for both transports: the core routes a roam-prefixed id
+            // to its peer, so this app keeps no second code path here.
+            core.openSession(sessionId)
             return
         }
         currentRoamPeer = null
@@ -1205,12 +1207,11 @@ class ConnectionManager private constructor(context: Context) {
         replayActive.value = true
         replayProgress.value = 0
         openFailed.value = null
-        val peer = currentRoamPeer
-        if (peer != null) {
-            // A peer's load has no freshness/hold mode — it re-loads its own way.
-            core.roamOpenSession(peer, sid)
-            return
-        }
+        // One call for both transports: the core routes a `roam:<peer>:<id>` id
+        // to the peer that owns it and applies the same freshness rule there
+        // (Quick trusts a settled cache and merges a bounded tail, Full replays
+        // from the server). Before this, roam took a separate path where Full
+        // was silently a no-op.
         core.refreshSession(sid, if (full) RefreshMode.FULL else RefreshMode.QUICK)
         if (full) backgroundNotice.value = "Replaying this chat from the start…"
     }
