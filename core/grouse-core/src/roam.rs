@@ -1098,26 +1098,20 @@ impl RoamPeer {
     /// session. Call from a UI/intent thread, not from inside the dispatch
     /// loop.
     pub fn rpc(&self, method: &str, params: Value) -> Result<Value, AcpError> {
-        let conn = self
-            .inner
-            .lock()
-            .conn
-            .clone()
-            .ok_or_else(|| AcpError::internal_error().data("roam peer not connected"))?;
-        let msg = UntypedMessage::new(method, self.wire_params(params))?;
-        let (tx, rx) = std_mpsc::channel();
-        runtime().spawn(async move {
-            let _ = tx.send(conn.send_request(msg).block_task().await);
-        });
-        // S-RC-6: a hung remote goose must not pin the calling thread forever.
-        // The request task is detached; if we time out, its eventual reply is
-        // simply dropped.
-        // End-of-turn fan-out, shared by the success, failure, and timeout
-        // arms: the turn's completion rides the session/prompt REPLACE (the
-        // reply's stopReason) — the main connection surfaces it via
+        let is_prompt = method == "session/prompt";
+        // End-of-turn fan-out, shared by EVERY exit — the success, failure and
+        // timeout arms: the turn's completion rides the session/prompt REPLACE
+        // (the reply's stopReason) — the main connection surfaces it via
         // store.run_ended; the peer has no store, so emit RunEnded straight
         // to the listener so the app clears its in-flight/turnInFlight state
         // and drains the queue.
+        //
+        // Defined BEFORE the connection lookup: a prompt attempted while the
+        // peer is re-dialing has no conn, and returning early without this left
+        // the app's busy state wedged forever — `send_prompt` discards this
+        // Result and the app clears in-flight state only on RunEnded, so the
+        // reply it waits for can never arrive. Every `session/prompt` exit must
+        // reach this.
         let end_turn = |stop: &str| {
             // Emit RunEnded UNCONDITIONALLY, not just when this peer owns the
             // screen. The turn has ended regardless of what the user is viewing;
@@ -1131,6 +1125,35 @@ impl RoamPeer {
             // now over, whether or not the server sent an activeRunId update.
             self.inner.lock().active_run = None;
         };
+        // Scoped: a `match self.inner.lock().conn.clone()` scrutinee would hold
+        // the lock through the arms, and `end_turn` locks again (parking_lot is
+        // not re-entrant) — a prompt with no conn deadlocked instead of ending.
+        let conn = { self.inner.lock().conn.clone() };
+        let conn = match conn {
+            Some(conn) => conn,
+            None => {
+                if is_prompt {
+                    end_turn("error");
+                }
+                return Err(AcpError::internal_error().data("roam peer not connected"));
+            }
+        };
+        let msg = match UntypedMessage::new(method, self.wire_params(params)) {
+            Ok(msg) => msg,
+            Err(error) => {
+                if is_prompt {
+                    end_turn("error");
+                }
+                return Err(error);
+            }
+        };
+        let (tx, rx) = std_mpsc::channel();
+        runtime().spawn(async move {
+            let _ = tx.send(conn.send_request(msg).block_task().await);
+        });
+        // S-RC-6: a hung remote goose must not pin the calling thread forever.
+        // The request task is detached; if we time out, its eventual reply is
+        // simply dropped.
         let result = match rx.recv_timeout(Self::RPC_TIMEOUT) {
             Ok(inner) => inner,
             Err(e) => {
@@ -1143,7 +1166,7 @@ impl RoamPeer {
                 // clean FIN, so send_request hangs and never errors) must still
                 // end the turn — the app clears its in-flight state only on
                 // RunEnded, so skipping this left it busy forever.
-                if method == "session/prompt" {
+                if is_prompt {
                     end_turn("error");
                 }
                 return Err(error);
@@ -1155,13 +1178,13 @@ impl RoamPeer {
                 // A prompt that fails must still end the turn so the UI can
                 // clear in-flight state and drain the queue (mirrors spine's
                 // run_ended("error") — the desktop wedges here).
-                if method == "session/prompt" {
+                if is_prompt {
                     end_turn("error");
                 }
                 return Err(error);
             }
         };
-        if method == "session/prompt" {
+        if is_prompt {
             let stop = result
                 .get("stopReason")
                 .and_then(Value::as_str)
@@ -3344,5 +3367,36 @@ mod tests {
         let inner = peer.inner.lock();
         assert_eq!(inner.sessions[0].title, "new title");
         assert_eq!(inner.sessions[0].updated_at, "2026-08-23T11:00:00Z");
+    }
+
+    #[test]
+    fn a_prompt_without_a_connection_still_ends_the_turn() {
+        // A send while the peer is re-dialing has no conn to send on:
+        // `send_prompt` discards rpc()'s Result, and the app frees its busy
+        // state only on RunEnded — so the early return must still end the turn,
+        // or the chat wedges busy until the user switches sessions.
+        let listener = test_listener();
+        let (peer, _cmd_rx) = offline_peer(
+            "laptop",
+            listener.clone(),
+            gate(Arc::new(AtomicBool::new(true))),
+        );
+
+        assert!(
+            peer.rpc("session/prompt", json!({ "sessionId": "s1" }))
+                .is_err(),
+            "no connection means no prompt"
+        );
+        // Only a prompt ends a turn: an ordinary request that cannot be sent
+        // must not emit a spurious RunEnded (it would free a live turn's state).
+        assert!(peer.rpc("session/list", json!({})).is_err());
+
+        let events = listener.events.lock();
+        let ended: Vec<_> = events.iter().filter(|e| e.starts_with("run_ended")).collect();
+        assert_eq!(
+            ended,
+            vec!["run_ended error"],
+            "exactly one turn-end, from the prompt: {events:?}"
+        );
     }
 }
