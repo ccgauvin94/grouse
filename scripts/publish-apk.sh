@@ -78,7 +78,7 @@ for f in /publish/grouse-*.apk; do
   [[ -e "${f}" ]] || continue
   c="$("${aapt2}" dump badging "${f}" 2>/dev/null | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)"
   [[ -n "${c}" && "${c}" -gt "${max}" ]] && max="${c}"
-fi
+done
 if [[ "${vcode}" -le "${max}" ]]; then
   echo "REFUSING: versionCode ${vcode} is not newer than ${max} already published" >&2
   echo "          bump versionCode/versionName in app/build.gradle.kts first" >&2
