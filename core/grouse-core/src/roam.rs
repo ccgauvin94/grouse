@@ -1842,8 +1842,17 @@ impl RoamPeer {
                     }
                 }
                 if active && (!title.is_empty() || !updated_at.is_empty()) {
-                    self.listener
-                        .on_session_touched(session_id, title, updated_at);
+                    // PREFIXED, like every other chat-scoped event the app keys
+                    // a chat by (`staged_touch` already did): the raw id matches
+                    // nothing in the drawer, whose peer rows are
+                    // `roam:<label>:<id>`, so an auto-generated title or a
+                    // rename from another client never painted until the next
+                    // full session re-list.
+                    self.listener.on_session_touched(
+                        format!("roam:{}:{}", self.label, session_id),
+                        title,
+                        updated_at,
+                    );
                 }
             }
             SessionUpdate::ConfigOptionUpdate(config) if active => {
@@ -3367,6 +3376,38 @@ mod tests {
         let inner = peer.inner.lock();
         assert_eq!(inner.sessions[0].title, "new title");
         assert_eq!(inner.sessions[0].updated_at, "2026-08-23T11:00:00Z");
+    }
+
+    #[test]
+    fn a_live_title_update_reaches_the_app_under_the_prefixed_id() {
+        // The drawer keys peer sessions by `roam:<label>:<id>` (every other
+        // chat-scoped event is prefixed; `staged_touch`'s green-dot touch always
+        // was), so a raw id here matched nothing and a peer's auto-generated
+        // title — or a rename from another client — only appeared after a full
+        // session re-list.
+        let listener = test_listener();
+        let (peer, _cmd_rx) = offline_peer(
+            "laptop",
+            listener.clone(),
+            gate(Arc::new(AtomicBool::new(true))),
+        );
+
+        peer.dispatch(SessionNotification::new(
+            "s1",
+            SessionUpdate::SessionInfoUpdate(
+                SessionInfoUpdate::new()
+                    .title("named by goose".to_string())
+                    .updated_at("2026-08-23T11:00:00Z".to_string()),
+            ),
+        ));
+
+        let events = listener.events.lock();
+        assert!(
+            events
+                .iter()
+                .any(|e| e == "touched roam:laptop:s1 named by goose 2026-08-23T11:00:00Z"),
+            "title must carry the prefixed id: {events:?}"
+        );
     }
 
     #[test]
