@@ -60,6 +60,26 @@ roam.rs        the peer registry: RoamPeer { label, client, sessions },
                emits `on_item` directly (docs/TRANSCRIPT_MODEL.md; no bridge),
                with its own window + `load_older`. `transcript()` flat-projects
                the store for the legacy getter.
+
+               REPLAY CONTRACT (both stores, one set of rules — do not let them
+               drift, which is what made a roam refresh mis-order history):
+               - a `session/load` replay is ARMED BEFORE the request and
+                 finished ON THE REPLY, never by replacing the store afterwards;
+                 `open_session`/`refresh_session` route a `roam:<label>:<id>` id
+                 to its peer with the same Quick/Full semantics;
+               - rows reconcile BY IDENTITY: `Full` drops the seed once, `Tail`
+                 truncates at the first overlapping id; a tail that never
+                 overlaps is a GAP and forces a full replay. NEVER dedupe by
+                 text (`contains`/`ends_with` on the accumulated string);
+               - the client sees ONE windowed paint at the end
+                 (`hold_emissions`/`release_held_replay` in transcript.rs,
+                 `PeerStore::begin_replay`/`end_replay` in roam.rs);
+               - a prompt the client sends is ECHOED into the store at the send
+                 (goose sends no user chunk for it), and the echo closes the
+                 text stream so two prompts stay two rows;
+               - a save taken while a replay or a live turn is rewriting the
+                 store carries NO `updatedAt` stamp, so freshness can never
+                 trust a partial copy.
 ```
 
 ## Pinned seams (the contract between slices)
@@ -98,7 +118,8 @@ roam.rs        the peer registry: RoamPeer { label, client, sessions },
 4. **Roam** (roam.rs):
    - `RoamPeer::connect(secret, card, label, listener) -> Arc<RoamPeer>` —
      browse mode: initialize → session/list, no auto-open.
-   - `RoamPeer::sessions() -> Vec<SessionSummary>`, `open_session(session_id, cwd)`
+   - `RoamPeer::sessions() -> Vec<SessionSummary>`,
+     `open_session_with(session_id, cwd, full)` (`full` = RefreshMode::Full)
    - `Core` owns `Vec<Arc<RoamPeer>>` + the active-peer label; routing follows
      CONTRACT §6 (chat routes to the last-opened session's owner).
 
