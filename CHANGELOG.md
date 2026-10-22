@@ -4,10 +4,47 @@ All notable changes to Grouse are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.14] - 2026-10-21
+
+### Added
+
+- **One session pipeline for both transports.** `session.rs` now owns the ACP
+  parameter builders, wire→item translation, the update dispatch, one
+  transcript store per chat, the cache paint policy and the turn lifecycle.
+  The WebSocket and roam transports contribute only dial/framing, reconnect
+  policy, browse lists and the `roam:` id namespace.
+- **Roam chats get the session features that were main-only.** MCP Apps
+  hydrate, consecutive tool calls collapse into groups, a run of tools gets a
+  model-written label, recipe parameter prompts and elicitation requests work,
+  turn-end `status_message`/`message_usage` arrive, and multiple permission
+  prompts can be answered concurrently.
+- **Background chats keep their state without stealing the paint.** A chat
+  updating while another is displayed accumulates silently, shows the green
+  dot, and is painted once when opened.
+
+### Changed
+
+- Android's "reload chat" calls the core's single refresh path; the client no
+  longer picks a wire. The desktop needed no change — the C ABI is unchanged.
+- The hidden summarizer runs one session per connection, using the same
+  hidden-session marker for both transports.
 
 ### Fixed
 
+- **Reload chat on a roam session ignored `force`.** The refresh now resolves
+  the session's owning connection and replays when asked, instead of always
+  probing the main connection's bound session.
+- **Steer could target the wrong chat.** It resolved the main connection's
+  bound session even when the displayed chat belonged to a peer; it now steers
+  the displayed session on its owner.
+- **A prompt sent while a peer was re-dialing was lost.** Prompts queue per
+  owner until that connection can accept them, then flush in order.
+- **Remote-change resync never ran for peer sessions.** The debounced
+  `session_info_update` probe → in-place `session/load` replay → re-probe now
+  runs on the session's own connection.
+- **One chat's failed turn marked every chat's cache incomplete.** Incomplete
+  tracking is per session, so a dropped turn no longer forces unrelated chats
+  to full-replay.
 - **A roam turn could wedge the app busy forever.** A prompt sent while the
   peer was re-dialing has no connection to go out on, and `rpc()` returned
   without ending the turn — so `busy` stayed set with nothing left to clear it.
@@ -25,6 +62,10 @@ All notable changes to Grouse are recorded here. The format is based on
   peer's `ready` to match the main Ready path. A prompt typed before any chat
   was bound is re-keyed onto the session that binds, and switching chats
   (roam included) clears the previous chat's busy/compacting state.
+- **Roam transcript rows are keyed by the server's message id.** A replayed
+  turn no longer folds distinct messages together because their text matched.
+- **A roam prompt is echoed locally.** The question and the turn boundary
+  appear before the server replies, instead of after the first chunk.
 
 ## [0.2.0] - 2026-10-12
 
@@ -78,5 +119,6 @@ Initial release: Android (Kotlin/Compose) and Linux desktop (Qt6/KF6 Kirigami)
 clients for a self-hosted `goose serve`, over ACP (JSON-RPC 2.0) on WebSocket,
 sharing one Rust core (`libgrouse_core.so`) and the roam peer transport.
 
+[0.2.14]: https://github.com/ccgauvin94/grouse/compare/v0.2.10...v0.2.14
 [0.2.0]: https://github.com/ccgauvin94/grouse/compare/v0.1...v0.2.0
 [0.1]: https://github.com/ccgauvin94/grouse/releases/tag/v0.1
