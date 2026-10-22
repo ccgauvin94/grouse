@@ -997,8 +997,6 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_transcript(
     ): Int
-    external fun uniffi_grouse_core_checksum_method_core_transcript_is_fresh(
-    ): Int
     external fun uniffi_grouse_core_checksum_method_core_unarchive_session(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_window(
@@ -1245,8 +1243,6 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_transcript(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_grouse_core_fn_method_core_transcript_is_fresh(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`cachedAt`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Byte
     external fun uniffi_grouse_core_fn_method_core_unarchive_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_window(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1489,7 +1485,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_flush_caches() and 0xFFFF) != 885) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_item() and 0xFFFF) != 5029) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_item() and 0xFFFF) != 1772) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_list_sessions() and 0xFFFF) != 33034) {
@@ -1522,7 +1518,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_respond_permission() and 0xFFFF) != 49597) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_rich_transcript() and 0xFFFF) != 64700) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_rich_transcript() and 0xFFFF) != 55967) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_roam_connect() and 0xFFFF) != 53647) {
@@ -1543,7 +1539,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_run_summaries() and 0xFFFF) != 42596) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_send_prompt() and 0xFFFF) != 38382) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_send_prompt() and 0xFFFF) != 19143) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_sessions() and 0xFFFF) != 51807) {
@@ -1558,16 +1554,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_status() and 0xFFFF) != 4077) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_transcript() and 0xFFFF) != 31384) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_grouse_core_checksum_method_core_transcript_is_fresh() and 0xFFFF) != 45455) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_transcript() and 0xFFFF) != 63821) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_unarchive_session() and 0xFFFF) != 51838) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_window() and 0xFFFF) != 50229) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_window() and 0xFFFF) != 53063) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_add_extension() and 0xFFFF) != 24761) {
@@ -2345,7 +2338,7 @@ public interface CoreInterface {
     fun `flushCaches`()
     
     /**
-     * One rich item by id from the main store.
+     * One rich item by id from the displayed session.
      */
     fun `item`(`id`: kotlin.String): Item?
     
@@ -2429,7 +2422,6 @@ public interface CoreInterface {
     
     /**
      * The rich item snapshot of the active session (docs/TRANSCRIPT_MODEL.md).
-     * Both the main connection and roam peers hold rich items now.
      */
     fun `richTranscript`(): List<Item>
     
@@ -2473,9 +2465,9 @@ public interface CoreInterface {
     fun `runSummaries`(): kotlin.Boolean
     
     /**
-     * Send a prompt (text/image/resource blocks). Queues until the socket is
-     * ready; rejected (not queued) when `expect` mismatches the bound
-     * session. Routes to the active roam peer when one owns the chat.
+     * Send a prompt (text/image/resource blocks). Queues until the owning
+     * connection can accept it; rejected (not queued) when `expect` mismatches
+     * the displayed session. One path for the main wire and every peer.
      */
     fun `sendPrompt`(`prompt`: Prompt, `expect`: SendExpect?)
     
@@ -2496,24 +2488,9 @@ public interface CoreInterface {
     fun `status`(): ConnectionStatus
     
     /**
-     * The accumulated active-session transcript (peer-owned when a roam peer
-     * owns the chat).
+     * The accumulated active-session transcript.
      */
     fun `transcript`(): List<Message>
-    
-    /**
-     * Whether the cached transcript for a session is up to date with the
-     * session's last-known `updatedAt` (from the directory cache seed, a live
-     * session/list, or a session_info_update). A mismatch means the session
-     * changed remotely and a replay is owed; equality means the cache is
-     * fresh and any load can suppress its replay.
-     *
-     * A cache is fresh only when it is also COMPLETE: `store_incomplete` is set
-     * while a turn is in flight (or after it ended in error), and a save in that
-     * state writes an empty stamp — but within one process the store can still
-     * be incomplete before any save lands, so gate on the flag directly too.
-     */
-    fun `transcriptIsFresh`(`sessionId`: kotlin.String, `cachedAt`: kotlin.String): kotlin.Boolean
     
     /**
      * Restore an archived session; re-lists.
@@ -2521,7 +2498,7 @@ public interface CoreInterface {
     fun `unarchiveSession`(`sessionId`: kotlin.String)
     
     /**
-     * The pagination cursor for the active session.
+     * The pagination cursor for the displayed session.
      */
     fun `window`(): TranscriptWindow
     
@@ -2809,7 +2786,7 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
-     * One rich item by id from the main store.
+     * One rich item by id from the displayed session.
      */override fun `item`(`id`: kotlin.String): Item? {
             return FfiConverterOptionalTypeItem.lift(
     callWithHandle {
@@ -3019,7 +2996,6 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     
     /**
      * The rich item snapshot of the active session (docs/TRANSCRIPT_MODEL.md).
-     * Both the main connection and roam peers hold rich items now.
      */override fun `richTranscript`(): List<Item> {
             return FfiConverterSequenceTypeItem.lift(
     callWithHandle {
@@ -3143,9 +3119,9 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
-     * Send a prompt (text/image/resource blocks). Queues until the socket is
-     * ready; rejected (not queued) when `expect` mismatches the bound
-     * session. Routes to the active roam peer when one owns the chat.
+     * Send a prompt (text/image/resource blocks). Queues until the owning
+     * connection can accept it; rejected (not queued) when `expect` mismatches
+     * the displayed session. One path for the main wire and every peer.
      */override fun `sendPrompt`(`prompt`: Prompt, `expect`: SendExpect?)
         = 
     callWithHandle {
@@ -3223,8 +3199,7 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
-     * The accumulated active-session transcript (peer-owned when a roam peer
-     * owns the chat).
+     * The accumulated active-session transcript.
      */override fun `transcript`(): List<Message> {
             return FfiConverterSequenceTypeMessage.lift(
     callWithHandle {
@@ -3232,33 +3207,6 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     UniffiLib.uniffi_grouse_core_fn_method_core_transcript(
         it,
         _status)
-}
-    }
-    )
-    }
-    
-
-    
-    /**
-     * Whether the cached transcript for a session is up to date with the
-     * session's last-known `updatedAt` (from the directory cache seed, a live
-     * session/list, or a session_info_update). A mismatch means the session
-     * changed remotely and a replay is owed; equality means the cache is
-     * fresh and any load can suppress its replay.
-     *
-     * A cache is fresh only when it is also COMPLETE: `store_incomplete` is set
-     * while a turn is in flight (or after it ended in error), and a save in that
-     * state writes an empty stamp — but within one process the store can still
-     * be incomplete before any save lands, so gate on the flag directly too.
-     */override fun `transcriptIsFresh`(`sessionId`: kotlin.String, `cachedAt`: kotlin.String): kotlin.Boolean {
-            return FfiConverterBoolean.lift(
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_grouse_core_fn_method_core_transcript_is_fresh(
-        it,
-        
-        FfiConverterString.lower(`sessionId`),
-        FfiConverterString.lower(`cachedAt`),_status)
 }
     }
     )
@@ -3283,7 +3231,7 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
-     * The pagination cursor for the active session.
+     * The pagination cursor for the displayed session.
      */override fun `window`(): TranscriptWindow {
             return FfiConverterTypeTranscriptWindow.lift(
     callWithHandle {
@@ -5291,8 +5239,8 @@ data class SessionSummary (
     var `hasRecipe`: kotlin.Boolean
     , 
     /**
-     * True while the session has backgrounded (staged) content the UI has
-     * not shown yet — the green-dot indicator (roam staging, serve parity).
+     * True while the session has backgrounded content the UI has not shown
+     * yet — the green-dot indicator (hub staging, for any transport).
      */
     var `hasNew`: kotlin.Boolean
     , 

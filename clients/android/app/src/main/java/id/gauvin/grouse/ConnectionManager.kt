@@ -1223,12 +1223,10 @@ class ConnectionManager private constructor(context: Context) {
         replayActive.value = true
         replayProgress.value = 0
         openFailed.value = null
-        val peer = currentRoamPeer
-        if (peer != null) {
-            // A peer's load has no freshness/hold mode — it re-loads its own way.
-            core.roamOpenSession(peer, sid)
-            return
-        }
+        // The core owns owner routing: `refreshSession` detects the `roam:` prefix,
+        // rebinds the peer as display owner and asks that peer to re-load (honoring
+        // FULL), or falls through to the main wire. The client must not pick a wire
+        // here -- a peer refresh and a main refresh are the same intent.
         core.refreshSession(sid, if (full) RefreshMode.FULL else RefreshMode.QUICK)
         if (full) backgroundNotice.value = "Replaying this chat from the start…"
     }
