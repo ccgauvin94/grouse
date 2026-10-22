@@ -2917,6 +2917,40 @@ mod tests {
         }
     }
 
+    /// The turn-final `[thinking + text]` message: goose sends one `AgentThoughtChunk`
+    /// and one `AgentMessageChunk` carrying the SAME message id (both come from
+    /// `content_chunk_for_message`, which copies `message.id`). Keyed by that id the
+    /// answer used to append into the thinking row, so every refresh showed thinking
+    /// and tool calls and then no answer at all.
+    #[test]
+    fn a_thought_and_the_answer_sharing_one_message_id_stay_separate() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+
+        // Live: a thought chunk that carries no id (its message id is not a row
+        // identity), then the answer under the message's id.
+        store.append_chunk("thought", "weighing it", None, true);
+        store.append_chunk("agent", "the answer", Some("m1"), false);
+        let items = store.rich_transcript();
+        let agent: Vec<&Item> = items.iter().filter(|i| i.kind == ItemKind::Agent).collect();
+        assert_eq!(agent.len(), 1, "{items:?}");
+        assert_eq!(agent[0].text, "the answer", "the answer is its own row: {items:?}");
+
+        // Replayed: the thought is framing, the answer is still a row under its id.
+        let (l2, _e2) = listener();
+        let replayed = TranscriptStore::new(l2);
+        replayed.replay_thought("weighing it");
+        replayed.append_chunk("agent", "the answer", Some("m1"), false);
+        let items = replayed.rich_transcript();
+        let agent: Vec<&Item> = items.iter().filter(|i| i.kind == ItemKind::Agent).collect();
+        assert_eq!(agent.len(), 1, "{items:?}");
+        assert_eq!(agent[0].text, "the answer", "the answer is its own row: {items:?}");
+        assert!(
+            items.iter().all(|i| i.kind != ItemKind::Thought || i.text != "weighing itthe answer"),
+            "nothing folded the answer into the thinking row: {items:?}"
+        );
+    }
+
     #[test]
     fn a_run_answers_with_its_own_id_and_framing() {
         let (l, _i_evts) = listener();
