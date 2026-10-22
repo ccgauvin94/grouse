@@ -15,7 +15,7 @@
 //! - stream chunks / tool events / usage / run-ended go out on `on_stream`;
 //!   bubble structure changes (append / update / clear) on `on_transcript`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use parking_lot::Mutex;
 
@@ -95,8 +95,13 @@ fn summarize(thought: &str) -> String {
         .unwrap_or("")
         .trim_start_matches(['#', '-', '*', '>', ' '])
         .trim();
-    let end = line.find(['.', '!', '?']).map(|i| i + 1).unwrap_or(line.len());
-    let s = line[..end].trim_end_matches(['…', '.', '!', '?', ' ']).trim();
+    let end = line
+        .find(['.', '!', '?'])
+        .map(|i| i + 1)
+        .unwrap_or(line.len());
+    let s = line[..end]
+        .trim_end_matches(['…', '.', '!', '?', ' '])
+        .trim();
     if s.chars().count() > 80 {
         format!("{}…", s.chars().take(79).collect::<String>().trim_end())
     } else {
@@ -173,7 +178,9 @@ impl Bubble {
     /// kind and payload, so a chart stays a chart and an MCP app keeps its key.
     fn item(&self) -> Item {
         match self {
-            Bubble::Text { uid, role, text, .. } => Item {
+            Bubble::Text {
+                uid, role, text, ..
+            } => Item {
                 id: uid.clone(),
                 kind: match role.as_str() {
                     "user" => ItemKind::User,
@@ -307,6 +314,10 @@ struct State {
     /// of its own (it has no stable id to reconcile by, and would double the
     /// trail), so it waits here until a call claims it.
     pending_thought: Option<String>,
+    /// Prompts echoed locally that the server has not named yet, oldest first
+    /// (`text`, bubble index). goose sends no user chunk for our own prompt;
+    /// when a replay later names it, the row is adopted instead of duplicated.
+    pending_echo: VecDeque<(String, usize)>,
 }
 
 /// Hard cap on retained bubbles (S-RC-4). A transcript is inherently
@@ -355,6 +366,11 @@ impl State {
         self.emitted_from = self.emitted_from.saturating_sub(drop);
         self.tool_by_id.clear();
         index_bubbles(&mut self.tool_by_id, &self.bubbles);
+        self.pending_echo = self
+            .pending_echo
+            .drain(..)
+            .filter_map(|(text, idx)| idx.checked_sub(drop).map(|i| (text, i)))
+            .collect();
         self.stream_idx = None;
     }
 
@@ -391,6 +407,30 @@ impl State {
         self.merge_overlap = false;
         self.speak.reset();
         self.pending_thought = None;
+        self.pending_echo.clear();
+    }
+
+    /// Rebuild the echo queue from rows a cache supplied: a user row with a
+    /// core-assigned `@n` id was echoed locally and may still be waiting for
+    /// the server's name.
+    fn rebuild_pending_echo(&mut self) {
+        self.pending_echo = self
+            .bubbles
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, bubble)| match bubble {
+                Bubble::Text {
+                    id,
+                    uid,
+                    role,
+                    text,
+                    ..
+                } if id.is_empty() && uid.starts_with('@') && role == "user" => {
+                    Some((text.clone(), idx))
+                }
+                _ => None,
+            })
+            .collect();
     }
 
     /// Close the turn: a trailing `Thought` bubble is FINISHED reasoning, not
@@ -420,9 +460,12 @@ impl State {
         let mut parts: Vec<String> = Vec::new();
         loop {
             let popped = match self.bubbles.last() {
-                Some(Bubble::Text { uid, thought: true, text, .. }) => {
-                    Some((uid.clone(), text.clone()))
-                }
+                Some(Bubble::Text {
+                    uid,
+                    thought: true,
+                    text,
+                    ..
+                }) => Some((uid.clone(), text.clone())),
                 _ => None,
             };
             let Some((uid, text)) = popped else { break };
@@ -440,7 +483,11 @@ impl State {
         parts.reverse();
         self.emitted_from = self.emitted_from.min(self.bubbles.len());
         // A popped bubble may have been the live stream anchor.
-        if self.stream_idx.map(|i| i >= self.bubbles.len()).unwrap_or(false) {
+        if self
+            .stream_idx
+            .map(|i| i >= self.bubbles.len())
+            .unwrap_or(false)
+        {
             self.stream_idx = None;
             self.stream_role.clear();
             self.stream_msg_id.clear();
@@ -513,9 +560,10 @@ fn bubble_uid(b: &Bubble) -> String {
     match b {
         Bubble::Text { uid, .. } => uid.clone(),
         Bubble::Tool(r, _) | Bubble::Chart(r) | Bubble::McpApp(r) => r.tool_call_id.clone(),
-        Bubble::ToolGroup(calls, _) => {
-            calls.first().map(|c| c.tool_call_id.clone()).unwrap_or_default()
-        }
+        Bubble::ToolGroup(calls, _) => calls
+            .first()
+            .map(|c| c.tool_call_id.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -541,9 +589,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
             // A whitespace-only agent/thought item is goose's "\n\n" between
             // tool calls (see `append_chunk`): dropping it keeps a cache paint
             // or a replay from re-creating an empty bubble.
-            if matches!(it.kind, ItemKind::Agent | ItemKind::Thought)
-                && it.text.trim().is_empty()
-            {
+            if matches!(it.kind, ItemKind::Agent | ItemKind::Thought) && it.text.trim().is_empty() {
                 return None;
             }
             let role = match it.kind {
@@ -553,7 +599,11 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
                 _ => "agent",
             };
             // A core-assigned `@n` id has no server message_id to recover.
-            let id = if it.id.starts_with('@') { String::new() } else { it.id.clone() };
+            let id = if it.id.starts_with('@') {
+                String::new()
+            } else {
+                it.id.clone()
+            };
             Some(Bubble::Text {
                 id,
                 uid: it.id.clone(),
@@ -644,6 +694,7 @@ impl TranscriptStore {
                 next_uid: 0,
                 speak: SpeakStream::new(),
                 pending_thought: None,
+                pending_echo: VecDeque::new(),
             }),
         }
     }
@@ -666,7 +717,32 @@ impl TranscriptStore {
             st.anchor_merge(message_id.unwrap_or(""));
             let mut ops = Vec::new();
             if st.supersede_provisional() {
-                ops.push(TranscriptOp::Reset { session_id: st.session_id.clone() });
+                ops.push(TranscriptOp::Reset {
+                    session_id: st.session_id.clone(),
+                });
+            }
+            // A prompt we echoed locally, now named by the server: adopt that
+            // row instead of appending a second copy of the question. Only an
+            // exact text match counts, oldest first — the server names prompts
+            // in the order it received them.
+            if let Some(mid) = message_id.filter(|m| !m.is_empty()) {
+                if st.stream_msg_id != mid && role == "user" {
+                    if let Some((echo_text, idx)) = st.pending_echo.front().cloned() {
+                        if echo_text == text && idx < st.bubbles.len() {
+                            st.pending_echo.pop_front();
+                            if let Bubble::Text { id, .. } = &mut st.bubbles[idx] {
+                                *id = mid.to_string();
+                            }
+                            st.stream_idx = Some(idx);
+                            st.stream_role = role.to_string();
+                            st.stream_msg_id = mid.to_string();
+                            let item = st.bubbles[idx].item();
+                            drop(st);
+                            self.emit_ops(vec![TranscriptOp::Upsert { item }]);
+                            return;
+                        }
+                    }
+                }
             }
             let fresh = st.stream_idx.is_none()
                 || st.stream_role != role
@@ -711,8 +787,15 @@ impl TranscriptStore {
                 st.stream_msg_id = message_id.unwrap_or("").to_string();
                 idx
             } else {
-                let idx = st.stream_idx.expect("non-fresh implies an open stream bubble");
-                if let Bubble::Text { text: acc, thought: t, .. } = &mut st.bubbles[idx] {
+                let idx = st
+                    .stream_idx
+                    .expect("non-fresh implies an open stream bubble");
+                if let Bubble::Text {
+                    text: acc,
+                    thought: t,
+                    ..
+                } = &mut st.bubbles[idx]
+                {
                     acc.push_str(text);
                     *t = thought;
                 }
@@ -722,13 +805,18 @@ impl TranscriptStore {
             // A fresh bubble is an authoritative Upsert; an accumulated chunk is
             // the O(chunk) delta.
             let op = if fresh {
-                TranscriptOp::Upsert { item: st.bubbles[idx].item() }
+                TranscriptOp::Upsert {
+                    item: st.bubbles[idx].item(),
+                }
             } else {
                 match &st.bubbles[idx] {
-                    Bubble::Text { uid, .. } => {
-                        TranscriptOp::AppendText { id: uid.clone(), chunk: text.to_string() }
-                    }
-                    _ => TranscriptOp::Upsert { item: st.bubbles[idx].item() },
+                    Bubble::Text { uid, .. } => TranscriptOp::AppendText {
+                        id: uid.clone(),
+                        chunk: text.to_string(),
+                    },
+                    _ => TranscriptOp::Upsert {
+                        item: st.bubbles[idx].item(),
+                    },
                 }
             };
             ops.push(op);
@@ -747,6 +835,54 @@ impl TranscriptStore {
         for sentence in speaks {
             self.listener.on_speak(sentence);
         }
+    }
+
+    /// Echo a prompt we sent: ALWAYS a new row, and a turn boundary.
+    ///
+    /// goose sends no `user_message_chunk` for a prompt a client sent, so the
+    /// core writes the question itself at send time. It is queued in
+    /// `pending_echo`; when the server later names it (a replay carries the
+    /// message id), [`Self::append_chunk`] adopts this row instead of appending
+    /// a duplicate. Closing the live stream is what makes the reply that
+    /// follows its own row rather than an extension of the previous turn.
+    pub fn echo_prompt(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let ops = {
+            let mut st = self.state.lock();
+            st.anchor_merge("");
+            let mut ops = Vec::new();
+            if st.supersede_provisional() {
+                ops.push(TranscriptOp::Reset {
+                    session_id: st.session_id.clone(),
+                });
+            }
+            // Finalize the reply the previous turn left open.
+            if let Some(prev) = st.stream_idx {
+                if let Some(b) = st.bubbles.get(prev) {
+                    ops.push(TranscriptOp::Upsert { item: b.item() });
+                }
+            }
+            let uid = st.new_uid();
+            st.stream_idx = None;
+            st.bubbles.push(Bubble::Text {
+                id: String::new(),
+                uid,
+                role: "user".to_string(),
+                text: text.to_string(),
+                thought: false,
+            });
+            let idx = st.bubbles.len() - 1;
+            st.pending_echo.push_back((text.to_string(), idx));
+            st.trim();
+            let idx = idx.min(st.bubbles.len().saturating_sub(1));
+            ops.push(TranscriptOp::Upsert {
+                item: st.bubbles[idx].item(),
+            });
+            ops
+        };
+        self.emit_ops(ops);
     }
 
     /// A thought from a `session/load` replay. goose re-sends the reasoning trail
@@ -774,7 +910,9 @@ impl TranscriptStore {
             st.anchor_merge(tool_call_id);
             let mut ops = Vec::new();
             if st.supersede_provisional() {
-                ops.push(TranscriptOp::Reset { session_id: st.session_id.clone() });
+                ops.push(TranscriptOp::Reset {
+                    session_id: st.session_id.clone(),
+                });
             }
             // The thinking this call absorbs: every `Thought` row directly above
             // it (plus a replayed one). Folding it in here, per call, is what
@@ -818,7 +956,11 @@ impl TranscriptStore {
                         let idx = st.bubbles.len() - 1;
                         let first = match &st.bubbles[idx] {
                             Bubble::Tool(r, existing) => {
-                                let label = if existing.is_empty() { label } else { existing.clone() };
+                                let label = if existing.is_empty() {
+                                    label
+                                } else {
+                                    existing.clone()
+                                };
                                 (r.clone(), label)
                             }
                             _ => unreachable!("last row is Tool"),
@@ -850,7 +992,9 @@ impl TranscriptStore {
                 st.bubbles.len() - 1
             };
             st.tool_by_id.insert(row_id, idx);
-            ops.push(TranscriptOp::Upsert { item: st.bubbles[idx].item() });
+            ops.push(TranscriptOp::Upsert {
+                item: st.bubbles[idx].item(),
+            });
             st.trim();
 
             // Desktop: every tool call resets the streaming anchor so the next
@@ -875,12 +1019,18 @@ impl TranscriptStore {
             st.anchor_merge(id);
             let mut ops = Vec::new();
             if st.supersede_provisional() {
-                ops.push(TranscriptOp::Reset { session_id: st.session_id.clone() });
+                ops.push(TranscriptOp::Reset {
+                    session_id: st.session_id.clone(),
+                });
             }
             // O(1) lookup via the tool_by_id index (S-RC-4) — the previous
             // newest-backwards scan was O(n) per update, quadratic over a long
             // chat. Fall back to a scan only if the index is somehow stale.
-            let idx = st.tool_by_id.get(id).copied().filter(|i| *i < st.bubbles.len());
+            let idx = st
+                .tool_by_id
+                .get(id)
+                .copied()
+                .filter(|i| *i < st.bubbles.len());
             if let Some(idx) = idx {
                 let found = match &mut st.bubbles[idx] {
                     Bubble::Tool(r, _) if r.tool_call_id == id => {
@@ -914,9 +1064,14 @@ impl TranscriptStore {
                         && !output.is_empty()
                         && matches!(&st.bubbles[idx], Bubble::Tool(r, _) if r.tool_call_id == id);
                     ops.push(if standalone_live {
-                        TranscriptOp::AppendOutput { id: id.to_string(), chunk: output.to_string() }
+                        TranscriptOp::AppendOutput {
+                            id: id.to_string(),
+                            chunk: output.to_string(),
+                        }
                     } else {
-                        TranscriptOp::Upsert { item: st.bubbles[idx].item() }
+                        TranscriptOp::Upsert {
+                            item: st.bubbles[idx].item(),
+                        }
                     });
                 }
             }
@@ -943,15 +1098,15 @@ impl TranscriptStore {
         let ops = {
             let mut st = self.state.lock();
             st.anchor_merge(id);
-            let Some(&idx) = st.tool_by_id.get(id) else { return };
+            let Some(&idx) = st.tool_by_id.get(id) else {
+                return;
+            };
             if idx >= st.bubbles.len() {
                 return;
             }
             let row = match &st.bubbles[idx] {
                 Bubble::Tool(r, _) if r.tool_call_id == id => Some(r.clone()),
-                Bubble::ToolGroup(calls, _) => {
-                    calls.iter().find(|c| c.tool_call_id == id).cloned()
-                }
+                Bubble::ToolGroup(calls, _) => calls.iter().find(|c| c.tool_call_id == id).cloned(),
                 _ => None, // already an app/chart bubble, or a stale index
             };
             let Some(mut row) = row else { return };
@@ -960,16 +1115,22 @@ impl TranscriptStore {
 
             if matches!(&st.bubbles[idx], Bubble::Tool(..)) {
                 st.bubbles[idx] = Bubble::McpApp(row);
-                vec![TranscriptOp::Upsert { item: st.bubbles[idx].item() }]
+                vec![TranscriptOp::Upsert {
+                    item: st.bubbles[idx].item(),
+                }]
             } else {
-                let Bubble::ToolGroup(calls, label) = &st.bubbles[idx] else { unreachable!() };
+                let Bubble::ToolGroup(calls, label) = &st.bubbles[idx] else {
+                    unreachable!()
+                };
                 let label = label.clone();
                 let pos = calls.iter().position(|c| c.tool_call_id == id).unwrap();
                 let mut calls = calls.clone();
                 calls.remove(pos);
                 if calls.is_empty() {
                     st.bubbles[idx] = Bubble::McpApp(row);
-                    vec![TranscriptOp::Upsert { item: st.bubbles[idx].item() }]
+                    vec![TranscriptOp::Upsert {
+                        item: st.bubbles[idx].item(),
+                    }]
                 } else {
                     st.bubbles[idx] = Bubble::ToolGroup(calls, label);
                     st.bubbles.insert(idx + 1, Bubble::McpApp(row));
@@ -994,7 +1155,8 @@ impl TranscriptStore {
 
     /// Context-window usage + cost.
     pub fn usage(&self, used: i64, size: i64, cost: f64, currency: &str) {
-        self.listener.on_usage(used, size, cost, currency.to_string());
+        self.listener
+            .on_usage(used, size, cost, currency.to_string());
     }
 
     /// A turn finished. The last text bubble is final: emit its authoritative
@@ -1047,7 +1209,10 @@ impl TranscriptStore {
     /// The id of the oldest item the CLIENT holds (the window's origin).
     pub fn oldest_id(&self) -> String {
         let st = self.state.lock();
-        st.bubbles.get(st.emitted_from).map(bubble_uid).unwrap_or_default()
+        st.bubbles
+            .get(st.emitted_from)
+            .map(bubble_uid)
+            .unwrap_or_default()
     }
 
     /// The id of the newest held item (empty when the store is empty).
@@ -1061,7 +1226,11 @@ impl TranscriptStore {
     pub fn window(&self) -> TranscriptWindow {
         let st = self.state.lock();
         TranscriptWindow {
-            oldest_id: st.bubbles.get(st.emitted_from).map(bubble_uid).unwrap_or_default(),
+            oldest_id: st
+                .bubbles
+                .get(st.emitted_from)
+                .map(bubble_uid)
+                .unwrap_or_default(),
             newest_id: st.bubbles.last().map(bubble_uid).unwrap_or_default(),
             has_older: st.has_older,
         }
@@ -1076,8 +1245,10 @@ impl TranscriptStore {
             let from = st.emitted_from.saturating_sub(count);
             // An empty batch (nothing older) is NOT an early return: the client's
             // in-flight load needs the refreshed Window to settle.
-            let batch: Vec<Item> =
-                st.bubbles[from..st.emitted_from].iter().map(Bubble::item).collect();
+            let batch: Vec<Item> = st.bubbles[from..st.emitted_from]
+                .iter()
+                .map(Bubble::item)
+                .collect();
             st.emitted_from = from;
             st.has_older = from > 0;
             let oldest = st.bubbles.get(from).map(bubble_uid).unwrap_or_default();
@@ -1088,7 +1259,10 @@ impl TranscriptStore {
         for item in batch {
             self.listener.on_item(TranscriptOp::Upsert { item });
         }
-        self.listener.on_item(TranscriptOp::Window { oldest_id: oldest, has_older });
+        self.listener.on_item(TranscriptOp::Window {
+            oldest_id: oldest,
+            has_older,
+        });
     }
 
     /// The rich item snapshot (docs/TRANSCRIPT_MODEL.md), in transcript order.
@@ -1141,10 +1315,7 @@ impl TranscriptStore {
         if thought.trim().is_empty() {
             return None;
         }
-        Some((
-            thought,
-            calls.iter().map(|c| c.title.clone()).collect(),
-        ))
+        Some((thought, calls.iter().map(|c| c.title.clone()).collect()))
     }
 
     /// Replace a run's label with the model's rewrite, emitting the `Upsert` the
@@ -1153,9 +1324,13 @@ impl TranscriptStore {
     pub fn set_run_summary(&self, id: &str, summary: &str) {
         let op = {
             let mut st = self.state.lock();
-            let Some(&idx) = st.tool_by_id.get(id) else { return };
+            let Some(&idx) = st.tool_by_id.get(id) else {
+                return;
+            };
             {
-                let Some(b) = st.bubbles.get_mut(idx) else { return };
+                let Some(b) = st.bubbles.get_mut(idx) else {
+                    return;
+                };
                 let label = match b {
                     Bubble::Tool(_, label) => label,
                     Bubble::ToolGroup(_, label) => label,
@@ -1302,7 +1477,11 @@ impl TranscriptStore {
             st.merge_anchored = false;
             (
                 gap,
-                if merged { st.session_id.clone() } else { String::new() },
+                if merged {
+                    st.session_id.clone()
+                } else {
+                    String::new()
+                },
             )
         };
         if !merged_session.is_empty() {
@@ -1322,8 +1501,10 @@ impl TranscriptStore {
             st.emitted_from = st.bubbles.len().saturating_sub(CLIENT_WINDOW);
             let has_older = st.emitted_from > 0;
             st.has_older = has_older;
-            let window: Vec<Item> =
-                st.bubbles[st.emitted_from..].iter().map(Bubble::item).collect();
+            let window: Vec<Item> = st.bubbles[st.emitted_from..]
+                .iter()
+                .map(Bubble::item)
+                .collect();
             let oldest = window.first().map(|i| i.id.clone()).unwrap_or_default();
             (st.session_id.clone(), window, oldest, has_older)
         };
@@ -1331,9 +1512,11 @@ impl TranscriptStore {
         for item in window {
             self.listener.on_item(TranscriptOp::Upsert { item });
         }
-        self.listener.on_item(TranscriptOp::Window { oldest_id: oldest, has_older });
+        self.listener.on_item(TranscriptOp::Window {
+            oldest_id: oldest,
+            has_older,
+        });
     }
-
 
     /// Rebuild the transcript from a rich snapshot (the rich cache paint):
     /// clear + rebuild, emitting Clear + `Reset` + one `Upsert` per item + a
@@ -1385,6 +1568,7 @@ impl TranscriptStore {
             st.tool_by_id.clear();
             index_bubbles(&mut st.tool_by_id, &st.bubbles);
             st.seed_next_uid();
+            st.rebuild_pending_echo();
             st.provisional = provisional;
             st.trim();
             // Paint only the newest CLIENT_WINDOW items; the store keeps all (for
@@ -1392,8 +1576,10 @@ impl TranscriptStore {
             st.emitted_from = st.bubbles.len().saturating_sub(CLIENT_WINDOW);
             let has_older = st.emitted_from > 0;
             st.has_older = has_older;
-            let window: Vec<Item> =
-                st.bubbles[st.emitted_from..].iter().map(Bubble::item).collect();
+            let window: Vec<Item> = st.bubbles[st.emitted_from..]
+                .iter()
+                .map(Bubble::item)
+                .collect();
             let oldest = window.first().map(|i| i.id.clone()).unwrap_or_default();
             (st.session_id.clone(), window, oldest, has_older)
         };
@@ -1401,7 +1587,10 @@ impl TranscriptStore {
         for item in window {
             self.listener.on_item(TranscriptOp::Upsert { item });
         }
-        self.listener.on_item(TranscriptOp::Window { oldest_id: oldest, has_older });
+        self.listener.on_item(TranscriptOp::Window {
+            oldest_id: oldest,
+            has_older,
+        });
     }
 
     fn replace_inner(&self, messages: Vec<Message>, provisional: bool) {
@@ -1410,8 +1599,7 @@ impl TranscriptStore {
         let messages: Vec<Message> = messages
             .into_iter()
             .filter(|m| {
-                !((m.role == "agent" || m.role == "thought")
-                    && m.content.trim().is_empty())
+                !((m.role == "agent" || m.role == "thought") && m.content.trim().is_empty())
             })
             .collect();
         let (session_id, oldest, items, has_older) = {
@@ -1456,7 +1644,11 @@ impl TranscriptStore {
                         String::new(),
                     ));
                 } else {
-                    let uid = if m.id.is_empty() { st.new_uid() } else { m.id.clone() };
+                    let uid = if m.id.is_empty() {
+                        st.new_uid()
+                    } else {
+                        m.id.clone()
+                    };
                     st.bubbles.push(Bubble::Text {
                         id: m.id.clone(),
                         uid,
@@ -1467,12 +1659,15 @@ impl TranscriptStore {
                 }
             }
             st.seed_next_uid();
+            st.rebuild_pending_echo();
             st.provisional = provisional;
             st.emitted_from = st.bubbles.len().saturating_sub(CLIENT_WINDOW);
             let has_older = st.emitted_from > 0;
             st.has_older = has_older;
-            let items: Vec<Item> =
-                st.bubbles[st.emitted_from..].iter().map(Bubble::item).collect();
+            let items: Vec<Item> = st.bubbles[st.emitted_from..]
+                .iter()
+                .map(Bubble::item)
+                .collect();
             let oldest = items.first().map(|i| i.id.clone()).unwrap_or_default();
             (st.session_id.clone(), oldest, items, has_older)
         };
@@ -1480,7 +1675,10 @@ impl TranscriptStore {
         for item in items {
             self.listener.on_item(TranscriptOp::Upsert { item });
         }
-        self.listener.on_item(TranscriptOp::Window { oldest_id: oldest, has_older });
+        self.listener.on_item(TranscriptOp::Window {
+            oldest_id: oldest,
+            has_older,
+        });
     }
 
     /// Test-only view of the rich rows (outputs/statuses are not visible
@@ -1505,12 +1703,12 @@ fn apply_output(acc: &mut String, output: &str, live: bool) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use parking_lot::Mutex;
+    use std::sync::Arc;
 
     use crate::{
-        ConfigOption, ConnectionStatus, CoreListener, Item, ItemKind, Message,
-        PermissionRequest, ProjectSummary, SessionSummary, ToolCall, ToolCallKind,
+        ConfigOption, ConnectionStatus, CoreListener, Item, ItemKind, Message, PermissionRequest,
+        ProjectSummary, SessionSummary, ToolCall, ToolCallKind,
     };
 
     use super::{summarize, Bubble, TranscriptStore};
@@ -1534,7 +1732,10 @@ mod tests {
             Op::AppendText { id, chunk } => format!("text:{id}:{chunk}"),
             Op::AppendOutput { id, chunk } => format!("output:{id}:{chunk}"),
             Op::Remove { id } => format!("remove:{id}"),
-            Op::Window { oldest_id, has_older } => format!("window:{oldest_id}:{has_older}"),
+            Op::Window {
+                oldest_id,
+                has_older,
+            } => format!("window:{oldest_id}:{has_older}"),
         }
     }
 
@@ -1604,9 +1805,17 @@ mod tests {
         assert_eq!(
             msgs(&store),
             vec![
-                ("user".to_string(), "m1".to_string(), "Hello world".to_string()),
+                (
+                    "user".to_string(),
+                    "m1".to_string(),
+                    "Hello world".to_string()
+                ),
                 ("user".to_string(), "m2".to_string(), "!".to_string()),
-                ("agent".to_string(), "m2".to_string(), "Sure thing".to_string()),
+                (
+                    "agent".to_string(),
+                    "m2".to_string(),
+                    "Sure thing".to_string()
+                ),
                 ("thought".to_string(), String::new(), "hmm more".to_string()),
             ]
         );
@@ -1688,12 +1897,17 @@ mod tests {
 
         store.tool_call("Chart", "", "c1", ToolCallKind::Chart { spec: "{}".into() });
         store.tool_call("Bash", "ls", "t4", ToolCallKind::Plain); // chart in between → no merge
-        store.tool_call("App", "input", "a1", ToolCallKind::McpApp {
-            app_key: "k".into(),
-            uri: "u".into(),
-            extension: "x".into(),
-            input: "i".into(),
-        });
+        store.tool_call(
+            "App",
+            "input",
+            "a1",
+            ToolCallKind::McpApp {
+                app_key: "k".into(),
+                uri: "u".into(),
+                extension: "x".into(),
+                input: "i".into(),
+            },
+        );
 
         assert_eq!(
             msgs(&store),
@@ -1815,10 +2029,30 @@ mod tests {
         store.append_chunk("user", "old", Some("m1"), false);
 
         store.replace(vec![
-            Message { id: "m1".into(), role: "user".into(), content: "hi".into() , output: String::new() },
-            Message { id: "m2".into(), role: "agent".into(), content: "hello".into() , output: String::new() },
-            Message { id: "t1".into(), role: "tool".into(), content: "Bash".into() , output: String::new() },
-            Message { id: String::new(), role: "thought".into(), content: "hmm".into() , output: String::new() },
+            Message {
+                id: "m1".into(),
+                role: "user".into(),
+                content: "hi".into(),
+                output: String::new(),
+            },
+            Message {
+                id: "m2".into(),
+                role: "agent".into(),
+                content: "hello".into(),
+                output: String::new(),
+            },
+            Message {
+                id: "t1".into(),
+                role: "tool".into(),
+                content: "Bash".into(),
+                output: String::new(),
+            },
+            Message {
+                id: String::new(),
+                role: "thought".into(),
+                content: "hmm".into(),
+                output: String::new(),
+            },
         ]);
 
         // The rebuild is faithful: the projection reproduces the input.
@@ -1845,8 +2079,18 @@ mod tests {
         let (l, _i_evts) = listener();
         let store = TranscriptStore::new(l);
         let snapshot = vec![
-            Message { id: "m1".into(), role: "user".into(), content: "hi".into() , output: String::new() },
-            Message { id: "m2".into(), role: "agent".into(), content: "hello".into() , output: String::new() },
+            Message {
+                id: "m1".into(),
+                role: "user".into(),
+                content: "hi".into(),
+                output: String::new(),
+            },
+            Message {
+                id: "m2".into(),
+                role: "agent".into(),
+                content: "hello".into(),
+                output: String::new(),
+            },
         ];
         store.replace(snapshot.clone());
 
@@ -1858,8 +2102,18 @@ mod tests {
 
         // A genuinely different snapshot still rebuilds.
         store.replace(vec![
-            Message { id: "m1".into(), role: "user".into(), content: "hi".into() , output: String::new() },
-            Message { id: "m2".into(), role: "agent".into(), content: "changed".into() , output: String::new() },
+            Message {
+                id: "m1".into(),
+                role: "user".into(),
+                content: "hi".into(),
+                output: String::new(),
+            },
+            Message {
+                id: "m2".into(),
+                role: "agent".into(),
+                content: "changed".into(),
+                output: String::new(),
+            },
         ]);
     }
 
@@ -1873,8 +2127,18 @@ mod tests {
         let store = TranscriptStore::new(l);
         store.set_session("s1");
         store.replace_provisional(vec![
-            Message { id: "old2".into(), role: "user".into(), content: "old prompt".into(), output: String::new() },
-            Message { id: "old1".into(), role: "agent".into(), content: "19h-old reply".into(), output: String::new() },
+            Message {
+                id: "old2".into(),
+                role: "user".into(),
+                content: "old prompt".into(),
+                output: String::new(),
+            },
+            Message {
+                id: "old1".into(),
+                role: "agent".into(),
+                content: "19h-old reply".into(),
+                output: String::new(),
+            },
         ]);
         assert_eq!(msgs(&store).len(), 2, "painted rows render instantly");
         i_evts.lock().clear();
@@ -1903,8 +2167,18 @@ mod tests {
         let (l, _i_evts) = listener();
         let store = TranscriptStore::new(l);
         let snapshot = vec![
-            Message { id: "m1".into(), role: "user".into(), content: "hi".into(), output: String::new() },
-            Message { id: "m2".into(), role: "agent".into(), content: "hello".into(), output: String::new() },
+            Message {
+                id: "m1".into(),
+                role: "user".into(),
+                content: "hi".into(),
+                output: String::new(),
+            },
+            Message {
+                id: "m2".into(),
+                role: "agent".into(),
+                content: "hello".into(),
+                output: String::new(),
+            },
         ];
         store.replace_provisional(snapshot.clone());
         store.replace(snapshot);
@@ -1930,7 +2204,11 @@ mod tests {
             output: String::new(),
         }]);
         store.append_chunk("user", "live", Some("m2"), false);
-        assert_eq!(msgs(&store).len(), 2, "a non-provisional snapshot must survive real rows");
+        assert_eq!(
+            msgs(&store).len(),
+            2,
+            "a non-provisional snapshot must survive real rows"
+        );
     }
 
     #[test]
@@ -1956,9 +2234,24 @@ mod tests {
         let store = TranscriptStore::new(l);
         // A stale cache: one row older than the tail, two the replay re-delivers.
         store.replace_for_merge(vec![
-            Message { id: "old".into(), role: "user".into(), content: "ancient".into(), output: String::new() },
-            Message { id: "m1".into(), role: "user".into(), content: "hi".into(), output: String::new() },
-            Message { id: "m2".into(), role: "agent".into(), content: "hello".into(), output: String::new() },
+            Message {
+                id: "old".into(),
+                role: "user".into(),
+                content: "ancient".into(),
+                output: String::new(),
+            },
+            Message {
+                id: "m1".into(),
+                role: "user".into(),
+                content: "hi".into(),
+                output: String::new(),
+            },
+            Message {
+                id: "m2".into(),
+                role: "agent".into(),
+                content: "hello".into(),
+                output: String::new(),
+            },
         ]);
         // The bounded tail starts at m1 (present in the cache) and adds m3.
         store.append_chunk("user", "hi", Some("m1"), false);
@@ -1979,8 +2272,18 @@ mod tests {
         let (l, _i_evts) = listener();
         let store = TranscriptStore::new(l);
         store.replace_for_merge(vec![
-            Message { id: "m1".into(), role: "user".into(), content: "hi".into(), output: String::new() },
-            Message { id: "t1".into(), role: "tool".into(), content: "Bash".into(), output: String::new() },
+            Message {
+                id: "m1".into(),
+                role: "user".into(),
+                content: "hi".into(),
+                output: String::new(),
+            },
+            Message {
+                id: "t1".into(),
+                role: "tool".into(),
+                content: "Bash".into(),
+                output: String::new(),
+            },
         ]);
         store.tool_call("Bash", "ls", "t1", ToolCallKind::Plain);
         store.append_chunk("agent", "done", Some("m2"), false);
@@ -2017,8 +2320,18 @@ mod tests {
         let (l, _i_evts) = listener();
         let store = TranscriptStore::new(l);
         store.replace_for_merge(vec![
-            Message { id: "old".into(), role: "user".into(), content: "ancient".into(), output: String::new() },
-            Message { id: "m1".into(), role: "agent".into(), content: "hello".into(), output: String::new() },
+            Message {
+                id: "old".into(),
+                role: "user".into(),
+                content: "ancient".into(),
+                output: String::new(),
+            },
+            Message {
+                id: "m1".into(),
+                role: "agent".into(),
+                content: "hello".into(),
+                output: String::new(),
+            },
         ]);
         // A tool row that does not overlap must NOT wipe the painted prefix the
         // way a provisional paint would.
@@ -2054,15 +2367,27 @@ mod tests {
     fn rich_items_keep_chart_app_and_toolgroup_kinds() {
         let (l, _i_evts) = listener();
         let store = TranscriptStore::new(l);
-        store.tool_call("Chart", "input", "c1", ToolCallKind::Chart { spec: r#"{"a":1}"#.into() });
+        store.tool_call(
+            "Chart",
+            "input",
+            "c1",
+            ToolCallKind::Chart {
+                spec: r#"{"a":1}"#.into(),
+            },
+        );
         store.tool_call("A", "x", "g1", ToolCallKind::Plain);
         store.tool_call("B", "y", "g2", ToolCallKind::Plain);
-        store.tool_call("Dashboard", "{}", "a1", ToolCallKind::McpApp {
-            app_key: "ext|ui://d".into(),
-            uri: "ui://d".into(),
-            extension: "ext".into(),
-            input: "{}".into(),
-        });
+        store.tool_call(
+            "Dashboard",
+            "{}",
+            "a1",
+            ToolCallKind::McpApp {
+                app_key: "ext|ui://d".into(),
+                uri: "ui://d".into(),
+                extension: "ext".into(),
+                input: "{}".into(),
+            },
+        );
 
         let items = store.rich_transcript();
         // Chart: the SPEC is retained (the flat projection threw it away).
@@ -2118,7 +2443,11 @@ mod tests {
         // client renders markdown a single time.
         assert_eq!(
             &*i_evts.lock(),
-            &["upsert:m1:Agent:Hel:", "text:m1:lo", "upsert:m1:Agent:Hello:"]
+            &[
+                "upsert:m1:Agent:Hel:",
+                "text:m1:lo",
+                "upsert:m1:Agent:Hello:"
+            ]
         );
     }
 
@@ -2130,7 +2459,10 @@ mod tests {
         store.append_chunk("thought", " more", None, true);
         // The server gave no id, but the item stream still needs a key: one is
         // assigned and the delta targets it.
-        assert_eq!(&*i_evts.lock(), &["upsert:@1:Thought:hmm:", "text:@1: more"]);
+        assert_eq!(
+            &*i_evts.lock(),
+            &["upsert:@1:Thought:hmm:", "text:@1: more"]
+        );
         let items = store.rich_transcript();
         assert_eq!(items[0].id, "@1");
         assert_eq!(items[0].text, "hmm more");
@@ -2145,7 +2477,10 @@ mod tests {
         store.append_chunk("agent", "\n\n", Some("m1"), false);
         store.tool_call("Bash", "ls", "t1", ToolCallKind::Plain);
         assert_eq!(&*i_evts.lock(), &["upsert:t1:Tool:Bash:in_progress"]);
-        assert!(store.rich_transcript().iter().all(|i| i.kind != ItemKind::Agent));
+        assert!(store
+            .rich_transcript()
+            .iter()
+            .all(|i| i.kind != ItemKind::Agent));
     }
 
     #[test]
@@ -2287,14 +2622,16 @@ mod tests {
                         detail: "ls".into(),
                         output: "x".into(),
                         status: "completed".into(),
-                    thought: String::new(),                    },
+                        thought: String::new(),
+                    },
                     ToolCall {
                         id: "t2".into(),
                         title: "Read".into(),
                         detail: "f".into(),
                         output: "y".into(),
                         status: "completed".into(),
-                    thought: String::new(),                    },
+                        thought: String::new(),
+                    },
                 ],
                 thought: String::new(),
                 summary: String::new(),
@@ -2321,8 +2658,18 @@ mod tests {
         let store = TranscriptStore::new(l);
         store.set_session("s1");
         store.replace_for_merge(vec![
-            Message { id: "old".into(), role: "user".into(), content: "ancient".into(), output: String::new() },
-            Message { id: "m1".into(), role: "agent".into(), content: "hello".into(), output: String::new() },
+            Message {
+                id: "old".into(),
+                role: "user".into(),
+                content: "ancient".into(),
+                output: String::new(),
+            },
+            Message {
+                id: "m1".into(),
+                role: "agent".into(),
+                content: "hello".into(),
+                output: String::new(),
+            },
         ]);
         // The bounded tail anchors on the cached m1 and re-delivers it.
         store.append_chunk("agent", "hi", Some("m1"), false);
@@ -2345,7 +2692,11 @@ mod tests {
         store.set_session("s1");
         let items: Vec<Item> = (0..100)
             .map(|n| {
-                let kind = if n % 2 == 0 { ItemKind::User } else { ItemKind::Agent };
+                let kind = if n % 2 == 0 {
+                    ItemKind::User
+                } else {
+                    ItemKind::Agent
+                };
                 text_item(&format!("m{n}"), kind, &format!("t{n}"))
             })
             .collect();
@@ -2380,7 +2731,11 @@ mod tests {
 
         i_evts.lock().clear();
         store.load_older(40);
-        assert_eq!(&*i_evts.lock(), &["window:m0:false"], "an empty load still answers");
+        assert_eq!(
+            &*i_evts.lock(),
+            &["window:m0:false"],
+            "an empty load still answers"
+        );
     }
 
     #[test]
@@ -2399,7 +2754,10 @@ mod tests {
 
     #[test]
     fn summarize_takes_the_first_sentence_and_caps_it() {
-        assert_eq!(summarize("Let me check the calendar. Then reply."), "Let me check the calendar");
+        assert_eq!(
+            summarize("Let me check the calendar. Then reply."),
+            "Let me check the calendar"
+        );
         assert_eq!(summarize("\n\n  ## Look it up  \nmore"), "Look it up");
         assert_eq!(summarize("   "), "");
         assert_eq!(summarize("No terminator here"), "No terminator here");
@@ -2414,13 +2772,21 @@ mod tests {
         let store = TranscriptStore::new(l);
         i_evts.lock().clear();
 
-        store.append_chunk("thought", "Let me check the calendar. Then reply.", None, true);
+        store.append_chunk(
+            "thought",
+            "Let me check the calendar. Then reply.",
+            None,
+            true,
+        );
         store.tool_call("Bash", "date", "t1", ToolCallKind::Plain);
 
         // The thinking is absorbed: its own row is folded away and the run carries
         // it, so a long loop reads as one run with the reasoning inside it.
         let ops = i_evts.lock().clone();
-        assert!(ops.iter().any(|o| o.starts_with("remove:@1")), "thought row dropped: {ops:?}");
+        assert!(
+            ops.iter().any(|o| o.starts_with("remove:@1")),
+            "thought row dropped: {ops:?}"
+        );
         assert_eq!(msgs(&store).len(), 1, "only the tool row survives");
         match &store.rows_for_test()[0] {
             Bubble::Tool(r, label) => {
@@ -2445,8 +2811,16 @@ mod tests {
             vec![
                 // The flat projection reports no id for a synthetic row (the
                 // rich item carries `@1`); the desktop keys history on it.
-                ("thought".to_string(), String::new(), "Hmm, let me think about this.".to_string()),
-                ("agent".to_string(), "m1".to_string(), "Here is the answer.".to_string()),
+                (
+                    "thought".to_string(),
+                    String::new(),
+                    "Hmm, let me think about this.".to_string()
+                ),
+                (
+                    "agent".to_string(),
+                    "m1".to_string(),
+                    "Here is the answer.".to_string()
+                ),
             ]
         );
     }
@@ -2492,7 +2866,10 @@ mod tests {
         let rows = store.rows_for_test();
         assert_eq!(rows.len(), 3, "run, narration, run: {rows:?}");
         assert!(matches!(rows[0], Bubble::Tool(..)), "first loop");
-        assert!(matches!(rows[1], Bubble::Text { .. }), "narration stays visible");
+        assert!(
+            matches!(rows[1], Bubble::Text { .. }),
+            "narration stays visible"
+        );
         match &rows[2] {
             Bubble::Tool(r, label) => {
                 assert_eq!(r.thought, "", "the narration is a boundary");
@@ -2605,14 +2982,75 @@ mod tests {
         let rows = store.rows_for_test();
         match rows.last() {
             Some(Bubble::Tool(r, label)) => {
-                assert_eq!(label, "", "a finished turn's thinking must not label a later run");
+                assert_eq!(
+                    label, "",
+                    "a finished turn's thinking must not label a later run"
+                );
                 assert_eq!(r.thought, "");
             }
             other => panic!("expected a tool bubble last, got {other:?}"),
         }
         assert!(
-            rows.iter().any(|b| matches!(b, Bubble::Text { role, .. } if role == "thought")),
+            rows.iter()
+                .any(|b| matches!(b, Bubble::Text { role, .. } if role == "thought")),
             "and it is still on screen as its own block: {rows:?}"
         );
+    }
+
+    #[test]
+    fn an_echoed_prompt_is_adopted_when_the_server_names_it() {
+        let (l, _) = listener();
+        let store = TranscriptStore::new(l);
+        store.echo_prompt("what time is it");
+        assert_eq!(store.transcript().len(), 1);
+
+        // goose never sends our own prompt live; a replay names it. The named
+        // chunk must adopt the echoed row, not append a duplicate.
+        store.append_chunk("user", "what time is it", Some("m1"), false);
+        let rows = store.rows_for_test();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        match &rows[0] {
+            Bubble::Text { id, text, .. } => {
+                assert_eq!(id, "m1");
+                assert_eq!(text, "what time is it");
+            }
+            other => panic!("expected the prompted row, got {other:?}"),
+        }
+
+        // Later chunks of the same message accumulate into it.
+        store.append_chunk("user", " (again)", Some("m1"), false);
+        assert_eq!(store.transcript().len(), 1);
+        assert_eq!(store.transcript()[0].content, "what time is it (again)");
+    }
+
+    #[test]
+    fn two_echoed_prompts_are_two_rows() {
+        let (l, _) = listener();
+        let store = TranscriptStore::new(l);
+        store.echo_prompt("first");
+        store.echo_prompt("second");
+        assert_eq!(store.transcript().len(), 2);
+        // The oldest echo is adopted first (the server names prompts in order).
+        store.append_chunk("user", "first", Some("m1"), false);
+        store.append_chunk("user", "second", Some("m2"), false);
+        assert_eq!(store.transcript().len(), 2);
+    }
+
+    #[test]
+    fn a_cached_echo_is_adopted_after_a_paint() {
+        let (l, _) = listener();
+        let store = TranscriptStore::new(l);
+        store.echo_prompt("hello");
+        let items = store.rich_transcript();
+
+        let (l, _) = listener();
+        let reloaded = TranscriptStore::new(l);
+        reloaded.replace_rich(items, false);
+        reloaded.append_chunk("user", "hello", Some("m9"), false);
+        assert_eq!(reloaded.transcript().len(), 1);
+        // The RICH row keeps its stable `@1` id (the client's key); the flat
+        // projection now carries the server's message id.
+        assert_eq!(reloaded.rich_transcript()[0].id, "@1");
+        assert_eq!(reloaded.transcript()[0].id, "m9");
     }
 }

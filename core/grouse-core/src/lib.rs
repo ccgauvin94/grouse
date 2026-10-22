@@ -18,7 +18,7 @@
 //! dispatch, and `CoreListener` callbacks run on the core's single tokio
 //! runtime ([`roam::runtime`]); the intents enqueue onto it and return.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -27,7 +27,7 @@ use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
 use crate::cache::CacheStore;
-use crate::roam::{RoamPeer, active_peer};
+use crate::roam::{active_peer, RoamPeer};
 use crate::spine::ConnectSpec;
 use crate::transcript::TranscriptStore;
 
@@ -37,6 +37,7 @@ pub mod cache;
 pub mod capi;
 pub mod notify;
 pub mod roam;
+mod session;
 pub mod speak;
 pub mod spine;
 mod summarize;
@@ -92,7 +93,9 @@ pub enum ConnectionStatus {
     Connecting,
     Ready,
     Syncing,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// A session list entry (CONTRACT §3.2/§3.3).
@@ -112,8 +115,8 @@ pub struct SessionSummary {
     pub model: String,
     /// From the reply's `_meta.hasRecipe`.
     pub has_recipe: bool,
-    /// True while the session has backgrounded (staged) content the UI has
-    /// not shown yet — the green-dot indicator (roam staging, serve parity).
+    /// True while the session has backgrounded content the UI has not shown
+    /// yet — the green-dot indicator (hub staging, for any transport).
     pub has_new: bool,
     /// True when the session is archived (goose stamps `_meta.archivedAt` and
     /// `session/list` has no archived filter — the flag lets UIs list and
@@ -227,7 +230,9 @@ pub enum TranscriptOp {
 
 /// The core's window over the active session's transcript
 /// (docs/TRANSCRIPT_MODEL.md). `oldest_id` is empty when the window is empty.
-#[derive(uniffi::Record, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    uniffi::Record, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize,
+)]
 pub struct TranscriptWindow {
     pub oldest_id: String,
     pub newest_id: String,
@@ -252,8 +257,15 @@ pub enum RefreshMode {
 #[derive(uniffi::Enum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ToolCallKind {
     Plain,
-    Chart { spec: String },
-    McpApp { app_key: String, uri: String, extension: String, input: String },
+    Chart {
+        spec: String,
+    },
+    McpApp {
+        app_key: String,
+        uri: String,
+        extension: String,
+        input: String,
+    },
 }
 
 /// A config entry (`provider` | `model` | `mode` | `thinking_effort`).
@@ -317,11 +329,21 @@ pub struct Prompt {
 /// A prompt content block: text / image / resource (CONTRACT §3.4).
 #[derive(uniffi::Enum, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PromptBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     /// `data` is base64; `mime_type` e.g. `image/png`.
-    Image { mime_type: String, data: String },
+    Image {
+        mime_type: String,
+        data: String,
+    },
     /// `text` and `blob` are mutually exclusive; `blob` is base64.
-    Resource { uri: String, mime_type: String, text: Option<String>, blob: Option<String> },
+    Resource {
+        uri: String,
+        mime_type: String,
+        text: Option<String>,
+        blob: Option<String>,
+    },
 }
 
 /// The session the UI believes is active when sending a prompt (CONTRACT §3.1).
@@ -453,13 +475,13 @@ struct CoreState {
     prompting: bool,
     /// The store may NOT be a complete copy of the server's transcript: a turn
     /// was in flight (or ended in error) and the last rows are partial. Drives
-    /// two things: `save_cache` writes an EMPTY `updatedAt` stamp for an
+    /// two things: `save_cache_for` writes an EMPTY `updatedAt` stamp for an
     /// incomplete store (so it can never read back as "fresh" and suppress the
     /// replay that would complete it), and a non-fresh reconnect asks for a FULL
     /// replay instead of a bounded tail-merge, since a merge anchors onto rows
-    /// that may be truncated. A fresh process starts `false` — nothing is known
-    /// to be incomplete, so a settled cache still suppresses its replay.
-    store_incomplete: bool,
+    /// that may be truncated. Keyed by display id: a turn on one chat must not
+    /// mark another chat's cache partial (parallel peers make that real).
+    incomplete: HashSet<String>,
     /// Per-session pending intents (key is sessionId, "" for global/no-session).
     /// Prompts queued in one chat must not leak into another.
     pending: HashMap<String, VecDeque<PendingIntent>>,
@@ -474,14 +496,6 @@ struct CoreState {
     user_disconnect: bool,
     /// Remote-change resync: session_info_update debounce generation.
     touch_gen: u64,
-    /// Which session the transcript store's current content BELONGS to.
-    ///
-    /// Not always the active session: a cold start paints the last chat's cache
-    /// and only then opens a connection, which creates a throwaway session
-    /// first — so between those two the store holds one session's rows while
-    /// another is active. Persisting then would file the wrong transcript under
-    /// the wrong id, so [`Core::save_cache`] requires the two to agree.
-    store_session_id: Option<String>,
     /// Follow-up probes left in the current resync cycle (desktop m_resyncTicks).
     resync_ticks: i32,
     /// Last probed (updatedAt, messageCount) — the "did it move?" comparison.
@@ -490,25 +504,31 @@ struct CoreState {
     /// (issue #13). On by default; costs one short inference per turn, spent on
     /// a hidden session so it never appears in a chat.
     run_summaries: bool,
-}
-
-/// How to paint a session's cached transcript and which wire load it owes. See
-/// [`Core::plan_cache_paint`].
-struct CachePaint {
-    /// The cache is a settled, up-to-date copy: paint authoritatively, suppress
-    /// the replay.
-    suppress: bool,
-    /// The cache is settled but stale: paint and merge a bounded tail.
-    merge: bool,
-    /// The cached items to paint, if any.
-    items: Option<Vec<Item>>,
+    /// Sessions whose `session/load` replay is in progress. Replayed thought
+    /// chunks are framing for the following tool run, not rows of their own.
+    /// Shared by every transport, so the rule is one rule.
+    replaying: HashSet<String>,
+    /// The live turn's run id per displayed session (main or peer). A run ends
+    /// only when one was actually started, so a bare title update cannot clear
+    /// the app's busy/steer state.
+    active_runs: HashMap<String, String>,
+    /// Each session's plain tool runs for the turn in flight, oldest first.
+    /// The end-of-turn summarizer drains this; shared by every transport.
+    turn_runs: HashMap<String, Vec<String>>,
+    /// Hidden run-label summarizer sessions currently in flight (display ids).
+    summarizer_ids: HashSet<String>,
+    /// Text streamed by those summarizer sessions.
+    summarizer_replies: HashMap<String, String>,
+    /// One reusable hidden summarizer per endpoint (`""` = main, else the peer
+    /// label): `(display id, wire id)`. Truncated after every use.
+    summarizer_sessions: HashMap<String, (String, String)>,
 }
 
 struct CoreInner {
     listener: Arc<dyn CoreListener>,
-    /// The shared transcript store (main connection streams into it; the
-    /// `transcript()` getter reads it unless a roam peer owns the chat).
-    store: Arc<TranscriptStore>,
+    /// Every session's transcript store, keyed by display id, with the one
+    /// display gate the UI follows. Both transports feed it.
+    hub: Arc<crate::session::SessionHub>,
     /// Dumb per-session transcript I/O under a default data dir (CONTRACT §7.4;
     /// the skeleton's constructor carries no CacheDir, so the core defaults it).
     cache: Arc<CacheStore>,
@@ -520,6 +540,9 @@ struct CoreInner {
     /// session's owner.
     peers: Mutex<Vec<Arc<RoamPeer>>>,
     active_peer_label: Arc<RwLock<Option<String>>>,
+    /// The `Arc` this core is owned by, for handing itself to connections as
+    /// the shared dispatch host (set once, right after construction).
+    self_ref: std::sync::OnceLock<std::sync::Weak<Core>>,
 }
 
 /// The stable interface (CONTRACT §3).
@@ -538,15 +561,10 @@ impl Core {
     #[uniffi::constructor]
     pub fn new(listener: Box<dyn CoreListener>, cache_dir: String) -> Arc<Self> {
         let listener: Arc<dyn CoreListener> = Arc::from(listener);
-        // The store shares one listener with the rest of the core; a tiny
-        // forwarder adapts the Box the store's seam asks for AND carries the
-        // display-ownership gate (chat painting is suppressed while a roam
-        // peer owns the screen — see CoreListenerForwarder).
+        // One hub for every session, main or roam. The display gate lives in
+        // the hub, so a background chat can accumulate without painting.
         let active_peer_label = Arc::new(RwLock::new(None));
-        let store = Arc::new(TranscriptStore::new(Box::new(CoreListenerForwarder {
-            inner: listener.clone(),
-            active_peer: active_peer_label.clone(),
-        })));
+        let hub = crate::session::SessionHub::new(listener.clone());
         let cache_dir = if cache_dir.is_empty() {
             default_cache_dir()
         } else {
@@ -555,15 +573,20 @@ impl Core {
         let core = Arc::new(Self {
             inner: Arc::new(CoreInner {
                 listener,
-                store,
+                hub,
                 cache: Arc::new(CacheStore::new(cache_dir)),
-                state: Mutex::new(CoreState { run_summaries: true, ..Default::default() }),
+                state: Mutex::new(CoreState {
+                    run_summaries: true,
+                    ..Default::default()
+                }),
                 conn: Mutex::new(None),
                 conn_task: Mutex::new(None),
                 peers: Mutex::new(Vec::new()),
-                active_peer_label, // THE SAME Arc the store's forwarder holds — a second one would make the paint gate blind
+                active_peer_label,
+                self_ref: std::sync::OnceLock::new(),
             }),
         });
+        let _ = core.inner.self_ref.set(Arc::downgrade(&core));
         // Seed the session directory from cache: the drawer renders the
         // names immediately (before the first session/list round trip), the
         // updatedAt table makes a cold-start resume's freshness check match
@@ -598,6 +621,12 @@ impl Core {
                 .cloned()
                 .map(|peer: Arc<crate::roam::RoamPeer>| peer as Arc<dyn crate::spine::RpcConn>)
         }));
+        // The unstable shim resolves the active chat (main or peer) through
+        // this, so intents like steer never address the main wire by default.
+        let weak = Arc::downgrade(&core);
+        crate::spine::register_active_session_resolver(Arc::new(move || {
+            weak.upgrade().and_then(|core| core.active_session_id())
+        }));
         core
     }
 
@@ -612,6 +641,8 @@ impl Core {
             ConnectSpec::New {
                 recipe_id: config.initial_recipe_id.clone(),
                 project_id: config.initial_project_id.clone(),
+                // Cold start: the cached chat already painted stays on screen.
+                display: false,
             },
             false,
             false,
@@ -639,17 +670,13 @@ impl Core {
         // replay outright; a settled-but-stale one asks for a bounded tail that
         // merges into the paint; an incomplete one paints provisionally and
         // takes the full replay (see `plan_cache_paint`).
-        self.inner.store.set_session(&session_id);
+        let store = self.inner.hub.display(&session_id);
         match paint.items {
-            Some(items) if suppress => self.inner.store.replace_rich(items, false),
-            Some(items) if merge => self.inner.store.replace_rich_for_merge(items),
-            Some(items) => self.inner.store.replace_rich(items, true),
-            None => self.inner.store.clear(),
+            Some(items) if suppress => store.replace_rich(items, false),
+            Some(items) if merge => store.replace_rich_for_merge(items),
+            Some(items) => store.replace_rich(items, true),
+            None => store.clear(),
         };
-        {
-            let mut state = self.inner.state.lock();
-            state.store_session_id = Some(session_id.clone());
-        }
         let (_, ready_rx) = self.connect_impl(
             config,
             ConnectSpec::Resume { session_id, cwd },
@@ -677,8 +704,10 @@ impl Core {
             drop(task); // the task ends after the graceful close
         }
         self.emit_status(ConnectionStatus::Disconnected);
-        self.inner.store.clear();
-        self.inner.state.lock().store_session_id = None;
+        if let Some(store) = self.store() {
+            store.clear();
+        }
+        self.inner.hub.clear_display();
     }
 
     /// `session/new` with `_meta.client` + cwd; replaces the current wire.
@@ -691,12 +720,11 @@ impl Core {
     pub fn new_session(&self, recipe_id: Option<String>, project_id: Option<String>) {
         *self.inner.active_peer_label.write() = None;
         self.reset_chat_state();
-        self.inner.store.clear();
-        let config = {
-            let mut state = self.inner.state.lock();
-            state.store_session_id = None;
-            state.last_config.clone()
-        };
+        if let Some(store) = self.store() {
+            store.clear();
+        }
+        self.inner.hub.clear_display();
+        let config = self.inner.state.lock().last_config.clone();
         let Some(config) = config else { return };
         // Live reuse: same host/port/key, already Ready — session/new on the
         // existing wire. This is the project-creation path
@@ -709,13 +737,9 @@ impl Core {
                 let pid = project_id.clone();
                 crate::roam::runtime().spawn(async move {
                     match conn.live_new_session_async(rid.clone(), pid.clone()).await {
-                        Ok(session_id) => {
-                            {
-                                let mut state = this.inner.state.lock();
-                                state.store_session_id = Some(session_id);
-                            }
+                        Ok(_session_id) => {
                             this.save_cache();
-                            this.probe_stamp_and_save();
+                            this.probe_stamp();
                             // Live reuse doesn't go through the handshake's
                             // on_ready → on_conn_status(Ready) path, so the UI
                             // would stay in `connecting`/`Loading 0` forever.
@@ -723,44 +747,32 @@ impl Core {
                             this.on_conn_status(ConnectionStatus::Ready);
                         }
                         Err(_) => {
-                            let _ =
-                                this.connect_impl(cfg, ConnectSpec::New { recipe_id: rid, project_id: pid }, false, false);
+                            let _ = this.connect_impl(
+                                cfg,
+                                ConnectSpec::New {
+                                    recipe_id: rid,
+                                    project_id: pid,
+                                    display: true,
+                                },
+                                false,
+                                false,
+                            );
                         }
                     }
                 });
                 return;
             }
         }
-        let (_, _rx) =
-            self.connect_impl(config, ConnectSpec::New { recipe_id, project_id }, false, false);
-    }
-
-    /// Whether the cached transcript for a session is up to date with the
-    /// session's last-known `updatedAt` (from the directory cache seed, a live
-    /// session/list, or a session_info_update). A mismatch means the session
-    /// changed remotely and a replay is owed; equality means the cache is
-    /// fresh and any load can suppress its replay.
-    ///
-    /// A cache is fresh only when it is also COMPLETE: `store_incomplete` is set
-    /// while a turn is in flight (or after it ended in error), and a save in that
-    /// state writes an empty stamp — but within one process the store can still
-    /// be incomplete before any save lands, so gate on the flag directly too.
-    fn transcript_is_fresh(&self, session_id: &str, cached_at: &str) -> bool {
-        if cached_at.is_empty() {
-            return false;
-        }
-        if self.inner.state.lock().store_incomplete {
-            return false;
-        }
-        let updated = self
-            .inner
-            .state
-            .lock()
-            .session_updated_at
-            .get(session_id)
-            .cloned()
-            .unwrap_or_default();
-        !updated.is_empty() && updated == cached_at
+        let (_, _rx) = self.connect_impl(
+            config,
+            ConnectSpec::New {
+                recipe_id,
+                project_id,
+                display: true,
+            },
+            false,
+            false,
+        );
     }
 
     /// `session/load` with the session's real cwd (resolved: cache → probe →
@@ -786,7 +798,17 @@ impl Core {
     /// still takes the full replay. Either way the replay is ingested silently
     /// and ends in one windowed paint (grouse#18).
     pub fn refresh_session(&self, session_id: String, mode: RefreshMode) {
-        self.open_session_inner(session_id, matches!(mode, RefreshMode::Full));
+        let force = matches!(mode, RefreshMode::Full);
+        // A peer owns its own wire and cache; the same intent must reach it
+        // instead of clearing the display owner and loading on the main wire
+        // (which does not own `roam:<label>:<id>`).
+        if let Some(peer) = self.peer_for_session(&session_id) {
+            *self.inner.active_peer_label.write() = Some(peer.label().to_string());
+            self.inner.hub.display(&session_id);
+            peer.open_session_with(session_id, String::new(), force);
+            return;
+        }
+        self.open_session_inner(session_id, force);
     }
 
     fn open_session_inner(&self, session_id: String, force_replay: bool) {
@@ -813,18 +835,14 @@ impl Core {
         // each reopen re-saved a different wrong subset.
         let paint = self.plan_cache_paint(&session_id, force_replay);
         let (suppress, merge) = (paint.suppress, paint.merge);
-        self.inner.store.set_session(&session_id);
+        let store = self.inner.hub.display(&session_id);
         match paint.items {
-            Some(items) if suppress => self.inner.store.replace_rich(items, false),
-            Some(items) if merge => self.inner.store.replace_rich_for_merge(items),
-            Some(items) => self.inner.store.replace_rich(items, true),
-            None => self.inner.store.clear(),
+            Some(items) if suppress => store.replace_rich(items, false),
+            Some(items) if merge => store.replace_rich_for_merge(items),
+            Some(items) => store.replace_rich(items, true),
+            None => store.clear(),
         };
-        let config = {
-            let mut state = self.inner.state.lock();
-            state.store_session_id = Some(session_id.clone());
-            state.last_config.clone()
-        };
+        let config = self.inner.state.lock().last_config.clone();
         let Some(config) = config else {
             // No connection configuration has ever been installed in this
             // process, so there is nothing to load the session over. The client
@@ -846,8 +864,9 @@ impl Core {
                 let sid = session_id.clone();
                 let c = cwd.clone();
                 crate::roam::runtime().spawn(async move {
-                    if let Err(error) =
-                        conn.live_load_session_async(sid.clone(), c.clone(), suppress, merge).await
+                    if let Err(error) = conn
+                        .live_load_session_async(sid.clone(), c.clone(), suppress, merge)
+                        .await
                     {
                         // The live wire refused the load. Do NOT bind a
                         // substitute session: the client asked for THIS one, and
@@ -870,8 +889,12 @@ impl Core {
                 return;
             }
         }
-        let (_, _rx) =
-            self.connect_impl(config, ConnectSpec::Resume { session_id, cwd }, suppress, merge);
+        let (_, _rx) = self.connect_impl(
+            config,
+            ConnectSpec::Resume { session_id, cwd },
+            suppress,
+            merge,
+        );
     }
 
     /// Render the cached transcript for a session WITHOUT connecting (cold
@@ -888,14 +911,10 @@ impl Core {
             // path that DOES owe one (`open_session`, and the reconnect's stale
             // resume) repaints with the provisional mode it decides on, and
             // `replace` adopts that mode when the content is identical.
-            self.inner.store.set_session(&session_id);
-            self.inner.store.replace_rich(items, false);
-            // These rows are this session's, whatever session the connection
-            // that follows happens to bind first (see `store_session_id`).
-            self.inner.state.lock().store_session_id = Some(session_id);
+            let store = self.inner.hub.display(&session_id);
+            store.replace_rich(items, false);
         }
     }
-
 
     /// Persist every open transcript NOW: the main session's and each roam
     /// peer's.
@@ -915,7 +934,9 @@ impl Core {
 
     /// Refresh `session/list` (reply → `on_sessions`).
     pub fn list_sessions(&self) {
-        let Some(conn) = self.inner.conn.lock().clone() else { return };
+        let Some(conn) = self.inner.conn.lock().clone() else {
+            return;
+        };
         let core = self.clone();
         crate::roam::runtime().spawn(async move {
             if let Ok(reply) = conn
@@ -927,71 +948,59 @@ impl Core {
         });
     }
 
-    /// Send a prompt (text/image/resource blocks). Queues until the socket is
-    /// ready; rejected (not queued) when `expect` mismatches the bound
-    /// session. Routes to the active roam peer when one owns the chat.
+    /// Send a prompt (text/image/resource blocks). Queues until the owning
+    /// connection can accept it; rejected (not queued) when `expect` mismatches
+    /// the displayed session. One path for the main wire and every peer.
     pub fn send_prompt(&self, prompt: Prompt, expect: Option<SendExpect>) {
-        if let Some(peer) = self.active_peer() {
-            let sid = peer.active_session_id().unwrap_or_default();
-            // Same local echo as `spawn_prompt` (which the roam branch returns
-            // before reaching): goose does not send a `user_message_chunk` for a
-            // prompt we sent, and the peer has its own store rather than the
-            // spine's. Without it the question shows up only on a later replay —
-            // and because roam's live text bubble then stays open, the next
-            // turn's reply appends onto the previous reply instead of opening
-            // its own bubble.
-            if let Some(text) = crate::pure_text(&prompt) {
-                peer.echo_prompt(&text);
+        let Some(display) = self.active_session_id() else {
+            self.queue_prompt(prompt, expect);
+            return;
+        };
+        if let Some(exp) = &expect {
+            if exp.session_id != display {
+                eprintln!(
+                    "grouse-core: send_prompt rejected — UI expects a different session than the one displayed"
+                );
+                return;
             }
-            let params = prompt_params(&prompt, &sid);
-            crate::roam::runtime().spawn_blocking(move || {
-                let _ = peer.rpc("session/prompt", params);
-            });
+        }
+        let Some(owner) = self.owner_for(&display) else {
+            self.queue_prompt(prompt, expect);
+            return;
+        };
+        if self.inner.state.lock().prompting || !owner.accepts_prompt() {
+            self.queue_prompt(prompt, expect);
             return;
         }
-        match self.try_send_prompt(prompt, expect) {
-            Ok(()) => {}
-            Err((prompt, expect)) => {
-                let mut state = self.inner.state.lock();
-                let id = state.next_pending_id.to_string();
-                state.next_pending_id += 1;
-                let key = expect.as_ref().map(|e| e.session_id.clone()).unwrap_or_default();
-                state.pending.entry(key).or_default().push_back(PendingIntent::SendPrompt(prompt, expect, id));
-            }
-        }
+        self.spawn_prompt(owner, display, prompt);
     }
 
     /// `session/cancel` (a notification; never waits for a reply).
     pub fn cancel(&self) {
-        if let Some(peer) = self.active_peer() {
-            let params = json!({ "sessionId": peer.active_session_id().unwrap_or_default() });
-            crate::roam::runtime().spawn_blocking(move || {
-                let _ = peer.notify("session/cancel", params);
-            });
+        let Some(display) = self.active_session_id() else {
             return;
-        }
-        let Some(conn) = self.inner.conn.lock().clone() else { return };
-        let Some(sid) = conn.active_session_id() else { return };
-        let _ = conn.notify("session/cancel", json!({ "sessionId": sid }));
+        };
+        let Some(owner) = self.owner_for(&display) else {
+            return;
+        };
+        let params = json!({ "sessionId": owner.wire_id(&display) });
+        crate::roam::runtime().spawn(async move {
+            let _ = owner.notify("session/cancel", params);
+        });
     }
 
     /// `session/set_config_option`; queues until ready (CONTRACT §4).
     pub fn set_config_option(&self, config_id: String, value: String) {
-        if let Some(peer) = self.active_peer() {
-            let params = json!({
-                "sessionId": peer.active_session_id().unwrap_or_default(),
-                "configId": config_id,
-                "value": value,
-            });
-            crate::roam::runtime().spawn_blocking(move || {
-                let _ = peer.rpc("session/set_config_option", params);
-            });
-            return;
-        }
         match self.try_set_config(config_id, value) {
             Ok(()) => {}
             Err((config_id, value)) => {
-                self.inner.state.lock().pending.entry(String::new()).or_default().push_back(PendingIntent::SetConfig(config_id, value));
+                self.inner
+                    .state
+                    .lock()
+                    .pending
+                    .entry(String::new())
+                    .or_default()
+                    .push_back(PendingIntent::SetConfig(config_id, value));
             }
         }
     }
@@ -1023,9 +1032,13 @@ impl Core {
     /// Delete a session outright (irreversible); re-lists. If it was the open
     /// chat, the transcript view is dropped too.
     pub fn delete_session(&self, session_id: String) {
-        if self.active_session_id().as_deref() == Some(session_id.as_str()) {
-            self.inner.store.clear();
+        if self.inner.hub.is_displayed(&session_id) {
+            if let Some(store) = self.store() {
+                store.clear();
+            }
         }
+        self.inner.hub.forget(&session_id);
+        self.inner.state.lock().incomplete.remove(&session_id);
         self.mutate_session("session/delete", json!({ "sessionId": session_id }));
     }
 
@@ -1042,18 +1055,16 @@ impl Core {
             }
         });
         let secret = self.roam_identity();
-        let active = self.inner.active_peer_label.clone();
-        let gate_label = label.clone();
-        let is_active: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
-            *active.read() == Some(gate_label.clone())
-        });
+        let host: Arc<dyn crate::session::DispatchHost> = Arc::new(
+            crate::session::PrefixHost::new(label.clone(), self.host(), self.inner.hub.clone()),
+        );
         let peer = RoamPeer::connect(
             secret,
             card,
             label,
             self.inner.listener.clone(),
-            is_active,
-            self.config_hook(),
+            host,
+            self.inner.hub.clone(),
             self.inner.cache.clone(),
         );
         peers.push(peer);
@@ -1074,6 +1085,7 @@ impl Core {
         let mut active = self.inner.active_peer_label.write();
         if *active == Some(label) {
             *active = None;
+            self.inner.hub.clear_display();
         }
     }
 
@@ -1089,6 +1101,8 @@ impl Core {
             .cloned();
         let Some(peer) = peer else { return };
         *self.inner.active_peer_label.write() = Some(label);
+        // The store is the single display source; the peer paints into it.
+        self.inner.hub.display(&session_id);
         // Peer sessions are not in the main session list; the working dir is
         // the only known-good cwd (session/load rewrites working_dir when the
         // cwd differs, so the caller's pick wins on the peer side).
@@ -1161,7 +1175,7 @@ impl Core {
     /// when one owns the chat.
     pub fn respond_permission(&self, tool_call_id: String, outcome: PermissionOutcome) {
         if let Some(peer) = self.active_peer() {
-            let _ = peer.respond_permission(outcome);
+            let _ = peer.respond_permission(&tool_call_id, outcome);
             return;
         }
         if let Some(conn) = self.inner.conn.lock().clone() {
@@ -1186,39 +1200,45 @@ impl Core {
         if let Some(peer) = self.active_peer() {
             return peer.active_session_id();
         }
-        self.inner.conn.lock().as_ref().and_then(|conn| conn.active_session_id())
+        self.inner
+            .conn
+            .lock()
+            .as_ref()
+            .and_then(|conn| conn.active_session_id())
     }
 
     pub fn sessions(&self) -> Vec<SessionSummary> {
         self.inner.state.lock().sessions.clone()
     }
 
-    /// The accumulated active-session transcript (peer-owned when a roam peer
-    /// owns the chat).
+    /// The accumulated active-session transcript.
     pub fn transcript(&self) -> Vec<Message> {
-        if let Some(peer) = self.active_peer() {
-            return peer.transcript();
-        }
-        self.inner.store.transcript()
+        self.store()
+            .map(|store| store.transcript())
+            .unwrap_or_default()
     }
 
     /// The rich item snapshot of the active session (docs/TRANSCRIPT_MODEL.md).
-    /// Both the main connection and roam peers hold rich items now.
     pub fn rich_transcript(&self) -> Vec<Item> {
-        if let Some(peer) = self.active_peer() {
-            return peer.items();
-        }
-        self.inner.store.rich_transcript()
+        self.store()
+            .map(|store| store.rich_transcript())
+            .unwrap_or_default()
     }
 
-    /// One rich item by id from the main store.
+    /// One rich item by id from the displayed session.
     pub fn item(&self, id: String) -> Option<Item> {
-        self.inner.store.item(&id)
+        self.store().and_then(|store| store.item(&id))
     }
 
-    /// The pagination cursor for the active session.
+    /// The pagination cursor for the displayed session.
     pub fn window(&self) -> TranscriptWindow {
-        self.inner.store.window()
+        self.store()
+            .map(|store| store.window())
+            .unwrap_or(TranscriptWindow {
+                oldest_id: String::new(),
+                newest_id: String::new(),
+                has_older: false,
+            })
     }
 
     /// Extend the client's window backward by `count` items
@@ -1227,12 +1247,9 @@ impl Core {
     /// per older item (oldest-first) + a refreshed `Window`; `has_older: false`
     /// means there is nothing further back.
     pub fn load_older(&self, count: u32) {
-        // A peer owns its own rich window.
-        if let Some(peer) = self.active_peer() {
-            peer.load_older(count as usize);
-            return;
+        if let Some(store) = self.store() {
+            store.load_older(count as usize);
         }
-        self.inner.store.load_older(count as usize);
     }
 
     pub fn config(&self) -> Vec<ConfigOption> {
@@ -1257,30 +1274,50 @@ impl Core {
 // ---------------------------------------------------------------------------
 
 impl Core {
+    /// The store of the chat the UI is showing, if any.
+    fn store(&self) -> Option<Arc<TranscriptStore>> {
+        self.inner.hub.displayed_store()
+    }
+
+    /// The store for a session, created on first use.
+    fn store_for(&self, key: &str) -> Arc<TranscriptStore> {
+        self.inner.hub.store(key)
+    }
+
+    /// The shared dispatch host (this core), for a connection.
+    fn host(&self) -> Arc<dyn crate::session::DispatchHost> {
+        self.inner
+            .self_ref
+            .get()
+            .and_then(|weak| weak.upgrade())
+            .expect("core self reference is set at construction")
+    }
+
     /// Decide how to paint a session's cached transcript and which wire load it
     /// owes. `force_replay` (see [`Core::refresh_session`]) ignores the cache as
     /// a source of truth. A cache is usable as a merge BASE only when it is
     /// settled (non-empty stamp: written from a complete store) and the store is
     /// not currently incomplete — a truncated base would anchor a bounded-tail
     /// merge in the wrong place and drift on every reopen.
-    fn plan_cache_paint(&self, session_id: &str, force_replay: bool) -> CachePaint {
-        match self.inner.cache.load_transcript(session_id) {
-            Some((items, cached_at)) => {
-                let settled = !cached_at.is_empty();
-                let fresh = !force_replay && self.transcript_is_fresh(session_id, &cached_at);
-                let incomplete = self.inner.state.lock().store_incomplete;
-                CachePaint {
-                    suppress: fresh,
-                    merge: !force_replay && settled && !fresh && !incomplete,
-                    items: Some(items),
-                }
-            }
-            None => CachePaint {
-                suppress: false,
-                merge: false,
-                items: None,
-            },
-        }
+    fn plan_cache_paint(&self, session_id: &str, force_replay: bool) -> crate::session::PaintPlan {
+        let (listed, incomplete) = {
+            let state = self.inner.state.lock();
+            (
+                state
+                    .session_updated_at
+                    .get(session_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                state.incomplete.contains(session_id),
+            )
+        };
+        crate::session::plan_paint(
+            &self.inner.cache,
+            session_id,
+            &listed,
+            force_replay,
+            incomplete,
+        )
     }
 
     /// Reset the per-chat state a fresh open/new starts from (desktop
@@ -1307,7 +1344,10 @@ impl Core {
         spec: ConnectSpec,
         suppress_replay: bool,
         merge_replay: bool,
-    ) -> (Arc<crate::spine::Conn>, oneshot::Receiver<Result<(), String>>) {
+    ) -> (
+        Arc<crate::spine::Conn>,
+        oneshot::Receiver<Result<(), String>>,
+    ) {
         let gen = {
             let mut state = self.inner.state.lock();
             state.conn_gen += 1;
@@ -1321,18 +1361,17 @@ impl Core {
             drop(task); // the old task finishes after its graceful close
         }
 
+        let host = self.host();
         let (conn, ready_rx) = crate::spine::Conn::new(
             self.inner.listener.clone(),
-            self.inner.store.clone(),
+            self.inner.hub.clone(),
+            host,
             config.clone(),
             spec,
         );
         conn.set_suppress_replay(suppress_replay);
         conn.set_merge_replay(merge_replay);
         conn.set_on_status(self.status_hook());
-        conn.set_on_touched(self.touched_hook());
-        conn.set_on_active_run(self.active_run_hook());
-        conn.set_on_commands(self.commands_hook());
         conn.set_on_open_failed(self.open_failed_hook());
         conn.set_on_config(self.config_hook());
         conn.set_on_ended(self.ended_hook(gen));
@@ -1401,64 +1440,82 @@ impl Core {
             // re-streamed it every time.
             // An unowned store belongs to whatever session just bound: a fresh
             // session/new starts empty and its rows accumulate from here.
-            {
-                let active = self.active_session_id();
-                let mut state = self.inner.state.lock();
-                if state.store_session_id.is_none() {
-                    state.store_session_id = active;
+            // The session THIS wire bound (the display may belong to a peer).
+            let bound = self
+                .inner
+                .conn
+                .lock()
+                .as_ref()
+                .and_then(|conn| conn.active_session_id());
+            if let Some(key) = bound {
+                {
+                    let mut state = self.inner.state.lock();
+                    // The replay/new just completed, so the store is a faithful
+                    // copy of the server's transcript — unless a turn is still
+                    // in flight.
+                    if state.prompting {
+                        state.incomplete.insert(key.clone());
+                    } else {
+                        state.incomplete.remove(&key);
+                    }
                 }
-                // The replay/new just completed, so the store is a faithful copy
-                // of the server's transcript — unless a turn is still in flight.
-                state.store_incomplete = state.prompting;
+                self.save_cache_for(&key);
+                // Record the server's current stamp from a session/info probe
+                // (no cache write: a load's store is only current up to the
+                // stamp its replay carried). This makes a later open compare
+                // the cache against the server's real position.
+                self.refresh_stamp(&key, false);
             }
-            self.save_cache();
             self.flush_pending();
-            // doesn't), so the stamp above can race the session/list reply and
-            // land empty — which made every later open look stale. Re-stamp
-            // from a session/info probe: deterministic, and its updatedAt is
-            // byte-identical to the session/list entry, so the freshness check
-            // survives process restarts (list on the next cold start == this
-            // stamp when nothing changed).
-            self.probe_stamp_and_save();
         }
         self.inner.listener.on_status(status);
     }
 
-    /// `session/info` probe for the active session → re-stamp the cache's
-    /// updatedAt and persist (see [`Self::on_conn_status`]) and, when the probe
-    /// carries a message count, refresh the resync baseline (`sync_stamp`) so
-    /// our own just-completed change does not read as a remote one.
-    fn probe_stamp_and_save(&self) {
-        let Some(session_id) = self.active_session_id() else { return };
-        let Some(conn) = self.inner.conn.lock().clone() else { return };
+    /// `session/info` probe for the active session: record its updatedAt (the
+    /// cache-freshness comparison) and refresh the resync baseline
+    /// (`sync_stamp`) so our own just-completed change does not read as a
+    /// remote one. Does not write the cache — see [`Self::refresh_stamp`].
+    fn probe_stamp(&self) {
+        if let Some(session_id) = self.active_session_id() {
+            self.refresh_stamp(&session_id, false);
+        }
+    }
+
+    /// Re-read a session's stamp from its OWNING connection. `persist` writes
+    /// the store with the probed stamp — only safe when the store holds the
+    /// turn that moved it (after our own prompt). Works for the main wire and
+    /// a peer alike.
+    fn refresh_stamp(&self, session_id: &str, persist: bool) {
+        let Some(owner) = self.owner_for(session_id) else {
+            return;
+        };
+        let params = json!({ "sessionId": owner.wire_id(session_id) });
         let core = self.clone();
+        let key = session_id.to_string();
         crate::roam::runtime().spawn(async move {
-            let probed = conn
-                .rpc_async(
-                    "_goose/unstable/session/info",
-                    json!({ "sessionId": session_id }),
-                )
-                .await
-                .ok()
-                .and_then(|reply| reply.get("session").cloned())
-                .map(|session| {
-                    let updated_at = session
-                        .get("updatedAt")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    let message_count = session
-                        .pointer("/_meta/messageCount")
-                        .and_then(Value::as_i64)
-                        .unwrap_or(-1);
-                    (updated_at, message_count)
-                });
+            let probed =
+                crate::session::request(owner.as_ref(), "_goose/unstable/session/info", params)
+                    .await
+                    .ok()
+                    .and_then(|reply| reply.get("session").cloned())
+                    .map(|session| {
+                        let updated_at = session
+                            .get("updatedAt")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let message_count = session
+                            .pointer("/_meta/messageCount")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(-1);
+                        (updated_at, message_count)
+                    });
             if let Some((updated_at, message_count)) = probed {
                 let mut state = core.inner.state.lock();
                 if !updated_at.is_empty() {
                     state
                         .session_updated_at
-                        .insert(session_id.clone(), updated_at.clone());
+                        .insert(key.clone(), updated_at.clone());
                 }
                 // Baseline for the move test in `on_session_probe`. Without
                 // this, the first `session_info_update` after a prompt (the
@@ -1468,7 +1525,9 @@ impl Core {
                     state.sync_stamp = Some((updated_at, message_count));
                 }
             }
-            core.save_cache();
+            if persist {
+                core.save_cache_for(&key);
+            }
         });
     }
 
@@ -1555,11 +1614,14 @@ impl Core {
         // supersedes the live rows and the full replay rebuilds cleanly. Never
         // arm a merge on reconnect — the paint it would need does not exist.
         if !suppress {
-            self.inner.store.mark_provisional();
+            self.store_for(&resume).mark_provisional();
         }
         let (_, _rx) = self.connect_impl(
             config,
-            ConnectSpec::Resume { session_id: resume, cwd },
+            ConnectSpec::Resume {
+                session_id: resume,
+                cwd,
+            },
             suppress,
             false,
         );
@@ -1569,7 +1631,14 @@ impl Core {
     /// open) → `_goose/unstable/session/info` probe → the user's working dir.
     /// Never guess (CONTRACT §4 footgun note).
     fn resolve_cwd(&self, session_id: &str) -> String {
-        if let Some(cwd) = self.inner.state.lock().session_cwds.get(session_id).cloned() {
+        if let Some(cwd) = self
+            .inner
+            .state
+            .lock()
+            .session_cwds
+            .get(session_id)
+            .cloned()
+        {
             if !cwd.is_empty() {
                 return cwd;
             }
@@ -1608,96 +1677,98 @@ impl Core {
         prompt: Prompt,
         expect: Option<SendExpect>,
     ) -> Result<(), (Prompt, Option<SendExpect>)> {
-        let Some(conn) = self.inner.conn.lock().clone() else {
+        let Some(display) = self.active_session_id() else {
             return Err((prompt, expect));
         };
-        let Some(sid) = conn.active_session_id() else {
+        let Some(owner) = self.owner_for(&display) else {
             return Err((prompt, expect));
         };
+        if !owner.accepts_prompt() {
+            return Err((prompt, expect));
+        }
         if let Some(exp) = &expect {
-            if exp.session_id != sid {
-                // The UI is showing a different chat than the socket is bound
-                // to; reject instead of mis-routing (CONTRACT §3.1). The UI
-                // observes the mismatch through its getters.
-                //
-                // Neither id is printed: a session id is a bearer-like
-                // identifier, and a log is the wrong place for one even when
-                // the mismatch is the thing being diagnosed (the caller knows
-                // both ids — it passed one in).
+            if exp.session_id != display {
+                // The UI is showing a different chat than the one displayed;
+                // reject instead of mis-routing (CONTRACT §3.1). Neither id is
+                // printed: a session id is a bearer-like identifier.
                 eprintln!(
-                    "grouse-core: send_prompt rejected — UI expects a different session than the socket is bound to"
+                    "grouse-core: send_prompt rejected — UI expects a different session than the one displayed"
                 );
                 return Ok(());
             }
         }
-        self.spawn_prompt(conn, sid, prompt);
+        self.spawn_prompt(owner, display, prompt);
         Ok(())
+    }
+
+    /// Park a prompt until the displayed chat's owner can accept it.
+    fn queue_prompt(&self, prompt: Prompt, expect: Option<SendExpect>) {
+        let mut state = self.inner.state.lock();
+        let id = state.next_pending_id.to_string();
+        state.next_pending_id += 1;
+        let key = expect
+            .as_ref()
+            .map(|e| e.session_id.clone())
+            .or_else(|| self.active_session_id())
+            .unwrap_or_default();
+        state
+            .pending
+            .entry(key)
+            .or_default()
+            .push_back(PendingIntent::SendPrompt(prompt, expect, id));
     }
 
     fn try_set_config(&self, config_id: String, value: String) -> Result<(), (String, String)> {
-        let Some(conn) = self.inner.conn.lock().clone() else {
+        let Some(display) = self.active_session_id() else {
             return Err((config_id, value));
         };
-        let Some(sid) = conn.active_session_id() else {
+        let Some(owner) = self.owner_for(&display) else {
             return Err((config_id, value));
         };
-        self.spawn_set_config(conn, sid, config_id, value);
+        if !owner.accepts_prompt() {
+            return Err((config_id, value));
+        }
+        self.spawn_set_config(owner, display, config_id, value);
         Ok(())
     }
 
-    fn spawn_prompt(&self, conn: Arc<crate::spine::Conn>, session_id: String, prompt: Prompt) {
-        let params = prompt_params(&prompt, &session_id);
+    fn spawn_prompt(
+        &self,
+        owner: Arc<dyn crate::session::ChatEndpoint>,
+        session_id: String,
+        prompt: Prompt,
+    ) {
+        let params = crate::session::prompt_params(&prompt, &owner.wire_id(&session_id));
         let core = self.clone();
-        let store = self.inner.store.clone();
+        let store = self.store_for(&session_id);
+        let key = session_id.clone();
+        let summary_key = session_id.clone();
         // Local echo of the prompt. goose does NOT send a `user_message_chunk`
-        // for a prompt WE sent (verified against a live serve): the prompt next
-        // crosses the wire in a later `session/load` replay. Without this the
-        // core's transcript — and the cache it saves — holds no record of what
-        // was asked, so a reopen that trusts the cache shows the replies with the
-        // questions missing. Only pure text can be echoed: `Item` has no image
-        // field, so an attachment prompt stays the client's own local echo.
-        //
-        // The echo lands here, at the send, so exactly one row appears per prompt
-        // that reaches the wire. A prompt parked in a client's own queue (the wire
-        // was down) therefore shows up when it is finally sent, not when it was
-        // typed — the clients no longer echo it themselves, which is what keeps
-        // the two from doubling.
+        // for a prompt WE sent: the prompt next crosses the wire in a later
+        // `session/load` replay. The echo lands here, at the send, so exactly
+        // one row appears per prompt that reaches the wire; attachments stay
+        // the client's own local echo (`Item` has no image field).
         if let Some(text) = pure_text(&prompt) {
-            store.append_chunk("user", &text, None, false);
+            store.echo_prompt(&text);
         }
         // A new turn's runs are a fresh worklist for the summarizer.
-        conn.clear_turn_runs();
+        self.inner.state.lock().turn_runs.remove(&session_id);
         {
             let mut state = self.inner.state.lock();
             state.prompting = true;
-            // The turn's rows are not final until it ends: mark the store
+            // The turn's rows are not final until it ends: mark THIS session
             // incomplete so a save or reconnect in the meantime cannot treat it
-            // as a settled copy of the session.
-            state.store_incomplete = true;
+            // as a settled copy.
+            state.incomplete.insert(session_id.clone());
         }
+        let summary_owner = owner.clone();
         crate::roam::runtime().spawn(async move {
-            let result = conn.rpc_async("session/prompt", params).await;
-            match &result {
-                Ok(reply) => {
-                    let stop = reply
-                        .get("stopReason")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    store.run_ended(&stop);
-                }
-                Err(error) => {
-                    // No stable error event exists; surface the failure as the
-                    // turn's end so the queue flushes (the desktop wedges
-                    // here — this is deliberately more robust).
-                    eprintln!("grouse-core: session/prompt failed: {error}");
-                    store.run_ended("error");
-                }
-            }
-            // The turn is over: rewrite its tool runs' labels (issue #13). After
-            // the reply, on a hidden session, so it costs the user no latency.
-            core.spawn_run_summaries(conn.clone());
-            core.on_prompt_done(result.is_ok());
+            let result = owner.request("session/prompt", params).await;
+            core.on_turn_ended(&key, result);
+            // The turn is over: rewrite its tool runs' labels (issue #13),
+            // after the reply and on a hidden session on the SAME connection,
+            // so it costs the user no latency.
+            core.spawn_run_summaries(summary_owner, summary_key);
         });
     }
 
@@ -1705,16 +1776,26 @@ impl Core {
     /// ended. The provisional label (the run's own thinking, condensed by the
     /// store) stands wherever the model does not answer, so this is pure
     /// improvement — and it runs after the turn, so it never delays a reply.
-    fn spawn_run_summaries(&self, conn: Arc<crate::spine::Conn>) {
-        if !self.inner.state.lock().run_summaries {
-            conn.clear_turn_runs();
+    fn spawn_run_summaries(
+        &self,
+        owner: Arc<dyn crate::session::ChatEndpoint>,
+        key: String,
+    ) {
+        let (enabled, run_ids) = {
+            let mut state = self.inner.state.lock();
+            let ids = state.turn_runs.remove(&key).unwrap_or_default();
+            (state.run_summaries, ids)
+        };
+        if !enabled {
             return;
         }
-        let runs: Vec<(String, String, Vec<String>)> = conn
-            .take_turn_runs()
+        let store = self.store_for(&key);
+        let runs: Vec<(String, String, Vec<String>)> = run_ids
             .into_iter()
             .filter_map(|id| {
-                conn.store().run_framing(&id).map(|(thought, tools)| (id, thought, tools))
+                store
+                    .run_framing(&id)
+                    .map(|(thought, tools)| (id, thought, tools))
             })
             .collect();
         if runs.is_empty() {
@@ -1722,88 +1803,178 @@ impl Core {
         }
         let core = self.clone();
         crate::roam::runtime().spawn(async move {
-            core.rewrite_run_labels(conn, runs).await;
+            core.rewrite_run_labels(owner, key, runs).await;
         });
     }
 
+    /// One hidden session on the CHAT'S OWN connection (main or peer). Its
+    /// `session/update` chunks are intercepted centrally by `session::dispatch`
+    /// via the summarizer ids, so they never touch a client store.
     async fn rewrite_run_labels(
         &self,
-        conn: Arc<crate::spine::Conn>,
+        owner: Arc<dyn crate::session::ChatEndpoint>,
+        key: String,
         runs: Vec<(String, String, Vec<String>)>,
     ) {
-        let Some(session_id) = self.summarizer_session(&conn).await else {
-            return;
+        let slot = owner.label().unwrap_or_default();
+        let existing = self
+            .inner
+            .state
+            .lock()
+            .summarizer_sessions
+            .get(&slot)
+            .cloned();
+        let (hidden, wire) = if let Some(pair) = existing {
+            pair
+        } else {
+            let cwd = owner
+                .session_cwd(&key)
+                .filter(|cwd| !cwd.is_empty())
+                .unwrap_or_else(|| {
+                    if owner.label().is_none() {
+                        self.resolve_cwd(&key)
+                    } else {
+                        String::new()
+                    }
+                });
+            // `_meta.hidden` keeps it out of every session list.
+            let params = json!({
+                "cwd": cwd,
+                "mcpServers": [],
+                "_meta": { "hidden": true },
+            });
+            let Ok(reply) =
+                crate::session::request(owner.as_ref(), "session/new", params).await
+            else {
+                return;
+            };
+            let Some(wire) = reply
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                return;
+            };
+            let hidden = crate::session::display_id(owner.label().as_deref(), &wire);
+            self.inner
+                .state
+                .lock()
+                .summarizer_sessions
+                .insert(slot.clone(), (hidden.clone(), wire.clone()));
+            (hidden, wire)
         };
+        self.inner
+            .state
+            .lock()
+            .summarizer_ids
+            .insert(hidden.clone());
+
         let body = crate::summarize::prompt(
-            &runs.iter().map(|(_, t, tools)| (t.clone(), tools.clone())).collect::<Vec<_>>(),
+            &runs
+                .iter()
+                .map(|(_, t, tools)| (t.clone(), tools.clone()))
+                .collect::<Vec<_>>(),
         );
-        let params = prompt_params(
-            &Prompt { blocks: vec![PromptBlock::Text { text: body }] },
-            &session_id,
+        let params = crate::session::prompt_params(
+            &Prompt {
+                blocks: vec![PromptBlock::Text { text: body }],
+            },
+            &wire,
         );
-        let sent = conn.rpc_async("session/prompt", params).await.is_ok();
-        let text = conn.take_summary_reply();
+        let sent = crate::session::request(owner.as_ref(), "session/prompt", params)
+            .await
+            .is_ok();
+        let text = crate::session::DispatchHost::take_summarizer_reply(self, &hidden);
         // Empty the hidden session: its context must not grow turn on turn.
-        let _ = conn
-            .rpc_async(
-                "_goose/unstable/session/conversation/truncate",
-                json!({ "sessionId": session_id, "truncateFrom": 0 }),
-            )
-            .await;
-        if !sent {
+        let truncated = crate::session::request(
+            owner.as_ref(),
+            "_goose/unstable/session/conversation/truncate",
+            json!({ "sessionId": &wire, "truncateFrom": 0 }),
+        )
+        .await
+        .is_ok();
+        {
+            let mut state = self.inner.state.lock();
+            state.summarizer_ids.remove(&hidden);
+            if !sent || !truncated {
+                // The hidden session is unusable (the link replaced it, or its
+                // context could not be emptied): recreate it next turn.
+                state.summarizer_sessions.remove(&slot);
+                state.summarizer_replies.remove(&hidden);
+            }
+        }
+        if !sent || !truncated {
             return;
         }
+        let store = self.store_for(&key);
         for (n, label) in crate::summarize::parse_labels(&text) {
             if let Some((id, _, _)) = runs.get(n - 1) {
-                conn.store().set_run_summary(id, &label);
+                store.set_run_summary(id, &label);
             }
         }
     }
 
-    /// The hidden summarizer session, created on first use. `_meta.hidden` keeps
-    /// it out of `session/list` (goose's `hidden` session type is not listable),
-    /// so it can never show up as a chat in any client.
-    async fn summarizer_session(&self, conn: &Arc<crate::spine::Conn>) -> Option<String> {
-        if let Some(id) = conn.summarizer_session() {
-            return Some(id);
-        }
-        let params = json!({
-            "cwd": conn.cwd(),
-            "mcpServers": [],
-            "_meta": { "hidden": true },
-        });
-        let reply = conn.rpc_async("session/new", params).await.ok()?;
-        let id = reply.get("sessionId").and_then(Value::as_str)?.to_string();
-        conn.set_summarizer_session(id.clone());
-        Some(id)
-    }
-
-    fn spawn_set_config(&self, conn: Arc<crate::spine::Conn>, session_id: String, config_id: String, value: String) {
+    fn spawn_set_config(
+        &self,
+        owner: Arc<dyn crate::session::ChatEndpoint>,
+        session_id: String,
+        config_id: String,
+        value: String,
+    ) {
         let core = self.clone();
+        let key = session_id.clone();
         crate::roam::runtime().spawn(async move {
             let params = json!({
-                "sessionId": session_id,
+                "sessionId": owner.wire_id(&session_id),
                 "configId": config_id,
                 "value": value,
             });
-            if let Ok(reply) = conn.rpc_async("session/set_config_option", params).await {
-                let options = crate::spine::parse_config_options(&reply);
+            if let Ok(reply) =
+                crate::session::request(owner.as_ref(), "session/set_config_option", params).await
+            {
+                let options = crate::session::parse_config_options(&reply);
                 core.on_config_reply(options);
+                core.refresh_stamp(&key, false);
             }
         });
     }
 
-    /// A turn finished. `clean` is false when the prompt failed (including a
-    /// dropped wire): the store's tail is then partial, so it stays marked
-    /// incomplete — `save_cache` writes no freshness stamp and the next open
-    /// full-replays instead of trusting it.
-    fn on_prompt_done(&self, clean: bool) {
+    /// A turn finished on `key`'s connection. One path for every transport:
+    /// finalize the transcript, persist with the incomplete rule, re-baseline
+    /// the resync stamp, then drain the queue.
+    ///
+    /// `clean` is false when the prompt failed (including a dropped wire): the
+    /// store's tail is then partial, so the cache is written with an empty
+    /// stamp and the next open full-replays instead of trusting it.
+    fn on_turn_ended(&self, key: &str, result: Result<Value, crate::spine::AcpError>) {
+        let (stop, clean) = match &result {
+            Ok(reply) => (
+                reply
+                    .get("stopReason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                true,
+            ),
+            Err(error) => {
+                // No stable error event exists; surface the failure as the
+                // turn's end so the UI clears in-flight state and the queue
+                // drains (the desktop wedged here before).
+                eprintln!("grouse-core: session/prompt failed: {error}");
+                ("error".to_string(), false)
+            }
+        };
+        self.store_for(key).run_ended(&stop);
         {
             let mut state = self.inner.state.lock();
             state.prompting = false;
-            state.store_incomplete = !clean;
+            if clean {
+                state.incomplete.remove(key);
+            } else {
+                state.incomplete.insert(key.to_string());
+            }
         }
-        self.save_cache();
+        self.save_cache_for(key);
         // Re-baseline the resync stamp from the server after OUR OWN turn. The
         // server also emits a run-end `session_info_update`, and its debounced
         // probe otherwise sees a moved (updatedAt, messageCount) against the
@@ -1811,7 +1982,7 @@ impl Core {
         // a full-history reload of the turn we just streamed (painful on a
         // long chat). Recording the post-turn stamp here makes that probe a
         // no-op while a genuine remote change still differs and resyncs.
-        self.probe_stamp_and_save();
+        self.refresh_stamp(key, true);
         self.flush_pending();
     }
 
@@ -1827,22 +1998,34 @@ impl Core {
                 let sid = self.active_session_id().unwrap_or_default();
                 if let Some(q) = state.pending.get_mut("") {
                     if let Some(intent) = q.pop_front() {
-                        if q.is_empty() { state.pending.remove(""); }
+                        if q.is_empty() {
+                            state.pending.remove("");
+                        }
                         (String::new(), intent)
                     } else {
                         // No global pending, try current session
                         if let Some(q) = state.pending.get_mut(&sid) {
                             if let Some(intent) = q.pop_front() {
-                                if q.is_empty() { state.pending.remove(&sid); }
+                                if q.is_empty() {
+                                    state.pending.remove(&sid);
+                                }
                                 (sid.clone(), intent)
-                            } else { return; }
-                        } else { return; }
+                            } else {
+                                return;
+                            }
+                        } else {
+                            return;
+                        }
                     }
                 } else if let Some(q) = state.pending.get_mut(&sid) {
                     if let Some(intent) = q.pop_front() {
-                        if q.is_empty() { state.pending.remove(&sid); }
+                        if q.is_empty() {
+                            state.pending.remove(&sid);
+                        }
                         (sid.clone(), intent)
-                    } else { return; }
+                    } else {
+                        return;
+                    }
                 } else {
                     return;
                 }
@@ -1852,7 +2035,10 @@ impl Core {
                     match self.try_send_prompt(prompt, expect) {
                         Ok(()) => None,
                         Err((prompt, expect)) => {
-                            let k = expect.as_ref().map(|e| e.session_id.clone()).unwrap_or_default();
+                            let k = expect
+                                .as_ref()
+                                .map(|e| e.session_id.clone())
+                                .unwrap_or_default();
                             Some((k, PendingIntent::SendPrompt(prompt, expect, id)))
                         }
                     }
@@ -1860,12 +2046,20 @@ impl Core {
                 PendingIntent::SetConfig(config_id, value) => {
                     match self.try_set_config(config_id, value) {
                         Ok(()) => None,
-                        Err((config_id, value)) => Some((String::new(), PendingIntent::SetConfig(config_id, value))),
+                        Err((config_id, value)) => {
+                            Some((String::new(), PendingIntent::SetConfig(config_id, value)))
+                        }
                     }
                 }
             };
             if let Some((k, intent)) = requeue {
-                self.inner.state.lock().pending.entry(k).or_default().push_front(intent);
+                self.inner
+                    .state
+                    .lock()
+                    .pending
+                    .entry(k)
+                    .or_default()
+                    .push_front(intent);
                 return;
             }
         }
@@ -1879,34 +2073,35 @@ impl Core {
     /// painting instantly, but it must never compare equal to the server's
     /// `updatedAt` and suppress the replay that would complete it.
     fn save_cache(&self) {
-        let Some(session_id) = self.active_session_id() else { return };
-        // Only persist rows this session actually owns. A cold start paints the
-        // last chat's cache and THEN connects, and the connect creates a
-        // throwaway session before the real resume — without this the painted
-        // rows were filed under the throwaway's id, one junk cache file per
-        // launch, and opening that empty chat replayed another conversation
-        // into it.
-        if self.inner.state.lock().store_session_id.as_deref() != Some(session_id.as_str()) {
-            return;
+        if let Some(session_id) = self.active_session_id() {
+            self.save_cache_for(&session_id);
         }
-        let items = self.inner.store.rich_transcript();
+    }
+
+    /// Persist one session's store. The store is keyed by display id, so the
+    /// rows can never be filed under another chat.
+    fn save_cache_for(&self, session_id: &str) {
+        let items = self.store_for(session_id).rich_transcript();
         let (incomplete, updated_at) = {
             let state = self.inner.state.lock();
             (
-                state.store_incomplete,
+                state.incomplete.contains(session_id),
                 state
                     .session_updated_at
-                    .get(&session_id)
+                    .get(session_id)
                     .cloned()
                     .unwrap_or_default(),
             )
         };
         let stamp = if incomplete { "" } else { &updated_at };
-        self.inner.cache.save_transcript(&session_id, &items, stamp);
+        self.inner.cache.save_transcript(session_id, &items, stamp);
     }
 
     fn on_sessions_reply(&self, reply: Value) {
-        let (sessions, cwds, updated) = crate::spine::parse_sessions(&reply);
+        let (mut sessions, cwds, updated) = crate::spine::parse_sessions(&reply);
+        for session in &mut sessions {
+            session.has_new = self.inner.hub.has_new(&session.id);
+        }
         {
             let mut state = self.inner.state.lock();
             state.sessions = sessions.clone();
@@ -1919,8 +2114,7 @@ impl Core {
         }
         // The drawer's names + cwds persist so a cold start renders them
         // before the first session/list round trip.
-        let cwds_map: std::collections::BTreeMap<String, String> =
-            cwds.iter().cloned().collect();
+        let cwds_map: std::collections::BTreeMap<String, String> = cwds.iter().cloned().collect();
         self.inner.cache.save_directory(&sessions, &cwds_map);
         self.inner.listener.on_sessions(sessions);
     }
@@ -1959,14 +2153,6 @@ impl Core {
         self.inner.listener.on_config(snapshot);
     }
 
-    fn on_active_run(&self, session_id: String, run_id: String) {
-        self.inner.listener.on_active_run(session_id, run_id);
-    }
-
-    fn on_commands(&self, commands: Vec<String>) {
-        self.inner.listener.on_commands(commands);
-    }
-
     /// An open/resume failed; nothing was substituted (see the listener's
     /// `on_session_open_failed`).
     pub fn on_session_open_failed(&self, session_id: String, message: String) {
@@ -1976,7 +2162,10 @@ impl Core {
     }
 
     fn mutate_session(&self, method: &str, params: Value) {
-        let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        let session_id = params
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         // Route session-bound mutations to the owning roam peer
         // (`roam:<label>:<id>` sessions live on the peer's connection, not the
         // main one). Before this, roam mutations went to the main connection,
@@ -1984,7 +2173,9 @@ impl Core {
         // change reverted on the next session/list (the app only showed it
         // optimistically).
         if session_id.starts_with("roam:") {
-            let Some(peer) = self.peer_for_session(session_id) else { return };
+            let Some(peer) = self.peer_for_session(session_id) else {
+                return;
+            };
             let method = method.to_string();
             crate::roam::runtime().spawn_blocking(move || {
                 if peer.rpc(&method, params).is_ok() {
@@ -1995,7 +2186,9 @@ impl Core {
             });
             return;
         }
-        let Some(conn) = self.inner.conn.lock().clone() else { return };
+        let Some(conn) = self.inner.conn.lock().clone() else {
+            return;
+        };
         let core = self.clone();
         let method = method.to_string();
         crate::roam::runtime().spawn(async move {
@@ -2005,6 +2198,21 @@ impl Core {
                 core.list_sessions();
             }
         });
+    }
+
+    /// The connection that owns a display session id: a peer for a
+    /// `roam:<label>:<id>` id, the main wire otherwise.
+    fn owner_for(&self, display: &str) -> Option<Arc<dyn crate::session::ChatEndpoint>> {
+        if display.starts_with(crate::session::ROAM_PREFIX) {
+            return self
+                .peer_for_session(display)
+                .map(|peer| peer as Arc<dyn crate::session::ChatEndpoint>);
+        }
+        self.inner
+            .conn
+            .lock()
+            .clone()
+            .map(|conn| conn as Arc<dyn crate::session::ChatEndpoint>)
     }
 
     /// Resolve the roam peer owning a `roam:<label>:<id>` session, if any.
@@ -2028,7 +2236,9 @@ impl Core {
         {
             let mut state = self.inner.state.lock();
             if !updated_at.is_empty() {
-                state.session_updated_at.insert(session_id.clone(), updated_at.clone());
+                state
+                    .session_updated_at
+                    .insert(session_id.clone(), updated_at.clone());
             }
         }
         self.inner
@@ -2075,29 +2285,29 @@ impl Core {
     }
 
     fn probe_and_maybe_resync(&self, session_id: String) {
-        let Some(conn) = self.inner.conn.lock().clone() else { return };
+        let Some(owner) = self.owner_for(&session_id) else {
+            return;
+        };
+        let params = json!({ "sessionId": owner.wire_id(&session_id) });
         let core = self.clone();
         crate::roam::runtime().spawn(async move {
-            let probe = conn
-                .rpc_async(
-                    "_goose/unstable/session/info",
-                    json!({ "sessionId": session_id }),
-                )
-                .await
-                .ok()
-                .and_then(|reply| reply.get("session").cloned())
-                .map(|session| {
-                    let updated_at = session
-                        .get("updatedAt")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    let message_count = session
-                        .pointer("/_meta/messageCount")
-                        .and_then(Value::as_i64)
-                        .unwrap_or(-1);
-                    (updated_at, message_count)
-                });
+            let probe =
+                crate::session::request(owner.as_ref(), "_goose/unstable/session/info", params)
+                    .await
+                    .ok()
+                    .and_then(|reply| reply.get("session").cloned())
+                    .map(|session| {
+                        let updated_at = session
+                            .get("updatedAt")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let message_count = session
+                            .pointer("/_meta/messageCount")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(-1);
+                        (updated_at, message_count)
+                    });
             core.on_session_probe(session_id, probe);
         });
     }
@@ -2145,35 +2355,42 @@ impl Core {
     /// In-place replay: same state prep as open_session's stale path, minus
     /// the reconnect — the wire is already live (desktop resyncCurrentSession).
     fn resync_current_session(&self, session_id: &str) {
-        let Some(conn) = self.inner.conn.lock().clone() else { return };
-        let cwd = self.resolve_cwd(session_id);
-        self.inner.store.clear();
+        let Some(owner) = self.owner_for(session_id) else {
+            return;
+        };
+        let cwd = owner
+            .session_cwd(session_id)
+            .unwrap_or_else(|| self.resolve_cwd(session_id));
+        let key = session_id.to_string();
+        self.store_for(session_id).clear();
         // This is a FULL rebuild: the store was just cleared, so the replay must
         // be APPLIED. A previous live load can leave `suppress_replay` armed
         // (open a fresh cache → suppress), and without this reset the resync's
         // rows would be dropped and the transcript left empty/partial.
-        conn.set_suppress_replay(false);
-        conn.set_merge_replay(false);
-        conn.set_replaying(true);
+        owner.reset_replay_gates();
+        self.inner
+            .state
+            .lock()
+            .replaying
+            .insert(session_id.to_string());
         self.emit_status(ConnectionStatus::Syncing);
         let core = self.clone();
-        let session_id = session_id.to_string();
         crate::roam::runtime().spawn(async move {
-            let params = json!({
-                "sessionId": session_id,
-                "cwd": cwd,
-                "mcpServers": [],
-            });
-            match conn.rpc_async("session/load", params).await {
+            let params = crate::session::session_load_params(&owner.wire_id(&key), &cwd, None);
+            match crate::session::request(owner.as_ref(), "session/load", params).await {
                 Ok(reply) => {
-                    conn.set_replaying(false);
-                    let options = crate::spine::parse_config_options(&reply);
+                    core.inner.state.lock().replaying.remove(&key);
+                    let options = crate::session::parse_config_options(&reply);
                     core.on_config_reply(options);
                     core.emit_status(ConnectionStatus::Ready);
-                    core.list_sessions();
+                    if let Some(peer) = core.peer_for_session(&key) {
+                        peer.relist();
+                    } else {
+                        core.list_sessions();
+                    }
                 }
                 Err(error) => {
-                    conn.set_replaying(false);
+                    core.inner.state.lock().replaying.remove(&key);
                     core.emit_status(ConnectionStatus::Error {
                         message: format!("resync failed: {error}"),
                     });
@@ -2189,26 +2406,9 @@ impl Core {
         Arc::new(move |status| core.on_conn_status(status))
     }
 
-    fn touched_hook(&self) -> Arc<dyn Fn(String, String, String) + Send + Sync> {
-        let core = self.clone();
-        Arc::new(move |session_id, title, updated_at| {
-            core.on_session_touched(session_id, title, updated_at)
-        })
-    }
-
     fn config_hook(&self) -> Arc<dyn Fn(Vec<ConfigOption>) + Send + Sync> {
         let core = self.clone();
         Arc::new(move |options| core.on_config_reply(options))
-    }
-
-    fn active_run_hook(&self) -> Arc<dyn Fn(String, String) + Send + Sync> {
-        let core = self.clone();
-        Arc::new(move |session_id, run_id| core.on_active_run(session_id, run_id))
-    }
-
-    fn commands_hook(&self) -> Arc<dyn Fn(Vec<String>) + Send + Sync> {
-        let core = self.clone();
-        Arc::new(move |commands| core.on_commands(commands))
     }
 
     fn open_failed_hook(&self) -> Arc<dyn Fn(String, String) + Send + Sync> {
@@ -2298,33 +2498,131 @@ fn pure_text(prompt: &Prompt) -> Option<String> {
         }
     }
     let text = text.trim();
-    if text.is_empty() { None } else { Some(text.to_string()) }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
 }
 
-/// Turn `Prompt` content blocks into the ACP `session/prompt` params
-/// (desktop sendPrompt: text/image/resource shapes pass through verbatim).
-fn prompt_params(prompt: &Prompt, session_id: &str) -> Value {
-    let blocks = prompt
-        .blocks
-        .iter()
-        .map(|block| match block {
-            PromptBlock::Text { text } => json!({ "type": "text", "text": text }),
-            PromptBlock::Image { mime_type, data } => {
-                json!({ "type": "image", "mimeType": mime_type, "data": data })
+/// The core is the dispatch host for the main connection: display ids are the
+/// wire ids, and the hub's display gate decides what paints.
+impl crate::session::DispatchHost for Core {
+    fn display_id(&self, wire: &str) -> String {
+        crate::session::display_id(None, wire)
+    }
+    fn store(&self, key: &str) -> Arc<TranscriptStore> {
+        self.inner.hub.store(key)
+    }
+    fn touched(&self, key: String, title: String, updated_at: String) {
+        self.on_session_touched(key, title, updated_at);
+    }
+    fn active_run(&self, key: String, run_id: String) {
+        if run_id.is_empty() {
+            if self.inner.state.lock().active_runs.remove(&key).is_some() {
+                self.inner.listener.on_active_run(key, String::new());
             }
-            PromptBlock::Resource { uri, mime_type, text, blob } => {
-                let mut resource = json!({ "uri": uri, "mimeType": mime_type });
-                if let Some(text) = text {
-                    resource["text"] = Value::String(text.clone());
-                }
-                if let Some(blob) = blob {
-                    resource["blob"] = Value::String(blob.clone());
-                }
-                json!({ "type": "resource", "resource": resource })
-            }
-        })
-        .collect::<Vec<_>>();
-    json!({ "sessionId": session_id, "prompt": blocks })
+        } else {
+            self.inner
+                .state
+                .lock()
+                .active_runs
+                .insert(key.clone(), run_id.clone());
+            self.inner.listener.on_active_run(key, run_id);
+        }
+    }
+    fn config(&self, key: &str, options: Vec<ConfigOption>) {
+        if self.inner.hub.is_displayed(key) {
+            self.on_config_reply(options);
+        }
+    }
+    fn usage(&self, key: &str, used: i64, size: i64, cost: f64, currency: String) {
+        if self.inner.hub.is_displayed(key) {
+            self.inner.listener.on_usage(used, size, cost, currency);
+        }
+    }
+    fn commands(&self, _key: &str, names: Vec<String>) {
+        // Slash commands are a connection-level capability, not chat content:
+        // forward them even while a transient session is binding (the old
+        // spine behavior).
+        self.inner.listener.on_commands(names);
+    }
+    fn permission(&self, key: &str, request: PermissionRequest) {
+        if self.inner.hub.is_displayed(key) {
+            self.inner.listener.on_permission_request(request);
+        }
+    }
+    fn begin_replay(&self, key: &str) {
+        self.inner.state.lock().replaying.insert(key.to_string());
+    }
+    fn end_replay(&self, key: &str) {
+        self.inner.state.lock().replaying.remove(key);
+    }
+    fn replaying(&self, key: &str) -> bool {
+        self.inner.state.lock().replaying.contains(key)
+    }
+    fn accepts_chat(&self, _key: &str) -> bool {
+        !self
+            .inner
+            .conn
+            .lock()
+            .as_ref()
+            .map(|conn| conn.suppresses_replay())
+            .unwrap_or(false)
+    }
+    fn background(&self, key: &str) {
+        self.inner.hub.mark_new(key);
+    }
+    fn endpoint_ready(&self, _label: Option<&str>) {
+        self.flush_pending();
+    }
+    fn cache_session(&self, key: &str) {
+        self.save_cache_for(key);
+    }
+    fn session_stamp(&self, key: &str, updated_at: &str) {
+        if !updated_at.is_empty() {
+            self.inner
+                .state
+                .lock()
+                .session_updated_at
+                .insert(key.to_string(), updated_at.to_string());
+        }
+    }
+    fn tool_run(&self, key: &str, run_id: &str) {
+        let mut state = self.inner.state.lock();
+        let runs = state.turn_runs.entry(key.to_string()).or_default();
+        if !runs.iter().any(|id| id == run_id) {
+            runs.push(run_id.to_string());
+        }
+    }
+    fn stamp_probe(&self, key: &str, persist: bool) {
+        self.refresh_stamp(key, persist);
+    }
+    fn is_summarizer(&self, key: &str) -> bool {
+        self.inner.state.lock().summarizer_ids.contains(key)
+    }
+    fn summarizer_chunk(&self, key: &str, text: &str) -> bool {
+        let mut state = self.inner.state.lock();
+        if !state.summarizer_ids.contains(key) {
+            return false;
+        }
+        state
+            .summarizer_replies
+            .entry(key.to_string())
+            .or_default()
+            .push_str(text);
+        true
+    }
+    fn take_summarizer_reply(&self, key: &str) -> String {
+        // Keep the id registered until the truncate reply: late updates from
+        // that session must not create a store.
+        self.inner
+            .state
+            .lock()
+            .summarizer_replies
+            .remove(key)
+            .unwrap_or_default()
+    }
 }
 
 /// The cache + identity directory (CONTRACT §7.4 says the UI supplies a
@@ -2337,267 +2635,4 @@ fn default_cache_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(|home| PathBuf::from(home).join(".local/share/grouse"))
         .unwrap_or_else(|| PathBuf::from(".").join("grouse-cache"))
-}
-
-/// Adapts the store's `Box<dyn CoreListener>` seam to the shared listener
-/// `Arc` the core keeps (the store emits `on_stream`/`on_transcript` through
-/// it). The store speaks for the MAIN connection's session, and the app
-/// paints every transcript/stream event into its single on-screen transcript
-/// — so while a roam peer owns the display (`active_peer` is Some), the
-/// main connection's CHAT PAINTING must not emit, or a reply streaming in a
-/// backgrounded Main chat would render inside the peer's window. This mirrors
-/// the peer's own `is_active` gate at its seam (CONTRACT §6): the peer already
-/// suppresses backgrounded emissions, and the main side not doing the same was
-/// the asymmetry behind the "wrong conversation streams in" report.
-///
-/// Turn CONTROL is not painting: `RunEnded` always passes, so a backgrounded
-/// turn still drains its own per-chat queue wherever the user is looking (the
-/// same reasoning roam.rs applies at its run-end emit — gating that stranded
-/// a queue with busy=true). Directory/config/permission/status events are not
-/// session-painting either and pass through.
-struct CoreListenerForwarder {
-    inner: Arc<dyn CoreListener>,
-    active_peer: Arc<RwLock<Option<String>>>,
-}
-
-impl CoreListenerForwarder {
-    /// Is the MAIN connection's session what the UI is showing?
-    fn main_displayed(&self) -> bool {
-        self.active_peer.read().is_none()
-    }
-}
-
-impl CoreListener for CoreListenerForwarder {
-    fn on_status(&self, status: ConnectionStatus) {
-        self.inner.on_status(status);
-    }
-    fn on_sessions(&self, sessions: Vec<SessionSummary>) {
-        self.inner.on_sessions(sessions);
-    }
-    fn on_item(&self, op: TranscriptOp) {
-        if self.main_displayed() {
-            self.inner.on_item(op);
-        }
-    }
-    fn on_usage(&self, used: i64, size: i64, cost: f64, currency: String) {
-        if self.main_displayed() {
-            self.inner.on_usage(used, size, cost, currency);
-        }
-    }
-    fn on_run_ended(&self, stop_reason: String) {
-        // Turn CONTROL is not painting: always passes, so a backgrounded turn
-        // still drains its own per-chat queue wherever the user is looking.
-        self.inner.on_run_ended(stop_reason);
-    }
-    fn on_speak(&self, text: String) {
-        // Speech is painting: a backgrounded Main chat must not narrate into
-        // the window showing a roam peer.
-        if self.main_displayed() {
-            self.inner.on_speak(text);
-        }
-    }
-    fn on_config(&self, options: Vec<ConfigOption>) {
-        self.inner.on_config(options);
-    }
-    fn on_permission_request(&self, request: PermissionRequest) {
-        self.inner.on_permission_request(request);
-    }
-    fn on_session_touched(&self, session_id: String, title: String, updated_at: String) {
-        self.inner.on_session_touched(session_id, title, updated_at);
-    }
-    fn on_projects(&self, projects: Vec<ProjectSummary>) {
-        self.inner.on_projects(projects);
-    }
-    fn on_roam_peer_status(&self, label: String, status: String) {
-        self.inner.on_roam_peer_status(label, status);
-    }
-    fn on_roam_sessions(&self, label: String, sessions: Vec<SessionSummary>) {
-        self.inner.on_roam_sessions(label, sessions);
-    }
-    fn on_peer_new_session(&self, label: String, session_id: String) {
-        self.inner.on_peer_new_session(label, session_id);
-    }
-    fn on_active_run(&self, session_id: String, run_id: String) {
-        self.inner.on_active_run(session_id, run_id);
-    }
-    fn on_commands(&self, commands: Vec<String>) {
-        self.inner.on_commands(commands);
-    }
-    fn on_session_open_failed(&self, session_id: String, message: String) {
-        // Turn CONTROL, not painting (like `on_run_ended`): this answers an
-        // intent the client issued. A backgrounded Main chat whose open failed
-        // while a roam peer owns the screen must still hear about it, or the
-        // spinner for that tap never resolves.
-        self.inner.on_session_open_failed(session_id, message);
-    }
-}
-
-#[cfg(test)]
-mod forwarder_tests {
-    use super::*;
-    use std::sync::Mutex;
-
-    /// Records the painting channels (the gate's subject); the other
-    /// CoreListener methods are irrelevant to forwarding and stub out empty.
-    struct Recorder {
-        items: Mutex<usize>,
-        usages: Mutex<usize>,
-        run_ended: Mutex<usize>,
-    }
-    impl Recorder {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                items: Mutex::new(0),
-                usages: Mutex::new(0),
-                run_ended: Mutex::new(0),
-            })
-        }
-    }
-    impl CoreListener for Recorder {
-        fn on_status(&self, _: ConnectionStatus) {}
-        fn on_sessions(&self, _: Vec<SessionSummary>) {}
-        fn on_item(&self, _: TranscriptOp) {
-            *self.items.lock().unwrap() += 1;
-        }
-        fn on_usage(&self, _: i64, _: i64, _: f64, _: String) {
-            *self.usages.lock().unwrap() += 1;
-        }
-        fn on_run_ended(&self, _: String) {
-            *self.run_ended.lock().unwrap() += 1;
-        }
-        fn on_speak(&self, _: String) {}
-        fn on_config(&self, _: Vec<ConfigOption>) {}
-        fn on_permission_request(&self, _: PermissionRequest) {}
-        fn on_session_touched(&self, _: String, _: String, _: String) {}
-        fn on_projects(&self, _: Vec<ProjectSummary>) {}
-        fn on_roam_peer_status(&self, _: String, _: String) {}
-        fn on_roam_sessions(&self, _: String, _: Vec<SessionSummary>) {}
-        fn on_peer_new_session(&self, _: String, _: String) {}
-        fn on_active_run(&self, _: String, _: String) {}
-        fn on_commands(&self, _: Vec<String>) {}
-        fn on_session_open_failed(&self, _: String, _: String) {}
-    }
-
-    fn fwd(active: Arc<RwLock<Option<String>>>) -> (CoreListenerForwarder, Arc<Recorder>) {
-        let rec = Recorder::new();
-        (
-            CoreListenerForwarder { inner: rec.clone(), active_peer: active },
-            rec,
-        )
-    }
-
-    #[test]
-    fn painting_flows_when_main_owns_the_display() {
-        let active = Arc::new(RwLock::new(None));
-        let (f, rec) = fwd(active);
-        f.on_item(TranscriptOp::Reset { session_id: "s".into() });
-        f.on_usage(1, 2, 0.0, "x".into());
-        f.on_run_ended("end_turn".into());
-        assert_eq!(*rec.items.lock().unwrap(), 1);
-        assert_eq!(*rec.usages.lock().unwrap(), 1);
-        assert_eq!(*rec.run_ended.lock().unwrap(), 1);
-    }
-
-    #[test]
-    fn painting_suppressed_while_a_peer_owns_the_display() {
-        // The reported bug: a backgrounded Main chat's reply streamed into the
-        // roam window. With a peer displayed, item + usage painting must not
-        // reach the (single, on-screen) transcript.
-        let active = Arc::new(RwLock::new(Some("laptop".to_string())));
-        let (f, rec) = fwd(active);
-        f.on_item(TranscriptOp::Reset { session_id: "s".into() });
-        f.on_usage(1, 2, 0.0, "x".into());
-        assert_eq!(*rec.items.lock().unwrap(), 0, "no painting while a peer owns the screen");
-        assert_eq!(*rec.usages.lock().unwrap(), 0);
-        // Turn CONTROL still passes (below).
-    }
-
-    #[test]
-    fn run_ended_always_flows_so_a_background_turn_drains_its_queue() {
-        // Turn CONTROL is not painting: a Main turn ending while a peer is shown
-        // must still emit run-ended, or its per-chat queue strands with busy=true.
-        let active = Arc::new(RwLock::new(Some("laptop".to_string())));
-        let (f, rec) = fwd(active);
-        f.on_run_ended("end_turn".into());
-        assert_eq!(*rec.run_ended.lock().unwrap(), 1);
-    }
-
-    /// The freshness/merge decision: an incomplete store must never be trusted
-    /// as a replay-suppressing or merge base, and a forced refresh ignores even a
-    /// fresh cache. This is the fix for a mid-stream drop persisting a truncated
-    /// cache that then looked fresh forever (the "different wrong version on
-    /// every reopen" bug).
-    #[test]
-    fn cache_plan_never_trusts_an_incomplete_store() {
-        use crate::cache::CacheStore;
-        use crate::{Item, ItemKind};
-
-        let dir = std::env::temp_dir().join(format!("grouse-plan-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let cache = CacheStore::new(dir.clone());
-        let items = vec![Item {
-            id: "m1".into(),
-            kind: ItemKind::Agent,
-            text: "hi".into(),
-            detail: String::new(),
-            output: String::new(),
-            status: String::new(),
-            app_key: String::new(),
-            calls: Vec::new(),
-            thought: String::new(),
-            summary: String::new(),
-        }];
-
-        let core = Core::new(
-            Box::new(Recorder {
-                items: Mutex::new(0),
-                usages: Mutex::new(0),
-                run_ended: Mutex::new(0),
-            }),
-            dir.to_string_lossy().to_string(),
-        );
-
-        // Settled + stamp matches the server: suppress (the fast path).
-        cache.save_transcript("s", &items, "T1");
-        {
-            let mut st = core.inner.state.lock();
-            st.session_updated_at.insert("s".into(), "T1".into());
-            st.store_incomplete = false;
-        }
-        let p = core.plan_cache_paint("s", false);
-        assert!(p.suppress, "a settled, matching cache suppresses its replay");
-        assert!(!p.merge);
-
-        // Settled but stale: a bounded tail-merge is allowed.
-        core.inner
-            .state
-            .lock()
-            .session_updated_at
-            .insert("s".into(), "T2".into());
-        let p = core.plan_cache_paint("s", false);
-        assert!(!p.suppress);
-        assert!(p.merge, "a settled-but-stale cache may tail-merge");
-
-        // A turn is in flight: never merge — take the full replay.
-        core.inner.state.lock().store_incomplete = true;
-        let p = core.plan_cache_paint("s", false);
-        assert!(!p.suppress && !p.merge, "an incomplete store must full-replay");
-
-        // Forced refresh ignores even a fresh cache.
-        {
-            let mut st = core.inner.state.lock();
-            st.store_incomplete = false;
-            st.session_updated_at.insert("s".into(), "T1".into());
-        }
-        let p = core.plan_cache_paint("s", true);
-        assert!(!p.suppress && !p.merge, "a forced refresh never trusts the cache");
-
-        // A cache saved from an incomplete store carries no stamp → unsettled.
-        cache.save_transcript("s", &items, "");
-        let p = core.plan_cache_paint("s", false);
-        assert!(!p.suppress && !p.merge, "an unstamped cache is not a merge base");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

@@ -37,9 +37,11 @@ UI (native)                    core (Rust, tokio)
   in-intent network RPCs on the calling thread. This covers `connect` (blocks,
   bounded, until ready) and the roam peer / `grouse-unstable` shim
   request/reply calls (cwd resolution, `session_info`/probe, `export`,
-  tools/extension/config lists). These are bounded by
-  `RoamPeer::RPC_TIMEOUT` (30s) so a hung remote goose never pins the caller
-  forever (S-RC-6); outcomes still also arrive as events where applicable.
+  tools/extension/config lists). These are bounded by the shared control-call
+  timeout (`session::rpc_timeout`, 30s per non-prompt method) so a hung remote
+  goose never pins the caller forever (S-RC-6); outcomes still also arrive as
+  events where applicable. `session/prompt` is the exception with no timeout:
+  its reply IS the turn's end.
 - **Events** arrive as typed methods on `CoreListener` (one per event family).
 - **Getters** return immutable snapshots (`Record`s). They are cheap; the core
   is authoritative, the UI mirrors what events tell it and may re-read a
@@ -83,9 +85,9 @@ defaulting to real verification; roam byte stream). The UI supplies only
 | `disconnect()` | — | explicit close, no reconnect |
 | `new_session(recipe_id: Option<String>, project_id: Option<String>)` | — | `session/new` with `_meta.client` + cwd; `recipeId`/`projectId` when given. `projectId` is persisted by stock goose at creation, so a project chat needs no post-creation `session/project/update` |
 | `open_session(session_id: String)` | — | `session/load` with the real cwd (core resolves it); a settled, matching cache paints authoritatively and suppresses the replay, a settled-but-stale one merges a bounded tail, an incomplete one full-replays |
-| `refresh_session(session_id: String, mode: RefreshMode)` | — | `RefreshMode::Quick` lets freshness decide (a settled, current cache suppresses the replay; a settled-but-stale one merges a bounded tail; an incomplete store still replays in full); `RefreshMode::Full` forces the full `session/load` replay regardless. Either way the replay is ingested silently and ends in one windowed paint (grouse#18) |
+| `refresh_session(session_id: String, mode: RefreshMode)` | — | routes by id: a `roam:<label>:<raw>` id reloads on its peer (`RoamPeer::open_session_with`, `force` honoured), anything else on the main wire. `RefreshMode::Quick` lets freshness decide (a settled, current cache suppresses the replay; a settled-but-stale one merges a bounded tail; an incomplete store still replays in full); `RefreshMode::Full` forces the full `session/load` replay regardless. Either way the replay is ingested silently and ends in one windowed paint (grouse#18) |
 | `list_sessions()` | — | refreshes `session/list` |
-| `send_prompt(prompt: Prompt, expect: Option<SendExpect>)` | — | text/image/resource blocks |
+| `send_prompt(prompt: Prompt, expect: Option<SendExpect>)` | — | text/image/resource blocks; ONE path for both transports. Resolves the owner of the DISPLAYED id (`Core::owner_for`: a `roam:` id → its peer, otherwise the main wire), queues per session when there is no owner / the owner is not ready / a turn is running, echoes the prompt once (`TranscriptStore::echo_prompt`), and finalizes in `Core::on_turn_ended` (run end, cache save with the incomplete-stamp rule, stamp re-baseline, queue flush) |
 | `cancel()` | — | `session/cancel` (notification) |
 | `set_config_option(config_id: String, value: String)` | — | provider/model/mode/thinking_effort |
 | `rename_session(session_id, title)` / `archive_session` / `unarchive_session` / `delete_session` | — | re-list after |
@@ -131,12 +133,13 @@ pub trait CoreListener {
 **A failed open never substitutes a session** (grouse#19). `open_session`/
 `refresh_session` either load the requested session or report
 `on_session_open_failed`; they never leave a different (fresh, empty) session
-bound in its place, and a failed load leaves the connection with **no** session
-bound (`active_session_id()` → `None`, the chat-event gate names nothing). The
-store keeps whatever the client's cache painted for the requested session — it
-stays provisional, so it can never suppress the replay of a later successful
-load — and `save_cache` is inert while the store's session and the bound session
-disagree, so a rejected open cannot re-stamp a cache it never confirmed.
+bound in its place, and a failed load leaves its owner with **no** session
+bound (`active_session_id()` → `None`; the displayed key in `SessionHub` is
+still the requested chat, so its painted rows stay on screen). The store keeps
+whatever the client's cache painted for the requested session — it stays
+provisional, so it can never suppress the replay of a later successful load —
+and no turn can end for a session nothing is bound to, so `save_cache_for`
+cannot re-stamp a cache the open never confirmed.
 
 **An open/reload paints ONCE, at the end** (grouse#18). While a `session/load`
 replay is in flight the store ingests every row silently; on completion the client
@@ -276,13 +279,19 @@ Rules:
   the call that follows it (`replay_thought`), so a run's `summary`/`thought`
   rebuild identically from a replay — the label is derived from the replayed rows,
   never persisted against a `tool_call_id`.
-- **Roam peers** hold a rich item store of their own (`PeerStore`): live text,
-  tool calls (kind and payload preserved), and staging/cache are all items, so
-  a peer chart/app survives promotion and restart, and `rich_transcript()` /
-  `window()` / `load_older` work for a peer exactly as for the main connection
-  (the peer owns its own window; `Core::load_older` routes to it). Its mutations
-  still emit the legacy `on_transcript` alongside `on_item` until that channel is
-  deleted.
+- **There is one store per session, not one per transport.** `SessionHub` owns
+  exactly one `TranscriptStore` per display session id — the main connection's
+  sessions and every roam peer's alike. A `SessionGate` per store forwards
+  `on_item` / `on_usage` / `on_speak` only while that key is the displayed one,
+  and always forwards turn control (`on_run_ended`, `on_session_open_failed`,
+  touched/status events). A background session therefore keeps accumulating (and
+  is cached) without painting, and its content sets the drawer's green dot
+  (`SessionHub::mark_new` → `on_session_touched`). A peer session (`roam:<label>:<raw>`)
+  gets the same rich items, the same window and the same `load_older` —
+  `Core::load_older` walks the displayed store, whichever transport produced it.
+  The transport differs only in dial/framing, reconnect budget, browse-mode
+  session list and id namespace (`session::display_id` / `ChatEndpoint::wire_id`);
+  routing and painting are the core's, keyed by display id.
 
 ---
 
@@ -308,15 +317,29 @@ Rules:
   never pays for one. This is what turns a silently reaped NAT/proxy path into
   a visible reconnect instead of a hung socket; UIs must not add their own
   ping/idle probes.
-- Remote-change resync: `session_info_update` debounced → probe → in-place
-  `session/load` replay, re-probed a few times at 8s for a still-streaming turn.
-  This replaces BOTH the desktop's `sessionTouched` resync and Android's
-  `turnResyncTick` — one implementation, no drift.
+- One session pipeline for every transport (`core/grouse-core/src/session.rs`):
+  the same ACP parameter builders, wire→item translators, `PaintPlan` cache
+  policy, `SessionHub` store/display gate, and `session/update` `dispatch`.
+  `spine::Conn` (WebSocket) and `roam::RoamPeer` (iroh) own only transport
+  concerns — dial/framing, reconnect budget, browse-mode session list, and id
+  namespace — and both implement `ChatEndpoint`, the single transmit surface.
+  A protocol change lands in `session.rs` once, never once per transport.
+- One prompt path: `send_prompt` resolves the owner of the displayed id, queues
+  per session when the owner is not ready or a turn is running, echoes the
+  prompt once, and `on_turn_ended` finalizes (run end, cache save, stamp
+  re-baseline, queue flush).
+- Remote-change resync: `session_info_update` debounced → probe on the session's
+  owner → in-place `session/load` replay, re-probed a few times at 8s for a
+  still-streaming turn. Runs for peer sessions too. This replaces BOTH the
+  desktop's `sessionTouched` resync and Android's `turnResyncTick` — one
+  implementation, no drift.
 - Transcript accumulation: chunks append into a bubble keyed by (role,
   `message_id`); live shell output appends, the completion update replaces;
   replay chunks are gated by message id. Caches (per-session transcript + tool
-  catalog) are the core's, keyed by session id, with the freshness check
-  (`updatedAt == cachedUpdatedAt`).
+  catalog) are the core's, keyed by display id, with the freshness check
+  (`updatedAt == cachedUpdatedAt`); a peer session's cache key is
+  `roam:<label>:<raw>`, and `Core::save_cache_for` writes an empty stamp for an
+  incomplete store on every transport.
 
 ---
 
@@ -421,13 +444,31 @@ are client-local events, not push kinds.
 ## 6. Roam (parallel peers)
 
 The core owns the peer registry (the desktop's `m_roamPeers`). Peers are
-parallel connections in browse mode; chat routes to whichever session was last
-opened. A peer's connection is supervised: an unexpected drop re-dials with the
-core's backoff curve and resumes the session that was open (a peer that was
-never live gives up after the main connection's 6-try budget; one that dropped
-after reaching ready retries far longer — see `RoamPeer::RECONNECT_MAX`).
-Intents (`open_session`, `new_session`) also queue during the reconnect window
-the same way they queue on the main connection. Surfaced as:
+parallel connections in browse mode. A peer's connection is supervised: an
+unexpected drop re-dials with the core's backoff curve and resumes the session
+that was open (a peer that was never live gives up after the main connection's
+6-try budget; one that dropped after reaching ready retries far longer — see
+`RoamPeer::RECONNECT_MAX`). Intents (`open_session`, `new_session`) also queue
+during the reconnect window the same way they queue on the main connection.
+Surfaced as:
+
+**A peer is a transport, not a second session implementation.** Both wires feed
+the one pipeline in `core/grouse-core/src/session.rs`: the same ACP parameter
+builders, the same `session/update` `dispatch(DispatchHost, ..)` (a peer passes a
+`PrefixHost` so ids land in the `roam:` namespace), the same `SessionHub` store
+per display id with the same display gate, the same `PaintPlan` cache policy,
+and the same `ClientHandlers`/`connect_client` SDK client — so turn-end custom
+notifications (`status_message`, `message_usage`) and recipe/elicitation server
+requests work on a peer exactly as on the main connection. `RoamPeer` owns only
+the transport: iroh dial + newline framing, its reconnect supervisor and budget,
+its browse-mode `session/list`, and its id prefix (`ChatEndpoint::wire_id` strips
+it, `display_id` adds it). Chat routes by display id: `Core::owner_for` picks the
+peer for a `roam:<label>:<raw>` id and the main `Conn` otherwise, and
+`Core::refresh_session` reloads a peer session on its peer
+(`RoamPeer::open_session_with`, `force` honoured). Peer transcripts are cached
+under `roam:<label>:<raw>`, saved by the core's policy
+(`Core::save_cache_for`, incomplete ⇒ empty stamp), and a background peer chat
+sets the drawer's green dot via `SessionHub::mark_new` instead of painting.
 
 - intents: `roam_connect(card, label)`, `roam_disconnect(label)`,
   `roam_open_session(label, session_id)`

@@ -36,26 +36,23 @@ use std::sync::{Arc, Weak};
 use parking_lot::Mutex;
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, ContentChunk, PermissionOptionKind, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionConfigKind, SessionNotification, SessionUpdate, ToolCallContent, ToolCallStatus,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionNotification,
 };
-use agent_client_protocol::schema::MaybeUndefined;
-use agent_client_protocol::{
-    Agent, Client, ConnectionTo, Responder, UntypedMessage, on_receive_notification,
-    on_receive_request,
-};
-use serde_json::{Map, Value, json};
+use agent_client_protocol::{Agent, ConnectionTo, Responder, UntypedMessage};
+use serde_json::{json, Map, Value};
 use tokio::sync::oneshot;
 
 use crate::transcript::TranscriptStore;
 use crate::transport::WsTransport;
-use crate::{
-    ConfigChoice, ConfigOption, ConnectionStatus, CoreListener, PermissionOption, PermissionOutcome,
-    PermissionRequest, ServerConfig, SessionSummary, ToolCallKind,
-};
+use crate::{ConfigOption, ConnectionStatus, CoreListener, PermissionOutcome, ServerConfig};
 
 pub use agent_client_protocol::Error as AcpError;
+
+// The wire → record translators and ACP parameter builders live in `session`
+// so the roam transport shares them verbatim. Re-exported here because the
+// pinned seams (INTERNAL.md) name this module.
+pub(crate) use crate::session::{parse_config_options, parse_sessions};
 
 // ---------------------------------------------------------------------------
 // Connection registry (slices reach the live connection through here)
@@ -64,11 +61,6 @@ pub use agent_client_protocol::Error as AcpError;
 /// The seam the unstable shim codes against: any live connection (the spine's
 /// [`Conn`], or a stub in tests) exposes the synchronous RPC and the bound
 /// session.
-/// Bounded replay window for a stale-cache open: the server is asked for the
-/// last `REPLAY_TAIL` messages and the store merges them into the painted cache
-/// (see `TranscriptStore::replace_for_merge`). Mirrors the roam peer's window.
-const REPLAY_TAIL: usize = 100;
-
 pub trait RpcConn: Send + Sync {
     /// Synchronous request/reply: `block_task` driven on the core runtime.
     fn rpc(&self, method: &str, params: Value) -> Result<Value, AcpError>;
@@ -88,10 +80,7 @@ static CURRENT_CONN: Mutex<Option<Weak<dyn RpcConn>>> = Mutex::new(None);
 /// The live connection, if one is currently registered. The unstable shim
 /// resolves this per call; `None` while disconnected or mid-connect.
 pub fn current_conn() -> Option<Arc<dyn RpcConn>> {
-    CURRENT_CONN
-        .lock()
-        .as_ref()
-        .and_then(Weak::upgrade)
+    CURRENT_CONN.lock().as_ref().and_then(Weak::upgrade)
 }
 
 /// Register (or clear) the live connection. Called by the core on connect and
@@ -113,10 +102,27 @@ pub(crate) fn register_peer_resolver(
 }
 
 pub(crate) fn peer_for(session_id: &str) -> Option<Arc<dyn RpcConn>> {
-    PEER_RESOLVER
+    PEER_RESOLVER.lock().as_ref().and_then(|f| f(session_id))
+}
+
+/// The displayed session's id, whichever connection owns it. The unstable shim
+/// is constructed independently of `Core`, so the core installs this resolver
+/// (same pattern as the peer resolver).
+static ACTIVE_SESSION_RESOLVER: Mutex<Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>> =
+    Mutex::new(None);
+
+pub(crate) fn register_active_session_resolver(f: Arc<dyn Fn() -> Option<String> + Send + Sync>) {
+    *ACTIVE_SESSION_RESOLVER.lock() = Some(f);
+}
+
+pub(crate) fn active_session() -> Option<String> {
+    ACTIVE_SESSION_RESOLVER
         .lock()
         .as_ref()
-        .and_then(|f| f(session_id))
+        .and_then(|resolve| resolve())
+        // The shim can be constructed and driven without a Core (and tests do
+        // exactly that): fall back to the main connection's bound session.
+        .or_else(|| current_conn().and_then(|conn| conn.active_session_id()))
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +257,12 @@ fn notify_listeners(method: &str, params: Value) {
     }
 }
 
+/// Fan a goose-custom notification out to registered slices. Called by the
+/// shared client builder's untyped handler on EVERY transport.
+pub(crate) fn dispatch_custom_notification(method: &str, params: Value) {
+    notify_listeners(method, params);
+}
+
 // ---------------------------------------------------------------------------
 // The connection
 // ---------------------------------------------------------------------------
@@ -263,6 +275,10 @@ pub(crate) enum ConnectSpec {
     New {
         recipe_id: Option<String>,
         project_id: Option<String>,
+        /// Show the new (empty) session. False for the throwaway session a
+        /// cold `connect()` creates on its way to the real resume: the cached
+        /// chat the UI already painted must stay on screen.
+        display: bool,
     },
     /// `session/load` with the session's resolved cwd.
     Resume { session_id: String, cwd: String },
@@ -278,19 +294,7 @@ fn session_new_params(
     recipe_id: Option<&str>,
     project_id: Option<&str>,
 ) -> Value {
-    let mut meta = Map::new();
-    meta.insert("client".into(), Value::String(config.client_id.clone()));
-    if let Some(recipe) = recipe_id.filter(|r| !r.is_empty()) {
-        meta.insert("recipeId".into(), Value::String(recipe.to_string()));
-    }
-    if let Some(project) = project_id.filter(|p| !p.is_empty()) {
-        meta.insert("projectId".into(), Value::String(project.to_string()));
-    }
-    json!({
-        "cwd": config.cwd,
-        "mcpServers": [],
-        "_meta": Value::Object(meta),
-    })
+    crate::session::session_new_params(&config.client_id, &config.cwd, recipe_id, project_id)
 }
 
 struct ConnInner {
@@ -299,24 +303,25 @@ struct ConnInner {
     runtime: tokio::runtime::Handle,
     /// The UI listener (permission requests, config, touched).
     listener: Arc<dyn CoreListener>,
-    /// The shared transcript store (chunks + bubbles + stream events).
-    store: Arc<TranscriptStore>,
+    /// Every session's store, keyed by display id. The spine owns the main
+    /// namespace (no prefix).
+    hub: Arc<crate::session::SessionHub>,
+    /// The one dispatch pipeline both transports share.
+    host: Arc<dyn crate::session::DispatchHost>,
+    /// Display-id namespace for this connection (`None` = main).
+    label: Option<String>,
     config: ServerConfig,
     spec: Mutex<Option<ConnectSpec>>,
     /// The live SDK connection handle, set by the handshake.
     connection: Mutex<Option<ConnectionTo<Agent>>>,
     status: Mutex<ConnectionStatus>,
     session_id: Mutex<Option<String>>,
-    active_run_id: Mutex<Option<String>>,
     /// Fresh-cache opens suppress the replayed stream; cleared on ready.
     suppress_replay: AtomicBool,
     /// Stale-cache opens ask for a bounded TAIL and merge it into the painted
     /// cache (the store anchors the overlap) instead of replaying everything.
     /// Cleared on ready.
     merge_replay: AtomicBool,
-    /// `session/load` replay (open + resync): thought chunks are dropped so a
-    /// replayed reasoning trail does not double up (desktop `m_replaying`).
-    replaying: AtomicBool,
     /// The handshake signals Core (bounded connect) through this channel.
     ready: Mutex<Option<oneshot::Sender<Result<(), String>>>>,
     /// Core triggers an explicit disconnect through this channel.
@@ -333,12 +338,6 @@ struct ConnInner {
     shutdown_rx: Mutex<Option<oneshot::Receiver<()>>>,
     /// Status-change hook (Core mirrors + fans out to the listener).
     on_status: Mutex<Option<Arc<dyn Fn(ConnectionStatus) + Send + Sync>>>,
-    /// `session_info_update` hook (Core: sidebar state + resync debounce).
-    on_touched: Mutex<Option<Arc<dyn Fn(String, String, String) + Send + Sync>>>,
-    /// Active-run hook: `(session_id, run_id)`; an empty run_id means the run ended.
-    on_active_run: Mutex<Option<Arc<dyn Fn(String, String) + Send + Sync>>>,
-    /// Slash-command availability hook (`available_commands_update` names).
-    on_commands: Mutex<Option<Arc<dyn Fn(Vec<String>) + Send + Sync>>>,
     /// Open/resume failure hook: `(session_id, message)`. Fired instead of
     /// silently binding a different session (grouse#19).
     on_open_failed: Mutex<Option<Arc<dyn Fn(String, String) + Send + Sync>>>,
@@ -348,17 +347,6 @@ struct ConnInner {
     on_ended: Mutex<Option<Arc<dyn Fn(Result<(), String>) + Send + Sync>>>,
     /// Pending `session/request_permission` responders, keyed by tool call id.
     permission: Mutex<HashMap<String, Responder<RequestPermissionResponse>>>,
-    /// The hidden session the core asks for run labels (issue #13). Created
-    /// lazily on the first request, reused, and truncated empty after every
-    /// request so its context cannot grow; `session/list` never shows it.
-    summarizer: Mutex<Option<String>>,
-    /// The in-flight summarizer reply's text. The hidden session's agent chunks
-    /// are routed here instead of into the transcript (its session is not the
-    /// open one, so the chat-event gate would drop them anyway).
-    summary_reply: Mutex<String>,
-    /// The tool runs of the current turn (item ids, oldest first) — the
-    /// summarizer's worklist, drained when the turn's labels are requested.
-    turn_runs: Mutex<Vec<String>>,
 }
 
 /// The live connection. Owned by the core; slices reach it through
@@ -374,7 +362,8 @@ impl Conn {
     /// the connection and the receiver the bounded `connect()` waits on.
     pub(crate) fn new(
         listener: Arc<dyn CoreListener>,
-        store: Arc<TranscriptStore>,
+        hub: Arc<crate::session::SessionHub>,
+        host: Arc<dyn crate::session::DispatchHost>,
         config: ServerConfig,
         spec: ConnectSpec,
     ) -> (Arc<Self>, oneshot::Receiver<Result<(), String>>) {
@@ -384,7 +373,9 @@ impl Conn {
             inner: Arc::new(ConnInner {
                 runtime: crate::roam::runtime().handle().clone(),
                 listener,
-                store,
+                hub,
+                host,
+                label: None,
                 config,
                 spec: Mutex::new(Some(spec)),
                 connection: Mutex::new(None),
@@ -392,23 +383,15 @@ impl Conn {
                 session_id: Mutex::new(None),
                 shutdown_tx: Mutex::new(Some(shutdown_tx)),
                 closing: AtomicBool::new(false),
-                active_run_id: Mutex::new(None),
                 suppress_replay: AtomicBool::new(false),
                 merge_replay: AtomicBool::new(false),
-                replaying: AtomicBool::new(false),
                 ready: Mutex::new(Some(ready_tx)),
                 shutdown_rx: Mutex::new(Some(shutdown_rx)),
                 on_status: Mutex::new(None),
-                on_touched: Mutex::new(None),
-                on_active_run: Mutex::new(None),
-                on_commands: Mutex::new(None),
                 on_open_failed: Mutex::new(None),
                 on_config: Mutex::new(None),
                 on_ended: Mutex::new(None),
                 permission: Mutex::new(HashMap::new()),
-                summarizer: Mutex::new(None),
-                summary_reply: Mutex::new(String::new()),
-                turn_runs: Mutex::new(Vec::new()),
             }),
         });
         (conn, ready_rx)
@@ -472,89 +455,46 @@ impl Conn {
         *self.inner.session_id.lock() = Some(session_id.to_string());
     }
 
-    /// The run id of the live turn (`session_info_update` `_meta.goose
-    /// activeRunId`), if any. Tracked for steer plumbing: the unstable shim's
-    /// `steer` carries the UI's `expected_run_id`, and this is the server's
-    /// authoritative id for diagnostics when the two disagree.
-    #[allow(dead_code)] // written by the dispatch; read by future steer validation
-    pub(crate) fn active_run_id(&self) -> Option<String> {
-        self.inner.active_run_id.lock().clone()
-    }
-
     pub(crate) fn set_suppress_replay(&self, suppress: bool) {
         self.inner.suppress_replay.store(suppress, Ordering::SeqCst);
+    }
+
+    /// A fresh-cache open is dropping replayed rows; the shared dispatch must
+    /// not ingest them into the store at all.
+    pub(crate) fn suppresses_replay(&self) -> bool {
+        self.inner.suppress_replay.load(Ordering::SeqCst)
     }
 
     pub(crate) fn set_merge_replay(&self, merge: bool) {
         self.inner.merge_replay.store(merge, Ordering::SeqCst);
     }
 
-    pub(crate) fn set_replaying(&self, replaying: bool) {
-        self.inner.replaying.store(replaying, Ordering::SeqCst);
+    /// Bind a session without touching its store (a resume paints first).
+    fn bind_session(&self, session_id: &str) {
+        *self.inner.session_id.lock() = Some(session_id.to_string());
+        let key = crate::session::display_id(self.inner.label.as_deref(), session_id);
+        self.inner.hub.display(&key);
     }
 
-    /// The host cwd this connection was opened with — the only cwd the core may
-    /// hand to `session/new` without guessing (CONTRACT §4).
-    pub(crate) fn cwd(&self) -> String {
-        self.inner.config.cwd.clone()
+    /// Bind a NEW session and clear the screen: there is no transcript yet, and
+    /// the previous chat's rows must not linger behind the empty one.
+    fn bind_new_session(&self, session_id: &str) {
+        self.bind_session(session_id);
+        let key = crate::session::display_id(self.inner.label.as_deref(), session_id);
+        self.inner.hub.store(&key).clear();
     }
 
-    /// The transcript store this connection streams into.
-    pub(crate) fn store(&self) -> &Arc<TranscriptStore> {
-        &self.inner.store
-    }
-
-    /// The hidden summarizer session, if one has been created (issue #13).
-    pub(crate) fn summarizer_session(&self) -> Option<String> {
-        self.inner.summarizer.lock().clone()
-    }
-
-    pub(crate) fn set_summarizer_session(&self, session_id: String) {
-        *self.inner.summarizer.lock() = Some(session_id);
-    }
-
-    /// Take the text the summarizer session streamed back, and clear it.
-    pub(crate) fn take_summary_reply(&self) -> String {
-        std::mem::take(&mut *self.inner.summary_reply.lock())
-    }
-
-    /// Take the current turn's tool runs (item ids, oldest first).
-    pub(crate) fn take_turn_runs(&self) -> Vec<String> {
-        std::mem::take(&mut *self.inner.turn_runs.lock())
-    }
-
-    /// Forget the current turn's runs (a new turn's worklist starts empty).
-    pub(crate) fn clear_turn_runs(&self) {
-        self.inner.turn_runs.lock().clear();
-    }
-
-    /// Drop a provisional cache paint as this load's replay produces its first
-    /// real row (and again when a load completes producing none, meaning the
-    /// server's copy is empty).
-    ///
-    /// The replay APPENDS, so painted rows left in place would be followed by
-    /// replayed rows — not the server's order. The store owns this decision
-    /// (`replace_provisional` arms it, the first real row consumes it) so every
-    /// paint path gets it; a spine-side flag had to be armed by each entry
-    /// point, and the one that forgot produced exactly that interleaving.
-    fn drop_painted_cache(&self) {
-        self.inner.store.supersede_provisional();
+    /// The store for a session owned by this connection, in this connection's
+    /// display namespace.
+    pub(crate) fn store_for(&self, session_id: &str) -> Arc<TranscriptStore> {
+        self.inner.hub.store(&crate::session::display_id(
+            self.inner.label.as_deref(),
+            session_id,
+        ))
     }
 
     pub(crate) fn set_on_status(&self, f: Arc<dyn Fn(ConnectionStatus) + Send + Sync>) {
         *self.inner.on_status.lock() = Some(f);
-    }
-
-    pub(crate) fn set_on_touched(&self, f: Arc<dyn Fn(String, String, String) + Send + Sync>) {
-        *self.inner.on_touched.lock() = Some(f);
-    }
-
-    pub(crate) fn set_on_active_run(&self, f: Arc<dyn Fn(String, String) + Send + Sync>) {
-        *self.inner.on_active_run.lock() = Some(f);
-    }
-
-    pub(crate) fn set_on_commands(&self, f: Arc<dyn Fn(Vec<String>) + Send + Sync>) {
-        *self.inner.on_commands.lock() = Some(f);
     }
 
     pub(crate) fn set_on_open_failed(&self, f: Arc<dyn Fn(String, String) + Send + Sync>) {
@@ -619,7 +559,11 @@ impl Conn {
 
     /// Answer a parked `session/request_permission` (the UI's
     /// `respond_permission` intent routes here).
-    pub fn respond_permission(&self, tool_call_id: &str, outcome: PermissionOutcome) -> Result<(), AcpError> {
+    pub fn respond_permission(
+        &self,
+        tool_call_id: &str,
+        outcome: PermissionOutcome,
+    ) -> Result<(), AcpError> {
         let responder = self
             .inner
             .permission
@@ -627,9 +571,9 @@ impl Conn {
             .remove(tool_call_id)
             .ok_or_else(|| AcpError::internal_error().data("no pending permission request"))?;
         let outcome = match outcome {
-            PermissionOutcome::Selected { option_id } => RequestPermissionOutcome::Selected(
-                SelectedPermissionOutcome::new(option_id),
-            ),
+            PermissionOutcome::Selected { option_id } => {
+                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id))
+            }
             PermissionOutcome::Cancelled => RequestPermissionOutcome::Cancelled,
         };
         responder
@@ -659,7 +603,9 @@ impl Conn {
         };
         // Reflect the terminal status first so a UI thread parked in the
         // bounded `connect()` observes the failure the moment it wakes.
-        self.set_status(ConnectionStatus::Error { message: message.clone() });
+        self.set_status(ConnectionStatus::Error {
+            message: message.clone(),
+        });
         // A handshake that never reached ready must unblock the bounded
         // `connect()` wait with the failure instead of letting it time out.
         if !matches!(*self.inner.status.lock(), ConnectionStatus::Ready) {
@@ -691,11 +637,14 @@ impl Conn {
     fn on_ready(&self) {
         self.inner.suppress_replay.store(false, Ordering::SeqCst);
         self.inner.merge_replay.store(false, Ordering::SeqCst);
-        self.inner.replaying.store(false, Ordering::SeqCst);
         // Still armed here => the replay produced nothing, so the server's copy
         // of this session is empty and the painted rows are gone from it.
         // Replay chunks precede the load reply, so nothing is racing this.
-        self.drop_painted_cache();
+        if let Some(session_id) = self.inner.session_id.lock().clone() {
+            self.store_for(&session_id).supersede_provisional();
+            let key = crate::session::display_id(self.inner.label.as_deref(), &session_id);
+            self.inner.host.end_replay(&key);
+        }
         self.set_status(ConnectionStatus::Ready);
         self.signal_ready(Ok(()));
     }
@@ -727,34 +676,34 @@ impl Conn {
         let spec = self.inner.spec.lock().take();
         match spec {
             Some(ConnectSpec::Resume { session_id, cwd }) => {
-                self.inner.replaying.store(true, Ordering::SeqCst);
-                // Ingest the replay SILENTLY and paint the result once (grouse#18):
-                // the rows still land in the store, the cache and the window, but
-                // the client does not watch the history arrive from the top.
-                self.inner.store.hold_emissions(true);
+                let replay_key =
+                    crate::session::display_id(self.inner.label.as_deref(), &session_id);
+                // A merge fetched the overlap and the tail, so the store is
+                // current up to the server's probe. A full replay (no cache)
+                // may still lag it, and a fresh cache is already current.
+                let persist_stamp = !self.inner.suppress_replay.load(Ordering::SeqCst)
+                    && self.inner.merge_replay.load(Ordering::SeqCst);
+                self.inner.host.begin_replay(&replay_key);
                 // Set the open-session id BEFORE the load request: the server
                 // may stream replay chunks ahead of the reply (the spine's own
                 // gateway test does), and the session-membership gate must not
                 // drop them. start_new_session overwrites this if load fails.
                 *self.inner.session_id.lock() = Some(session_id.clone());
-                let mut params = json!({
-                    "sessionId": session_id,
-                    "cwd": cwd,
-                    "mcpServers": [],
-                });
-                // A fresh-cache open drops every replayed row client-side
-                // (suppress_replay), so ask the server to skip the history it
-                // can — the minimum tail still exercises the load path.
-                // Servers without replayTail support ignore the meta and
-                // replay in full, which suppression absorbs as before.
-                if self.inner.suppress_replay.load(Ordering::SeqCst) {
-                    params["_meta"] = json!({ "replayTail": 1 });
+                let store = self.store_for(&session_id);
+                // Ingest the replay SILENTLY and paint the result once (grouse#18):
+                // the rows still land in the store, the cache and the window, but
+                // the client does not watch the history arrive from the top.
+                store.hold_emissions(true);
+                // A fresh cache asks for the minimum tail; a stale one for a
+                // bounded tail it merges; otherwise the full replay.
+                let tail = if self.inner.suppress_replay.load(Ordering::SeqCst) {
+                    Some(1)
                 } else if self.inner.merge_replay.load(Ordering::SeqCst) {
-                    // Stale cache: replay only the tail and merge it into the
-                    // painted prefix (the store anchors the overlap) instead of
-                    // streaming the whole session from the top.
-                    params["_meta"] = json!({ "replayTail": REPLAY_TAIL });
-                }
+                    Some(crate::session::REPLAY_TAIL)
+                } else {
+                    None
+                };
+                let params = crate::session::session_load_params(&session_id, &cwd, tail);
                 match cx
                     .send_request(UntypedMessage::new("session/load", params)?)
                     .block_task()
@@ -764,23 +713,24 @@ impl Conn {
                         // Merge gap: the tail started past the cached prefix, so
                         // extending the cache would leave a hole. Clear and load
                         // the whole transcript now.
-                        if self.inner.store.end_merge() {
-                            self.inner.store.clear();
-                            let full = json!({
-                                "sessionId": session_id,
-                                "cwd": cwd,
-                                "mcpServers": [],
-                            });
+                        if store.end_merge() {
+                            store.clear();
+                            let full = crate::session::session_load_params(&session_id, &cwd, None);
                             let _ = cx
                                 .send_request(UntypedMessage::new("session/load", full)?)
                                 .block_task()
                                 .await;
                         }
-                        *self.inner.session_id.lock() = Some(session_id);
+                        self.bind_session(&session_id);
                         self.emit_config(&reply);
                         // The replay is in: paint the newest window (or the empty
                         // transcript) in ONE shot.
-                        self.inner.store.release_held_replay();
+                        store.release_held_replay();
+                        if persist_stamp {
+                            // The merge fetched the overlap and tail; stamp the
+                            // result with the server's current updatedAt.
+                            self.inner.host.stamp_probe(&replay_key, true);
+                        }
                     }
                     Err(error) => {
                         // A stale/archived session cannot be resumed. Do NOT
@@ -795,19 +745,23 @@ impl Conn {
                         // Discard the hold WITHOUT painting: the rows on screen
                         // are the provisional cache paint, which is the right
                         // thing to keep for a chat that failed to load.
-                        self.inner.store.hold_emissions(false);
-                        self.report_open_failed(session_id, format!("session/load failed: {error}"));
+                        store.hold_emissions(false);
+                        self.report_open_failed(
+                            session_id,
+                            format!("session/load failed: {error}"),
+                        );
                     }
                 }
             }
             Some(ConnectSpec::New {
                 recipe_id,
                 project_id,
+                display,
             }) => {
-                self.start_new_session(&cx, recipe_id, project_id).await?;
+                self.start_new_session(&cx, recipe_id, project_id, display).await?;
             }
             None => {
-                self.start_new_session(&cx, None, None).await?;
+                self.start_new_session(&cx, None, None, true).await?;
             }
         }
 
@@ -828,6 +782,7 @@ impl Conn {
         cx: &ConnectionTo<Agent>,
         recipe_id: Option<String>,
         project_id: Option<String>,
+        display: bool,
     ) -> Result<(), AcpError> {
         let params = session_new_params(
             &self.inner.config,
@@ -846,7 +801,14 @@ impl Conn {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        *self.inner.session_id.lock() = Some(session_id);
+        // A cold `connect()` may create a throwaway session while the UI still
+        // shows the last chat's cached paint; keep that paint. With nothing
+        // painted (a first launch), or for an explicit new chat, show it.
+        if display || self.inner.hub.displayed_key().is_none() {
+            self.bind_new_session(&session_id);
+        } else {
+            *self.inner.session_id.lock() = Some(session_id);
+        }
         self.emit_config(&reply);
         Ok(())
     }
@@ -872,7 +834,7 @@ impl Conn {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        *self.inner.session_id.lock() = Some(session_id.clone());
+        self.bind_new_session(&session_id);
         self.emit_config(&reply);
         Ok(session_id)
     }
@@ -892,7 +854,7 @@ impl Conn {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        *self.inner.session_id.lock() = Some(session_id.clone());
+        self.bind_new_session(&session_id);
         self.emit_config(&reply);
         Ok(session_id)
     }
@@ -905,7 +867,9 @@ impl Conn {
         suppress_replay: bool,
     ) -> Result<(), AcpError> {
         self.inner.session_id.lock().replace(session_id.clone());
-        self.inner.suppress_replay.store(suppress_replay, Ordering::SeqCst);
+        self.inner
+            .suppress_replay
+            .store(suppress_replay, Ordering::SeqCst);
         let mut params = json!({
             "sessionId": session_id,
             "cwd": cwd,
@@ -919,7 +883,7 @@ impl Conn {
         self.inner.suppress_replay.store(false, Ordering::SeqCst);
         self.inner.merge_replay.store(false, Ordering::SeqCst);
         let reply: Value = reply?;
-        *self.inner.session_id.lock() = Some(session_id);
+        self.bind_session(&session_id);
         self.emit_config(&reply);
         Ok(())
     }
@@ -935,20 +899,29 @@ impl Conn {
         // "restored" to the previous chat from here — see the Err arm below for
         // what a failed load leaves behind.
         self.inner.session_id.lock().replace(session_id.clone());
-        self.inner.suppress_replay.store(suppress_replay, Ordering::SeqCst);
-        self.inner.merge_replay.store(merge_replay, Ordering::SeqCst);
+        self.inner
+            .suppress_replay
+            .store(suppress_replay, Ordering::SeqCst);
+        self.inner
+            .merge_replay
+            .store(merge_replay, Ordering::SeqCst);
         // Ingest the replay SILENTLY and paint it once at the end (grouse#18).
-        self.inner.store.hold_emissions(true);
-        let mut params = json!({
-            "sessionId": session_id,
-            "cwd": cwd,
-            "mcpServers": [],
-        });
-        if suppress_replay {
-            params["_meta"] = json!({ "replayTail": 1 });
+        let store = self.store_for(&session_id);
+        store.hold_emissions(true);
+        let replay_key = crate::session::display_id(self.inner.label.as_deref(), &session_id);
+        self.inner.host.begin_replay(&replay_key);
+        let tail = if suppress_replay {
+            Some(1)
         } else if merge_replay {
-            params["_meta"] = json!({ "replayTail": REPLAY_TAIL });
-        }
+            Some(crate::session::REPLAY_TAIL)
+        } else {
+            None
+        };
+        // A merge fetched the tail, so its result may be stamped with a newer
+        // probe; a full replay (no cache) may still lag it, and a fresh cache
+        // is already current.
+        let persist_stamp = merge_replay && !suppress_replay;
+        let params = crate::session::session_load_params(&session_id, &cwd, tail);
         let reply = self.rpc_async("session/load", params).await;
         // Disarm the replay gates for the NEXT load: a fresh-cache open arms
         // `suppress_replay`, and a later full rebuild (resync) that did not reset
@@ -965,278 +938,34 @@ impl Conn {
                 // Drop the hold without painting — the rows on screen are the
                 // provisional cache paint, which is what a failed load should
                 // leave behind.
-                self.inner.store.hold_emissions(false);
+                store.hold_emissions(false);
+                self.inner.host.end_replay(&replay_key);
                 return Err(error);
             }
         };
+        self.inner.host.end_replay(&replay_key);
         // Merge gap: the tail started past the cached prefix — clear and reload
         // the whole transcript (see the handshake Resume branch).
-        if self.inner.store.end_merge() {
-            self.inner.store.clear();
-            let full = json!({
-                "sessionId": session_id,
-                "cwd": cwd,
-                "mcpServers": [],
-            });
+        if store.end_merge() {
+            store.clear();
+            let full = crate::session::session_load_params(&session_id, &cwd, None);
             let _ = self.rpc_async("session/load", full).await;
         }
-        *self.inner.session_id.lock() = Some(session_id);
+        self.bind_session(&session_id);
         self.emit_config(&reply);
         // The replay is in: paint the newest window in ONE shot (grouse#18).
-        self.inner.store.release_held_replay();
+        store.release_held_replay();
+        if persist_stamp {
+            self.inner.host.stamp_probe(&replay_key, true);
+        }
         Ok(())
     }
 
     // -- notification dispatch (runs on the runtime, never blocks) -----------
 
     fn dispatch_session_notification(&self, notif: SessionNotification) {
-        let session_id = notif.session_id.to_string();
-        // The hidden summarizer session's turn is the core's own bookkeeping, not
-        // chat content: collect its text for the caller and keep it out of the
-        // transcript entirely (the chat-event gate below would drop it anyway,
-        // silently, and the caller would wait for a reply that never arrived).
-        if self.inner.summarizer.lock().as_deref() == Some(session_id.as_str()) {
-            if let SessionUpdate::AgentMessageChunk(chunk) = &notif.update {
-                self.inner.summary_reply.lock().push_str(&chunk_text(chunk));
-            }
-            return;
-        }
-        // Session-membership gate (serve parity with the roam peers): a CHAT
-        // event for a session other than the one currently open belongs to a
-        // backgrounded turn — never render it in the wrong chat (serve re-loads
-        // on every open, so the reply is recovered by the next replay). Applied
-        // only to bubble-producing events: session-level config/run updates
-        // (SessionInfoUpdate etc.) are not chat content and may arrive before
-        // the open/load reply has set session_id (e.g. session/new broadcasts).
-        let chat_event = matches!(
-            &notif.update,
-            SessionUpdate::UserMessageChunk(_)
-                | SessionUpdate::AgentMessageChunk(_)
-                | SessionUpdate::AgentThoughtChunk(_)
-                | SessionUpdate::ToolCall(_)
-                | SessionUpdate::ToolCallUpdate(_)
-                | SessionUpdate::UsageUpdate(_)
-        );
-        if chat_event && self.inner.session_id.lock().as_deref() != Some(session_id.as_str()) {
-            return;
-        }
-        match notif.update {
-            SessionUpdate::UserMessageChunk(chunk) => {
-                if !self.inner.suppress_replay.load(Ordering::SeqCst) {
-                    let text = chunk_text(&chunk);
-                    if !text.is_empty() {
-                        self.drop_painted_cache();
-                        let mid = chunk.message_id.map(|id| id.to_string());
-                        self.inner
-                            .store
-                            .append_chunk("user", &text, mid.as_deref(), false);
-                    }
-                }
-            }
-            SessionUpdate::AgentMessageChunk(chunk) => {
-                if !self.inner.suppress_replay.load(Ordering::SeqCst) {
-                    let text = chunk_text(&chunk);
-                    if !text.is_empty() {
-                        self.drop_painted_cache();
-                        let mid = chunk.message_id.map(|id| id.to_string());
-                        self.inner
-                            .store
-                            .append_chunk("agent", &text, mid.as_deref(), false);
-                    }
-                }
-            }
-            SessionUpdate::AgentThoughtChunk(chunk) => {
-                if !self.inner.suppress_replay.load(Ordering::SeqCst) {
-                    let text = chunk_text(&chunk);
-                    if !text.is_empty() {
-                        if self.inner.replaying.load(Ordering::SeqCst) {
-                            // A replayed thought never becomes a row of its own:
-                            // the trail would double, and it carries no stable id
-                            // to reconcile by. It is held as the framing for the
-                            // tool run it precedes, so the run's label survives a
-                            // reload (see `TranscriptStore::replay_thought`).
-                            self.inner.store.replay_thought(&text);
-                        } else {
-                            self.drop_painted_cache();
-                            self.inner.store.append_chunk("thought", &text, None, true);
-                        }
-                    }
-                }
-            }
-            SessionUpdate::ToolCall(tc) => {
-                if !self.inner.suppress_replay.load(Ordering::SeqCst) {
-                    self.drop_painted_cache();
-                    self.dispatch_tool_call(&tc);
-                }
-            }
-            SessionUpdate::ToolCallUpdate(tcu) => {
-                if !self.inner.suppress_replay.load(Ordering::SeqCst) {
-                    self.drop_painted_cache();
-                    self.dispatch_tool_update(&tcu);
-                }
-            }
-            SessionUpdate::UsageUpdate(usage) => {
-                let (amount, currency) = usage
-                    .cost
-                    .as_ref()
-                    .map(|cost| (cost.amount, cost.currency.clone()))
-                    .unwrap_or((0.0, String::new()));
-                self.inner
-                    .store
-                    .usage(usage.used as i64, usage.size as i64, amount, &currency);
-            }
-            SessionUpdate::SessionInfoUpdate(info) => {
-                self.dispatch_session_info_update(&session_id, info);
-            }
-            SessionUpdate::ConfigOptionUpdate(config) => {
-                let options = config
-                    .config_options
-                    .iter()
-                    .map(|option| ConfigOption {
-                        id: option.id.to_string(),
-                        value: config_option_value(option),
-                        name: option.name.clone(),
-                        // The typed schema has no choices list — the initial
-                        // config (session/new|load replies) carries them.
-                        choices: Vec::new(),
-                    })
-                    .collect::<Vec<_>>();
-                if let Some(hook) = self.inner.on_config.lock().clone() {
-                    hook(options);
-                }
-            }
-            SessionUpdate::CurrentModeUpdate(_) => {
-                // No stable listener event carries this; the desktop patches
-                // it in place. Ignored here.
-            }
-            SessionUpdate::AvailableCommandsUpdate(commands) => {
-                // Slash-command autocomplete: surface the command names so a
-                // client can offer them without a server round-trip.
-                let names = commands
-                    .available_commands
-                    .iter()
-                    .map(|command| command.name.clone())
-                    .collect::<Vec<_>>();
-                if let Some(hook) = self.inner.on_commands.lock().clone() {
-                    hook(names);
-                }
-            }
-            SessionUpdate::Plan(_) => {}
-            _ => {} // non_exhaustive
-        }
-    }
-
-    fn dispatch_tool_call(&self, tc: &agent_client_protocol::schema::v1::ToolCall) {
-        let tool_call_id = tc.tool_call_id.to_string();
-        let title = tc.title.clone();
-        let (kind, detail) = tool_call_kind(tc);
-        // Remember which run this call landed in: the turn's runs are the
-        // summarizer's worklist (issue #13). Only plain runs are summarised —
-        // a chart or an app is not a "step" the model narrates.
-        let plain = matches!(kind, ToolCallKind::Plain);
-        self.inner
-            .store
-            .tool_call(&title, &detail, &tool_call_id, kind);
-        if plain {
-            if let Some(run) = self.inner.store.run_id_for(&tool_call_id) {
-                let mut runs = self.inner.turn_runs.lock();
-                if !runs.contains(&run) {
-                    runs.push(run);
-                }
-            }
-        }
-    }
-
-    fn dispatch_tool_update(&self, tcu: &agent_client_protocol::schema::v1::ToolCallUpdate) {
-        let id = tcu.tool_call_id.to_string();
-        let status = tcu
-            .fields
-            .status
-            .as_ref()
-            .map(tool_call_status_str)
-            .unwrap_or_default();
-        let meta = Value::Object(tcu.meta.clone().unwrap_or_default());
-
-        // MCP-App identity arrives HERE, not on the tool_call frame: goose only
-        // knows a completed call produced an app (it hydrates `goose.mcpApp` onto
-        // the tool_call_update once the extension's ui:// resource resolved).
-        // Promote the plain chip the creation already announced.
-        if let Some(app) = meta.pointer("/goose/mcpApp") {
-            if let (Some(uri), Some(ext)) = (
-                app.get("resourceUri").and_then(Value::as_str),
-                app.get("extensionName").and_then(Value::as_str),
-            ) {
-                if !uri.is_empty() && !ext.is_empty() && status != "in_progress" {
-                    self.inner.store.tool_app(&id, uri, ext);
-                }
-            }
-        }
-
-        // Streaming shell output rides _meta.toolNotification (live_output):
-        // appends with live=true so the bubble ACCUMULATES instead of
-        // replacing (desktop tool_call_update).
-        let notif = meta.get("toolNotification").cloned().unwrap_or(Value::Null);
-        if notif.get("type").and_then(Value::as_str) == Some("live_output") {
-            let mut chunk = String::new();
-            if let Some(parts) = notif.pointer("/params/chunks").and_then(Value::as_array) {
-                for part in parts {
-                    if let Some(text) = part.pointer("/output/text").and_then(Value::as_str) {
-                        chunk.push_str(text);
-                    }
-                }
-            }
-            if !chunk.is_empty() {
-                self.inner.store.tool_update(&id, status, &chunk, true);
-            }
-            return;
-        }
-
-        let mut outputs = Vec::new();
-        if let Some(content) = &tcu.fields.content {
-            for entry in content {
-                if let ToolCallContent::Content(content) = entry {
-                    if let ContentBlock::Text(text) = &content.content {
-                        outputs.push(text.text.clone());
-                    }
-                }
-            }
-        }
-        self.inner
-            .store
-            .tool_update(&id, status, &outputs.join("\n"), false);
-    }
-
-    fn dispatch_session_info_update(
-        &self,
-        session_id: &str,
-        info: agent_client_protocol::schema::v1::SessionInfoUpdate,
-    ) {
-        // The active-run lifecycle rides _meta.goose.activeRunId; its presence
-        // is what makes session/steer possible. Emit both transitions: the run
-        // starting (id present) and ending (absent in this update).
-        if let Some(goose) = info.meta.as_ref().and_then(|meta| meta.get("goose")) {
-            if let Some(run_id) = goose.get("activeRunId").and_then(Value::as_str) {
-                *self.inner.active_run_id.lock() = Some(run_id.to_string());
-                if let Some(hook) = self.inner.on_active_run.lock().clone() {
-                    hook(session_id.to_string(), run_id.to_string());
-                }
-            } else if self.inner.active_run_id.lock().take().is_some() {
-                if let Some(hook) = self.inner.on_active_run.lock().clone() {
-                    hook(session_id.to_string(), String::new());
-                }
-            }
-        }
-        let title = match info.title {
-            MaybeUndefined::Value(title) => title,
-            _ => String::new(),
-        };
-        let updated_at = match info.updated_at {
-            MaybeUndefined::Value(updated_at) => updated_at,
-            _ => String::new(),
-        };
-        if let Some(hook) = self.inner.on_touched.lock().clone() {
-            hook(session_id.to_string(), title, updated_at);
-        }
+        // The shared pipeline intercepts the hidden summarizer session.
+        crate::session::dispatch(self.inner.host.as_ref(), notif);
     }
 
     // -- server requests (answered on the dispatch loop) ---------------------
@@ -1246,36 +975,12 @@ impl Conn {
         req: RequestPermissionRequest,
         responder: Responder<RequestPermissionResponse>,
     ) {
-        let tool_call_id = req.tool_call.tool_call_id.to_string();
-        let title = req.tool_call.fields.title.clone().unwrap_or_default();
-        let detail = req
-            .tool_call
-            .fields
-            .raw_input
-            .as_ref()
-            .and_then(|raw| raw.get("command"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let options = req
-            .options
-            .iter()
-            .map(|option| PermissionOption {
-                option_id: option.option_id.to_string(),
-                name: option.name.clone(),
-                kind: permission_option_kind_str(&option.kind).to_string(),
-            })
-            .collect();
+        let request = crate::session::permission_request(&req);
         self.inner
             .permission
             .lock()
-            .insert(tool_call_id.clone(), responder);
-        self.inner.listener.on_permission_request(PermissionRequest {
-            tool_call_id,
-            title,
-            detail,
-            options,
-        });
+            .insert(request.tool_call_id.clone(), responder);
+        self.inner.listener.on_permission_request(request);
     }
 
     fn on_server_request(&self, method: &str, params: &Value, responder: Responder<Value>) {
@@ -1290,7 +995,8 @@ impl Conn {
                 // Unknown server request -> a real JSON-RPC error, not a
                 // silent empty result (desktop serverRequest fallback).
                 let _ = responder.respond_with_error(
-                    AcpError::method_not_found().data(format!("not supported by this client: {method}")),
+                    AcpError::method_not_found()
+                        .data(format!("not supported by this client: {method}")),
                 );
             }
         }
@@ -1303,50 +1009,58 @@ impl Conn {
         params: &Value,
         responder: Responder<Value>,
     ) {
-        let listeners = server_request_listeners();
-        if listeners.is_empty() {
-            // No slice opted into forms: auto-answer with the parameter
-            // defaults so the session can start (desktop serverRequest); an
-            // elicitation without a form is declined the same way the desktop
-            // rejects it.
-            match kind {
-                PendingRequest::RecipeParams => {
-                    let values = params
-                        .get("parameters")
-                        .and_then(Value::as_array)
-                        .map(|parameters| {
-                            parameters
-                                .iter()
-                                .filter_map(|p| {
-                                    let obj = p.as_object()?;
-                                    let key = obj.get("key")?.as_str()?.to_string();
-                                    let default = obj
-                                        .get("default")
-                                        .cloned()
-                                        .unwrap_or(Value::Null);
-                                    Some((key, default))
-                                })
-                                .collect::<Map<String, Value>>()
-                        })
-                        .unwrap_or_default();
-                    let _ = responder.respond(json!({ "action": "submit", "values": values }));
-                }
-                PendingRequest::Elicitation => {
-                    let _ = responder.respond_with_error(AcpError::method_not_found().data(
-                        "elicitation/create not supported by this client",
-                    ));
-                }
+        park_server_request(kind, method, params, responder);
+    }
+}
+
+/// Park a recipe-params / elicitation responder and fan the request out to the
+/// registered slices. With no listener the request is auto-answered (recipe
+/// defaults) or declined — desktop parity. Shared by every connection: the
+/// parked responders are client-global, because the UI answers one request at
+/// a time regardless of which wire it arrived on.
+pub(crate) fn park_server_request(
+    kind: PendingRequest,
+    method: &str,
+    params: &Value,
+    responder: Responder<Value>,
+) {
+    let listeners = server_request_listeners();
+    if listeners.is_empty() {
+        match kind {
+            PendingRequest::RecipeParams => {
+                let values = params
+                    .get("parameters")
+                    .and_then(Value::as_array)
+                    .map(|parameters| {
+                        parameters
+                            .iter()
+                            .filter_map(|p| {
+                                let obj = p.as_object()?;
+                                let key = obj.get("key")?.as_str()?.to_string();
+                                let default = obj.get("default").cloned().unwrap_or(Value::Null);
+                                Some((key, default))
+                            })
+                            .collect::<Map<String, Value>>()
+                    })
+                    .unwrap_or_default();
+                let _ = responder.respond(json!({ "action": "submit", "values": values }));
             }
-            return;
+            PendingRequest::Elicitation => {
+                let _ = responder.respond_with_error(
+                    AcpError::method_not_found()
+                        .data("elicitation/create not supported by this client"),
+                );
+            }
         }
-        let slot = match kind {
-            PendingRequest::RecipeParams => &mut PARKED.lock().recipe_params,
-            PendingRequest::Elicitation => &mut PARKED.lock().elicitation,
-        };
-        *slot = Some(responder);
-        for f in listeners {
-            f(method, params.clone());
-        }
+        return;
+    }
+    let slot = match kind {
+        PendingRequest::RecipeParams => &mut PARKED.lock().recipe_params,
+        PendingRequest::Elicitation => &mut PARKED.lock().elicitation,
+    };
+    *slot = Some(responder);
+    for f in listeners {
+        f(method, params.clone());
     }
 }
 
@@ -1361,6 +1075,39 @@ impl RpcConn for Conn {
 
     fn prebind_session(&self, session_id: &str) {
         Conn::prebind_session(self, session_id)
+    }
+}
+
+impl crate::session::ChatEndpoint for Conn {
+    fn request(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> futures::future::BoxFuture<'static, Result<Value, AcpError>> {
+        let conn = self.clone();
+        let method = method.to_string();
+        Box::pin(async move { conn.rpc_async(&method, params).await })
+    }
+
+    fn notify(&self, method: &str, params: Value) -> Result<(), AcpError> {
+        Conn::notify(self, method, params)
+    }
+
+    fn wire_id(&self, display: &str) -> String {
+        display.to_string()
+    }
+
+    fn accepts_prompt(&self) -> bool {
+        self.is_ready() && self.active_session_id().is_some()
+    }
+
+    fn label(&self) -> Option<String> {
+        None
+    }
+
+    fn reset_replay_gates(&self) {
+        self.inner.suppress_replay.store(false, Ordering::SeqCst);
+        self.inner.merge_replay.store(false, Ordering::SeqCst);
     }
 }
 
@@ -1388,50 +1135,21 @@ pub(crate) async fn run_connection(
     let notif_conn = conn.clone();
     let permission_conn = conn.clone();
     let request_conn = conn.clone();
-
-    let builder = Client.builder()
-        .name("grouse")
-        // Typed handler claims `session/update`; the untyped one below claims
-        // every other notification (handlers are tried in registration order).
-        .on_receive_notification(
-            async move |notif: SessionNotification, _cx| {
-                notif_conn.dispatch_session_notification(notif);
-                Ok(())
-            },
-            on_receive_notification!(),
-        )
-        .on_receive_notification(
-            async move |notif: UntypedMessage, _cx| {
-                // Custom notifications (gooseUpdate: status_message /
-                // message_usage, and anything else) go to registered slices.
-                notify_listeners(&notif.method, notif.params.clone());
-                Ok(())
-            },
-            on_receive_notification!(),
-        )
-        // `session/request_permission` — the UI answers via respond_permission.
-        .on_receive_request(
-            async move |req: RequestPermissionRequest, responder, _cx| {
-                permission_conn.on_permission_request(req, responder);
-                Ok(())
-            },
-            on_receive_request!(),
-        )
-        // Recipe-params / elicitation (parked) + unknown-method fallback.
-        .on_receive_request(
-            async move |req: UntypedMessage, responder, _cx| {
-                request_conn.on_server_request(&req.method, &req.params, responder);
-                Ok(())
-            },
-            on_receive_request!(),
-        );
-
-    builder
-        .connect_with(transport, move |cx: ConnectionTo<Agent>| {
-            let conn = conn.clone();
-            async move { conn.handshake(cx).await }
-        })
-        .await
+    let handlers = crate::session::ClientHandlers {
+        notification: Arc::new(move |notif| notif_conn.dispatch_session_notification(notif)),
+        custom_notification: Arc::new(notify_listeners),
+        permission: Arc::new(move |req, responder| {
+            permission_conn.on_permission_request(req, responder)
+        }),
+        request: Arc::new(move |method, params, responder| {
+            request_conn.on_server_request(method, params, responder)
+        }),
+    };
+    let foreground = move |cx: ConnectionTo<Agent>| -> futures::future::BoxFuture<'static, Result<(), AcpError>> {
+        let conn = conn.clone();
+        Box::pin(async move { conn.handshake(cx).await })
+    };
+    crate::session::connect_client(transport, handlers, foreground).await
 }
 
 async fn wait_optional(rx: &mut Option<oneshot::Receiver<()>>) {
@@ -1466,295 +1184,12 @@ fn install_crypto_provider() {
 /// `_meta.goose.mcpApp` on the tool_call update, and every MCP App (the
 /// autovisualiser charts included) silently degrades to a plain tool chip.
 pub(crate) fn initialize_params() -> Value {
-    json!({
-        "protocolVersion": 1,
-        "clientCapabilities": {
-            "fs": { "readTextFile": false, "writeTextFile": false },
-            "elicitation": { "form": {} },
-            "_meta": {
-                "goose": {
-                    "customNotifications": true,
-                    "recipeParameterRequests": true,
-                    "toolCallLabelEnrichment": true,
-                    "mcpHostCapabilities": {
-                        "extensions": {
-                            "io.modelcontextprotocol/ui": {
-                                "mimeTypes": ["text/html;profile=mcp-app"]
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    })
+    crate::session::initialize_params()
 }
 
 /// The `session/list` params: list user + ACP sessions (desktop listSessions).
 pub(crate) fn session_list_params() -> Value {
-    json!({ "_meta": { "types": ["user", "acp"] } })
-}
-
-/// Parse a `session/list` reply into summaries, plus side tables the core
-/// keeps (cwd for resume resolution, updatedAt for cache freshness).
-pub(crate) fn parse_sessions(result: &Value) -> (Vec<SessionSummary>, Vec<(String, String)>, Vec<(String, String)>) {
-    let mut sessions = Vec::new();
-    let mut cwds = Vec::new();
-    let mut updated_at = Vec::new();
-    if let Some(list) = result.get("sessions").and_then(Value::as_array) {
-        for entry in list {
-            let Some(obj) = entry.as_object() else { continue };
-            let Some(session_id) = obj.get("sessionId").and_then(Value::as_str) else { continue };
-            let title = obj
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            if title.is_empty() && session_id.is_empty() {
-                continue;
-            }
-            if title.starts_with("Scheduled job:") {
-                continue;
-            }
-            let meta = obj.get("_meta").and_then(Value::as_object);
-            // goose's archive only stamps archivedAt; session/list has no
-            // archived filter — surface the flag instead of dropping the
-            // session so UIs can list and restore archived chats (A-1).
-            let archived = meta.map(|m| m.contains_key("archivedAt")).unwrap_or(false);
-            let snippet = meta
-                .and_then(|m| m.get("lastMessageSnippet"))
-                .and_then(Value::as_str)
-                .map(|s| s.to_string());
-            let project_id = meta
-                .and_then(|m| m.get("projectId"))
-                .and_then(Value::as_str)
-                .map(|s| s.to_string());
-            let message_count = meta
-                .and_then(|m| m.get("messageCount"))
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-            let model = meta
-                .and_then(|m| m.get("model"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let has_recipe = meta
-                .and_then(|m| m.get("hasRecipe"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            // Ordering/freshness must track MESSAGE activity, not open/select
-            // touch: goose bumps updatedAt whenever a session is loaded (i.e.
-            // merely clicking it in the sidebar), but only a real message moves
-            // _meta.lastMessageAt. Surface lastMessageAt (falling back to
-            // updatedAt) so selecting a chat never reorders the sidebar; a bare
-            // touch also carries no new content, so it must not invalidate
-            // caches or trip the resync replay.
-            let last_message = meta
-                .and_then(|m| m.get("lastMessageAt"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let updated = if last_message.is_empty() {
-                obj.get("updatedAt")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string()
-            } else {
-                last_message
-            };
-            let cwd = obj
-                .get("cwd")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            sessions.push(SessionSummary {
-                id: session_id.to_string(),
-                title: if title.is_empty() { session_id.to_string() } else { title },
-                updated_at: updated.clone(),
-                last_message_snippet: snippet,
-                project_id,
-                message_count,
-                model,
-                has_recipe,
-                has_new: false,
-                archived,
-            });
-            if !cwd.is_empty() {
-                cwds.push((session_id.to_string(), cwd));
-            }
-            if !updated.is_empty() {
-                updated_at.push((session_id.to_string(), updated));
-            }
-        }
-    }
-    (sessions, cwds, updated_at)
-}
-
-/// Parse a reply's `configOptions` into the flat `ConfigOption` records the
-/// contract exposes (id + current value as a string).
-pub(crate) fn parse_config_options(result: &Value) -> Vec<ConfigOption> {
-    result
-        .get("configOptions")
-        .and_then(Value::as_array)
-        .map(|options| {
-            options
-                .iter()
-                .filter_map(|option| {
-                    let obj = option.as_object()?;
-                    let id = obj.get("id")?.as_str()?.to_string();
-                    let value = match obj.get("currentValue") {
-                        Some(Value::String(s)) => s.clone(),
-                        Some(Value::Bool(b)) => b.to_string(),
-                        Some(Value::Number(n)) => n.to_string(),
-                        _ => String::new(),
-                    };
-                    let name = obj.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-                    // goose sends the selectable values under `options`
-                    // (SessionConfigSelect.options); the desktop parses the
-                    // same key. `choices` is never sent — reading it made every
-                    // dropdown empty (mode pill did nothing).
-                    let choices = obj
-                        .get("options")
-                        .and_then(Value::as_array)
-                        .map(|choices| {
-                            choices
-                                .iter()
-                                .filter_map(|c| {
-                                    let c = c.as_object()?;
-                                    Some(ConfigChoice {
-                                        value: c.get("value")?.as_str()?.to_string(),
-                                        name: c.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
-                                    })
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    Some(ConfigOption { id, value, name, choices })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// The typed `SessionConfigOption`'s current value, flattened to a string.
-pub(crate) fn config_option_value(option: &agent_client_protocol::schema::v1::SessionConfigOption) -> String {
-    match &option.kind {
-        SessionConfigKind::Select(select) => select.current_value.to_string(),
-        SessionConfigKind::Boolean(boolean) => boolean.current_value.to_string(),
-        _ => String::new(),
-    }
-}
-
-/// Canonical text rendering for a content block — the SINGLE shared
-/// translator (RC-3), used by the spine and the roam peer so every surface
-/// renders text/image/audio/resource identically. Text passes through;
-/// non-text blocks become a bracketed marker (desktop `standardUpdate`'s
-/// `text()` lambda).
-pub(crate) fn content_block_text(block: &ContentBlock) -> String {
-    match block {
-        ContentBlock::Text(text) => text.text.clone(),
-        ContentBlock::ResourceLink(_) => "[resource]".to_string(),
-        ContentBlock::Resource(_) => "[resource]".to_string(),
-        ContentBlock::Image(_) => "[image]".to_string(),
-        ContentBlock::Audio(_) => "[audio]".to_string(),
-        _ => "[unknown]".to_string(),
-    }
-}
-
-/// Chunk text with the desktop's content-type mapping: text passes through,
-/// resources are placeholders, anything else is bracketed.
-fn chunk_text(chunk: &ContentChunk) -> String {
-    content_block_text(&chunk.content)
-}
-
-/// Map a wire `ToolCall` to the CONTRACT's `ToolCallKind` plus the tool's
-/// command detail — the SINGLE shared translator for tool rows (RC-3), used
-/// by the spine dispatch and the roam peer so mcp-app/chart calls and the
-/// detail string are identical across surfaces.
-pub(crate) fn tool_call_kind(
-    tc: &agent_client_protocol::schema::v1::ToolCall,
-) -> (ToolCallKind, String) {
-    let raw_input = tc.raw_input.clone().unwrap_or(Value::Null);
-    let detail = raw_input
-        .get("command")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let goose = tc
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.get("goose"))
-        .cloned()
-        .unwrap_or(Value::Null);
-
-    // MCP-App path: the server names a UI resource for this tool's output
-    // (how ALL autovisualiser types work). Until the template is fetched it
-    // is still a plain chip.
-    let mcp_app = goose.get("mcpApp").cloned().unwrap_or(Value::Null);
-    let app_uri = mcp_app
-        .get("resourceUri")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let app_ext = mcp_app
-        .get("extensionName")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-
-    let kind = if !app_uri.is_empty() && !app_ext.is_empty() {
-        let input = compact_json(&raw_input);
-        ToolCallKind::McpApp {
-            app_key: format!("{app_ext}|{app_uri}"),
-            uri: app_uri,
-            extension: app_ext,
-            input,
-        }
-    } else {
-        // Legacy chart fallback only (server too old to send mcpApp meta):
-        // `data` arrives as a JSON object, not a string.
-        let tool_name = goose
-            .pointer("/toolCall/toolName")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let chart_data = raw_input
-            .get("data")
-            .map(|data| match data {
-                Value::Object(_) => compact_json(data),
-                Value::String(s) => s.clone(),
-                _ => String::new(),
-            })
-            .unwrap_or_default();
-        if tool_name == "autovisualiser__show_chart" && !chart_data.is_empty() {
-            ToolCallKind::Chart { spec: chart_data }
-        } else {
-            ToolCallKind::Plain
-        }
-    };
-    (kind, detail)
-}
-
-fn compact_json(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_default()
-}
-
-pub(crate) fn tool_call_status_str(status: &ToolCallStatus) -> &'static str {
-    match status {
-        ToolCallStatus::Pending => "pending",
-        ToolCallStatus::InProgress => "in_progress",
-        ToolCallStatus::Completed => "completed",
-        ToolCallStatus::Failed => "failed",
-        _ => "",
-    }
-}
-
-pub(crate) fn permission_option_kind_str(kind: &PermissionOptionKind) -> &'static str {
-    match kind {
-        PermissionOptionKind::AllowOnce => "allow_once",
-        PermissionOptionKind::AllowAlways => "allow_always",
-        PermissionOptionKind::RejectOnce => "reject_once",
-        PermissionOptionKind::RejectAlways => "reject_always",
-        _ => "",
-    }
+    crate::session::session_list_params()
 }
 
 #[cfg(test)]
@@ -1771,9 +1206,11 @@ mod tests {
     fn initialize_declares_mcp_apps_host_capability() {
         let p = initialize_params();
         assert_eq!(
-            p.pointer("/clientCapabilities/_meta/goose/mcpHostCapabilities/\
-                       extensions/io.modelcontextprotocol~1ui/mimeTypes/0")
-                .and_then(Value::as_str),
+            p.pointer(
+                "/clientCapabilities/_meta/goose/mcpHostCapabilities/\
+                       extensions/io.modelcontextprotocol~1ui/mimeTypes/0"
+            )
+            .and_then(Value::as_str),
             Some("text/html;profile=mcp-app"),
             "lost the MCP-Apps capability declaration — the server will stop \
              attaching _meta.goose.mcpApp to tool calls"
@@ -1803,8 +1240,14 @@ mod tests {
             p.pointer("/_meta/client").and_then(Value::as_str),
             Some("grouse-desktop")
         );
-        assert_eq!(p.pointer("/_meta/recipeId").and_then(Value::as_str), Some("r-1"));
-        assert_eq!(p.pointer("/_meta/projectId").and_then(Value::as_str), Some("proj-9"));
+        assert_eq!(
+            p.pointer("/_meta/recipeId").and_then(Value::as_str),
+            Some("r-1")
+        );
+        assert_eq!(
+            p.pointer("/_meta/projectId").and_then(Value::as_str),
+            Some("proj-9")
+        );
 
         // Absent/empty ids are omitted, never emitted as `""`.
         let p = session_new_params(&cfg, None, Some(""));

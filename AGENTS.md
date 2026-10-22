@@ -42,10 +42,15 @@ transport:
 - **`grouse-core`** — the stable ACP surface on the official
   `agent-client-protocol` SDK: initialize handshake, session lifecycle,
   prompt/streaming, tools, permissions, config, and the standard `session/update`
-  tags. Owns the WebSocket transport (`transport.rs`: custom `ConnectTo` sending
-  the `X-Secret-Key` header; WebPKI-verifying TLS with an `accept_invalid_certs`
-  opt-out). It also carries the hand-written C ABI (`capi.rs`) and the
-  client-shared policy modules (`notify.rs`, `speak.rs`, `summarize.rs`).
+  tags. `session.rs` is the single session layer shared by both transports —
+  ACP parameter builders, wire→item translators, the `PaintPlan` cache policy,
+  the `SessionHub` store + display gate, the `session/update` dispatch, and the
+  one `ChatEndpoint` transmit surface. The transports own only their wire:
+  `transport.rs` + `spine.rs` for the WebSocket (`ConnectTo` sending the
+  `X-Secret-Key` header; WebPKI-verifying TLS with an `accept_invalid_certs`
+  opt-out) and `roam.rs` for iroh peers. It also carries the hand-written C ABI
+  (`capi.rs`) and the client-shared policy modules (`notify.rs`, `speak.rs`,
+  `summarize.rs`).
 - **`grouse-roam-core`** — the roam transport: iroh peer dialing, device identity,
   connection cards, and the authenticated byte duplex ACP is framed over. An rlib
   dependency of `grouse-core` (the roam uniffi package is exported from
@@ -113,11 +118,21 @@ one-line labels for a run of tool calls), `capi.rs` (the C ABI above).
 - **Intents** never return the result of network work; they change a state machine
   or queue a request. Outcomes arrive as events.
 - **Session lifecycle** is owned by the core: `ready` ⇔ an open session id exists;
-  `send_prompt`/`set_config_option`/tool queries queue until `ready`, then flush
-  in order. Reconnect uses exponential backoff (500ms·2ⁿ, cap 15s, 6 attempts,
-  reset on Ready; none on explicit `disconnect`). Remote-change resync debounces
-  `session_info_update` (1.5s) → probes `_goose/unstable/session/info` → in-place
-  `session/load` replay → re-probes at 8s ×3.
+  `send_prompt`/`set_config_option`/tool queries queue per session until the
+  owner of the displayed id can accept them, then flush in order
+  (`Core::owner_for` → `ChatEndpoint`). Reconnect uses exponential backoff
+  (500ms·2ⁿ, cap 15s, 6 attempts, reset on Ready; none on explicit `disconnect`);
+  a roam peer re-dials on the same curve with its own budget. Remote-change
+  resync debounces `session_info_update` (1.5s) → probes
+  `_goose/unstable/session/info` on the session's owner → in-place
+  `session/load` replay → re-probes at 8s ×3, for main and peer sessions alike.
+- **One session pipeline, two transports.** `core/grouse-core/src/session.rs`
+  owns the ACP params, wire payload translation, cache paint policy, one
+  `TranscriptStore` per display session id (`SessionHub`), and the single
+  `session/update` dispatch. `spine::Conn` and `roam::RoamPeer` contribute only
+  dial/framing, reconnect policy, browse-mode session list, and id namespace
+  (`roam:`); a background session accumulates silently (green dot) until it is
+  displayed.
 - **The transcript crosses the boundary as rich items**, never as a republished
   list: `on_item` carries `Upsert`/`AppendText`/`AppendOutput`/`Remove`/`Reset`/
   `Window` ops keyed by item id, the core windows what it paints (newest ~60) and
@@ -170,7 +185,12 @@ keep them when extending the core.
   over an iroh connection between two peers instead of a WebSocket to a host.
   **Roam peers are parallel connections, not replacements** for the main
   connection. Sessions bound to a peer use the `roam:<peer>:<id>` id prefix for
-  sidebar grouping; session-bound unstable RPCs route to the owning peer.
+  sidebar grouping; session-bound unstable RPCs route to the owning peer. A peer
+  runs the SAME `session.rs` pipeline (params, dispatch, store, cache policy,
+  `ChatEndpoint`) and the same SDK handler table, so turn-end custom
+  notifications (`status_message`, `message_usage`) and recipe/elicitation
+  requests behave identically there; only dial/framing, the reconnect budget,
+  the browse-mode list and the id namespace are peer-specific.
 - **camelCase vs snake_case**: `recipes/*` and `schedules/*` params are snake_case
   (`cron_schedule`, `file_path`); nearly everything else is camelCase. **A
   misspelled param is silently dropped, not rejected.**
@@ -211,7 +231,7 @@ keep them when extending the core.
 |Path|Purpose|
 |---|---|
 |`core/`|Rust workspace (`core/Cargo.toml` is the workspace root — the repo root has no Cargo.toml). The three crates above. `core/CONTRACT.md` = the uniffi interface spec; `core/grouse-core/INTERNAL.md` = pinned internal module seams + threading model.|
-|`core/grouse-core/src/`|`lib.rs` (uniffi surface + Core/GrouseUnstable objects), `capi.rs` (the `grouse_*` C ABI for the desktop), `transport.rs` (WsTransport), `spine.rs` (live connection + handshake + notification dispatch), `transcript.rs` (TranscriptStore: chunks → items, the 60-item window), `cache.rs` (CacheStore: per-session transcript + tools), `unstable.rs` (the `_goose/unstable/*` shim), `roam.rs` (peer registry), `notify.rs` (push policy), `speak.rs` (TTS chunking), `summarize.rs` (tool-run labels). Bindings staged in `bindings/kotlin/`.|
+|`core/grouse-core/src/`|`lib.rs` (uniffi surface + Core/GrouseUnstable objects), `capi.rs` (the `grouse_*` C ABI for the desktop), `transport.rs` (WsTransport), `session.rs` (the single session layer: ACP params, wire→item translation, `PaintPlan`, `SessionHub` + display gate, `DispatchHost`/`dispatch`, `ChatEndpoint`, `connect_client`), `spine.rs` (main connection: dial + handshake + reconnect + server requests), `transcript.rs` (TranscriptStore: chunks → items, the 60-item window), `cache.rs` (CacheStore: per-session transcript + tools), `unstable.rs` (the `_goose/unstable/*` shim), `roam.rs` (peer registry: iroh transport, supervisor, id namespace), `notify.rs` (push policy), `speak.rs` (TTS chunking), `summarize.rs` (tool-run labels). Bindings staged in `bindings/kotlin/`.|
 |`core/grouse-roam-core/src/`|iroh transport (`lib.rs`), C ABI (`capi.rs`, `grc_*` symbols). An rlib dependency of `grouse-core` — no separate `.so` ships.|
 |`clients/desktop/`|Qt6/KF6 Kirigami thin client: QML + `corebridge` (dlopen of `libgrouse_core.so`, the only wire path), plus the host-side KRunner plugin (its own `AGENTS.md` is the C++-side contract).|
 |`clients/android/`|Kotlin/Compose client (app) + `grouse-core-aar` module carrying the uniffi bindings and native `.so`s.|
@@ -359,15 +379,20 @@ change before tagging.
   table.
 - **Error handling**: FFI-facing errors are `#[derive(Debug, uniffi::Error)]`
   enums (e.g. `RoamError::Message(String)`). `thiserror`/`anyhow` appear only
-  transitively; the crates hand-write boundary errors. `Conn::rpc(...) ->
-  Result<Value, AcpError>` is the ONLY seam slices use to talk to the server
-  (`INTERNAL.md` §pinned seams).
-- **Module invariants**: `transcript.rs`, `cache.rs`, `notify.rs`, `speak.rs` and
-  `summarize.rs` do NO network (and no OS access). The `TranscriptStore` owns
-  bubble shaping: chunks append into a bubble keyed by `(role, message_id)`; live
-  output appends, the completion update replaces; replay chunks are gated by
-  message id; consecutive tool calls collapse into a group. `CacheStore` is dumb
-  I/O keyed by session id — freshness (via `updatedAt`) is the caller's job.
+  transitively; the crates hand-write boundary errors. Main-wire slices use
+  `Conn::rpc(...) -> Result<Value, AcpError>`; anything that must work on either
+  transport goes through a `session::ChatEndpoint` (or `session::request`, which
+  applies the shared timeout policy), never a transport directly (`INTERNAL.md`
+  §pinned seams).
+- **Module invariants**: `transcript.rs`, `cache.rs`, `notify.rs`, `speak.rs`,
+  `summarize.rs` and `session.rs` do NO network of their own (and no OS access);
+  `session.rs` reaches a server only through a `ChatEndpoint`. The
+  `TranscriptStore` owns bubble shaping: chunks append into a bubble keyed by
+  `(role, message_id)`; live output appends, the completion update replaces;
+  replay chunks are gated by message id; consecutive tool calls collapse into a
+  group. `CacheStore` is dumb I/O keyed by display session id — freshness (via
+  `updatedAt`) is the caller's job (`session::plan_paint` / `Core::save_cache_for`).
+  Protocol changes land in `session.rs` once, never once per transport.
 - **The C ABI (`capi.rs`) is a second, hand-written face of the same core**: every
   symbol is `#[no_mangle] extern "C"`, `catch_unwind`-wrapped, and passes records
   as JSON C-strings that the consumer must copy inside the callback. A new intent
@@ -404,10 +429,11 @@ change before tagging.
 ### Cross-cutting
 
 - **Shared behavior lands in the core, once.** A wire/protocol change is made in
-  `grouse-core`, reflected in `core/CONTRACT.md`, and reaches the UIs through the
-  bindings — uniffi for Android (and macOS later) and the C ABI (`capi.rs` ↔
-  `clients/desktop/src/corebridge.cpp`) for the desktop. The desktop holds no
-  protocol logic to mirror.
+  `grouse-core` — for session/ACP semantics specifically, in `session.rs`, the
+  one place both transports share — reflected in `core/CONTRACT.md`, and reaches
+  the UIs through the bindings — uniffi for Android (and macOS later) and the C
+  ABI (`capi.rs` ↔ `clients/desktop/src/corebridge.cpp`) for the desktop. The
+  desktop holds no protocol logic to mirror.
 - Never hardcode a machine-specific path into a shared file.
 
 ## Important Files
@@ -417,7 +443,8 @@ change before tagging.
 |`core/CONTRACT.md`|The uniffi interface spec — the API boundary. Read before touching the core's public surface.|
 |`core/grouse-core/INTERNAL.md`|Pinned internal module seams, threading model, event fan-out rules.|
 |`core/grouse-core/src/lib.rs`|uniffi surface: records/enums, `Core` + `GrouseUnstable` objects, listener fan-out, status machine, reconnect + resync orchestration.|
-|`core/grouse-core/src/{spine,transport,transcript,cache,unstable,roam,notify,speak,summarize}.rs`|The live connection / WebSocket transport / transcript store / cache store / shim / peer registry / push policy / TTS chunking / tool-run labels.|
+|`core/grouse-core/src/session.rs`|The single session layer both transports share: ACP parameter builders, timeouts, wire→item translators, `PaintPlan` cache policy, `SessionHub` + `SessionGate`, `DispatchHost`/`PrefixHost`/`dispatch`, `ChatEndpoint`, and the SDK client builder (`ClientHandlers`/`connect_client`). A protocol change lands here once.|
+|`core/grouse-core/src/{spine,transport,transcript,cache,unstable,roam,notify,speak,summarize}.rs`|Main WebSocket connection (dial, handshake, reconnect, server requests) / WebSocket transport / transcript store / cache store / shim / peer registry (iroh dial, supervisor, `roam:` namespace) / push policy / TTS chunking / tool-run labels.|
 |`core/grouse-core/src/capi.rs`|The `grouse_*` C ABI the desktop dlopens — the same core surface as uniffi, hand-written. Add a symbol here and to `corebridge.cpp` together.|
 |`clients/desktop/src/corebridge.{h,cpp}`|The desktop's only wire path: resolve `grouse_*`, install `GrouseCoreListener`, marshal events onto the Qt main thread.|
 |`core/grouse-roam-core/src/capi.rs`|C ABI for the roam transport (`grc_*` symbols) — the convention `capi.rs` above follows. No in-tree consumer today.|

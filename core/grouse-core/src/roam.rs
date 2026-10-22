@@ -20,17 +20,13 @@
 //! tokio's blocking pool; [`RoamPeer::close`] unblocks a parked reader via
 //! `RoamStream::cancel()`.
 //!
-//! Session notifications are dispatched the same way the spine dispatches
-//! them (`SessionNotification` → `CoreListener` events). The peer forwards
-//! chat-scoped events (`on_stream`, `on_transcript`, `on_session_touched`,
-//! `on_permission_request`) only while it owns the active session — the
-//! `is_active` gate supplied by the spine — and always emits the peer-scoped
-//! events `on_roam_peer_status` / `on_roam_sessions` (manager.cpp
-//! `wireClient`'s `active()` gate, ported).
+//! Session notifications go through the SAME `session::dispatch` as the spine
+//! (`SessionNotification` → one `SessionHub` store per display id). Painting is
+//! gated by the hub's displayed key, never by the peer; the peer itself only
+//! emits the peer-scoped `on_roam_peer_status` / `on_roam_sessions`.
 //!
-//! Peer transcripts are peer-owned (a `Vec<Message>` here) and are never
-//! cached: the cache is keyed by session id, which could collide across
-//! machines, so the desktop replays peer sessions every time.
+//! Peer transcripts live in the shared hub under `roam:<label>:<raw>` (also
+//! their cache key), saved by the core's one freshness rule.
 //!
 //! Like the main connection, a peer whose link drops unexpectedly re-dials
 //! itself: the [`RoamPeer::connect`] task is a supervisor that retries with
@@ -38,38 +34,29 @@
 //! resumes the session that was open. Only an explicit [`RoamPeer::close`]
 //! (or [`Core::roam_disconnect`]) ends a peer for good.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, LazyLock, mpsc as std_mpsc};
+use std::collections::HashMap;
+use std::sync::{mpsc as std_mpsc, Arc, LazyLock};
 
 use parking_lot::Mutex;
 
 use agent_client_protocol::schema::v1::{
-    ClientCapabilities, ElicitationCapabilities, ElicitationFormCapabilities,
-    FileSystemCapabilities, Implementation, InitializeRequest, ListSessionsRequest,
-    ListSessionsResponse, PermissionOptionId,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionInfo, SessionNotification, SessionUpdate,
+    ListSessionsRequest, ListSessionsResponse, RequestPermissionRequest, RequestPermissionResponse,
+    SessionNotification, SessionUpdate,
 };
-use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{
-    Agent, Channel, Client, ConnectTo, Error as AcpError, Responder, TransportFrame,
-    UntypedMessage, on_receive_notification, on_receive_request,
+    Agent, Channel, Client, ConnectTo, Error as AcpError, Responder, TransportFrame, UntypedMessage,
 };
 use futures::future::{select, BoxFuture};
-use futures::stream::StreamExt;
 use futures::pin_mut;
+use futures::stream::StreamExt;
 use grouse_roam_core::RoamStream;
-use serde_json::{Map, Value, json};
-use std::time::{SystemTime, UNIX_EPOCH};
+use serde_json::Value;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::spine::RpcConn;
-use crate::{
-    ConfigOption, ConnectionStatus, CoreListener, Item, ItemKind, Message, PermissionOutcome,
-    SessionSummary, ToolCallKind, TranscriptOp,
-};
 use crate::cache::CacheStore;
+use crate::spine::{PendingRequest, RpcConn};
+use crate::{ConnectionStatus, CoreListener, PermissionOutcome, SessionSummary};
 
 // ---------------------------------------------------------------------------
 // Core runtime (shared with the spine)
@@ -97,7 +84,7 @@ pub(crate) fn runtime() -> &'static Runtime {
 /// is tolerated (`BufReader::lines` strips `\r`). Mirrors the desktop's
 /// `RoamFrameCodec` and the Android client's codec of the same name.
 #[derive(Debug, Default)]
-pub struct RoamCodec {
+pub(crate) struct RoamCodec {
     buf: Vec<u8>,
 }
 
@@ -124,9 +111,8 @@ impl RoamCodec {
         for &byte in chunk {
             match byte {
                 b'\n' => {
-                    frames.push(
-                        String::from_utf8_lossy(&std::mem::take(&mut self.buf)).into_owned(),
-                    );
+                    frames
+                        .push(String::from_utf8_lossy(&std::mem::take(&mut self.buf)).into_owned());
                 }
                 b'\r' => {} // CRLF tolerance (BufReader::lines strips \r)
                 _ => {
@@ -157,7 +143,7 @@ impl RoamCodec {
 /// byte stream"). The stream is pre-dialed and authorized by the caller — this
 /// transport only pumps newline-framed ACP frames both ways, feeding the SDK
 /// [`Channel`] exactly like `WsTransport::drive_ws` does for the WebSocket.
-pub struct RoamTransport {
+pub(crate) struct RoamTransport {
     stream: Arc<RoamStream>,
 }
 
@@ -275,8 +261,14 @@ impl ConnectTo<Client> for RoamTransport {
 /// Commands the spine's intents enqueue for the peer's connection task.
 #[derive(Debug)]
 enum PeerCommand {
-    OpenSession { session_id: String, cwd: String },
-    NewSession { cwd: String },
+    OpenSession {
+        session_id: String,
+        cwd: String,
+        force: bool,
+    },
+    NewSession {
+        cwd: String,
+    },
     Relist,
     Close,
 }
@@ -294,10 +286,7 @@ enum Outcome {
 /// desktop's `m_roamPeers` entry). The peer's client stays connected in
 /// browse mode — after `initialize` only `session/list` runs; sessions open
 /// explicitly via [`RoamPeer::open_session`].
-pub struct RoamPeer {
-    /// Where a peer's session config goes: the CORE's merge, not the UI listener. See
-    /// [`RoamPeer::emit_config`].
-    config_sink: Arc<dyn Fn(Vec<ConfigOption>) + Send + Sync>,
+pub(crate) struct RoamPeer {
     /// Stable peer name; the routing key and the `roam:<label>:` id prefix.
     label: String,
     inner: Mutex<PeerInner>,
@@ -311,9 +300,10 @@ pub struct RoamPeer {
     /// never lost).
     cmd_rx: Arc<tokio::sync::Mutex<tokio_mpsc::UnboundedReceiver<PeerCommand>>>,
     listener: Arc<dyn CoreListener>,
-    /// Gate supplied by the spine: true while this peer owns the active
-    /// session. Chat-scoped events forward only under this gate.
-    is_active: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// The one dispatch pipeline, prefixed with this peer's label.
+    host: Arc<dyn crate::session::DispatchHost>,
+    /// Every session's store, shared with the main connection.
+    hub: Arc<crate::session::SessionHub>,
     /// Shared transcript cache. Peer transcripts are cached under their
     /// prefixed id (`roam:<label>:<raw>`) — collision-free across machines —
     /// so opening a seen chat paints instantly instead of re-replaying the
@@ -339,22 +329,15 @@ struct PeerInner {
     /// reconnect). Consumed by `handshake_and_serve`.
     resume_pending: Option<String>,
     /// The live turn's run id (`_meta.goose.activeRunId`); None when no turn
-    /// is running. Mirrors the spine's active_run_id.
+    /// is running. Mirror of the core's per-session run map, kept here only so
+    /// a dropped link can clear it.
     active_run: Option<String>,
-    /// True while a `session/load` (or reconnect) replay is streaming its
-    /// history back. Dedupe is scoped to this: re-delivered staged content must
-    /// not double, but LIVE chunks must always append (they never dedupe — that
-    /// would swallow legitimately repeated streamed text, the way serve only
-    /// pushes text with no containment guard). Cleared when the first live turn
-    /// of the session starts.
-    replaying: bool,
     /// The SDK connection handle, set once `initialize` succeeds.
     conn: Option<agent_client_protocol::ConnectionTo<Agent>>,
-    /// Peer-owned rich transcript of the open session (docs/TRANSCRIPT_MODEL.md).
-    store: PeerStore,
-    /// In-flight `session/request_permission` responder, answered via
-    /// [`RoamPeer::respond_permission`] (single slot, like the desktop).
-    pending_permission: Option<Responder<RequestPermissionResponse>>,
+    /// In-flight `session/request_permission` responders, keyed by tool call
+    /// id so parallel calls can each be answered (the spine's map, not the old
+    /// single slot that dropped the first responder).
+    pending_permission: HashMap<String, Responder<RequestPermissionResponse>>,
     /// The dialed stream; `None` until the blocking dial completes.
     stream: Option<Arc<RoamStream>>,
     /// Set by [`RoamPeer::close`] so a teardown that races the dial or a
@@ -367,407 +350,6 @@ struct PeerInner {
     /// connection's short cold-start budget. Reset at the top of each
     /// attempt.
     ever_ready: bool,
-    /// Backgrounded content for sessions that are NOT currently open, keyed by
-    /// raw session id (dispatch routes by `notif.session_id`). Chunks keep
-    /// accumulating here while the user sits in another chat; opening the
-    /// session promotes them (no flash) and clears its green dot.
-    staging: HashMap<String, StagedSession>,
-}
-
-/// One backgrounded session's staged transcript + dot state. A full rich store,
-/// so staged charts/apps survive promotion and the live-stream cursor is kept
-/// across chunks (a plain `Vec` would restart the bubble every chunk).
-#[derive(Default)]
-struct StagedSession {
-    store: PeerStore,
-    has_new: bool,
-}
-
-/// A store mutation: the item op for the live stream. `None` means the mutation
-/// was consumed (a replayed row already on screen) or the row is outside the
-/// client's window, so nothing is emitted.
-#[derive(Default)]
-struct Mutation {
-    item: Option<TranscriptOp>,
-}
-
-impl Mutation {
-    fn none() -> Self {
-        Self::default()
-    }
-    fn item(op: TranscriptOp) -> Self {
-        Self { item: Some(op) }
-    }
-}
-
-/// The flat `Message` role a kind maps back to (the inverse of
-/// [`kind_for_role`]).
-fn role_for_kind(kind: ItemKind) -> String {
-    match kind {
-        ItemKind::User => "user",
-        ItemKind::Agent => "agent",
-        ItemKind::Thought => "thought",
-        ItemKind::Error => "error",
-        ItemKind::Tool | ItemKind::Chart | ItemKind::McpApp | ItemKind::ToolGroup => "tool",
-    }
-    .to_string()
-}
-
-/// A flat `Message` for a text item (the legacy projection).
-fn text_message(item: &Item) -> Message {
-    Message {
-        id: item.id.clone(),
-        role: role_for_kind(item.kind),
-        content: item.text.clone(),
-        output: item.output.clone(),
-    }
-}
-
-/// The peer's rich transcript store (docs/TRANSCRIPT_MODEL.md roam parity).
-///
-/// Same item semantics as the main `TranscriptStore`, but with the peer's own
-/// replay dedupe (a `session/load` re-delivers staged content) and no toolgroup
-/// collapsing — the clients group consecutive tool rows themselves.
-#[derive(Default)]
-struct PeerStore {
-    items: Vec<Item>,
-    /// tool_call_id -> index, for O(1) updates.
-    tool_idx: HashMap<String, usize>,
-    /// The live text bubble currently accumulating: (index, role, item id).
-    stream: Option<(usize, String, String)>,
-    /// The SERVER's identity for a text item: message id -> index.
-    ///
-    /// The one thing that makes a replay safe without comparing strings: goose
-    /// stamps every chunk with its message id — live and replayed alike
-    /// (`content_chunk_for_message`) — so the same message is always the same
-    /// row. It also holds the adoption of a locally echoed prompt (see
-    /// `pending_echo`), which has no server id until the server names it.
-    msg_idx: HashMap<String, usize>,
-    /// Message ids the replay in progress has already rewritten. The first
-    /// replayed chunk of an id starts that row over; the rest append.
-    rewritten: HashSet<String>,
-    /// Prompts echoed locally that the server has not named YET, oldest first.
-    /// A queue, not a map: the server names them in order, and only an exact
-    /// text match adopts one.
-    pending_echo: VecDeque<(String, usize)>,
-    next_uid: u64,
-    /// Oldest item the client holds (the window origin).
-    emitted_from: usize,
-}
-
-impl PeerStore {
-    /// A store seeded from items (a cache/staging promotion).
-    fn from_items(items: Vec<Item>) -> Self {
-        let mut store = Self { items, ..Self::default() };
-        // Carry the uid counter past anything the cache already holds: these
-        // ids are the client's row keys, and restarting the count handed a new
-        // row an id an old row still owned (so a fresh chunk overwrote an
-        // unrelated earlier message).
-        store.next_uid = store
-            .items
-            .iter()
-            .filter_map(|i| i.id.strip_prefix("roam-item-"))
-            .filter_map(|n| n.parse::<u64>().ok())
-            .max()
-            .unwrap_or(0);
-        store.cap();
-        store.reindex();
-        // A cached user row with a local id is a prompt we echoed, i.e. one the
-        // server may not have named yet. Queue them so a replay that DOES name
-        // them adopts these rows instead of appending a second copy — this is
-        // what keeps a tail replay after a restart from duplicating the question.
-        store.pending_echo = store
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, i)| i.kind == ItemKind::User && i.id.starts_with("roam-item-"))
-            .map(|(idx, i)| (i.text.clone(), idx))
-            .collect();
-        store
-    }
-
-    fn replace(&mut self, items: Vec<Item>) {
-        self.items = items;
-        self.stream = None;
-        self.emitted_from = 0;
-        self.cap();
-        self.reindex();
-    }
-
-    fn reindex(&mut self) {
-        self.tool_idx.clear();
-        // Text identity is by item id; a locally echoed prompt also answers to
-        // the server's id once one arrived, so keep those aliases.
-        let aliases = std::mem::take(&mut self.msg_idx);
-        for (i, it) in self.items.iter().enumerate() {
-            match it.kind {
-                ItemKind::User | ItemKind::Agent | ItemKind::Thought | ItemKind::Error => {
-                    self.msg_idx.insert(it.id.clone(), i);
-                }
-                _ => {}
-            }
-            match it.kind {
-                ItemKind::Tool | ItemKind::Chart | ItemKind::McpApp => {
-                    self.tool_idx.insert(it.id.clone(), i);
-                }
-                ItemKind::ToolGroup => {
-                    for c in &it.calls {
-                        self.tool_idx.insert(c.id.clone(), i);
-                    }
-                }
-                _ => {}
-            }
-        }
-        for (id, idx) in aliases {
-            if idx < self.items.len() {
-                self.msg_idx.insert(id, idx);
-            }
-        }
-    }
-
-    /// Evict the oldest items past the cap (bulk, to a watermark) so a
-    /// pathological peer session cannot grow memory without bound.
-    fn cap(&mut self) {
-        const MAX: usize = 2000;
-        if self.items.len() <= MAX {
-            return;
-        }
-        let keep = MAX - MAX / 4;
-        let drop = self.items.len() - keep;
-        self.items.drain(0..drop);
-        self.emitted_from = self.emitted_from.saturating_sub(drop);
-        self.stream = None;
-        self.pending_echo = self
-            .pending_echo
-            .drain(..)
-            .filter_map(|(text, idx)| idx.checked_sub(drop).map(|i| (text, i)))
-            .collect();
-        self.reindex();
-    }
-
-    fn messages(&self) -> Vec<Message> {
-        self.items.iter().map(text_message).collect()
-    }
-
-    /// A mutation for the item at `idx`: the item op is emitted only when the row
-    /// is inside the client's window. A replay can touch rows older than the
-    /// paint (the peer asks for a 100-message tail but paints 60); emitting their
-    /// Upserts would append them at the client's end. The legacy event still
-    /// flows, and `load_older` re-reads the store so the update is not lost.
-    fn at(&self, idx: usize, item: TranscriptOp) -> Mutation {
-        if idx >= self.emitted_from {
-            Mutation::item(item)
-        } else {
-            Mutation::none()
-        }
-    }
-
-    /// Append a text chunk (the peer's `accumulate`). `message_id` empty means
-    /// a live stream bubble; `replaying` enables the replay dedupe.
-    fn accumulate_text(
-        &mut self,
-        role: &str,
-        text: &str,
-        message_id: &str,
-        replaying: bool,
-    ) -> Mutation {
-        let kind = kind_for_role(role);
-        if !message_id.is_empty() {
-            // The server's own identity for this message. It is the same id on
-            // the live stream and on every replay of it, so the row is FOUND —
-            // there is nothing to compare text against.
-            if let Some(idx) = self.msg_idx.get(message_id).copied() {
-                if replaying {
-                    // A replay is authoritative for the messages it re-delivers:
-                    // its first chunk starts that row over, the rest append. That
-                    // is what makes a replay idempotent — appending it onto what
-                    // is already there doubled the text; skipping by text match
-                    // swallowed legitimate repeated words.
-                    let first = self.rewritten.insert(message_id.to_string());
-                    let it = &mut self.items[idx];
-                    if first {
-                        it.text = text.to_string();
-                    } else {
-                        it.text.push_str(text);
-                    }
-                } else {
-                    self.items[idx].text.push_str(text);
-                }
-                let item = self.items[idx].clone();
-                self.stream = Some((idx, role.to_string(), message_id.to_string()));
-                return self.at(idx, TranscriptOp::Upsert { item });
-            }
-            // A prompt we echoed locally, now named by the server: adopt that row
-            // instead of appending a second copy of the same question. Only the
-            // oldest pending echo is a candidate, and only on an exact match —
-            // the server names prompts in the order it received them.
-            if role == "user" {
-                if let Some((_, idx)) = self.pending_echo.pop_front() {
-                    if idx < self.items.len() && self.items[idx].text == text {
-                        self.msg_idx.insert(message_id.to_string(), idx);
-                        self.stream = Some((idx, role.to_string(), message_id.to_string()));
-                        return self.at(idx, TranscriptOp::Upsert { item: self.items[idx].clone() });
-                    }
-                }
-            }
-            // No item for this id yet: a fresh bubble.
-            let item = Item {
-                id: message_id.to_string(),
-                kind,
-                text: text.to_string(),
-                ..empty_item()
-            };
-            self.items.push(item.clone());
-            let idx = self.items.len() - 1;
-            self.msg_idx.insert(message_id.to_string(), idx);
-            // Created BY this replay: it is already the replay's content, so its
-            // remaining chunks append (without this the second chunk truncated
-            // the first, and a three-chunk message lost its opening).
-            if replaying {
-                self.rewritten.insert(message_id.to_string());
-            }
-            self.stream = Some((idx, role.to_string(), message_id.to_string()));
-            self.cap();
-            let idx = idx.min(self.items.len().saturating_sub(1));
-            return self.at(idx, TranscriptOp::Upsert { item });
-        }
-        // No server id: the live stream. Append to the open bubble of this role
-        // if there is one (the peer's "last empty-id bubble" rule).
-        if let Some((idx, srole, sid)) = self.stream.clone() {
-            if srole == role && idx < self.items.len() && self.items[idx].id == sid {
-                let it = &mut self.items[idx];
-                // Fallback only: a server that stamps message ids never reaches
-                // this branch, and without ids there is no honest way to tell a
-                // repeated word from a re-delivery — so this appends, plainly.
-                it.text.push_str(text);
-                let id = it.id.clone();
-                return self.at(
-                    idx,
-                    TranscriptOp::AppendText { id, chunk: text.to_string() },
-                );
-            }
-        }
-        self.next_uid += 1;
-        let id = format!("roam-item-{}", self.next_uid);
-        self.items.push(Item {
-            id: id.clone(),
-            kind,
-            text: text.to_string(),
-            ..empty_item()
-        });
-        self.msg_idx.insert(id.clone(), self.items.len() - 1);
-        self.stream = Some((self.items.len() - 1, role.to_string(), id));
-        self.cap();
-        let idx = self.items.len() - 1;
-        let item = self.items[idx].clone();
-        self.at(idx, TranscriptOp::Upsert { item })
-    }
-
-    /// Echo a prompt we sent: ALWAYS a new row.
-    ///
-    /// Not `accumulate_text`'s no-id path: that appends to the open bubble of the
-    /// same role, which would fuse two prompts sent back to back into one. A
-    /// prompt is a turn boundary, so it also closes the live text bubble — that
-    /// is what makes the reply that follows its own row instead of continuing
-    /// the previous turn's paragraph.
-    fn echo_prompt(&mut self, text: &str, _replaying: bool) -> Mutation {
-        self.next_uid += 1;
-        let id = format!("roam-item-{}", self.next_uid);
-        self.stream = None;
-        self.items.push(Item {
-            id: id.clone(),
-            kind: ItemKind::User,
-            text: text.to_string(),
-            ..empty_item()
-        });
-        let idx = self.items.len() - 1;
-        self.msg_idx.insert(id, idx);
-        // The server has no id for this row yet. When it names the prompt, that
-        // chunk adopts this row (see `accumulate_text`).
-        self.pending_echo.push_back((text.to_string(), idx));
-        self.cap();
-        let idx = idx.min(self.items.len().saturating_sub(1));
-        self.at(idx, TranscriptOp::Upsert { item: self.items[idx].clone() })
-    }
-
-    /// Create or replace a tool row (the peer's `accumulate_tool`). The kind is
-    /// preserved, so a chart/app survives the cache and staging.
-    fn tool_call(&mut self, id: &str, title: &str, detail: &str, kind: &ToolCallKind) -> Mutation {
-        let item = item_for_tool(kind, title, detail, id, "", "in_progress");
-        match self.tool_idx.get(id).copied() {
-            Some(idx) => self.items[idx] = item.clone(),
-            None => {
-                self.items.push(item.clone());
-                self.tool_idx.insert(id.to_string(), self.items.len() - 1);
-            }
-        }
-        // A tool call closes the text stream (the next chunk opens a bubble).
-        self.stream = None;
-        self.cap();
-        let idx = self.tool_idx.get(id).copied().unwrap_or(0);
-        self.at(idx, TranscriptOp::Upsert { item })
-    }
-
-    /// A tool lifecycle update (the peer's `accumulate_tool[_append]`). The
-    /// TITLE never changes (the client renders the title from the call); only
-    /// status and output do.
-    fn tool_update(&mut self, id: &str, status: &str, output: &str, live: bool) -> Mutation {
-        let Some(&idx) = self.tool_idx.get(id) else {
-            return Mutation::none();
-        };
-        let item = {
-            let it = &mut self.items[idx];
-            it.status = status.to_string();
-            // Chart/app rows take status only (desktop parity).
-            if matches!(it.kind, ItemKind::Tool | ItemKind::McpApp) && !output.is_empty() {
-                if live {
-                    it.output.push_str(output);
-                } else {
-                    it.output = output.to_string();
-                }
-            }
-            it.clone()
-        };
-        let op = if live && !output.is_empty() && matches!(item.kind, ItemKind::Tool) {
-            TranscriptOp::AppendOutput { id: id.to_string(), chunk: output.to_string() }
-        } else {
-            TranscriptOp::Upsert { item }
-        };
-        self.at(idx, op)
-    }
-
-    /// The paint ops for a session switch / cache paint: Reset, the newest
-    /// window of items, and the cursor.
-    fn paint(&mut self, session_id: &str) -> Vec<TranscriptOp> {
-        self.stream = None;
-        self.emitted_from = self
-            .items
-            .len()
-            .saturating_sub(crate::transcript::CLIENT_WINDOW);
-        let has_older = self.emitted_from > 0;
-        let window: Vec<Item> = self.items[self.emitted_from..].to_vec();
-        let oldest = window.first().map(|i| i.id.clone()).unwrap_or_default();
-        let mut ops = Vec::with_capacity(window.len() + 2);
-        ops.push(TranscriptOp::Reset { session_id: session_id.to_string() });
-        for item in window {
-            ops.push(TranscriptOp::Upsert { item });
-        }
-        ops.push(TranscriptOp::Window { oldest_id: oldest, has_older });
-        ops
-    }
-
-    /// Walk the window back by `count` items (the peer's `load_older`).
-    fn load_older(&mut self, count: usize) -> Vec<TranscriptOp> {
-        let from = self.emitted_from.saturating_sub(count);
-        let batch: Vec<Item> = self.items[from..self.emitted_from].to_vec();
-        self.emitted_from = from;
-        let has_older = from > 0;
-        let oldest = self.items.get(from).map(|i| i.id.clone()).unwrap_or_default();
-        let mut ops: Vec<TranscriptOp> =
-            batch.into_iter().map(|item| TranscriptOp::Upsert { item }).collect();
-        ops.push(TranscriptOp::Window { oldest_id: oldest, has_older });
-        ops
-    }
 }
 
 impl PeerInner {
@@ -780,22 +362,15 @@ impl PeerInner {
             session_cwds: HashMap::new(),
             active_run: None,
             conn: None,
-            store: PeerStore::default(),
-            replaying: false,
-            pending_permission: None,
+            pending_permission: HashMap::new(),
             stream: None,
             closing: false,
             ever_ready: false,
-            staging: HashMap::new(),
         }
     }
 }
 
 impl RoamPeer {
-    /// Hard ceiling on a single post-handshake RPC (S-RC-6). A hung remote
-    /// goose must not pin a UI/intent thread forever blocking on a reply.
-    const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
     /// Re-dial budget: the main connection's shape (500ms·2^n, 15s cap — see
     /// [`crate::Core`]'s `schedule_reconnect`), but where main gives up after
     /// 6 tries, a peer keeps trying far longer. A roam host is a laptop that
@@ -807,21 +382,21 @@ impl RoamPeer {
 
     /// Connect to a roam peer in browse mode, supervised. The dial (blocking,
     /// seconds) and the ACP handshake run on the core runtime; this returns
-    /// immediately with a peer in `Connecting` state. `is_active` is the
-    /// spine's routing gate (see the module docs). One peer per label: the
-    /// caller replaces an existing peer with the same label before connecting
-    /// again.
+    /// immediately with a peer in `Connecting` state. `host` is the shared
+    /// dispatch pipeline prefixed with this peer's label. One peer per label:
+    /// the caller replaces an existing peer with the same label before
+    /// connecting again.
     ///
     /// The task loops: dial → handshake → serve commands. An unexpected
     /// transport end re-dials with exponential backoff and resumes the open
     /// session; an explicit `Close` (or `close()` mid-dial) ends the task.
-    pub fn connect(
+    pub(crate) fn connect(
         secret: String,
         card: String,
         label: String,
         listener: Arc<dyn CoreListener>,
-        is_active: Arc<dyn Fn() -> bool + Send + Sync>,
-        config_sink: Arc<dyn Fn(Vec<ConfigOption>) + Send + Sync>,
+        host: Arc<dyn crate::session::DispatchHost>,
+        hub: Arc<crate::session::SessionHub>,
         cache: Arc<CacheStore>,
     ) -> Arc<Self> {
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel();
@@ -831,8 +406,8 @@ impl RoamPeer {
             cmd_tx,
             cmd_rx: Arc::new(tokio::sync::Mutex::new(cmd_rx)),
             listener,
-            is_active,
-            config_sink,
+            host,
+            hub,
             cache,
         });
         let task = peer.clone();
@@ -864,7 +439,11 @@ impl RoamPeer {
                         // main connection's short 6-try budget — a bad card
                         // or a gone-forever host should say so in ~90s, not
                         // after five minutes of retries.
-                        let budget = if ever_connected { Self::RECONNECT_MAX } else { 6 };
+                        let budget = if ever_connected {
+                            Self::RECONNECT_MAX
+                        } else {
+                            6
+                        };
                         if attempts >= budget {
                             task.fail(format!(
                                 "{reason} — giving up after {attempts} reconnect attempts"
@@ -911,9 +490,7 @@ impl RoamPeer {
         let stream = match dialed {
             Ok(Ok(stream)) => stream,
             Ok(Err(error)) => return Outcome::Retry(format!("roam connect: {error}")),
-            Err(error) => {
-                return Outcome::Retry(format!("roam dial task panicked: {error}"))
-            }
+            Err(error) => return Outcome::Retry(format!("roam dial task panicked: {error}")),
         };
         // Closed while dialing? Hand the stream back immediately.
         if self.inner.lock().closing {
@@ -923,39 +500,36 @@ impl RoamPeer {
         }
         self.inner.lock().stream = Some(stream.clone());
 
-        // 2. The SDK client: notifications + server requests dispatched to
-        //    the listener; requests answered via the peer.
+        // 2. The SDK client: the SAME handler table as the spine, so custom
+        //    notifications (status/message_usage) and recipe/elicitation
+        //    requests behave identically on a peer.
         let notif_peer = self.clone();
-        let req_peer = self.clone();
-        let builder = Client.builder()
-            .name("grouse")
-            .on_receive_notification(
-                async move |notif: SessionNotification, _cx| {
-                    notif_peer.dispatch(notif);
-                    Ok(())
-                },
-                on_receive_notification!(),
-            )
-            .on_receive_request(
-                async move |req: RequestPermissionRequest, responder, _cx| {
-                    req_peer.on_permission_request(req, responder);
-                    Ok(())
-                },
-                on_receive_request!(),
-            );
+        let permission_peer = self.clone();
+        let request_peer = self.clone();
+        let handlers = crate::session::ClientHandlers {
+            notification: std::sync::Arc::new(move |notif| notif_peer.dispatch(notif)),
+            custom_notification: std::sync::Arc::new(|method, params| {
+                crate::spine::dispatch_custom_notification(method, params)
+            }),
+            permission: std::sync::Arc::new(move |req, responder| {
+                permission_peer.on_permission_request(req, responder)
+            }),
+            request: std::sync::Arc::new(move |method, params, responder| {
+                request_peer.on_server_request(method, params, responder)
+            }),
+        };
 
         // 3. Connect: initialize -> session/list (browse) -> resume-if-owed,
         //    then serve commands until close.
         let main_task = self.clone();
         let transport_stream = stream.clone();
-        let result = builder
-            .connect_with(
-                RoamTransport::new(stream),
-                async move |cx: agent_client_protocol::ConnectionTo<Agent>| {
-                    main_task.handshake_and_serve(cx).await
-                },
-            )
-            .await;
+        let foreground = move |cx: agent_client_protocol::ConnectionTo<Agent>| {
+            let task = main_task.clone();
+            Box::pin(async move { task.handshake_and_serve(cx).await })
+                as futures::future::BoxFuture<'static, Result<(), AcpError>>
+        };
+        let result =
+            crate::session::connect_client(RoamTransport::new(stream), handlers, foreground).await;
         match result {
             // The command loop broke on Close (or the peer's receiver was
             // dropped): terminal. Route through the same teardown seam as a
@@ -1007,44 +581,26 @@ impl RoamPeer {
 
     /// The last `session/list` result, ids prefixed `roam:<label>:<id>`.
     pub fn sessions(&self) -> Vec<SessionSummary> {
-        // Rebuild from fields: the uniffi records are not Clone (yet). Read
-        // has_new from the staging map under the SAME lock — staging_has_new
-        // locks again and parking_lot is not re-entrant (deadlock).
-        //
-        // Preserve every OTHER field: this used to zero message_count/model/
-        // has_recipe/archived and re-read staging under the PREFIXED id (which
-        // never matched), so roam cards showed "0 msg" and never a green dot.
+        // Rebuild from fields: the uniffi records are not Clone (yet). The
+        // green dot comes from the shared hub (has_new), so every other field
+        // is preserved verbatim.
         let inner = self.inner.lock();
-        let prefix = format!("roam:{}:", self.label);
         inner
             .sessions
             .iter()
-            .map(|s| {
-                let raw = s.id.strip_prefix(&prefix).unwrap_or(&s.id);
-                SessionSummary {
-                    id: s.id.clone(),
-                    title: s.title.clone(),
-                    updated_at: s.updated_at.clone(),
-                    last_message_snippet: s.last_message_snippet.clone(),
-                    project_id: s.project_id.clone(),
-                    message_count: s.message_count,
-                    model: s.model.clone(),
-                    has_recipe: s.has_recipe,
-                    has_new: inner.staging.get(raw).map(|st| st.has_new).unwrap_or(false),
-                    archived: s.archived,
-                }
+            .map(|s| SessionSummary {
+                id: s.id.clone(),
+                title: s.title.clone(),
+                updated_at: s.updated_at.clone(),
+                last_message_snippet: s.last_message_snippet.clone(),
+                project_id: s.project_id.clone(),
+                message_count: s.message_count,
+                model: s.model.clone(),
+                has_recipe: s.has_recipe,
+                has_new: self.hub.has_new(&s.id),
+                archived: s.archived,
             })
             .collect()
-    }
-
-    /// True while the given raw session id has backgrounded content staged.
-    fn staging_has_new(&self, raw_id: &str) -> bool {
-        self.inner
-            .lock()
-            .staging
-            .get(raw_id)
-            .map(|s| s.has_new)
-            .unwrap_or(false)
     }
 
     /// The open session's id (`roam:<label>:<raw>`), if one is open.
@@ -1054,50 +610,6 @@ impl RoamPeer {
             .open_session_id
             .as_ref()
             .map(|id| format!("roam:{}:{id}", self.label))
-    }
-
-    /// Local echo of a prompt we are about to send — the peer-side twin of
-    /// `Core::spawn_prompt`'s echo.
-    ///
-    /// goose sends no `user_message_chunk` for a prompt a client sent, so
-    /// without this the question only appears when a later `session/load` replay
-    /// delivers it: i.e. after a refresh, at whatever position the replay puts
-    /// it. It also CLOSES the open live-text bubble — a user row is a new item,
-    /// so the reply that follows opens its own bubble instead of appending onto
-    /// the previous turn's (two replies merged into one paragraph).
-    pub fn echo_prompt(&self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        let mutation = {
-            let mut inner = self.inner.lock();
-            if inner.open_session_id.is_none() {
-                return;
-            }
-            let replaying = inner.replaying;
-            inner.store.echo_prompt(text, replaying)
-        };
-        self.emit_mutation(mutation);
-    }
-
-    /// The accumulated transcript of the open session, flat-projected (the
-    /// legacy getter). The rich store is the source of truth.
-    pub fn transcript(&self) -> Vec<Message> {
-        self.inner.lock().store.messages()
-    }
-
-    /// The peer's rich items for the open session (docs/TRANSCRIPT_MODEL.md).
-    pub fn items(&self) -> Vec<Item> {
-        self.inner.lock().store.items.clone()
-    }
-
-    /// Walk the open session's window back by `count` items, emitting the older
-    /// items for the client to prepend (docs/TRANSCRIPT_MODEL.md).
-    pub fn load_older(&self, count: usize) {
-        let ops = self.inner.lock().store.load_older(count);
-        for op in ops {
-            self.listener.on_item(op);
-        }
     }
 
     /// Open a session on this peer: `session/load` with the given cwd (the
@@ -1112,6 +624,12 @@ impl RoamPeer {
     /// (Disconnected/Error after the supervisor gives up) must NOT accept
     /// them — nothing will ever drain the queue.
     pub fn open_session(&self, session_id: String, cwd: String) {
+        self.open_session_with(session_id, cwd, false);
+    }
+
+    /// Open/reload a peer session. `force` ignores cache freshness and takes a
+    /// full replay (the desktop's "reload from the start").
+    pub fn open_session_with(&self, session_id: String, cwd: String, force: bool) {
         match self.status() {
             ConnectionStatus::Ready | ConnectionStatus::Connecting => {}
             _ => return,
@@ -1124,13 +642,19 @@ impl RoamPeer {
         // fall back to the session's own cwd from session/list — the remote
         // goose rewrote it there, so it's the guaranteed-valid one.
         let cwd = if cwd.is_empty() {
-            self.inner.lock().session_cwds.get(&raw).cloned().unwrap_or_default()
+            self.inner
+                .lock()
+                .session_cwds
+                .get(&raw)
+                .cloned()
+                .unwrap_or_default()
         } else {
             cwd
         };
         let _ = self.cmd_tx.send(PeerCommand::OpenSession {
             session_id: raw,
             cwd,
+            force,
         });
     }
 
@@ -1187,45 +711,13 @@ impl RoamPeer {
     /// same peer in the same run, which is why peer transcripts looked like they
     /// were not cached across restarts.
     pub fn save_open_transcript(&self) {
-        let inner = self.inner.lock();
-        let Some(open) = inner.open_session_id.clone() else { return };
-        let key = self.cache_key(&open);
-        // The store is already rich: save it as-is, so peer charts/apps survive
-        // a restart (the old flat projection did not).
-        let items = inner.store.items.clone();
-        let updated = inner
-            .sessions
-            .iter()
-            .find(|s| s.id.ends_with(&format!(":{open}")))
-            .map(|s| s.updated_at.clone())
-            .unwrap_or_default();
-        drop(inner);
-        self.cache.save_transcript(&key, &items, &updated);
-    }
-
-    /// How many trailing messages `session/load` should replay for this
-    /// session, or `None` for a full replay.
-    ///
-    /// A tail is requested only when the cached transcript provably covers
-    /// the session's current state: the `updatedAt` stamped into the cache at
-    /// save time equals the session's `updatedAt` from `session/list`. On any
-    /// mismatch — the session moved while we were away, no cache, no stamp —
-    /// the full replay runs, because a tail with an unknown gap behind it
-    /// would leave missing middle messages in the transcript forever (the
-    /// merge dedupes overlap; it cannot detect absence). Servers without
-    /// `replayTail` support ignore the meta and replay in full.
-    fn replay_tail(&self, raw_session_id: &str) -> Option<usize> {
-        let listed = {
-            let inner = self.inner.lock();
-            let suffix = format!(":{raw_session_id}");
-            inner
-                .sessions
-                .iter()
-                .find(|s| s.id.ends_with(&suffix))
-                .map(|s| s.updated_at.clone())
-        }?;
-        let (_, cached_at) = self.cache.load_transcript(&self.cache_key(raw_session_id))?;
-        replay_tail_decision(&cached_at, &listed)
+        let Some(open) = self.inner.lock().open_session_id.clone() else {
+            return;
+        };
+        // The core owns the freshness rule (a mid-turn store is written with an
+        // empty stamp); duplicating it here would let a dropped peer turn look
+        // current.
+        self.host.cache_session(&self.cache_key(&open));
     }
 
     /// Send a raw JSON-RPC request over this peer's connection — the
@@ -1235,101 +727,21 @@ impl RoamPeer {
     /// session. Call from a UI/intent thread, not from inside the dispatch
     /// loop.
     pub fn rpc(&self, method: &str, params: Value) -> Result<Value, AcpError> {
-        let is_prompt = method == "session/prompt";
-        // End-of-turn fan-out, shared by EVERY exit — the success, failure and
-        // timeout arms: the turn's completion rides the session/prompt REPLACE
-        // (the reply's stopReason) — the main connection surfaces it via
-        // store.run_ended; the peer has no store, so emit RunEnded straight
-        // to the listener so the app clears its in-flight/turnInFlight state
-        // and drains the queue.
-        //
-        // Defined BEFORE the connection lookup: a prompt attempted while the
-        // peer is re-dialing has no conn, and returning early without this left
-        // the app's busy state wedged forever — `send_prompt` discards this
-        // Result and the app clears in-flight state only on RunEnded, so the
-        // reply it waits for can never arrive. Every `session/prompt` exit must
-        // reach this.
-        let end_turn = |stop: &str| {
-            // Emit RunEnded UNCONDITIONALLY, not just when this peer owns the
-            // screen. The turn has ended regardless of what the user is viewing;
-            // gating it on `is_active` let the app keep busy=true + a stale
-            // activeRunId when the turn finished off-screen — and because that
-            // state is app-global, one wedged roam turn then made EVERY chat
-            // steer a dead run ("no turn exists to steer"). The app matches the
-            // completion to its own session/queue.
-            self.listener.on_run_ended(stop.to_string());
-            // The peer's turn bookkeeping mirrors the spine: a live run id is
-            // now over, whether or not the server sent an activeRunId update.
-            self.inner.lock().active_run = None;
-        };
-        // Scoped: a `match self.inner.lock().conn.clone()` scrutinee would hold
-        // the lock through the arms, and `end_turn` locks again (parking_lot is
-        // not re-entrant) — a prompt with no conn deadlocked instead of ending.
-        let conn = { self.inner.lock().conn.clone() };
-        let conn = match conn {
-            Some(conn) => conn,
-            None => {
-                if is_prompt {
-                    end_turn("error");
-                }
-                return Err(AcpError::internal_error().data("roam peer not connected"));
-            }
-        };
-        let msg = match UntypedMessage::new(method, self.wire_params(params)) {
-            Ok(msg) => msg,
-            Err(error) => {
-                if is_prompt {
-                    end_turn("error");
-                }
-                return Err(error);
-            }
-        };
+        let conn = { self.inner.lock().conn.clone() }
+            .ok_or_else(|| AcpError::internal_error().data("roam peer not connected"))?;
+        let msg = UntypedMessage::new(method, self.wire_params(params))?;
         let (tx, rx) = std_mpsc::channel();
         runtime().spawn(async move {
             let _ = tx.send(conn.send_request(msg).block_task().await);
         });
-        // S-RC-6: a hung remote goose must not pin the calling thread forever.
-        // The request task is detached; if we time out, its eventual reply is
-        // simply dropped.
-        let result = match rx.recv_timeout(Self::RPC_TIMEOUT) {
+        // Control calls are bounded (S-RC-6); prompts never travel through
+        // this path anymore (Core's one transmit path owns them).
+        let limit =
+            crate::session::rpc_timeout(method).unwrap_or(std::time::Duration::from_secs(30));
+        match rx.recv_timeout(limit) {
             Ok(inner) => inner,
-            Err(e) => {
-                let detail = match e {
-                    std::sync::mpsc::RecvTimeoutError::Timeout => "roam rpc timed out",
-                    std::sync::mpsc::RecvTimeoutError::Disconnected => "roam rpc task failed",
-                };
-                let error = AcpError::internal_error().data(detail);
-                // A prompt that times out (the peer vanished mid-turn without a
-                // clean FIN, so send_request hangs and never errors) must still
-                // end the turn — the app clears its in-flight state only on
-                // RunEnded, so skipping this left it busy forever.
-                if is_prompt {
-                    end_turn("error");
-                }
-                return Err(error);
-            }
-        };
-        let result = match result {
-            Ok(reply) => reply,
-            Err(error) => {
-                // A prompt that fails must still end the turn so the UI can
-                // clear in-flight state and drain the queue (mirrors spine's
-                // run_ended("error") — the desktop wedges here).
-                if is_prompt {
-                    end_turn("error");
-                }
-                return Err(error);
-            }
-        };
-        if is_prompt {
-            let stop = result
-                .get("stopReason")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            end_turn(&stop);
+            Err(_) => Err(AcpError::internal_error().data("roam rpc timed out")),
         }
-        Ok(result)
     }
 
     /// Preprocess outbound `sessionId` params at the peer wire boundary.
@@ -1377,23 +789,19 @@ impl RoamPeer {
     /// Answer the pending `session/request_permission` from this peer
     /// (CONTRACT §5; the spine routes `respond_permission` here when the peer
     /// owns the active session).
-    pub fn respond_permission(&self, outcome: PermissionOutcome) -> Result<(), AcpError> {
+    pub fn respond_permission(
+        &self,
+        tool_call_id: &str,
+        outcome: PermissionOutcome,
+    ) -> Result<(), AcpError> {
         let responder = self
             .inner
             .lock()
             .pending_permission
-            .take()
+            .remove(tool_call_id)
             .ok_or_else(|| AcpError::internal_error().data("no pending roam permission request"))?;
-        let outcome = match outcome {
-            PermissionOutcome::Selected { option_id } => {
-                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-                    PermissionOptionId::new(option_id),
-                ))
-            }
-            PermissionOutcome::Cancelled => RequestPermissionOutcome::Cancelled,
-        };
         responder
-            .respond(RequestPermissionResponse::new(outcome))
+            .respond(crate::session::permission_response(outcome))
             .map_err(|error| {
                 AcpError::internal_error().data(format!("roam permission respond: {error}"))
             })
@@ -1423,49 +831,52 @@ impl RoamPeer {
         self.emit_status("connecting: handshake");
         let init = tokio::time::timeout(
             PHASE_TIMEOUT,
-            cx.send_request(initialize_request()).block_task(),
+            cx.send_request(crate::session::initialize_request())
+                .block_task(),
         )
         .await;
         match init {
             Ok(Ok(_reply)) => {}
             Ok(Err(error)) => {
-                eprintln!("grouse-core: roam peer '{}' initialize: {error}", self.label);
-                return Err(AcpError::internal_error()
-                    .data(format!("roam initialize: {error}")));
+                eprintln!(
+                    "grouse-core: roam peer '{}' initialize: {error}",
+                    self.label
+                );
+                return Err(AcpError::internal_error().data(format!("roam initialize: {error}")));
             }
             Err(_) => {
                 eprintln!(
                     "grouse-core: roam peer '{}' handshake timed out",
                     self.label
                 );
-                return Err(AcpError::internal_error().data(
-                    "handshake timed out waiting for initialize reply",
-                ));
+                return Err(AcpError::internal_error()
+                    .data("handshake timed out waiting for initialize reply"));
             }
         }
 
         self.emit_status("connecting: listing sessions");
         let list = tokio::time::timeout(
             PHASE_TIMEOUT,
-            cx.send_request(ListSessionsRequest::new().meta(session_list_meta()))
+            cx.send_request(ListSessionsRequest::new().meta(crate::session::session_list_meta()))
                 .block_task(),
         )
         .await;
         let list: ListSessionsResponse = match list {
             Ok(Ok(reply)) => reply,
             Ok(Err(error)) => {
-                eprintln!("grouse-core: roam peer '{}' session/list: {error}", self.label);
-                return Err(AcpError::internal_error()
-                    .data(format!("roam session/list: {error}")));
+                eprintln!(
+                    "grouse-core: roam peer '{}' session/list: {error}",
+                    self.label
+                );
+                return Err(AcpError::internal_error().data(format!("roam session/list: {error}")));
             }
             Err(_) => {
                 eprintln!(
                     "grouse-core: roam peer '{}' session/list timed out",
                     self.label
                 );
-                return Err(AcpError::internal_error().data(
-                    "handshake timed out waiting for session/list reply",
-                ));
+                return Err(AcpError::internal_error()
+                    .data("handshake timed out waiting for session/list reply"));
             }
         };
         self.apply_sessions(&list);
@@ -1484,7 +895,7 @@ impl RoamPeer {
                 .get(&raw)
                 .cloned()
                 .unwrap_or_default();
-            if let Err(error) = self.load_session(&cx, raw, cwd).await {
+            if let Err(error) = self.load_session(&cx, raw, cwd, false).await {
                 self.fail(format!("roam resume: {error}"));
             }
         }
@@ -1496,9 +907,13 @@ impl RoamPeer {
         let mut cmd_rx = self.cmd_rx.lock().await;
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
-                PeerCommand::OpenSession { session_id, cwd } => {
+                PeerCommand::OpenSession {
+                    session_id,
+                    cwd,
+                    force,
+                } => {
                     let raw = self.strip_prefix(&session_id);
-                    if let Err(error) = self.load_session(&cx, raw, cwd).await {
+                    if let Err(error) = self.load_session(&cx, raw, cwd, force).await {
                         self.fail(format!("roam session/open: {error}"));
                     }
                 }
@@ -1516,7 +931,9 @@ impl RoamPeer {
                     // remote goose does not reliably notify us of our own
                     // mutation, so we re-list explicitly.
                     let list = cx
-                        .send_request(ListSessionsRequest::new().meta(session_list_meta()))
+                        .send_request(
+                            ListSessionsRequest::new().meta(crate::session::session_list_meta()),
+                        )
                         .block_task()
                         .await;
                     if let Ok(list) = list {
@@ -1548,32 +965,58 @@ impl RoamPeer {
         cx: &agent_client_protocol::ConnectionTo<Agent>,
         raw: String,
         cwd: String,
+        force: bool,
     ) -> Result<(), AcpError> {
-        let mut params = json!({ "sessionId": raw, "cwd": cwd, "mcpServers": [] });
-        // Bounded replay when the cache is current (see `replay_tail`). This
-        // covers BOTH paths that reach load_session: a user tap (OpenSession)
-        // and a reconnect resume — the resume dedupes the tail against the
-        // transcript the peer kept across the drop, same as the tap does
-        // against the cache.
-        if let Some(tail) = self.replay_tail(&raw) {
-            params["_meta"] = json!({ "replayTail": tail });
+        // Paint the cache and make this session the displayed one BEFORE the
+        // load: replay chunks may arrive ahead of the reply, and they must land
+        // in the store the UI is watching. This is the same paint policy the
+        // main connection applies (one implementation, `session::plan_paint`).
+        self.save_open_transcript();
+        let key = self.cache_key(&raw);
+        let listed = self
+            .inner
+            .lock()
+            .sessions
+            .iter()
+            .find(|s| s.id == key)
+            .map(|s| s.updated_at.clone())
+            .unwrap_or_default();
+        let plan = crate::session::plan_paint(&self.cache, &key, &listed, force, false);
+        {
+            let mut inner = self.inner.lock();
+            inner.open_session_id = Some(raw.clone());
+            if !cwd.is_empty() {
+                // Remember the resolved cwd for the hidden summarizer session.
+                inner.session_cwds.insert(raw.clone(), cwd.clone());
+            }
         }
+        let store = self.hub.display(&key);
+        crate::session::apply_paint(&store, &plan);
+        self.host.begin_replay(&key);
+        let tail = if plan.suppress {
+            Some(1)
+        } else if plan.merge {
+            Some(crate::session::REPLAY_TAIL)
+        } else {
+            None
+        };
+        let params = crate::session::session_load_params(&raw, &cwd, tail);
         let load = cx
             .send_request(UntypedMessage::new("session/load", params)?)
             .block_task()
             .await;
         match load {
             Ok(reply) => {
-                self.open(raw);
                 self.emit_status("ready");
-                self.emit_config(&reply);
+                self.emit_config(&reply, &key);
             }
             Err(error) => {
                 // The tapped session is stale/archived — do NOT quietly proxy
                 // it with a fresh session on the peer: the user asked for THIS
                 // session, and a blank replacement is the defect (grouse#19).
-                // Report it against the prefixed id the client knows, and leave
-                // the peer's own status alone (the connection is fine).
+                // Keep the painted cache and report against the prefixed id.
+                self.inner.lock().open_session_id = None;
+                self.host.end_replay(&key);
                 self.listener.on_session_open_failed(
                     format!("roam:{}:{}", self.label, raw),
                     format!("session/load failed: {error}"),
@@ -1595,22 +1038,31 @@ impl RoamPeer {
     ) -> Result<(), AcpError> {
         // The remote goose's session/new deserializer REQUIRES mcpServers
         // (a missing field is a hard protocol error, not a default) — the
-        // main connection sends it and so must this peer.
-        let mut params = json!({ "cwd": cwd, "mcpServers": [] });
-        params["_meta"] = Value::Object(new_session_meta());
+        // shared builder sends it for every transport.
+        let params = crate::session::session_new_params("grouse", cwd, None, None);
         let reply = cx
             .send_request(UntypedMessage::new("session/new", params)?)
             .block_task()
             .await
-            .map_err(|error| AcpError::internal_error().data(format!("roam session/new: {error}")))?;
+            .map_err(|error| {
+                AcpError::internal_error().data(format!("roam session/new: {error}"))
+            })?;
         let sid = reply
             .get("sessionId")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        self.open(sid.clone());
+        self.save_open_transcript();
+        let key = format!("roam:{}:{sid}", self.label);
+        {
+            let mut inner = self.inner.lock();
+            inner.open_session_id = Some(sid.clone());
+            // The hidden summarizer needs this session's own cwd on the peer.
+            inner.session_cwds.insert(sid.clone(), cwd.to_string());
+        }
+        self.hub.display(&key).clear();
         self.emit_status("ready");
-        self.emit_config(&reply);
+        self.emit_config(&reply, &key);
         // The app opens a freshly created chat on this id — but ONLY when the
         // user initiated the create. The load-fallback create must not yank
         // the UI to a proxy session the user didn't ask for.
@@ -1621,7 +1073,7 @@ impl RoamPeer {
         // never learns it exists (and cannot route a chat to it). Re-list.
         let relist = tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            cx.send_request(ListSessionsRequest::new().meta(session_list_meta()))
+            cx.send_request(ListSessionsRequest::new().meta(crate::session::session_list_meta()))
                 .block_task(),
         )
         .await;
@@ -1636,26 +1088,13 @@ impl RoamPeer {
     /// `model` option's `options` list with its featured models, so this is
     /// where a peer's model picker gets its choices. A reply without
     /// `configOptions` yields an empty vec — the app tolerates that.
-    fn emit_config(&self, reply: &Value) {
-        let options = crate::spine::parse_config_options(reply);
-        // Through the CORE's config sink, never straight to the UI: the core merges —
-        // preserving each option's choices when an update omits them, which is exactly
-        // what `session/set_config_option` replies and peer `config_option_update`s do —
-        // and emits one merged snapshot. Emitting directly replaced the UI's whole list,
-        // so a partial update wiped the provider and thinking-effort choices (the
-        // reported "providers disappear / effort unavailable" in Roam).
-        //
-        // Only while this peer owns the active session: an inactive peer's config must
-        // not repaint a local chat's pickers. A peer that becomes active later re-emits
-        // its own config on `session/load`.
-        self.publish_config(options);
-    }
-
-    /// Hand a peer's option update to the core's merge, when this peer is the active
-    /// connection.
-    fn publish_config(&self, options: Vec<ConfigOption>) {
-        if !options.is_empty() && (self.is_active)() {
-            (self.config_sink)(options);
+    fn emit_config(&self, reply: &Value, key: &str) {
+        let options = crate::session::parse_config_options(reply);
+        // Through the CORE's merge (the host), never straight to the UI: a
+        // partial update keeps each option's choices, and the host gates it on
+        // this session being the displayed one.
+        if !options.is_empty() {
+            self.host.config(key, options);
         }
     }
 
@@ -1666,43 +1105,25 @@ impl RoamPeer {
         let mut sessions: Vec<SessionSummary> = list
             .sessions
             .iter()
-            .map(|s| {
+            .filter_map(|s| {
                 let id = s.session_id.to_string();
-                cwds.insert(id.clone(), s.cwd.to_string_lossy().to_string());
-                let mut summary = to_summary(&self.label, s);
-                summary.has_new = self.staging_has_new(&id);
-                summary
+                cwds.insert(id.clone(), crate::session::info_cwd(s));
+                let mut summary = crate::session::summary_from_info(Some(&self.label), s)?;
+                summary.has_new = self.hub.has_new(&summary.id);
+                Some(summary)
             })
             .collect();
         {
             let mut inner = self.inner.lock();
-            // Seed each listed session's staging from the transcript cache:
-            // a seen chat then paints instantly on open (its chunks were
-            // staged here), no waiting on the wire replay.
-            for s in &list.sessions {
-                let raw = s.session_id.to_string();
-                if inner.staging.contains_key(&raw) {
-                    continue;
-                }
-                let key = self.cache_key(&raw);
-                if let Some((items, _)) = self.cache.load_transcript(&key) {
-                    inner.staging.insert(
-                        raw,
-                        StagedSession { store: PeerStore::from_items(items), has_new: false },
-                    );
-                }
-            }
             // The peer's list only contains sessions that HAVE messages (goose's
             // session/list filters empty ones). A chat this client just created is
-            // open but empty — invisible to the relist, so the drawer would never
-            // learn it exists. Union the open session into the list: once its first
+            // open but empty — invisible to the relist. Union it in: once its first
             // message lands, the server's own entry appears and the next list
             // replaces this synthetic row with server truth.
             if let Some(raw) = inner.open_session_id.clone() {
                 let app_id = format!("roam:{}:{}", self.label, raw);
                 if !sessions.iter().any(|s| s.id == app_id) {
-                    let staged =
-                        inner.staging.get(&raw).map(|s| s.store.items.len()).unwrap_or(0);
+                    let count = self.hub.store(&app_id).rich_transcript().len();
                     sessions.insert(
                         0,
                         SessionSummary {
@@ -1711,7 +1132,7 @@ impl RoamPeer {
                             updated_at: String::new(),
                             last_message_snippet: None,
                             project_id: None,
-                            message_count: staged as i64,
+                            message_count: count as i64,
                             model: String::new(),
                             has_recipe: false,
                             has_new: false,
@@ -1719,6 +1140,12 @@ impl RoamPeer {
                         },
                     );
                 }
+            }
+            // The cache-freshness baseline lives in the core, shared with the
+            // main list. A peer's own list is the only place these stamps
+            // arrive, so publish them without emitting a touch event.
+            for summary in &sessions {
+                self.host.session_stamp(&summary.id, &summary.updated_at);
             }
             inner.sessions = sessions;
             inner.session_cwds = cwds;
@@ -1729,56 +1156,8 @@ impl RoamPeer {
         }
         self.emit_sessions(self.sessions());
         self.emit_status("ready");
-    }
-
-    /// A session/load succeeded: the peer owns this session now, and its
-    /// transcript starts from whatever we already have for it.
-    ///
-    /// Content comes from staging (chunks that arrived while the session was
-    /// closed), else straight from the transcript cache, else empty. Reading
-    /// the cache HERE rather than relying on `apply_sessions` having seeded
-    /// staging means a session opened before the peer's session/list lands
-    /// still paints instantly.
-    ///
-    /// Emits exactly ONE Clear and no Appends — the contract the main path's
-    /// `TranscriptStore::replace` uses, where a Clear means "rebuild from
-    /// `transcript()`". Emitting an Append per row on top of that made the UI
-    /// paint the snapshot once from the rebuild and again from the events, so
-    /// every cached message doubled on open.
-    fn open(&self, raw_session_id: String) {
-        // Persist the PREVIOUS open session's transcript before switching: the
-        // next time it's opened, the cache paints it instantly.
-        self.save_open_transcript();
-        // Off-lock: the cache is file I/O and `inner` guards the live dispatch.
-        let cached = self
-            .cache
-            .load_transcript(&self.cache_key(&raw_session_id))
-            .map(|(items, _)| items);
-        {
-            let mut inner = self.inner.lock();
-            inner.open_session_id.take();
-            let staged = inner.staging.remove(&raw_session_id).map(|s| s.store.items);
-            inner.store.replace(staged.or(cached).unwrap_or_default());
-            inner.open_session_id = Some(raw_session_id.clone());
-            // The session/load replay that follows re-delivers the promoted
-            // (or cached) content; dedupe against it during this replay only,
-            // cleared once a live turn begins (dispatch SessionInfoUpdate).
-            inner.replaying = true;
-            inner.store.rewritten.clear();
-            // Promotion (or simply visiting) clears the green dot: has_new is
-            // gone with the staging entry, and sessions() re-reads it live.
-        }
-        // Unconditional legacy Clear (empty session included: otherwise the
-        // previous chat's rows stay on screen). The item paint is gated on this
-        // peer owning the display — a backgrounded peer must not wipe the
-        // visible model.
-        let session = format!("roam:{}:{}", self.label, raw_session_id);
-        let ops = self.inner.lock().store.paint(&session);
-        if (self.is_active)() {
-            for op in ops {
-                self.listener.on_item(op);
-            }
-        }
+        // Peer prompts queued while the link was down now have a wire.
+        self.host.endpoint_ready(Some(&self.label));
     }
 
     /// The link ended. `Ok` = clean (close command, or the peer was torn
@@ -1804,14 +1183,15 @@ impl RoamPeer {
             // reconnect). A run in flight died with the link: clear it and
             // emit the empty run id so the app frees busy/steer state.
             inner.resume_pending = inner.open_session_id.clone();
-            let dead_run = inner.active_run.take().is_some();
+            inner.active_run = None;
             let open = inner.open_session_id.clone();
             drop(inner);
-            if dead_run {
-                if let Some(raw) = open {
-                    self.listener
-                        .on_active_run(format!("roam:{}:{raw}", self.label), String::new());
-                }
+            if let Some(raw) = open {
+                let key = format!("roam:{}:{raw}", self.label);
+                // The host's run map is authoritative (it only emits the end
+                // when a run was live) and the replay is over with the link.
+                self.host.active_run(key.clone(), String::new());
+                self.host.end_replay(&key);
             }
             return;
         }
@@ -1849,311 +1229,93 @@ impl RoamPeer {
 
     // -- SessionNotification dispatch -----------------------------------------
 
-    /// The peer's `session/update` dispatch — the same `SessionNotification`
-    /// translation the spine uses, but for this peer's connection. Chat-scoped
-    /// events (stream/transcript/touched/permission) forward only under the
-    /// `is_active` gate; peer-scoped events are emitted unconditionally by
-    /// their callers.
+    /// One peer-specific pre-pass (its own session-list metadata), then the
+    /// shared `session::dispatch`. The hub's display gate decides what paints.
     fn dispatch(&self, notif: SessionNotification) {
-        let active = (self.is_active)();
-        let session_id = notif.session_id.to_string();
-        // Session-membership gate: this notification's chunks belong to the
-        // OPEN session (live view) or to a backgrounded one (staging + dot).
-        // Nothing from another session ever renders in the visible chat.
-        let mine = self
-            .inner
-            .lock()
-            .open_session_id
-            .as_deref()
-            == Some(session_id.as_str());
-        match notif.update {
-            SessionUpdate::UserMessageChunk(chunk) => {
-                if let Some(text) = chunk_text(&chunk.content) {
-                    let message_id = chunk.message_id.map(|m| m.to_string()).unwrap_or_default();
-                    let mutation = self.accumulate(&session_id, "user", &text, &message_id);
-                    if active && mine {
-                        self.emit_mutation(mutation);
+        let wire = notif.session_id.to_string();
+        let key = format!("roam:{}:{wire}", self.label);
+        // The peer's own session-list metadata is the one piece of state the
+        // shared pipeline does not own (the main list lives in Core).
+        if let SessionUpdate::SessionInfoUpdate(info) = &notif.update {
+            let title = info
+                .title
+                .value()
+                .map(|t| t.to_string())
+                .unwrap_or_default();
+            let updated_at = info
+                .updated_at
+                .value()
+                .map(|t| t.to_string())
+                .unwrap_or_default();
+            let mut inner = self.inner.lock();
+            if !title.is_empty() || !updated_at.is_empty() {
+                if let Some(session) = inner.sessions.iter_mut().find(|s| s.id == key) {
+                    if !title.is_empty() {
+                        session.title = title;
+                    }
+                    if !updated_at.is_empty() {
+                        session.updated_at = updated_at;
                     }
                 }
             }
-            SessionUpdate::AgentMessageChunk(chunk) => {
-                if let Some(text) = chunk_text(&chunk.content) {
-                    let message_id = chunk.message_id.map(|m| m.to_string()).unwrap_or_default();
-                    let mutation = self.accumulate(&session_id, "agent", &text, &message_id);
-                    if active && mine {
-                        self.emit_mutation(mutation);
-                    }
-                }
+            if let Some(goose) = info.meta.as_ref().and_then(|m| m.get("goose")) {
+                inner.active_run = goose
+                    .get("activeRunId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
             }
-            SessionUpdate::AgentThoughtChunk(chunk) => {
-                if let Some(text) = chunk_text(&chunk.content) {
-                    let message_id = chunk.message_id.map(|m| m.to_string()).unwrap_or_default();
-                    let mutation = self.accumulate(&session_id, "thought", &text, &message_id);
-                    if active && mine {
-                        self.emit_mutation(mutation);
-                    }
-                }
-            }
-            SessionUpdate::ToolCall(tool) => {
-                let tool_call_id = tool.tool_call_id.to_string();
-                let (kind, detail) = tool_kind(&tool);
-                let mutation =
-                    self.accumulate_tool(&session_id, &tool_call_id, &tool.title, &detail, &kind);
-                if active && mine {
-                    self.emit_mutation(mutation);
-                }
-            }
-            SessionUpdate::ToolCallUpdate(update) => {
-                let id = update.tool_call_id.to_string();
-                let (status, output, live) = tool_update(&update);
-                let mutation =
-                    self.accumulate_tool_update(&session_id, &id, &status, &output, live);
-                if active && mine {
-                    self.emit_mutation(mutation);
-                }
-            }
-
-            SessionUpdate::UsageUpdate(usage) => {
-                let (cost, currency) = usage
-                    .cost
-                    .as_ref()
-                    .map(|c| (c.amount, c.currency.clone()))
-                    .unwrap_or((0.0, String::new()));
-                if active && mine {
-                    self.listener.on_usage(usage.used as i64, usage.size as i64, cost, currency);
-                }
-            }
-
-            SessionUpdate::SessionInfoUpdate(info) => {
-                // The active-run lifecycle rides _meta.goose.activeRunId (same
-                // translation as the spine's dispatch_session_info_update):
-                // a present id starts a turn, an absent one ends it. The
-                // prefixed session id is emitted so the app's
-                // onCoreActiveRun matches currentSession and clears the
-                // prompting state.
-                if active {
-                    if let Some(goose) = info.meta.as_ref().and_then(|meta| meta.get("goose")) {
-                        let run = goose.get("activeRunId").and_then(Value::as_str);
-                        let started = run.map(|r| r.to_string());
-                        let ended = started.is_none()
-                            && self.inner.lock().active_run.take().is_some();
-                        if let Some(run_id) = started {
-                            self.inner.lock().active_run = Some(run_id.clone());
-                            // The load/reconnect replay is done; a live turn is
-                            // streaming now. From here on chunks never dedupe
-                            // (that would swallow legitimately repeated text).
-                            self.inner.lock().replaying = false;
-                            self.listener.on_active_run(
-                                format!("roam:{}:{session_id}", self.label),
-                                run_id,
-                            );
-                        } else if ended {
-                            self.listener.on_active_run(
-                                format!("roam:{}:{session_id}", self.label),
-                                String::new(),
-                            );
-                        }
-                    }
-                }
-                let title = info.title.value().map(|t| t.to_string()).unwrap_or_default();
-                let updated_at = info
-                    .updated_at
-                    .value()
-                    .map(|t| t.to_string())
-                    .unwrap_or_default();
-                // Keep this peer's own session list current: session/list only
-                // runs on connect and relist, so without this the stored
-                // updatedAt goes stale the moment a turn runs — and
-                // save_open_transcript stamps the cache from here, which is
-                // what lets replay_tail prove the cache is current on the
-                // next open.
-                if !title.is_empty() || !updated_at.is_empty() {
-                    let mut inner = self.inner.lock();
-                    let suffix = format!(":{session_id}");
-                    if let Some(s) = inner.sessions.iter_mut().find(|s| s.id.ends_with(&suffix)) {
-                        if !title.is_empty() {
-                            s.title = title.clone();
-                        }
-                        if !updated_at.is_empty() {
-                            s.updated_at = updated_at.clone();
-                        }
-                    }
-                }
-                if active && (!title.is_empty() || !updated_at.is_empty()) {
-                    // PREFIXED, like every other chat-scoped event the app keys
-                    // a chat by (`staged_touch` already did): the raw id matches
-                    // nothing in the drawer, whose peer rows are
-                    // `roam:<label>:<id>`, so an auto-generated title or a
-                    // rename from another client never painted until the next
-                    // full session re-list.
-                    self.listener.on_session_touched(
-                        format!("roam:{}:{}", self.label, session_id),
-                        title,
-                        updated_at,
-                    );
-                }
-            }
-            SessionUpdate::ConfigOptionUpdate(config) if active => {
-                // Peer-scoped config change (e.g. the user picked a different
-                // model on this peer): forward it to the listener so the app
-                // shows the peer's current provider/model/effort. Mirrors the
-                // spine's translation; gated on `active` like the neighboring
-                // chat-scoped arms.
-                let options = config
-                    .config_options
-                    .iter()
-                    .map(|option| crate::ConfigOption {
-                        id: option.id.to_string(),
-                        value: crate::spine::config_option_value(option),
-                        name: option.name.clone(),
-                        // The typed schema has no choices list — the initial
-                        // config (session/load|new reply) carries them.
-                        choices: Vec::new(),
-                    })
-                    .collect::<Vec<_>>();
-                // Choices are deliberately empty here (the typed update schema carries
-                // none); the core's merge keeps the ones the load reply supplied.
-                self.publish_config(options);
-            }
-            _ => {} // other updates are not peer-scoped chat events
         }
-    }
-
-    /// Append a text chunk to the bubble for `(role, message_id)` (CONTRACT §4
-    /// accumulation rule). Chunks for a session that is NOT open accumulate into
-    /// its staging store instead (green dot) and never touch the visible chat.
-    /// The caller emits the returned mutation under the active+mine gate.
-    fn accumulate(&self, session_id: &str, role: &str, text: &str, message_id: &str) -> Mutation {
-        let mut inner = self.inner.lock();
-        let mine = inner.open_session_id.as_deref() == Some(session_id);
-        let replaying = inner.replaying;
-        let mut staged_new = false;
-        let m = if mine {
-            inner.store.accumulate_text(role, text, message_id, replaying)
-        } else {
-            let st = inner.staging.entry(session_id.to_string()).or_default();
-            staged_new = !st.has_new;
-            st.has_new = true;
-            st.store.accumulate_text(role, text, message_id, replaying)
-        };
-        drop(inner);
-        if !mine && staged_new {
-            self.staged_touch(session_id);
-        }
-        m
-    }
-
-    /// Create or replace a tool row, preserving the kind (chart spec / MCP-app
-    /// key) so a peer chart/app survives.
-    fn accumulate_tool(
-        &self,
-        session_id: &str,
-        tool_call_id: &str,
-        title: &str,
-        detail: &str,
-        kind: &ToolCallKind,
-    ) -> Mutation {
-        let mut inner = self.inner.lock();
-        let mine = inner.open_session_id.as_deref() == Some(session_id);
-        let mut staged_new = false;
-        let m = if mine {
-            inner.store.tool_call(tool_call_id, title, detail, kind)
-        } else {
-            let st = inner.staging.entry(session_id.to_string()).or_default();
-            staged_new = !st.has_new;
-            st.has_new = true;
-            st.store.tool_call(tool_call_id, title, detail, kind)
-        };
-        drop(inner);
-        if !mine && staged_new {
-            self.staged_touch(session_id);
-        }
-        m
-    }
-
-    /// A tool lifecycle update: status plus output (live output appends, the
-    /// completion replaces).
-    fn accumulate_tool_update(
-        &self,
-        session_id: &str,
-        tool_call_id: &str,
-        status: &str,
-        output: &str,
-        live: bool,
-    ) -> Mutation {
-        let mut inner = self.inner.lock();
-        let mine = inner.open_session_id.as_deref() == Some(session_id);
-        let mut staged_new = false;
-        let m = if mine {
-            inner.store.tool_update(tool_call_id, status, output, live)
-        } else {
-            let st = inner.staging.entry(session_id.to_string()).or_default();
-            staged_new = !st.has_new;
-            st.has_new = true;
-            st.store.tool_update(tool_call_id, status, output, live)
-        };
-        drop(inner);
-        if !mine && staged_new {
-            self.staged_touch(session_id);
-        }
-        m
-    }
-
-
-    /// Fire the UI notification for a session's FIRST backgrounded content
-    /// (prefixed id, so the client can paint the dot on the peer row).
-    fn staged_touch(&self, session_id: &str) {
-        self.listener.on_session_touched(
-            format!("roam:{}:{}", self.label, session_id),
-            String::new(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis().to_string())
-                .unwrap_or_default(),
-        );
+        crate::session::dispatch(self.host.as_ref(), notif);
     }
 
     /// A `session/request_permission` arrived: stash the responder and prompt
-    /// the UI (gated on the peer owning the active session, like the desktop).
+    /// the UI. The host emits only while this peer's session is displayed.
     fn on_permission_request(
         &self,
         req: RequestPermissionRequest,
         responder: Responder<RequestPermissionResponse>,
     ) {
-        let tool_call_id = req.tool_call.tool_call_id.to_string();
-        let options = req
-            .options
-            .iter()
-            .map(|o| crate::PermissionOption {
-                option_id: o.option_id.to_string(),
-                name: o.name.clone(),
-                kind: crate::spine::permission_option_kind_str(&o.kind).to_string(),
-            })
-            .collect();
-        self.inner.lock().pending_permission = Some(responder);
-        if (self.is_active)() {
-            self.listener.on_permission_request(crate::PermissionRequest {
-                tool_call_id,
-                title: req.tool_call.fields.title.clone().unwrap_or_default(),
-                detail: String::new(),
-                options,
-            });
-        }
+        let request = crate::session::permission_request(&req);
+        self.inner
+            .lock()
+            .pending_permission
+            .insert(request.tool_call_id.clone(), responder);
+        let key = self.active_session_id().unwrap_or_default();
+        self.host.permission(&key, request);
     }
 
-    // -- emits ----------------------------------------------------------------
-
-    /// Emit a store mutation's item op, gated on `is_active`: a backgrounded
-    /// peer must not touch the visible item client, which does not rebuild from
-    /// a getter.
-    fn emit_mutation(&self, m: Mutation) {
-        if let Some(op) = m.item {
-            if (self.is_active)() {
-                self.listener.on_item(op);
+    /// Server→client requests the UI can answer (recipe params, elicitation).
+    /// The same parked-responder seam as the spine: the core exposes
+    /// `respond_recipe_params`/`respond_elicitation` regardless of which wire
+    /// asked, so declaring the capability on a peer now means it works there.
+    fn on_server_request(&self, method: &str, params: &Value, responder: Responder<Value>) {
+        match method {
+            "_goose/unstable/session/recipe/request-params" => {
+                crate::spine::park_server_request(
+                    PendingRequest::RecipeParams,
+                    method,
+                    params,
+                    responder,
+                );
+            }
+            "elicitation/create" => {
+                crate::spine::park_server_request(
+                    PendingRequest::Elicitation,
+                    method,
+                    params,
+                    responder,
+                );
+            }
+            _ => {
+                let _ = responder.respond_with_error(
+                    AcpError::method_not_found()
+                        .data(format!("not supported by this client: {method}")),
+                );
             }
         }
     }
 
+    // -- emits ----------------------------------------------------------------
 
     fn emit_sessions(&self, sessions: Vec<SessionSummary>) {
         self.listener.on_roam_sessions(self.label.clone(), sessions);
@@ -2174,246 +1336,50 @@ impl RpcConn for RoamPeer {
     }
 
     fn active_session_id(&self) -> Option<String> {
-        let raw = self.inner.lock().open_session_id.clone()?;
-        Some(format!("roam:{}:{}", self.label, raw))
+        RoamPeer::active_session_id(self)
+    }
+}
+
+impl crate::session::ChatEndpoint for RoamPeer {
+    fn request(&self, method: &str, params: Value) -> BoxFuture<'static, Result<Value, AcpError>> {
+        let conn = self.inner.lock().conn.clone();
+        let msg = UntypedMessage::new(method, self.wire_params(params));
+        match (conn, msg) {
+            (Some(conn), Ok(msg)) => {
+                Box::pin(async move { conn.send_request(msg).block_task().await })
+            }
+            (None, _) => {
+                Box::pin(async { Err(AcpError::internal_error().data("roam peer not connected")) })
+            }
+            (_, Err(error)) => Box::pin(async move { Err(error) }),
+        }
+    }
+
+    fn notify(&self, method: &str, params: Value) -> Result<(), AcpError> {
+        RoamPeer::notify(self, method, params)
+    }
+
+    fn wire_id(&self, display: &str) -> String {
+        self.strip_prefix(display)
+    }
+
+    fn accepts_prompt(&self) -> bool {
+        matches!(self.status(), ConnectionStatus::Ready)
+    }
+
+    fn label(&self) -> Option<String> {
+        Some(self.label.clone())
+    }
+
+    fn session_cwd(&self, display: &str) -> Option<String> {
+        let raw = self.strip_prefix(display);
+        self.inner.lock().session_cwds.get(&raw).cloned()
     }
 }
 
 // ---------------------------------------------------------------------------
 // SessionNotification translation helpers (the "same dispatch the spine uses")
 // ---------------------------------------------------------------------------
-
-/// The text of a chunk's content block; non-text blocks render as a marker.
-/// Delegates to the spine's SINGLE shared translator (RC-3) so roam and the
-/// spine render text/image/audio/resource identically (the old local copy
-/// drifted and rendered image/audio as `[unknown]`).
-fn chunk_text(block: &agent_client_protocol::schema::v1::ContentBlock) -> Option<String> {
-    // Preserves the original contract: every block renders to SOME text.
-    Some(crate::spine::content_block_text(block))
-}
-
-/// ToolCall → `(ToolCallKind, detail)`, collapsing the desktop's mcpapp/chart
-/// split into `ToolCallKind` (CONTRACT §3.4). Delegates to the spine's SINGLE
-/// shared translator (RC-3) so roam and the spine produce identical kinds and
-/// detail strings.
-fn tool_kind(tool: &agent_client_protocol::schema::v1::ToolCall) -> (ToolCallKind, String) {
-    crate::spine::tool_call_kind(tool)
-}
-
-// -- item-stream bridge helpers (docs/TRANSCRIPT_MODEL.md) -------------------
-
-/// The item kind a peer text row's role maps to.
-fn kind_for_role(role: &str) -> ItemKind {
-    match role {
-        "user" => ItemKind::User,
-        "thought" => ItemKind::Thought,
-        "error" => ItemKind::Error,
-        "tool" => ItemKind::Tool,
-        _ => ItemKind::Agent,
-    }
-}
-
-fn empty_item() -> Item {
-    Item {
-        id: String::new(),
-        kind: ItemKind::Tool,
-        text: String::new(),
-        detail: String::new(),
-        output: String::new(),
-        status: String::new(),
-        app_key: String::new(),
-        calls: Vec::new(),
-        thought: String::new(),
-        summary: String::new(),
-    }
-}
-
-/// A tool call as an item, preserving the kind (chart spec / MCP-app key) the
-/// stream carried.
-fn item_for_tool(
-    kind: &ToolCallKind,
-    title: &str,
-    detail: &str,
-    id: &str,
-    output: &str,
-    status: &str,
-) -> Item {
-    match kind {
-        ToolCallKind::Chart { spec } => Item {
-            id: id.to_string(),
-            kind: ItemKind::Chart,
-            text: title.to_string(),
-            detail: spec.clone(),
-            status: status.to_string(),
-            ..empty_item()
-        },
-        ToolCallKind::McpApp { app_key, input, .. } => Item {
-            id: id.to_string(),
-            kind: ItemKind::McpApp,
-            text: title.to_string(),
-            detail: input.clone(),
-            status: status.to_string(),
-            app_key: app_key.clone(),
-            ..empty_item()
-        },
-        ToolCallKind::Plain => Item {
-            id: id.to_string(),
-            kind: ItemKind::Tool,
-            text: title.to_string(),
-            detail: detail.to_string(),
-            output: output.to_string(),
-            status: status.to_string(),
-            ..empty_item()
-        },
-    }
-}
-
-/// ToolCallUpdate → status/output/live. Live shell output rides
-/// `_meta.toolNotification.type == "live_output"` and appends; otherwise the
-/// content texts join as the final output (desktop `standardUpdate`).
-fn tool_update(
-    update: &agent_client_protocol::schema::v1::ToolCallUpdate,
-) -> (String, String, bool) {
-    let status = update
-        .fields
-        .status
-        .as_ref()
-        .map(crate::spine::tool_call_status_str)
-        .unwrap_or_default()
-        .to_string();
-    let notif = update
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.get("toolNotification"))
-        .and_then(|v| v.as_object());
-    if notif.and_then(|n| n.get("type")).and_then(|v| v.as_str()) == Some("live_output") {
-        let mut chunk = String::new();
-        if let Some(params) = notif.and_then(|n| n.get("params")).and_then(|v| v.as_object()) {
-            if let Some(chunks) = params.get("chunks").and_then(|v| v.as_array()) {
-                for c in chunks {
-                    if let Some(text) = c
-                        .get("output")
-                        .and_then(|o| o.as_object())
-                        .and_then(|o| o.get("text"))
-                        .and_then(|t| t.as_str())
-                    {
-                        chunk.push_str(text);
-                    }
-                }
-            }
-        }
-        return (status, chunk, true);
-    }
-    let mut outputs = Vec::new();
-    use agent_client_protocol::schema::v1::{ContentBlock, ToolCallContent};
-    for content in &update.fields.content.clone().unwrap_or_default() {
-        if let ToolCallContent::Content(content) = content {
-            if let ContentBlock::Text(text) = &content.content {
-                outputs.push(text.text.clone());
-            }
-        }
-    }
-    (status, outputs.join("\n"), false)
-}
-
-/// One `session/list` entry → summary, in the peer's id namespace
-/// (`roam:<label>:<id>`, CONTRACT §6).
-fn to_summary(label: &str, info: &SessionInfo) -> SessionSummary {
-    // goose carries the drawer's metadata on `_meta` (the main connection parses
-    // the same keys from the raw reply). Without this the roam card had no
-    // snippet and a hardcoded "0 msg".
-    let meta = info.meta.as_ref();
-    let snippet = meta
-        .and_then(|m| m.get("lastMessageSnippet"))
-        .and_then(Value::as_str)
-        .map(|s| s.to_string());
-    let project_id = meta
-        .and_then(|m| m.get("projectId"))
-        .and_then(Value::as_str)
-        .map(|s| s.to_string());
-    let message_count = meta
-        .and_then(|m| m.get("messageCount"))
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let model = meta
-        .and_then(|m| m.get("model"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let has_recipe = meta
-        .and_then(|m| m.get("hasRecipe"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    // goose's archive only stamps archivedAt (session/list has no filter).
-    let archived = meta.map(|m| m.contains_key("archivedAt")).unwrap_or(false);
-    SessionSummary {
-        id: format!("roam:{label}:{}", info.session_id),
-        title: info.title.clone().unwrap_or_default(),
-        updated_at: info.updated_at.clone().unwrap_or_default(),
-        last_message_snippet: snippet,
-        project_id,
-        message_count,
-        model,
-        has_recipe,
-        has_new: false,
-        archived,
-    }
-}
-
-/// `initialize` request mirroring the desktop's `onOpen`: protocol v1, no fs
-/// access, form elicitation, and the goose `_meta` capabilities without which
-/// `session/new` hard-fails for recipe-parameter sessions.
-fn initialize_request() -> InitializeRequest {
-    let mut fs = FileSystemCapabilities::default();
-    fs.read_text_file = false;
-    fs.write_text_file = false;
-    let mut caps = ClientCapabilities::new().fs(fs).elicitation(
-        ElicitationCapabilities::new().form(ElicitationFormCapabilities::default()),
-    );
-    caps.meta = Some(goose_meta());
-    InitializeRequest::new(ProtocolVersion::V1)
-        .client_capabilities(caps)
-        .client_info(Implementation::new("grouse", env!("CARGO_PKG_VERSION")))
-}
-
-/// The `_meta.goose` capability block (customNotifications etc.).
-fn goose_meta() -> Map<String, Value> {
-    let mut goose = Map::new();
-    goose.insert("customNotifications".into(), Value::Bool(true));
-    goose.insert("recipeParameterRequests".into(), Value::Bool(true));
-    goose.insert("toolCallLabelEnrichment".into(), Value::Bool(true));
-    // MCP-App hosting gate — see spine::initialize_params for why this must be
-    // declared or the server never emits the trusted `goose.mcpApp` meta.
-    goose.insert(
-        "mcpHostCapabilities".into(),
-        json!({ "extensions": { "io.modelcontextprotocol/ui": {
-            "mimeTypes": ["text/html;profile=mcp-app"] } } }),
-    );
-    let mut meta = Map::new();
-    meta.insert("goose".into(), Value::Object(goose));
-    meta
-}
-
-/// `session/list` filter: user + acp sessions only (desktop `listSessions`).
-fn session_list_meta() -> Map<String, Value> {
-    let mut meta = Map::new();
-    meta.insert(
-        "types".into(),
-        Value::Array(vec![
-            Value::String("user".into()),
-            Value::String("acp".into()),
-        ]),
-    );
-    meta
-}
-
-/// `session/new` `_meta`: `client` present ⇒ `SessionType::User`, so the
-/// Desktop/CLI can see these chats (desktop `startNewSession`).
-fn new_session_meta() -> Map<String, Value> {
-    let mut meta = Map::new();
-    meta.insert("client".into(), Value::String("grouse".into()));
-    meta
-}
 
 // ---------------------------------------------------------------------------
 // Routing (CONTRACT §6: chat routes to the last-opened session's owner)
@@ -2423,25 +1389,12 @@ fn new_session_meta() -> Map<String, Value> {
 /// owner). Pick the peer that owns the active session: the one whose label
 /// equals `active_label`. `None` when no roam session is active (chat routes
 /// to the main connection). The spine calls this from its chat/unstable intents.
-pub fn active_peer<'a>(
+pub(crate) fn active_peer<'a>(
     peers: &'a [Arc<RoamPeer>],
     active_label: &Option<String>,
 ) -> Option<&'a Arc<RoamPeer>> {
     let label = active_label.as_ref()?;
     peers.iter().find(|peer| &peer.label == label)
-}
-
-/// Trailing messages requested from `session/load` when the cache is current
-/// (see [`RoamPeer::replay_tail`]). Counted in server-side messages (tool
-/// requests and responses included), so this covers a few heavy agentic turns;
-/// the server widens to the nearest turn boundary. Large enough that the
-/// replayed window always overlaps the cached tail it dedupes against.
-const REPLAY_TAIL: usize = 100;
-
-/// The stamp comparison behind [`RoamPeer::replay_tail`], separated for
-/// testing: a tail only when both stamps exist and agree.
-fn replay_tail_decision(cached_at: &str, listed_at: &str) -> Option<usize> {
-    (!cached_at.is_empty() && cached_at == listed_at).then_some(REPLAY_TAIL)
 }
 
 // ---------------------------------------------------------------------------
@@ -2451,10 +1404,12 @@ fn replay_tail_decision(cached_at: &str, listed_at: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ConfigOption, ItemKind};
     use agent_client_protocol::schema::v1::{
-        ConfigOptionUpdate, ContentBlock, ContentChunk, SessionInfoUpdate, TextContent, ToolCall,
-        ToolCallId,
+        ConfigOptionUpdate, ContentBlock, ContentChunk, SessionInfo, SessionInfoUpdate,
+        TextContent, ToolCall, ToolCallId,
     };
+    use serde_json::{json, Map};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// Records every CoreListener call as a line, for asserting dispatch.
@@ -2481,7 +1436,9 @@ mod tests {
                 .push(format!("status {}", status_name(&status)));
         }
         fn on_sessions(&self, sessions: Vec<SessionSummary>) {
-            self.events.lock().push(format!("sessions {}", sessions.len()));
+            self.events
+                .lock()
+                .push(format!("sessions {}", sessions.len()));
         }
         fn on_usage(&self, used: i64, size: i64, _cost: f64, currency: String) {
             self.events
@@ -2507,9 +1464,7 @@ mod tests {
             self.events.lock().push(line);
         }
         fn on_config(&self, options: Vec<crate::ConfigOption>) {
-            self.events
-                .lock()
-                .push(format!("config {}", options.len()));
+            self.events.lock().push(format!("config {}", options.len()));
         }
         fn on_permission_request(&self, request: crate::PermissionRequest) {
             self.events
@@ -2565,6 +1520,93 @@ mod tests {
     /// A peer without a connection, for state-machine tests.
     static TEST_PEER_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+    /// The production dispatch host composes the core; tests record the same
+    /// decisions on the listener.
+    struct TestHost {
+        label: String,
+        hub: Arc<crate::session::SessionHub>,
+        recorder: Arc<RecordingListener>,
+        replaying: Mutex<std::collections::HashSet<String>>,
+    }
+
+    impl crate::session::DispatchHost for TestHost {
+        fn display_id(&self, wire: &str) -> String {
+            crate::session::display_id(Some(&self.label), wire)
+        }
+        fn store(&self, key: &str) -> Arc<crate::transcript::TranscriptStore> {
+            self.hub.store(key)
+        }
+        fn touched(&self, key: String, title: String, updated_at: String) {
+            self.recorder
+                .events
+                .lock()
+                .push(format!("touched {key} {title} {updated_at}"));
+        }
+        fn active_run(&self, key: String, run_id: String) {
+            self.recorder
+                .events
+                .lock()
+                .push(format!("active_run {key} {run_id}"));
+            if !run_id.is_empty() {
+                self.replaying.lock().remove(&key);
+            }
+        }
+        fn config(&self, key: &str, options: Vec<ConfigOption>) {
+            if self.hub.is_displayed(key) {
+                self.recorder
+                    .events
+                    .lock()
+                    .push(format!("config {}", options.len()));
+            }
+        }
+        fn usage(&self, key: &str, used: i64, size: i64, _cost: f64, currency: String) {
+            if self.hub.is_displayed(key) {
+                self.recorder
+                    .events
+                    .lock()
+                    .push(format!("usage {used} {size} {currency}"));
+            }
+        }
+        fn commands(&self, _key: &str, _names: Vec<String>) {}
+        fn permission(&self, key: &str, request: crate::PermissionRequest) {
+            if self.hub.is_displayed(key) {
+                self.recorder
+                    .events
+                    .lock()
+                    .push(format!("permission {}", request.tool_call_id));
+            }
+        }
+        fn begin_replay(&self, key: &str) {
+            self.replaying.lock().insert(key.to_string());
+        }
+        fn end_replay(&self, key: &str) {
+            self.replaying.lock().remove(key);
+        }
+        fn replaying(&self, key: &str) -> bool {
+            self.replaying.lock().contains(key)
+        }
+        fn accepts_chat(&self, _key: &str) -> bool {
+            true
+        }
+        fn background(&self, key: &str) {
+            self.hub.mark_new(key);
+        }
+        fn endpoint_ready(&self, _label: Option<&str>) {}
+        fn cache_session(&self, _key: &str) {}
+        fn session_stamp(&self, _key: &str, _updated_at: &str) {}
+        fn tool_run(&self, _key: &str, _run_id: &str) {}
+        fn stamp_probe(&self, _key: &str, _persist: bool) {}
+        fn is_summarizer(&self, _key: &str) -> bool {
+            false
+        }
+        fn summarizer_chunk(&self, _key: &str, _text: &str) -> bool {
+            false
+        }
+        fn take_summarizer_reply(&self, _key: &str) -> String {
+            String::new()
+        }
+    }
+
     fn offline_peer(
         label: &str,
         listener: Arc<RecordingListener>,
@@ -2575,24 +1617,27 @@ mod tests {
         // the state machine directly and assert on `cmd_rx` returned below,
         // never through a live command loop.
         let (_slot_tx, slot_rx) = tokio_mpsc::unbounded_channel();
-        // A peer's config goes to the core's merge in production; here the recorder stands
-        // in for that merge, so config assertions ("config N") keep their meaning.
-        let recorder = listener.clone();
-        let as_dyn: Arc<dyn CoreListener> = listener;
+        let as_dyn: Arc<dyn CoreListener> = listener.clone();
+        let hub = crate::session::SessionHub::new(listener.clone());
+        // The old `is_active` gate is now the hub's displayed key. Tests use
+        // session `s1`.
+        if is_active() {
+            hub.display(&format!("roam:{label}:s1"));
+        }
+        let host = Arc::new(TestHost {
+            label: label.to_string(),
+            hub: hub.clone(),
+            recorder: listener,
+            replaying: Mutex::new(std::collections::HashSet::new()),
+        });
         let peer = Arc::new(RoamPeer {
             label: label.to_string(),
             inner: Mutex::new(PeerInner::new()),
             cmd_tx,
             cmd_rx: Arc::new(tokio::sync::Mutex::new(slot_rx)),
             listener: as_dyn,
-            is_active,
-            config_sink: Arc::new(move |options: Vec<ConfigOption>| {
-                recorder.events.lock().push(format!("config {}", options.len()));
-            }),
-            // A dir per PEER, not per label: `open` reads the transcript cache
-            // now, so peers sharing a dir would read each other's rows — tests
-            // that happen to use the same session id would leak into each
-            // other (they did, the moment open started reading the cache).
+            host,
+            hub,
             cache: Arc::new(CacheStore::new(std::env::temp_dir().join(format!(
                 "grouse-roam-test-{label}-{}-{}",
                 std::process::id(),
@@ -2661,7 +1706,11 @@ mod tests {
     #[test]
     fn browse_list_arrives_no_session_auto_opens() {
         let listener = test_listener();
-        let (peer, mut cmd_rx) = offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(false))));
+        let (peer, mut cmd_rx) = offline_peer(
+            "laptop",
+            listener.clone(),
+            gate(Arc::new(AtomicBool::new(false))),
+        );
 
         peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
 
@@ -2684,17 +1733,36 @@ mod tests {
     #[test]
     fn open_session_queues_load_with_raw_id() {
         let listener = test_listener();
-        let (peer, mut cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let (peer, mut cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
         peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
 
         // Prefixed id (what the UI holds) is stripped back to the raw id.
         peer.open_session("roam:laptop:s1".to_string(), "/home/user".to_string());
         match cmd_rx.try_recv() {
-            Ok(PeerCommand::OpenSession { session_id, cwd }) => {
+            Ok(PeerCommand::OpenSession {
+                session_id, cwd, ..
+            }) => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(cwd, "/home/user");
             }
             other => panic!("expected OpenSession command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_forced_peer_reload_queues_the_force_flag() {
+        let listener = test_listener();
+        let (peer, mut cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
+
+        // The desktop's "reload from the start": the core routes it here with
+        // force, and the peer must take a full replay rather than the cache.
+        peer.open_session_with("roam:laptop:s1".to_string(), String::new(), true);
+        match cmd_rx.try_recv() {
+            Ok(PeerCommand::OpenSession { force, .. }) => assert!(force),
+            other => panic!("expected a forced OpenSession, got {other:?}"),
         }
     }
 
@@ -2705,7 +1773,8 @@ mod tests {
         // the command channel. Only a DEAD peer (after the supervisor gave
         // up) drops opens.
         let listener = test_listener();
-        let (peer, mut cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let (peer, mut cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
         assert!(matches!(peer.status(), ConnectionStatus::Connecting));
         peer.open_session("s1".to_string(), "/home/user".to_string());
         match cmd_rx.try_recv() {
@@ -2716,61 +1785,31 @@ mod tests {
         peer.connection_ended(Ok(()));
         assert!(matches!(peer.status(), ConnectionStatus::Disconnected));
         peer.open_session("s2".to_string(), "/home/user".to_string());
-        assert!(cmd_rx.try_recv().is_err(), "a disconnected peer must not accept opens");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "a disconnected peer must not accept opens"
+        );
     }
 
     #[test]
     fn open_session_falls_back_to_session_cwd_when_blank() {
         let listener = test_listener();
-        let (peer, mut cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let (peer, mut cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
         peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
 
         // A blank cwd (roam-only client, no main last_config) must resolve to
         // the session's own cwd from session/list, not fail the load.
         peer.open_session("s1".to_string(), String::new());
         match cmd_rx.try_recv() {
-            Ok(PeerCommand::OpenSession { session_id, cwd }) => {
+            Ok(PeerCommand::OpenSession {
+                session_id, cwd, ..
+            }) => {
                 assert_eq!(session_id, "s1");
                 assert!(!cwd.is_empty());
             }
             other => panic!("expected OpenSession command, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn apply_sessions_seeds_staging_from_cache() {
-        use crate::{Item, ItemKind};
-        let listener = test_listener();
-        let (peer, _) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
-        // Persist a transcript for s1 under the prefixed cache key, then list:
-        // apply_sessions must seed it into staging so open() paints instantly.
-        let m = Item {
-            id: "msg1".to_string(),
-            kind: ItemKind::Agent,
-            text: "hello".to_string(),
-            detail: String::new(),
-            output: String::new(),
-            status: String::new(),
-            app_key: String::new(),
-            calls: Vec::new(),
-            thought: String::new(),
-            summary: String::new(),
-        };
-        assert!(peer.cache.save_transcript("roam:laptop:s1", &[m], "2026-01-01T00:00:00Z"));
-        peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
-        let n = peer
-            .inner
-            .lock()
-            .staging
-            .get("s1")
-            .map(|st| st.store.items.len())
-            .unwrap_or(0);
-        assert_eq!(n, 1, "s1 should be staged from the cache");
-        // Staging is rich now: the item's kind survives.
-        assert_eq!(
-            peer.inner.lock().staging.get("s1").unwrap().store.items[0].kind,
-            ItemKind::Agent
-        );
     }
 
     #[test]
@@ -2798,7 +1837,8 @@ mod tests {
             "the typed SessionInfo must keep _meta: {:?}",
             reply.sessions[0].meta
         );
-        let summary = to_summary("laptop", &reply.sessions[0]);
+        let summary = crate::session::summary_from_info(Some("laptop"), &reply.sessions[0])
+            .expect("listed session");
         assert_eq!(summary.message_count, 42);
         assert_eq!(summary.last_message_snippet.as_deref(), Some("hi there"));
     }
@@ -2824,139 +1864,12 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "roam:laptop:s1");
         assert_eq!(sessions[0].message_count, 42);
-        assert_eq!(sessions[0].last_message_snippet.as_deref(), Some("hi there"));
+        assert_eq!(
+            sessions[0].last_message_snippet.as_deref(),
+            Some("hi there")
+        );
         assert_eq!(sessions[0].model, "m-a");
         assert!(sessions[0].has_recipe);
-    }
-
-    #[test]
-    fn open_emits_cached_snapshot_instantly() {
-        use crate::{Item, ItemKind};
-        let listener = test_listener();
-        let (peer, _) = offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
-        let m = Item {
-            id: "msg1".to_string(),
-            kind: ItemKind::Agent,
-            text: "hello".to_string(),
-            detail: String::new(),
-            output: String::new(),
-            status: String::new(),
-            app_key: String::new(),
-            calls: Vec::new(),
-            thought: String::new(),
-            summary: String::new(),
-        };
-        assert!(peer.cache.save_transcript("roam:laptop:s1", &[m], "2026-01-01T00:00:00Z"));
-        peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
-        peer.open("s1".to_string());
-        // The open paints the item stream: exactly one Reset, the cached row,
-        // and one Window cursor.
-        let events = listener.events.lock().clone();
-        assert_eq!(
-            events.iter().filter(|e| e.as_str() == "item Reset").count(),
-            1,
-            "exactly one Reset: {events:?}"
-        );
-        assert!(
-            events.iter().any(|e| e.starts_with("item Upsert msg1 kind=Agent")),
-            "{events:?}"
-        );
-        assert_eq!(
-            events.iter().filter(|e| e.starts_with("item Window")).count(),
-            1,
-            "{events:?}"
-        );
-        let snapshot = peer.transcript();
-        assert_eq!(snapshot.len(), 1, "the cached row is what the rebuild reads");
-        assert_eq!(snapshot[0].content, "hello");
-    }
-
-    #[test]
-    fn a_peer_streams_rich_items_from_its_store() {
-        let listener = test_listener();
-        let (peer, _cmd_rx) =
-            offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
-        peer.open("s1".to_string()); // live-transcript path
-
-        // Two live chunks (no message id): the store mints an id, Upserts it
-        // first (creating the row), then sends the rest as a delta.
-        for text in ["Hel", "lo"] {
-            peer.dispatch(SessionNotification::new(
-                "s1",
-                SessionUpdate::AgentMessageChunk(
-                    ContentChunk::new(ContentBlock::Text(TextContent::new(text))),
-                ),
-            ));
-        }
-        // A tool call whose item keeps its kind.
-        peer.dispatch(SessionNotification::new(
-            "s1",
-            SessionUpdate::ToolCall(ToolCall::new(ToolCallId::new("t1"), "Bash")),
-        ));
-
-        let events = listener.events.lock().clone();
-        let created = events
-            .iter()
-            .position(|e| e.starts_with("item Upsert roam-item-1 kind=Agent"))
-            .expect("the live text row is Upserted first");
-        let delta = events
-            .iter()
-            .position(|e| e == "item AppendText roam-item-1 lo")
-            .expect("the next chunk is a delta");
-        assert!(created < delta, "Upsert must precede the delta: {events:?}");
-        assert!(
-            events.iter().any(|e| e.starts_with("item Upsert t1 kind=Tool")),
-            "{events:?}"
-        );
-
-        // The rich store is the source of truth for both getters.
-        let items = peer.items();
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[1].id, "t1");
-        assert_eq!(items[1].kind, ItemKind::Tool);
-        assert_eq!(peer.transcript().len(), 2);
-    }
-
-
-    /// Opening a session the peer has never listed still paints: the cache is
-    /// read on open, not only when apply_sessions seeds staging.
-    #[test]
-    fn open_paints_from_cache_before_any_session_list() {
-        use crate::{Item, ItemKind};
-        let listener = test_listener();
-        let (peer, _) = offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
-        let m = Item {
-            id: "msg1".to_string(),
-            kind: ItemKind::Agent,
-            text: "from the cache".to_string(),
-            detail: String::new(),
-            output: String::new(),
-            status: String::new(),
-            app_key: String::new(),
-            calls: Vec::new(),
-            thought: String::new(),
-            summary: String::new(),
-        };
-        assert!(peer.cache.save_transcript("roam:laptop:s9", &[m], "2026-01-01T00:00:00Z"));
-        // NO apply_sessions call: nothing has been staged for s9.
-        peer.open("s9".to_string());
-        let snapshot = peer.transcript();
-        assert_eq!(snapshot.len(), 1, "cache must paint without a prior session/list");
-        assert_eq!(snapshot[0].content, "from the cache");
-    }
-
-    /// An empty session must still clear the previous chat off screen.
-    #[test]
-    fn open_an_empty_session_clears_the_previous_one() {
-        let listener = test_listener();
-        let (peer, _) = offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
-        peer.open("s-empty".to_string());
-        let events = listener.events.lock();
-        assert_eq!(
-            events.iter().filter(|e| e.as_str() == "item Reset").count(),
-            1,
-            "an empty session still emits the Reset: {events:?}"
-        );
     }
 
     #[test]
@@ -2966,13 +1879,18 @@ mod tests {
         // behavior that made peers look dead), only record the resume and
         // free the app's turn state.
         let listener = test_listener();
-        let (peer, _cmd_rx) = offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
+        let (peer, _cmd_rx) = offline_peer(
+            "laptop",
+            listener.clone(),
+            gate(Arc::new(AtomicBool::new(true))),
+        );
         peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
-        peer.open("s1".to_string());
+        peer.inner.lock().open_session_id = Some("s1".to_string());
         peer.inner.lock().active_run = Some("run-9".to_string());
 
-        peer.connection_ended(Err(agent_client_protocol::Error::internal_error()
-            .data("roam stream ended")));
+        peer.connection_ended(Err(
+            agent_client_protocol::Error::internal_error().data("roam stream ended")
+        ));
 
         assert!(matches!(peer.status(), ConnectionStatus::Disconnected));
         assert_eq!(
@@ -2982,15 +1900,15 @@ mod tests {
         );
         let events = listener.events.lock();
         assert!(
-            !events.iter().any(|e| e.starts_with("peer_status laptop disconnected")
-                || e.starts_with("peer_status laptop error")),
+            !events
+                .iter()
+                .any(|e| e.starts_with("peer_status laptop disconnected")
+                    || e.starts_with("peer_status laptop error")),
             "a supervised drop emits no terminal status: {events:?}"
         );
         // The run died with the link: the empty run id frees the app's busy state.
         assert!(
-            events
-                .iter()
-                .any(|e| e == "active_run roam:laptop:s1 "),
+            events.iter().any(|e| e == "active_run roam:laptop:s1 "),
             "the dead run id must be cleared for the app: {events:?}"
         );
         assert!(peer.inner.lock().active_run.is_none());
@@ -2999,9 +1917,13 @@ mod tests {
     #[test]
     fn clean_end_is_terminal_and_owes_nothing() {
         let listener = test_listener();
-        let (peer, _cmd_rx) = offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
+        let (peer, _cmd_rx) = offline_peer(
+            "laptop",
+            listener.clone(),
+            gate(Arc::new(AtomicBool::new(true))),
+        );
         peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
-        peer.open("s1".to_string());
+        peer.inner.lock().open_session_id = Some("s1".to_string());
 
         peer.connection_ended(Ok(()));
 
@@ -3012,7 +1934,9 @@ mod tests {
         );
         let events = listener.events.lock();
         assert!(
-            events.iter().any(|e| e == "peer_status laptop disconnected"),
+            events
+                .iter()
+                .any(|e| e == "peer_status laptop disconnected"),
             "a clean end surfaces disconnected: {events:?}"
         );
     }
@@ -3031,7 +1955,8 @@ mod tests {
     #[test]
     fn new_session_queues_create_with_cwd() {
         let listener = test_listener();
-        let (peer, mut cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let (peer, mut cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
         peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
         peer.new_session("/home/user".to_string());
         match cmd_rx.try_recv() {
@@ -3047,7 +1972,8 @@ mod tests {
         // sessions so its drawer reflects the change. `relist()` must queue the
         // Relist command (the command loop re-fetches + applies the list).
         let listener = test_listener();
-        let (peer, mut cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let (peer, mut cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
         peer.relist();
         match cmd_rx.try_recv() {
             Ok(PeerCommand::Relist) => {}
@@ -3058,7 +1984,8 @@ mod tests {
     #[test]
     fn new_session_queues_while_connecting_rejects_dead() {
         let listener = test_listener();
-        let (peer, mut cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let (peer, mut cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
         peer.new_session("/home/user".to_string());
         match cmd_rx.try_recv() {
             Ok(PeerCommand::NewSession { cwd }) => assert_eq!(cwd, "/home/user"),
@@ -3066,13 +1993,17 @@ mod tests {
         }
         peer.connection_ended(Ok(()));
         peer.new_session("/home/user".to_string());
-        assert!(cmd_rx.try_recv().is_err(), "a disconnected peer must not accept creates");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "a disconnected peer must not accept creates"
+        );
     }
 
     #[test]
     fn applying_a_new_list_replaces_sessions() {
         let listener = test_listener();
-        let (peer, _cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
         peer.apply_sessions(&list_response(&[("s1", "Old", "2026-01-01T00:00:00Z")]));
         peer.apply_sessions(&list_response(&[("s2", "New", "2026-02-01T00:00:00Z")]));
         let sessions = peer.sessions();
@@ -3088,7 +2019,8 @@ mod tests {
         // exists. The open session must survive the list replacement until the
         // server itself lists it (first message landed).
         let listener = test_listener();
-        let (peer, _cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
         peer.inner.lock().open_session_id = Some("s9".to_string());
         peer.apply_sessions(&list_response(&[("s1", "Old", "2026-01-01T00:00:00Z")]));
         let sessions = peer.sessions();
@@ -3109,7 +2041,8 @@ mod tests {
     #[test]
     fn wire_params_strips_own_roam_prefix_from_session_id() {
         let listener = test_listener();
-        let (peer, _cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
         // The app/spine address this peer's sessions by the prefixed id; the
         // wire must receive the raw id or the remote cannot resolve it.
         let rewritten = peer.wire_params(json!({
@@ -3124,10 +2057,14 @@ mod tests {
     #[test]
     fn wire_params_leaves_foreign_or_raw_ids_alone() {
         let listener = test_listener();
-        let (peer, _cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
         // A raw id (already correct) and another peer's prefix (cannot reach
         // this connection) are not rewritten.
-        assert_eq!(peer.wire_params(json!({"sessionId": "s1"}))["sessionId"], json!("s1"));
+        assert_eq!(
+            peer.wire_params(json!({"sessionId": "s1"}))["sessionId"],
+            json!("s1")
+        );
         assert_eq!(
             peer.wire_params(json!({"sessionId": "roam:other:s2"}))["sessionId"],
             json!("roam:other:s2")
@@ -3161,32 +2098,41 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_gates_chat_events_on_active() {
+    fn dispatch_gates_chat_events_on_displayed_session() {
         let listener = test_listener();
-        let active = Arc::new(AtomicBool::new(false));
-        let (peer, _cmd_rx) = offline_peer("laptop", listener.clone(), gate(active.clone()));
-        peer.open("s1".to_string());  // live-transcript path: session must be OPEN
+        let (peer, _cmd_rx) = offline_peer(
+            "laptop",
+            listener.clone(),
+            gate(Arc::new(AtomicBool::new(false))),
+        );
+        peer.inner.lock().open_session_id = Some("s1".to_string());
 
         let notif = SessionNotification::new(
             "s1",
             SessionUpdate::AgentMessageChunk(
-                ContentChunk::new(ContentBlock::Text(TextContent::new("hello")))
-                    .message_id("m1"),
+                ContentChunk::new(ContentBlock::Text(TextContent::new("hello"))).message_id("m1"),
             ),
         );
         peer.dispatch(notif);
 
-        // Inactive: the bubble accumulates, but no chat events forward.
-        assert_eq!(peer.transcript().len(), 1);
-        assert_eq!(peer.transcript()[0].content, "hello");
-        assert!(!listener.events.lock().iter().any(|e| e.starts_with("item ")));
+        // Background: the store accumulates, but no chat events forward; the
+        // first content marks the session (green dot).
+        let store = peer.hub.store("roam:laptop:s1");
+        assert_eq!(store.transcript().len(), 1);
+        assert_eq!(store.transcript()[0].content, "hello");
+        let events = listener.events.lock();
+        assert!(!events.iter().any(|e| e.starts_with("item ")), "{events:?}");
+        assert!(events
+            .iter()
+            .any(|e| e.starts_with("touched roam:laptop:s1")));
+        drop(events);
 
-        active.store(true, Ordering::SeqCst);
+        // Displayed: the same store now paints.
+        peer.hub.display("roam:laptop:s1");
         peer.dispatch(SessionNotification::new(
             "s1",
             SessionUpdate::AgentMessageChunk(
-                ContentChunk::new(ContentBlock::Text(TextContent::new(" world")))
-                    .message_id("m1"),
+                ContentChunk::new(ContentBlock::Text(TextContent::new(" world"))).message_id("m1"),
             ),
         ));
         let events = listener.events.lock();
@@ -3194,135 +2140,35 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_appends_to_existing_bubble() {
-        let listener = test_listener();
-        let (peer, _cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(false))));
-        peer.open("s1".to_string());  // live-transcript path
-        for text in ["a", "b", "c"] {
-            peer.dispatch(SessionNotification::new(
-                "s1",
-                SessionUpdate::AgentMessageChunk(
-                    ContentChunk::new(ContentBlock::Text(TextContent::new(text))).message_id("m1"),
-                ),
-            ));
-        }
-        assert_eq!(peer.transcript().len(), 1);
-        assert_eq!(peer.transcript()[0].content, "abc");
-        // A new message id starts a new bubble.
-        peer.dispatch(SessionNotification::new(
-            "s1",
-            SessionUpdate::AgentMessageChunk(
-                ContentChunk::new(ContentBlock::Text(TextContent::new("x"))).message_id("m2"),
-            ),
-        ));
-        assert_eq!(peer.transcript().len(), 2);
-    }
-
-    #[test]
-    fn dispatch_live_turn_keeps_thinking_separate_and_does_not_garble() {
-        let listener = test_listener();
-        let (peer, _cmd_rx) = offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(false))));
-        peer.open("s1".to_string());  // live-transcript path
-
-        // Real turn shape: thinking chunks (empty id) → tool call → final answer (empty id).
-        // The final answer must NOT merge into the thinking bubble (garbling), and the
-        // thinking must not be swallowed by the replay `contains` dedupe.
-        for t in ["think one", " think two"] {
-            peer.dispatch(SessionNotification::new(
-                "s1",
-                SessionUpdate::AgentThoughtChunk(
-                    ContentChunk::new(ContentBlock::Text(TextContent::new(t))),
-                ),
-            ));
-        }
-        peer.dispatch(SessionNotification::new(
-            "s1",
-            SessionUpdate::ToolCall(ToolCall::new(ToolCallId::new("tool1"), "shell")),
-        ));
-        let t = "answer ";
-        peer.dispatch(SessionNotification::new(
-            "s1",
-            SessionUpdate::AgentMessageChunk(
-                ContentChunk::new(ContentBlock::Text(TextContent::new(t))),
-            ),
-        ));
-
-        let tr = peer.transcript();
-        // thinking + tool + answer = 3 separate bubbles; nothing merged, nothing lost.
-        assert_eq!(tr.len(), 3, "expected thinking+tool+answer separate, got {}", tr.len());
-        assert_eq!(tr[0].role, "thought");
-        assert!(!tr[0].content.is_empty(), "thinking was not lost");
-        assert_eq!(tr[1].role, "tool");
-        assert_eq!(tr[1].content, "shell");
-        assert_eq!(tr[2].role, "agent");
-        assert_eq!(tr[2].content, "answer ");
-    }
-
-    /** A live thought chunk that happens to repeat the tail of its own bubble must not
-     *  become a second bubble. The stall guard below returns "nothing to emit" for that
-     *  chunk, and "nothing to emit" used to be encoded as `None` — the same value the
-     *  no-open-bubble case produced — so the fallthrough opened a FRESH thinking bubble
-     *  containing just the repeated text. That is the "new Thinking block starts
-     *  mid-stream" report: it fires wherever the model repeats itself (a doubled word,
-     *  a repeated "\n", an em-dash), which is to say at random. */
-    #[test]
-    fn a_replayed_thought_rewrites_one_bubble_rather_than_doubling_it() {
-        // Chunks sharing a message id are one row, live and replayed alike. The
-        // old rule compared TEXT (skip a chunk already contained in the row),
-        // which also swallowed legitimate repeats; identity comes from the id.
-        let listener = test_listener();
-        let (peer, _cmd_rx) =
-            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(false))));
-        peer.open("s1".to_string());
-        peer.inner.lock().replaying = false; // a live turn, not a replay
-
-        let thought = |t: &str| {
-            SessionNotification::new(
-                "s1",
-                SessionUpdate::AgentThoughtChunk(
-                    ContentChunk::new(ContentBlock::Text(TextContent::new(t))).message_id("t1"),
-                ),
-            )
-        };
-        for t in ["thi", "ng about", " the count"] {
-            peer.dispatch(thought(t));
-        }
-        let tr = peer.transcript();
-        assert_eq!(tr.len(), 1, "one message id is one bubble, got {tr:?}");
-        assert_eq!(tr[0].content, "thing about the count");
-
-        // The same message re-delivered by a replay: rewritten, same one bubble.
-        peer.inner.lock().replaying = true;
-        peer.inner.lock().store.rewritten.clear();
-        for t in ["thi", "ng about", " the count"] {
-            peer.dispatch(thought(t));
-        }
-        let tr = peer.transcript();
-        assert_eq!(tr.len(), 1, "a replay must not add a row, got {tr:?}");
-        assert_eq!(tr[0].content, "thing about the count");
-    }
-
-    #[test]
     fn dispatch_config_option_update_forwards_when_active() {
         let listener = test_listener();
-        let active = Arc::new(AtomicBool::new(false));
-        let (peer, _cmd_rx) = offline_peer("laptop", listener.clone(), gate(active.clone()));
+        let (peer, _cmd_rx) = offline_peer(
+            "laptop",
+            listener.clone(),
+            gate(Arc::new(AtomicBool::new(false))),
+        );
 
         let notif = SessionNotification::new(
             "s1",
             SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(vec![
                 agent_client_protocol::schema::v1::SessionConfigOption::select(
-                    "model", "Model", "deepseek",
+                    "model",
+                    "Model",
+                    "deepseek",
                     Vec::<agent_client_protocol::schema::v1::SessionConfigSelectOption>::new(),
                 ),
             ])),
         );
-        // Inactive: config change is not forwarded (chat-scoped gate).
+        // Background session: the config must not repaint the visible pickers.
         peer.dispatch(notif.clone());
-        assert!(!listener.events.lock().iter().any(|e| e.starts_with("config ")));
+        assert!(!listener
+            .events
+            .lock()
+            .iter()
+            .any(|e| e.starts_with("config ")));
 
-        // Active: forwarded to on_config.
-        active.store(true, Ordering::SeqCst);
+        // Displayed: forwarded to on_config.
+        peer.hub.display("roam:laptop:s1");
         peer.dispatch(notif);
         let events = listener.events.lock();
         assert!(events.iter().any(|e| e == "config 1"));
@@ -3331,8 +2177,12 @@ mod tests {
     #[test]
     fn dispatch_tool_call_kinds() {
         let listener = test_listener();
-        let (peer, _cmd_rx) = offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
-        peer.open("s1".to_string());  // live-transcript path
+        let (peer, _cmd_rx) = offline_peer(
+            "laptop",
+            listener.clone(),
+            gate(Arc::new(AtomicBool::new(true))),
+        );
+        peer.inner.lock().open_session_id = Some("s1".to_string());
 
         let mut meta = Map::new();
         let mut goose = Map::new();
@@ -3346,36 +2196,11 @@ mod tests {
             ),
         ));
         // A plain call becomes a Tool item whose detail carries the raw input.
-        let items = peer.items();
+        let store = peer.hub.store("roam:laptop:s1");
+        let items = store.rich_transcript();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].kind, ItemKind::Tool);
         assert!(items[0].detail.contains("ls"), "{:?}", items[0].detail);
-    }
-
-    #[test]
-    fn an_update_below_the_paint_window_is_not_emitted_as_an_item() {
-        // The peer paints a window, then a replay touches an OLDER row (it asks
-        // for a 100-message tail but paints 60). That row's item op must be
-        // suppressed — the client does not hold it, so an Upsert would append it
-        // at the end — while the legacy event still flows.
-        let mut store = PeerStore::default();
-        let items: Vec<Item> = (0..70)
-            .map(|n| Item {
-                id: format!("m{n}"),
-                kind: ItemKind::Agent,
-                text: format!("t{n}"),
-                ..empty_item()
-            })
-            .collect();
-        store.replace(items);
-        store.paint("roam:laptop:s1");
-        assert_eq!(store.emitted_from, 10, "the window is the newest 60");
-
-        let in_window = store.accumulate_text("agent", "!", "m20", true);
-        assert!(in_window.item.is_some(), "an in-window update is emitted");
-
-        let below = store.accumulate_text("agent", "!", "m5", true);
-        assert!(below.item.is_none(), "an update below the window is suppressed");
     }
 
     // -- routing --------------------------------------------------------------
@@ -3412,97 +2237,45 @@ mod tests {
     #[test]
     fn shared_status_and_kind_strings_are_snake_case_variants() {
         use agent_client_protocol::schema::v1::{PermissionOptionKind, ToolCallStatus};
-        assert_eq!(crate::spine::tool_call_status_str(&ToolCallStatus::Pending), "pending");
-        assert_eq!(crate::spine::tool_call_status_str(&ToolCallStatus::InProgress), "in_progress");
-        assert_eq!(crate::spine::tool_call_status_str(&ToolCallStatus::Completed), "completed");
-        assert_eq!(crate::spine::tool_call_status_str(&ToolCallStatus::Failed), "failed");
-        assert_eq!(crate::spine::permission_option_kind_str(&PermissionOptionKind::AllowOnce), "allow_once");
-        assert_eq!(crate::spine::permission_option_kind_str(&PermissionOptionKind::AllowAlways), "allow_always");
-        assert_eq!(crate::spine::permission_option_kind_str(&PermissionOptionKind::RejectOnce), "reject_once");
-        assert_eq!(crate::spine::permission_option_kind_str(&PermissionOptionKind::RejectAlways), "reject_always");
-    }
-
-    #[test]
-    fn prompt_timeout_emits_run_ended() {
-        // Regression: a session/prompt whose reply never arrives (the peer
-        // vanished mid-turn without a clean FIN, so send_request hangs and
-        // never errors) must still end the turn. Before the fix, the `?` on
-        // recv_timeout returned before end_turn ran, so the app never received
-        // RunEnded and stayed busy forever.
-        let listener = test_listener();
-        let (peer, _cmd_rx) = offline_peer(
-            "laptop",
-            listener.clone(),
-            gate(Arc::new(AtomicBool::new(true))),
-        );
-
-        // A ConnectionTo<Agent> over a Channel whose counterpart never replies:
-        // send_request hangs, so the 30s RPC_TIMEOUT fires.
-        let (transport, _silent) = Channel::duplex();
-        let cx_holder: Arc<Mutex<Option<agent_client_protocol::ConnectionTo<Agent>>>> =
-            Arc::new(Mutex::new(None));
-        let (ready_tx, ready_rx) = std_mpsc::channel();
-        let (_keep_alive_tx, keep_alive_rx) = tokio::sync::oneshot::channel::<()>();
-        let cx_holder2 = cx_holder.clone();
-        let ready_tx2 = ready_tx.clone();
-        runtime().spawn(async move {
-            let _ = Client.builder()
-                .name("grouse")
-                .connect_with(
-                    transport,
-                    async move |cx: agent_client_protocol::ConnectionTo<Agent>| {
-                        *cx_holder2.lock() = Some(cx);
-                        let _ = ready_tx2.send(());
-                        // Never return: keeps the connection (and the transport)
-                        // alive so send_request keeps waiting for a reply.
-                        let _ = keep_alive_rx.await;
-                        Ok(())
-                    },
-                )
-                .await;
-        });
-        ready_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("connection not established");
-        peer.inner.lock().conn = cx_holder.lock().take();
-
-        // The prompt never gets a reply; the turn must still end.
-        let result = peer.rpc("session/prompt", json!({ "sessionId": "roam:laptop:s1" }));
-        assert!(result.is_err(), "expected the rpc to time out");
-
-        let events = listener.events.lock();
-        assert!(
-            events.iter().any(|e| e.starts_with("run_ended")),
-            "expected run-ended to be emitted, got: {events:?}"
-        );
-        // The peer's run bookkeeping is cleared too.
-        assert!(peer.inner.lock().active_run.is_none());
-    }
-
-    #[test]
-    fn replay_tail_only_when_stamps_agree() {
         assert_eq!(
-            replay_tail_decision("2026-08-23T10:00:00Z", "2026-08-23T10:00:00Z"),
-            Some(REPLAY_TAIL)
+            crate::session::tool_call_status_str(&ToolCallStatus::Pending),
+            "pending"
         );
-        // The session moved while we were away — a tail could hide a gap.
         assert_eq!(
-            replay_tail_decision("2026-08-23T10:00:00Z", "2026-08-23T11:00:00Z"),
-            None
+            crate::session::tool_call_status_str(&ToolCallStatus::InProgress),
+            "in_progress"
         );
-        // No stamp on either side proves nothing.
-        assert_eq!(replay_tail_decision("", ""), None);
-        assert_eq!(replay_tail_decision("", "2026-08-23T10:00:00Z"), None);
+        assert_eq!(
+            crate::session::tool_call_status_str(&ToolCallStatus::Completed),
+            "completed"
+        );
+        assert_eq!(
+            crate::session::tool_call_status_str(&ToolCallStatus::Failed),
+            "failed"
+        );
+        assert_eq!(
+            crate::session::permission_option_kind_str(&PermissionOptionKind::AllowOnce),
+            "allow_once"
+        );
+        assert_eq!(
+            crate::session::permission_option_kind_str(&PermissionOptionKind::AllowAlways),
+            "allow_always"
+        );
+        assert_eq!(
+            crate::session::permission_option_kind_str(&PermissionOptionKind::RejectOnce),
+            "reject_once"
+        );
+        assert_eq!(
+            crate::session::permission_option_kind_str(&PermissionOptionKind::RejectAlways),
+            "reject_always"
+        );
     }
 
     #[test]
     fn session_info_update_refreshes_the_session_list() {
         let listener = test_listener();
-        let (peer, _cmd_rx) = offline_peer(
-            "laptop",
-            listener,
-            gate(Arc::new(AtomicBool::new(false))),
-        );
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(false))));
         peer.inner.lock().sessions.push(SessionSummary {
             id: "roam:laptop:s1".to_string(),
             title: "old title".to_string(),
@@ -3561,208 +2334,6 @@ mod tests {
                 .iter()
                 .any(|e| e == "touched roam:laptop:s1 named by goose 2026-08-23T11:00:00Z"),
             "title must carry the prefixed id: {events:?}"
-        );
-    }
-
-    // --- transcript identity: the server's message id is the row ---------------
-
-    fn store_rows(store: &PeerStore) -> Vec<String> {
-        store
-            .items
-            .iter()
-            .map(|i| format!("{:?}:{}", i.kind, i.text))
-            .collect()
-    }
-
-    #[test]
-    fn a_replayed_message_rewrites_its_row_instead_of_doubling() {
-        // The same message id arrives live and then again in a replay (a
-        // reconnect, or a tail replay after the wire came back). Appending the
-        // replay onto what is already shown doubled the text; the replay is
-        // authoritative for a message it re-delivers.
-        let mut store = PeerStore::default();
-        store.accumulate_text("agent", "Hello", "m1", false);
-        store.accumulate_text("agent", " world", "m1", false);
-        assert_eq!(store_rows(&store), vec!["Agent:Hello world"]);
-
-        store.rewritten.clear(); // a replay begins
-        store.accumulate_text("agent", "Hello", "m1", true);
-        store.accumulate_text("agent", " world", "m1", true);
-        assert_eq!(store_rows(&store), vec!["Agent:Hello world"]);
-    }
-
-    #[test]
-    fn a_replay_completes_a_row_whose_live_stream_was_cut_short() {
-        // The live leg dropped mid-message; the replay carries the whole text
-        // and must end up as the row's content, not as an addition to it.
-        let mut store = PeerStore::default();
-        store.accumulate_text("agent", "Hello", "m1", false);
-
-        store.rewritten.clear();
-        store.accumulate_text("agent", "Hello", "m1", true);
-        store.accumulate_text("agent", " world", "m1", true);
-        assert_eq!(store_rows(&store), vec!["Agent:Hello world"]);
-    }
-
-    #[test]
-    fn the_servers_copy_of_an_echoed_prompt_adopts_the_echo_row() {
-        // The question is shown when it is sent; the server later names it (a
-        // user message WITH an id). Two rows for one question was the visible
-        // duplicate — and the stray row landed at the end of the transcript.
-        let mut store = PeerStore::default();
-        store.echo_prompt("what time is it", false);
-        assert_eq!(store_rows(&store), vec!["User:what time is it"]);
-
-        store.accumulate_text("user", "what time is it", "u1", false);
-        assert_eq!(store_rows(&store), vec!["User:what time is it"]);
-
-        // And the reply that follows is its own row, not a continuation.
-        store.accumulate_text("agent", "Seven.", "a1", false);
-        assert_eq!(
-            store_rows(&store),
-            vec!["User:what time is it", "Agent:Seven."]
-        );
-    }
-
-    #[test]
-    fn two_prompts_in_a_row_are_two_rows() {
-        let mut store = PeerStore::default();
-        store.echo_prompt("first", false);
-        store.echo_prompt("second", false);
-        assert_eq!(store_rows(&store), vec!["User:first", "User:second"]);
-    }
-
-    #[test]
-    fn a_cached_echo_row_is_adopted_by_the_replay_after_a_restart() {
-        // The cached row keeps its local id (the alias to the server's id is not
-        // persisted), so a TAIL replay — the fast path — used to append a second
-        // copy of a question that was already on screen.
-        let cached = vec![
-            Item {
-                id: "roam-item-4".to_string(),
-                kind: ItemKind::User,
-                text: "what time is it".to_string(),
-                ..empty_item()
-            },
-            Item {
-                id: "a1".to_string(),
-                kind: ItemKind::Agent,
-                text: "Seven.".to_string(),
-                ..empty_item()
-            },
-        ];
-        let mut store = PeerStore::from_items(cached);
-        store.rewritten.clear();
-        store.accumulate_text("user", "what time is it", "u1", true);
-
-        assert_eq!(
-            store_rows(&store),
-            vec!["User:what time is it", "Agent:Seven."],
-            "the replay adopts the cached echo row"
-        );
-    }
-
-    #[test]
-    fn a_reloaded_store_does_not_reissue_the_ids_it_already_holds() {
-        // `from_items` restarted the counter at zero, so the next row took an id
-        // a cached row still owned — and an upsert by id then overwrote that
-        // unrelated earlier message on the client.
-        let cached = vec![Item {
-            id: "roam-item-5".to_string(),
-            kind: ItemKind::User,
-            text: "from the cache".to_string(),
-            ..empty_item()
-        }];
-        let mut store = PeerStore::from_items(cached);
-        store.echo_prompt("fresh", false);
-        let ids: Vec<&str> = store.items.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, vec!["roam-item-5", "roam-item-6"]);
-    }
-
-    #[test]
-    fn the_prompt_echo_is_what_keeps_turns_apart() {
-        // goose sends no `user_message_chunk` for a prompt a client sent, and
-        // roam's live text bubble stays open until something closes it. This
-        // pins BOTH halves: without the echo two turns share one paragraph (and
-        // the question is missing entirely until a replay), with it each turn is
-        // its own row. `Core::send_prompt`'s roam branch performs the echo.
-        let chunk = |text: &str| {
-            SessionNotification::new(
-                "s1",
-                SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
-                    TextContent::new(text),
-                ))),
-            )
-        };
-        let rows = |peer: &Arc<RoamPeer>| -> Vec<String> {
-            peer.inner
-                .lock()
-                .store
-                .items
-                .iter()
-                .map(|i| format!("{:?}:{}", i.kind, i.text))
-                .collect()
-        };
-
-        // No echo (the old behaviour): the second reply lands in the first bubble.
-        let (bare, _rx1) = offline_peer(
-            "laptop",
-            test_listener(),
-            gate(Arc::new(AtomicBool::new(true))),
-        );
-        bare.open("s1".to_string());
-        bare.dispatch(chunk("first reply"));
-        bare.dispatch(chunk("second reply"));
-        assert_eq!(rows(&bare), vec!["Agent:first replysecond reply"]);
-
-        // With the echo: a user row between the two replies, and both replies whole.
-        let (echoed, _rx2) = offline_peer(
-            "laptop2",
-            test_listener(),
-            gate(Arc::new(AtomicBool::new(true))),
-        );
-        echoed.open("s1".to_string());
-        echoed.dispatch(chunk("first reply"));
-        echoed.echo_prompt("second question");
-        echoed.dispatch(chunk("second reply"));
-        assert_eq!(
-            rows(&echoed),
-            vec![
-                "Agent:first reply",
-                "User:second question",
-                "Agent:second reply",
-            ]
-        );
-    }
-
-    #[test]
-    fn a_prompt_without_a_connection_still_ends_the_turn() {
-        // A send while the peer is re-dialing has no conn to send on:
-        // `send_prompt` discards rpc()'s Result, and the app frees its busy
-        // state only on RunEnded — so the early return must still end the turn,
-        // or the chat wedges busy until the user switches sessions.
-        let listener = test_listener();
-        let (peer, _cmd_rx) = offline_peer(
-            "laptop",
-            listener.clone(),
-            gate(Arc::new(AtomicBool::new(true))),
-        );
-
-        assert!(
-            peer.rpc("session/prompt", json!({ "sessionId": "s1" }))
-                .is_err(),
-            "no connection means no prompt"
-        );
-        // Only a prompt ends a turn: an ordinary request that cannot be sent
-        // must not emit a spurious RunEnded (it would free a live turn's state).
-        assert!(peer.rpc("session/list", json!({})).is_err());
-
-        let events = listener.events.lock();
-        let ended: Vec<_> = events.iter().filter(|e| e.starts_with("run_ended")).collect();
-        assert_eq!(
-            ended,
-            vec!["run_ended error"],
-            "exactly one turn-end, from the prompt: {events:?}"
         );
     }
 }

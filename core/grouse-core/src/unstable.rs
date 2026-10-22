@@ -70,8 +70,14 @@ impl GrouseUnstable {
         // A roam-owned chat (`roam:<label>:<id>` active session) must be steered
         // through its peer — the old code always hit `current_conn()`, injecting
         // into the wrong conversation while a roam peer owned the chat.
-        let Some(active_conn) = spine::current_conn() else { return };
-        let Some(active) = active_conn.active_session_id() else {
+        // The DISPLAYED chat, whichever connection owns it. Reading the main
+        // connection's bound id steered the wrong session while a peer owned
+        // the screen (and reported "no session" on a roam-only client).
+        let Some(active) = spine::active_session() else {
+            // No wire at all: nothing to steer, and no user action to report.
+            if spine::current_conn().is_none() {
+                return;
+            }
             // Desktop parity: steering without a bound session is a user-visible failure.
             self.listener.on_error(
                 "_goose/unstable/session/steer".to_string(),

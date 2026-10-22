@@ -23,13 +23,17 @@ normative surface.
 - **Android (phase 3):** the same — `onCoreItem` maps items to `ChatMessage`
   rows keyed by item id (a ToolGroup expands to one `tool` row per call so the
   chat UI keeps grouping them), and the list asks for older items on scroll-back.
-- **Roam peers (pulled forward from phase 4):** `RoamPeer` holds a rich item
-  store (`PeerStore`) — transcript, staging and cache are all items, so a peer
-  chart/app survives promotion and restart. Its mutations emit `on_item`
-  directly (no bridge), with the same window/`load_older` behaviour as the main
-  connection (the peer owns its own window). Live text mints a stable id,
-  Upserts once, then deltas; a tool carries its kind; a replay that touches a
-  row below the painted window is not emitted (the client does not hold it).
+- **Every transport, one store (phase 4):** `SessionHub` keeps exactly one
+  `TranscriptStore` per display session id, the main WebSocket's and every roam
+  peer's alike. A per-store `SessionGate` paints (`on_item`, `on_usage`,
+  `on_speak`) only while that key is displayed; a background session accumulates
+  silently, is cached, and sets the drawer's green dot via `mark_new`. Both
+  wires feed the one `session::dispatch` pipeline, so peer items are built by the
+  same code and a peer chart/app survives promotion and restart. A peer differs
+  only in dial/framing, reconnect budget, browse list and the
+  `roam:<label>:<raw>` id namespace (which is also its cache key). Live text
+  mints a stable id, Upserts once, then deltas; a replay that touches a row
+  below the painted window is not emitted (the client does not hold it).
 
 **Phase 4 (in progress).** The legacy channels are deleted: `on_transcript`,
 `on_stream`, `TranscriptEvent` and `StreamEvent` are gone, and usage /
@@ -303,6 +307,13 @@ Because items carry their kind and payload, restart fidelity is total: charts,
 MCP apps, and tool groups survive untouched. The desktop's separate transcript
 cache is deleted.
 
+The cache key is the display session id: a main-wire chat caches under its bare
+`sessionId`, a peer chat under `roam:<label>:<raw>`. The save policy is the
+core's alone (`Core::save_cache_for`, reached by a peer through
+`DispatchHost::cache_session`), and the paint decision is
+`session::plan_paint` for both — so a peer chat cold-opens from its cached items
+exactly like a main one instead of replaying its whole history over the wire.
+
 ## Threading and performance
 
 - The core assigns no global order; order is the client's insertion order (new
@@ -370,8 +381,10 @@ Each phase is shippable; the old path stays until the last client moves.
    `Message` projection, and the provisional/supersede/anchor machinery; update
    `core/CONTRACT.md` and `core/grouse-core/INTERNAL.md`.
 
-Roam peers carry the same items: `RoamPeer`'s `Vec<Message>` becomes the item
-list, and the merge/dedupe code collapses into "Upsert by id".
+Every transport carries the same items through the same store: `spine::Conn`
+(WebSocket) and `roam::RoamPeer` (iroh) both hand their notifications to
+`session::dispatch` and share one `SessionHub` store per display id, so a peer
+needs no item code of its own and the merge/dedupe rules are "Upsert by id" once.
 
 ## Testing
 

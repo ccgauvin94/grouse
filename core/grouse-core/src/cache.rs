@@ -44,7 +44,7 @@ use crate::{Item, SessionSummary};
 /// it returns `None` and the next open replays and rewrites in the rich shape.
 ///
 /// Bumped to 4 when an INCOMPLETE store (a turn that dropped mid-stream) could
-/// still be saved with a non-empty `updatedAt` stamp — `probe_stamp_and_save`
+/// still be saved with a non-empty `updatedAt` stamp — `probe_stamp`
 /// copied the server's current stamp onto whatever the store held, so the
 /// half-finished transcript compared equal to the server forever and the replay
 /// that would have completed it was suppressed. The fix writes an empty stamp
@@ -210,7 +210,7 @@ impl CacheStore {
                     model: el.get("model").and_then(Value::as_str).unwrap_or("").to_string(),
                     has_recipe: el.get("hasRecipe").and_then(Value::as_bool).unwrap_or(false),
                     // The cache is a replay of the last list; a cached summary is
-                    // never "new" — has_new is live-only, derived from staging.
+                    // never "new" — has_new is live-only, derived from the hub.
                     has_new: false,
                     archived: false,
                 })
