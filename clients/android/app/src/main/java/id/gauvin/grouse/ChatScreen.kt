@@ -564,6 +564,24 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     }) { pad ->
         Box(Modifier.padding(pad).fillMaxSize()) {
             Column(Modifier.padding(horizontal = 12.dp).fillMaxSize()) {
+                // A delegate runs for minutes with nothing on screen to show it: its row
+                // may be scrolled away, or folded inside a collapsed tool run. Show a
+                // one-line strip exactly WHILE that is true — never when the row is in
+                // view, which would just duplicate what is already in front of you.
+                val chatRows = groupChatItems(cm.messages)
+                val activeDelegate = cm.messages.lastOrNull {
+                    it.role == "tool" && it.status == "in_progress" && it.steps.isNotEmpty()
+                }
+                val delegateRow = activeDelegate?.let { d ->
+                    chatRows.firstOrNull { row ->
+                        when (row) {
+                            is ChatItem.Msg -> row.m.id == d.id
+                            is ChatItem.Tools -> row.items.any { it.id == d.id }
+                        }
+                    }
+                }
+                val delegateOnScreen = delegateRow != null &&
+                    listState.layoutInfo.visibleItemsInfo.any { it.key == delegateRow.firstId }
                 if (cm.onAssistant && !hintDismissed) AssistantHint {
                     hintDismissed = true; cm.store.assistantHintSeen = true
                 }
@@ -719,6 +737,32 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             trailingIcon = { Icon(Icons.Filled.Close, contentDescription = "remove",
                                 modifier = Modifier.size(16.dp)) },
                             modifier = Modifier.padding(end = 6.dp))
+                    }
+                }
+
+                if (activeDelegate != null && !delegateOnScreen) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                val idx = chatRows.asReversed()
+                                    .indexOfFirst { it.firstId == delegateRow?.firstId }
+                                if (idx >= 0) scope.launch { listState.animateScrollToItem(idx) }
+                            }
+                            .padding(start = 4.dp, top = 2.dp, bottom = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CircularProgressIndicator(Modifier.size(11.dp), strokeWidth = 1.4.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "subagent · " +
+                                (activeDelegate.steps.lastOrNull()?.name?.replace('_', ' ')
+                                    ?: "working") +
+                                " · ${activeDelegate.steps.size} steps",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
 

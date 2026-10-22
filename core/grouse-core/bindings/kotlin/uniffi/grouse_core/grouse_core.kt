@@ -4556,6 +4556,12 @@ data class Item (
      * to the call titles.
      */
     var `summary`: kotlin.String
+    , 
+    /**
+     * `ItemKind::Tool` only: the child tool calls a SUBAGENT made under this
+     * delegate row, oldest first (bounded). Empty for ordinary calls.
+     */
+    var `steps`: List<SubagentStep>
     
 ){
     
@@ -4582,6 +4588,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterSequenceTypeToolCall.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterSequenceTypeSubagentStep.read(buf),
         )
     }
 
@@ -4595,7 +4602,8 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.allocationSize(value.`appKey`) +
             FfiConverterSequenceTypeToolCall.allocationSize(value.`calls`) +
             FfiConverterString.allocationSize(value.`thought`) +
-            FfiConverterString.allocationSize(value.`summary`)
+            FfiConverterString.allocationSize(value.`summary`) +
+            FfiConverterSequenceTypeSubagentStep.allocationSize(value.`steps`)
     )
 
     override fun write(value: Item, buf: ByteBuffer) {
@@ -4609,6 +4617,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterSequenceTypeToolCall.write(value.`calls`, buf)
             FfiConverterString.write(value.`thought`, buf)
             FfiConverterString.write(value.`summary`, buf)
+            FfiConverterSequenceTypeSubagentStep.write(value.`steps`, buf)
     }
 }
 
@@ -5304,6 +5313,66 @@ public object FfiConverterTypeSessionSummary: FfiConverterRustBuffer<SessionSumm
             FfiConverterBoolean.write(value.`hasRecipe`, buf)
             FfiConverterBoolean.write(value.`hasNew`, buf)
             FfiConverterBoolean.write(value.`archived`, buf)
+    }
+}
+
+
+
+/**
+ * One tool call a SUBAGENT made on behalf of a delegate call.
+ *
+ * goose does not expose subagent sessions over ACP (`ACP_VISIBLE_SESSION_TYPES`
+ * excludes them), but it forwards each child tool request into the parent's
+ * delegate row as `_meta.toolNotification` with a `subagent:<id>` logger. That
+ * stream is the record of what the delegate actually did, so the row carries it.
+ */
+data class SubagentStep (
+    /**
+     * The tool the subagent called (`developer__shell`, `read_file`, …).
+     */
+    var `name`: kotlin.String
+    , 
+    /**
+     * One line of its arguments (command, path, query), already trimmed.
+     */
+    var `detail`: kotlin.String
+    , 
+    /**
+     * `in_progress` while running; `completed` / `failed` once known.
+     */
+    var `status`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSubagentStep: FfiConverterRustBuffer<SubagentStep> {
+    override fun read(buf: ByteBuffer): SubagentStep {
+        return SubagentStep(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: SubagentStep) = (
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterString.allocationSize(value.`detail`) +
+            FfiConverterString.allocationSize(value.`status`)
+    )
+
+    override fun write(value: SubagentStep, buf: ByteBuffer) {
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterString.write(value.`detail`, buf)
+            FfiConverterString.write(value.`status`, buf)
     }
 }
 
@@ -7286,6 +7355,34 @@ public object FfiConverterSequenceTypeSessionSummary: FfiConverterRustBuffer<Lis
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeSessionSummary.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeSubagentStep: FfiConverterRustBuffer<List<SubagentStep>> {
+    override fun read(buf: ByteBuffer): List<SubagentStep> {
+        val len = buf.getInt()
+        return List<SubagentStep>(len) {
+            FfiConverterTypeSubagentStep.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<SubagentStep>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeSubagentStep.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<SubagentStep>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeSubagentStep.write(it, buf)
         }
     }
 }

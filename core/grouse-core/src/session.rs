@@ -356,6 +356,71 @@ pub(crate) fn tool_live_output(
     Some(chunk)
 }
 
+/// The child tool call a SUBAGENT just made, if this update carries one.
+///
+/// goose keeps subagent sessions out of ACP (`ACP_VISIBLE_SESSION_TYPES`), so the
+/// only view of the child's work is what it forwards onto the parent's delegate
+/// row: `_meta.toolNotification` with `type: message`, a `subagent:<id>` logger,
+/// and `data.type == "subagent_tool_request"` holding the child's tool name and
+/// arguments.
+pub(crate) fn tool_subagent_step(
+    update: &agent_client_protocol::schema::v1::ToolCallUpdate,
+) -> Option<crate::SubagentStep> {
+    let notif = update.meta.as_ref()?.get("toolNotification")?.as_object()?;
+    if notif.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    let params = notif.get("params")?.as_object()?;
+    let logger = params.get("logger").and_then(Value::as_str)?;
+    if !logger.starts_with("subagent:") {
+        return None;
+    }
+    let data = params.get("data")?.as_object()?;
+    if data.get("type").and_then(Value::as_str) != Some("subagent_tool_request") {
+        return None;
+    }
+    let call = data.get("tool_call")?.as_object()?;
+    let name = call
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Some(crate::SubagentStep {
+        name,
+        detail: summarize_tool_args(call.get("arguments")),
+        status: "in_progress".to_string(),
+    })
+}
+
+/// One line of a tool call's arguments, for a status list where the full JSON
+/// would be unreadable: the first useful scalar (a command, a path, a query), else
+/// a compact rendering, truncated.
+fn summarize_tool_args(args: Option<&Value>) -> String {
+    const MAX: usize = 120;
+    let Some(args) = args.and_then(Value::as_object) else {
+        return String::new();
+    };
+    for key in ["command", "path", "file_path", "query", "url", "title", "name"] {
+        if let Some(value) = args.get(key).and_then(Value::as_str) {
+            if !value.is_empty() {
+                return truncate_line(value, MAX);
+            }
+        }
+    }
+    let compact = Value::Object(args.clone()).to_string();
+    truncate_line(&compact, MAX)
+}
+
+fn truncate_line(text: &str, max: usize) -> String {
+    let flat = text.replace('\n', " ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let mut cut: String = flat.chars().take(max.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
+}
+
 /// The final text content of a completed `tool_call_update`.
 pub(crate) fn tool_final_output(
     update: &agent_client_protocol::schema::v1::ToolCallUpdate,
@@ -726,6 +791,79 @@ mod tests {
     };
     use std::sync::Mutex as StdMutex;
 
+    #[test]
+    fn a_subagent_notification_becomes_one_step_on_the_delegate_row() {
+        use agent_client_protocol::schema::v1::{
+            ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+        };
+        use serde_json::json;
+
+        let mut meta = agent_client_protocol::schema::v1::Meta::new();
+        meta.insert(
+            "toolNotification".to_string(),
+            json!({
+                "type": "message",
+                "params": {
+                    "level": "info",
+                    "logger": "subagent:abc",
+                    "data": {
+                        "type": "subagent_tool_request",
+                        "subagent_id": "abc",
+                        "tool_call": {
+                            "name": "developer__shell",
+                            "arguments": { "command": "git status --short" }
+                        }
+                    }
+                }
+            }),
+        );
+        let update = ToolCallUpdate::new(
+            ToolCallId::new("delegate-1"),
+            ToolCallUpdateFields::new().status(ToolCallStatus::InProgress),
+        )
+        .meta(meta);
+
+        let step = tool_subagent_step(&update).expect("a subagent step");
+        assert_eq!(step.name, "developer__shell");
+        assert_eq!(step.detail, "git status --short");
+        assert_eq!(step.status, "in_progress");
+    }
+
+    #[test]
+    fn ordinary_tool_notifications_are_not_mistaken_for_subagent_steps() {
+        use agent_client_protocol::schema::v1::{
+            ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+        };
+        use serde_json::json;
+
+        // A shell live-output chunk rides the same `_meta` channel and must not
+        // show up as child activity.
+        let mut meta = agent_client_protocol::schema::v1::Meta::new();
+        meta.insert(
+            "toolNotification".to_string(),
+            json!({ "type": "live_output", "params": { "chunks": [] } }),
+        );
+        let update = ToolCallUpdate::new(
+            ToolCallId::new("call-1"),
+            ToolCallUpdateFields::new().status(ToolCallStatus::InProgress),
+        )
+        .meta(meta);
+        assert!(tool_subagent_step(&update).is_none());
+
+        // And a plain log line from some other logger is not a step either.
+        let mut meta = agent_client_protocol::schema::v1::Meta::new();
+        meta.insert(
+            "toolNotification".to_string(),
+            json!({ "type": "message", "params": { "level": "info", "logger": "app", "data": {} } }),
+        );
+        let update = ToolCallUpdate::new(
+            ToolCallId::new("call-2"),
+            ToolCallUpdateFields::new().status(ToolCallStatus::InProgress),
+        )
+        .meta(meta);
+        assert!(tool_subagent_step(&update).is_none());
+    }
+
     struct Recorder {
         events: StdMutex<Vec<String>>,
     }
@@ -835,6 +973,7 @@ mod tests {
             calls: Vec::new(),
             thought: String::new(),
             summary: String::new(),
+            steps: Vec::new(),
         };
         cache.save_transcript("s1", &[item], "t1");
 
@@ -1273,6 +1412,9 @@ pub(crate) fn apply_tool_update(
         .as_ref()
         .map(tool_call_status_str)
         .unwrap_or_default();
+    if let Some(step) = tool_subagent_step(update) {
+        store.tool_step(&id, step);
+    }
     if let Some((uri, ext)) = tool_call_app(update) {
         if status != "in_progress" {
             store.tool_app(&id, &uri, &ext);

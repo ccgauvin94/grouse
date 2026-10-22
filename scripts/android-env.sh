@@ -78,7 +78,7 @@ fi
 
 # The keystore directory is mounted read-only at its own host path, so the
 # absolute GROUSE_KEYSTORE value keeps working inside the container.
-mounts=(--volume "${REPO_ROOT}:/workspace:Z"
+mounts=(--volume "${REPO_ROOT}:/workspace"
         --volume "${GRADLE_HOME}:/home/dev/.gradle"
         --volume "${CARGO_CACHE}/registry:/home/dev/.cargo/registry"
         --volume "${CARGO_CACHE}/git:/home/dev/.cargo/git")
@@ -98,7 +98,13 @@ fi
 tty=()
 [[ -t 0 ]] && tty=(-it)
 
+# label=disable, not `:Z`: a private-label mount claims the tree with ONE container's
+# MCS categories, so the next run (a different container id, different categories)
+# gets EPERM creating files in build output the previous run left behind — which is
+# what broke `cargo ndk` mid-build (`ring` could not open its .o files). These are
+# build artifacts in our own repo, not shared data.
 exec podman run --rm "${tty[@]}" \
+  --security-opt label=disable \
   --userns=keep-id \
   --user "$(id -u):$(id -g)" \
   --env HOME=/home/dev \

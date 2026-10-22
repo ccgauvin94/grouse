@@ -2122,7 +2122,8 @@ class ConnectionManager private constructor(context: Context) {
         ItemKind.TOOL -> listOf(item.id to ChatMessage(
             itemRole(item.kind), item.text, detail = item.detail, toolCallId = item.id,
             status = item.status, output = item.output, id = appIdFor(item.id),
-            summary = item.summary, stepThought = item.thought, stepId = item.id))
+            summary = item.summary, stepThought = item.thought, stepId = item.id,
+            steps = item.steps))
         ItemKind.USER, ItemKind.THOUGHT, ItemKind.ERROR, ItemKind.AGENT ->
             listOf(item.id to ChatMessage(itemRole(item.kind), item.text, id = appIdFor(item.id)))
     }

@@ -42,6 +42,10 @@ struct ToolRow {
     /// `Thought` rows above it (issue #13). Held per call, not per run, so the
     /// expanded run shows the loop in order: think, call, think, call.
     thought: String,
+    /// A delegate call's child activity: the tool calls its SUBAGENT made, as
+    /// goose forwards them onto this row (`_meta.toolNotification`, logger
+    /// `subagent:<id>`). Bounded — a long delegate must not grow without limit.
+    steps: Vec<crate::SubagentStep>,
 }
 
 impl ToolRow {
@@ -56,6 +60,7 @@ impl ToolRow {
             app_key: String::new(),
             spec: String::new(),
             thought: String::new(),
+            steps: Vec::new(),
         }
     }
 
@@ -200,6 +205,7 @@ impl Bubble {
                 status: r.status.clone(),
                 thought: r.thought.clone(),
                 summary: label.clone(),
+                steps: r.steps.clone(),
                 ..empty_item()
             },
             Bubble::ToolGroup(calls, label) => Item {
@@ -250,6 +256,7 @@ fn empty_item() -> Item {
         calls: Vec::new(),
         thought: String::new(),
         summary: String::new(),
+        steps: Vec::new(),
     }
 }
 
@@ -578,6 +585,7 @@ fn call_to_row(c: &ToolCall) -> ToolRow {
         app_key: String::new(),
         spec: String::new(),
         thought: c.thought.clone(),
+        steps: Vec::new(),
     }
 }
 
@@ -622,6 +630,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
                 app_key: String::new(),
                 spec: String::new(),
                 thought: it.thought.clone(),
+                steps: it.steps.clone(),
             },
             it.summary.clone(),
         )),
@@ -645,6 +654,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
             // The item's `detail` is the spec for a chart.
             spec: it.detail.clone(),
             thought: it.thought.clone(),
+            steps: Vec::new(),
         })),
         ItemKind::McpApp => Some(Bubble::McpApp(ToolRow {
             title: it.text.clone(),
@@ -655,6 +665,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
             app_key: it.app_key.clone(),
             spec: String::new(),
             thought: it.thought.clone(),
+            steps: Vec::new(),
         })),
     }
 }
@@ -1013,6 +1024,50 @@ impl TranscriptStore {
     /// REPLACES it, and an empty output leaves it untouched. Chart/mcp-app
     /// bubbles take status only (desktop quirk).
     ///
+    /// Record one child tool call a SUBAGENT made under a delegate row.
+    ///
+    /// goose keeps subagent sessions out of ACP (`ACP_VISIBLE_SESSION_TYPES`), so
+    /// the child's activity is only ever visible as these forwarded
+    /// notifications; the row is where it belongs. Bounded to the last
+    /// [`MAX_SUBAGENT_STEPS`] calls so a long delegate cannot grow without limit,
+    /// and emitted as an authoritative Upsert (a step is a discrete fact, not a
+    /// delta).
+    pub fn tool_step(&self, id: &str, step: crate::SubagentStep) {
+        const MAX_SUBAGENT_STEPS: usize = 200;
+        let ops = {
+            let mut st = self.state.lock();
+            st.anchor_merge(id);
+            let mut ops = Vec::new();
+            if st.supersede_provisional() {
+                ops.push(TranscriptOp::Reset {
+                    session_id: st.session_id.clone(),
+                });
+            }
+            let idx = st
+                .tool_by_id
+                .get(id)
+                .copied()
+                .filter(|i| *i < st.bubbles.len());
+            if let Some(idx) = idx {
+                let emitted = match &mut st.bubbles[idx] {
+                    Bubble::Tool(r, _) if r.tool_call_id == id => {
+                        if r.steps.len() >= MAX_SUBAGENT_STEPS {
+                            r.steps.remove(0);
+                        }
+                        r.steps.push(step);
+                        Some(st.bubbles[idx].item())
+                    }
+                    _ => None,
+                };
+                if let Some(item) = emitted {
+                    ops.push(TranscriptOp::Upsert { item });
+                }
+            }
+            ops
+        };
+        self.emit_ops(ops);
+    }
+
     pub fn tool_update(&self, id: &str, status: &str, output: &str, live: bool) {
         let ops = {
             let mut st = self.state.lock();
@@ -1640,6 +1695,7 @@ impl TranscriptStore {
                             app_key: String::new(),
                             spec: String::new(),
                             thought: String::new(),
+                            steps: Vec::new(),
                         },
                         String::new(),
                     ));
@@ -1968,6 +2024,41 @@ mod tests {
         }
 
         // Every successful tool update fires a transcript Update.
+    }
+
+    #[test]
+    fn a_delegate_row_carries_its_subagent_steps_through_a_reload() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.tool_call("delegate", "{}", "d1", ToolCallKind::Plain);
+        store.tool_step(
+            "d1",
+            crate::SubagentStep {
+                name: "developer__shell".into(),
+                detail: "git status".into(),
+                status: "in_progress".into(),
+            },
+        );
+        store.tool_step(
+            "d1",
+            crate::SubagentStep {
+                name: "read_file".into(),
+                detail: "src/main.rs".into(),
+                status: "in_progress".into(),
+            },
+        );
+        let items = store.rich_transcript();
+        assert_eq!(items.len(), 1, "{items:?}");
+        let steps: Vec<&str> = items[0].steps.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(steps, vec!["developer__shell", "read_file"]);
+
+        // The cache is the record: a reload must show what the delegate did.
+        let (l, _i_evts) = listener();
+        let reloaded = TranscriptStore::new(l);
+        reloaded.replace_rich(items, false);
+        let after = reloaded.rich_transcript();
+        assert_eq!(after[0].steps.len(), 2, "{after:?}");
+        assert_eq!(after[0].steps[1].detail, "src/main.rs");
     }
 
     #[test]
@@ -2360,6 +2451,7 @@ mod tests {
             calls: Vec::new(),
             thought: String::new(),
             summary: String::new(),
+            steps: Vec::new(),
         }
     }
 
@@ -2594,6 +2686,7 @@ mod tests {
                 calls: Vec::new(),
                 thought: String::new(),
                 summary: String::new(),
+                steps: Vec::new(),
             },
             Item {
                 id: "a1".into(),
@@ -2606,6 +2699,7 @@ mod tests {
                 calls: Vec::new(),
                 thought: String::new(),
                 summary: String::new(),
+                steps: Vec::new(),
             },
             Item {
                 id: "t1".into(),
@@ -2635,6 +2729,7 @@ mod tests {
                 ],
                 thought: String::new(),
                 summary: String::new(),
+                steps: Vec::new(),
             },
         ];
         store.replace_rich(items.clone(), false);

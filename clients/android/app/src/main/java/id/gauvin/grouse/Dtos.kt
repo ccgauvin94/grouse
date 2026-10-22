@@ -245,6 +245,10 @@ data class ChatMessage(
     // shared by all its calls. The chat list re-groups rows at render time, and
     // grouping by role alone would merge the core's steps back into one wall.
     val stepId: String = "",
+    // A DELEGATE row only: the tool calls its subagent made, forwarded by the
+    // server as they happen. goose keeps subagent sessions off ACP, so this is
+    // the only view of the child's work — see Item.steps in the core.
+    val steps: List<uniffi.grouse_core.SubagentStep> = emptyList(),
 )
 
 /** The UI role a rich transcript item renders as (docs/TRANSCRIPT_MODEL.md). A

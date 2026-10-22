@@ -671,7 +671,8 @@ private fun ToolChip(m: ChatMessage, showThought: Boolean = true) {
     // than as a bare tool name (issue #13).
     val label = m.summary.ifBlank { name.replace('_', ' ') }
     val thought = if (showThought) m.stepThought else ""
-    val hasBody = detail.isNotBlank() || m.output.isNotBlank() || thought.isNotBlank()
+    val hasBody = detail.isNotBlank() || m.output.isNotBlank() || thought.isNotBlank() ||
+        m.steps.isNotEmpty()
     Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
         Surface(color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
             contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -696,6 +697,11 @@ private fun ToolChip(m: ChatMessage, showThought: Boolean = true) {
                         color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.6f),
                         maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                 } else Spacer(Modifier.weight(1f))
+                if (m.steps.isNotEmpty()) {
+                    Spacer(Modifier.width(8.dp))
+                    Text("${m.steps.size} steps", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.6f))
+                }
                 if (hasBody) Icon(
                     if (expanded) Icons.Filled.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                     contentDescription = null, modifier = Modifier.size(16.dp),
@@ -712,6 +718,30 @@ private fun ToolChip(m: ChatMessage, showThought: Boolean = true) {
                     if (thought.isNotBlank()) {
                         Text(thought, style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (detail.isNotBlank() || m.output.isNotBlank()) Spacer(Modifier.height(6.dp))
+                    }
+                    if (m.steps.isNotEmpty()) {
+                        // What the SUBAGENT did, live. The server forwards each of
+                        // its tool calls onto this row and keeps the child session
+                        // off ACP, so this list IS the delegate's visible work.
+                        Text("subagent", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary)
+                        Column(Modifier.padding(top = 2.dp, bottom = 2.dp)) {
+                            m.steps.forEach { step ->
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("· ", style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.outline)
+                                    Text(step.name.replace('_', ' '),
+                                        style = MaterialTheme.typography.labelMedium)
+                                    if (step.detail.isNotBlank()) {
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(step.detail, style = mono,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            }
+                        }
                         if (detail.isNotBlank() || m.output.isNotBlank()) Spacer(Modifier.height(6.dp))
                     }
                     if (detail.isNotBlank()) {

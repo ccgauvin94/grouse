@@ -205,6 +205,26 @@ pub struct Item {
     /// to the call titles.
     #[serde(default)]
     pub summary: String,
+    /// `ItemKind::Tool` only: the child tool calls a SUBAGENT made under this
+    /// delegate row, oldest first (bounded). Empty for ordinary calls.
+    #[serde(default)]
+    pub steps: Vec<SubagentStep>,
+}
+
+/// One tool call a SUBAGENT made on behalf of a delegate call.
+///
+/// goose does not expose subagent sessions over ACP (`ACP_VISIBLE_SESSION_TYPES`
+/// excludes them), but it forwards each child tool request into the parent's
+/// delegate row as `_meta.toolNotification` with a `subagent:<id>` logger. That
+/// stream is the record of what the delegate actually did, so the row carries it.
+#[derive(uniffi::Record, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SubagentStep {
+    /// The tool the subagent called (`developer__shell`, `read_file`, …).
+    pub name: String,
+    /// One line of its arguments (command, path, query), already trimmed.
+    pub detail: String,
+    /// `in_progress` while running; `completed` / `failed` once known.
+    pub status: String,
 }
 
 /// One transcript mutation carried by `CoreListener::on_item`
