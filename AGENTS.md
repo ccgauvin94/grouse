@@ -238,7 +238,7 @@ keep them when extending the core.
 |`clients/cli/`|Rust TUI — **README placeholder only, no `Cargo.toml` yet.**|
 |`docs/`|`TRANSCRIPT_MODEL.md` (the item stream the core emits) and `NOTIFICATIONS.md` (push envelope + policy).|
 |`design/`|Shared design tokens (`tokens.json` + `design-language.md`), owned by the design-language workstream, not platform dirs.|
-|`scripts/`|`build-android-libs.sh` (Android native libs + bindings), `dev-env.sh` (devcontainer wrapper on podman).|
+|`scripts/`|`android-env.sh` (runs a command inside the Android build image: SDK/NDK + the JDK), `build-android-libs.sh` (Android native libs + bindings), `publish-apk.sh` (verify a release-signed APK and publish it to Nextcloud), `dev-env.sh` (devcontainer wrapper on podman).|
 |`.github/workflows/`|CI: `core.yml`, `android.yml`, `codeql.yml`, `flatpak.yml`, `secrets.yml`; `release.yml` (tag-triggered APK + Flatpak → GitHub Release).|
 |`.devcontainer/`|Rocky Linux 9 dev container for the Rust core only (no Android NDK, no Qt).|
 

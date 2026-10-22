@@ -817,27 +817,6 @@ impl Conn {
     /// `Core::new_session` when a Ready connection with the same host/port/key
     /// already exists — avoids the `old.shutdown()` race that killed in-flight
     /// `sources/create` during project creation. Returns the new session id.
-    #[allow(dead_code)]
-    pub(crate) fn live_new_session(
-        &self,
-        recipe_id: Option<String>,
-        project_id: Option<String>,
-    ) -> Result<String, AcpError> {
-        let params = session_new_params(
-            &self.inner.config,
-            recipe_id.as_deref(),
-            project_id.as_deref(),
-        );
-        let reply: Value = self.rpc("session/new", params)?;
-        let session_id = reply
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        self.bind_new_session(&session_id);
-        self.emit_config(&reply);
-        Ok(session_id)
-    }
     pub(crate) async fn live_new_session_async(
         &self,
         recipe_id: Option<String>,
@@ -858,35 +837,9 @@ impl Conn {
         self.emit_config(&reply);
         Ok(session_id)
     }
-    /// Live-wire `session/load` — same wire-reuse rationale as `live_new_session`.
-    #[allow(dead_code)]
-    pub(crate) fn live_load_session(
-        &self,
-        session_id: String,
-        cwd: String,
-        suppress_replay: bool,
-    ) -> Result<(), AcpError> {
-        self.inner.session_id.lock().replace(session_id.clone());
-        self.inner
-            .suppress_replay
-            .store(suppress_replay, Ordering::SeqCst);
-        let mut params = json!({
-            "sessionId": session_id,
-            "cwd": cwd,
-            "mcpServers": [],
-        });
-        if suppress_replay {
-            params["_meta"] = json!({ "replayTail": 1 });
-        }
-        let reply = self.rpc("session/load", params);
-        // Disarm the replay gates for the next load (see the async twin).
-        self.inner.suppress_replay.store(false, Ordering::SeqCst);
-        self.inner.merge_replay.store(false, Ordering::SeqCst);
-        let reply: Value = reply?;
-        self.bind_session(&session_id);
-        self.emit_config(&reply);
-        Ok(())
-    }
+    /// Live-wire `session/load` — same wire-reuse rationale as
+    /// `live_new_session_async`. The blocking twin that used to sit here had no
+    /// caller once session handling became async end to end.
     pub(crate) async fn live_load_session_async(
         &self,
         session_id: String,
