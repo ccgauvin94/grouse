@@ -327,11 +327,17 @@ struct State {
     pending_echo: VecDeque<(String, usize)>,
 }
 
-/// Hard cap on retained bubbles (S-RC-4). A transcript is inherently
-/// unbounded over a run, but we evict the OLDEST bubbles past this watermark
-/// (bulk, to a ¾ mark) so a pathological session cannot grow memory without
-/// bound. Far above any realistic screenful.
-const MAX_BUBBLES: usize = 2000;
+/// Hard cap on retained bubbles (S-RC-4): a pathological session must not grow
+/// memory without bound, so the OLDEST are evicted in bulk past this watermark.
+///
+/// It is a SAFETY NET, not a screenful estimate — it was 2000, and that silently
+/// ATE HISTORY: a full replay re-ingests the whole session, `replace_rich` trims
+/// before painting, and measured sessions on this box produce 4,761 and 6,161
+/// bubbles. Everything below the watermark was dropped from the store (so
+/// `load_older` could never reach it) and then written back over the cache, which
+/// is what a "hard refresh misses a lot of messages" actually was. 20k keeps
+/// every real session whole; items are small strings.
+const MAX_BUBBLES: usize = 20_000;
 
 /// How many newest items a paint emits up front. The rest stay in the store
 /// (and the cache) and arrive as the client asks for them via `load_older`.

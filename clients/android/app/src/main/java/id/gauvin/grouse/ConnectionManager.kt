@@ -46,6 +46,10 @@ import uniffi.grouse_roam_core.cardFingerprint
 import uniffi.grouse_roam_core.identityGenerate
 import uniffi.grouse_roam_core.identityPublicKey
 
+/** Items per drain page when a hard refresh pulls the history back in; the core
+ *  emits one batch + a Window per call. */
+private const val HISTORY_DRAIN_BATCH = 400
+
 /** The three drawer session categories. See ConnectionManager.sessionKind(). */
 enum class SessionKind { ASSISTANT, CHAT, CODE }
 
@@ -1218,6 +1222,12 @@ class ConnectionManager private constructor(context: Context) {
      *  to have drifted, behind a deliberate hold gesture. */
     fun reloadCurrentFromStart() = reloadCurrent(full = true)
 
+    /** A hard refresh is the user asking for the HISTORY, not a screenful. The
+     *  core paints the newest window and pages the rest through `loadOlder`, so
+     *  drain the pages instead of leaving a 60-row chat — which reads as "the
+     *  refresh lost everything". */
+    private var drainingHistory = false
+
     private fun reloadCurrent(full: Boolean) {
         val sid = currentSession.value ?: return
         replayActive.value = true
@@ -1227,6 +1237,7 @@ class ConnectionManager private constructor(context: Context) {
         // rebinds the peer as display owner and asks that peer to re-load (honoring
         // FULL), or falls through to the main wire. The client must not pick a wire
         // here -- a peer refresh and a main refresh are the same intent.
+        drainingHistory = full
         core.refreshSession(sid, if (full) RefreshMode.FULL else RefreshMode.QUICK)
         if (full) backgroundNotice.value = "Replaying this chat from the start…"
     }
@@ -2056,6 +2067,9 @@ class ConnectionManager private constructor(context: Context) {
                     loadingOlder = false
                 }
                 itemHasOlder.value = op.hasOlder
+                if (drainingHistory) {
+                    if (op.hasOlder) loadOlder(HISTORY_DRAIN_BATCH) else drainingHistory = false
+                }
                 if (messages.isNotEmpty() && replayActive.value) {
                     replayActive.value = false
                     replayDoneTick.value++   // new content -> snap to bottom
