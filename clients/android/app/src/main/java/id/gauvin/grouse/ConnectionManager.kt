@@ -2123,6 +2123,10 @@ class ConnectionManager private constructor(context: Context) {
             messages[idx] = bubble
             return
         }
+        // `seq == 0` is a legitimate position (the first row after a repaint), so
+        // the rule is purely ordinal: insert before the first row that outranks
+        // this one. Both `itemRows` branches stamp it; nothing else may build a
+        // core row without one.
         val at = messages.indexOfFirst { it.seq > bubble.seq }
         if (at < 0) messages.add(bubble) else messages.add(at, bubble)
     }
@@ -2152,7 +2156,12 @@ class ConnectionManager private constructor(context: Context) {
             summary = item.summary, stepThought = item.thought, stepId = item.id,
             steps = item.steps, seq = item.seq.toInt()))
         ItemKind.USER, ItemKind.THOUGHT, ItemKind.ERROR, ItemKind.AGENT ->
-            listOf(item.id to ChatMessage(itemRole(item.kind), item.text, id = appIdFor(item.id)))
+            listOf(item.id to ChatMessage(
+                itemRole(item.kind), item.text, id = appIdFor(item.id),
+                // EVERY row carries its position. Omitting it here left all
+                // text at seq 0, which the ordered insert then placed ABOVE the
+                // first tool row — the transcript read as nothing but tool calls.
+                seq = item.seq.toInt()))
     }
 
     /** Fetch an MCP-App template once per key; the bubble renders as a plain tool
