@@ -1475,7 +1475,7 @@ class ConnectionManager private constructor(context: Context) {
         // those, which is also what renders the thumbnail(s), not a "[📎 N]" placeholder.
         // (A reloaded session replays text; images are never reconstructed.)
         if (images.isNotEmpty() || files.isNotEmpty()) {
-            messages.add(ChatMessage("user", text, images, files, seq = nextSeq()))
+            promptAttachments[text] = images to files
         }
         busy.value = true
         lastMessageUsage.value = null   // stale stats from the previous turn shouldn't linger
@@ -2112,6 +2112,12 @@ class ConnectionManager private constructor(context: Context) {
      *  page drained back in, an echo landing after the reply it prompted, a row
      *  re-delivered by a replay). Appending those put questions underneath their
      *  own answers and left hard refreshes looking broken. */
+    /** Attachments by prompt text: the core owns the ROW (identity, position,
+     *  one row per prompt) and carries only a COUNT, so the pixels are matched
+     *  back to it here. Not persisted — a reloaded session replays text, exactly
+     *  as before. */
+    private val promptAttachments = mutableMapOf<String, Pair<List<ImageBlock>, List<FileBlock>>>()
+
     /** A position after everything on screen, for a row the CLIENT owns: an
      *  attachment prompt (the core cannot place it — `Item` has no image field),
      *  which must sit at the newest end, not jump to the front on `seq = 0`. */
@@ -2158,6 +2164,8 @@ class ConnectionManager private constructor(context: Context) {
         ItemKind.USER, ItemKind.THOUGHT, ItemKind.ERROR, ItemKind.AGENT ->
             listOf(item.id to ChatMessage(
                 itemRole(item.kind), item.text, id = appIdFor(item.id),
+                images = promptAttachments[item.text]?.first ?: emptyList(),
+                files = promptAttachments[item.text]?.second ?: emptyList(),
                 // EVERY row carries its position. Omitting it here left all
                 // text at seq 0, which the ordered insert then placed ABOVE the
                 // first tool row — the transcript read as nothing but tool calls.
@@ -2341,14 +2349,7 @@ class ConnectionManager private constructor(context: Context) {
                 val sid = currentSession.value
                 if (currentRoamPeer == label && sid != null &&
                     core.activeSessionId() == sid) {
-                    if (replayWiped) {
-                        replayWiped = false
-                        // Only ATTACHMENT prompts: the core echoes a pure-text
-                        // prompt as a User item at send time, so re-adding one
-                        // here would show the question twice.
-                        pendingSends.filter { it.sessionId == sid && (it.images.isNotEmpty() || it.files.isNotEmpty()) }
-                            .forEach { messages.add(ChatMessage("user", it.text, it.images, it.files, seq = nextSeq())) }
-                    }
+                    replayWiped = false
                     if (!turnInFlight) {
                         dequeueFor(sid)?.let { p ->
                             store.pendingPushSessionId = sid

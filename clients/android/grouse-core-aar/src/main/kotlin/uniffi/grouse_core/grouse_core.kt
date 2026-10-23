@@ -4564,6 +4564,15 @@ data class Item (
     var `steps`: List<SubagentStep>
     , 
     /**
+     * `ItemKind::User` only: how many attachments (images / resources) rode
+     * this prompt. The store owns the ROW — identity, position, one row per
+     * prompt — while the client owns the pixels, matching them to this row by
+     * text. Without it a client that kept its own attachment bubble produced a
+     * second row for the same prompt, with a position from a different counter.
+     */
+    var `attachments`: kotlin.UInt
+    , 
+    /**
      * Position in the transcript, ascending. Clients MUST insert by this rather
      * than by arrival: an item can be (re)delivered late — a prompt echo after
      * the reply it prompted, or a page of older rows drained back in — and
@@ -4598,6 +4607,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.read(buf),
             FfiConverterSequenceTypeSubagentStep.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
         )
     }
 
@@ -4613,6 +4623,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.allocationSize(value.`thought`) +
             FfiConverterString.allocationSize(value.`summary`) +
             FfiConverterSequenceTypeSubagentStep.allocationSize(value.`steps`) +
+            FfiConverterUInt.allocationSize(value.`attachments`) +
             FfiConverterUInt.allocationSize(value.`seq`)
     )
 
@@ -4628,6 +4639,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.write(value.`thought`, buf)
             FfiConverterString.write(value.`summary`, buf)
             FfiConverterSequenceTypeSubagentStep.write(value.`steps`, buf)
+            FfiConverterUInt.write(value.`attachments`, buf)
             FfiConverterUInt.write(value.`seq`, buf)
     }
 }

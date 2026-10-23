@@ -134,6 +134,8 @@ enum Bubble {
         thought: bool,
         /// Transcript position (see `Item::seq`).
         seq: u32,
+        /// User rows only: attachments that rode the prompt (see `Item::attachments`).
+        attachments: u32,
     },
     /// A lone plain tool call (collapses into a `ToolGroup` on the next call).
     /// The `String` is the run's one-line label (issue #13); the thinking rides
@@ -189,7 +191,7 @@ impl Bubble {
     fn item(&self) -> Item {
         match self {
             Bubble::Text {
-                uid, role, text, seq, ..
+                uid, role, text, seq, attachments, ..
             } => Item {
                 id: uid.clone(),
                 kind: match role.as_str() {
@@ -200,6 +202,7 @@ impl Bubble {
                 },
                 text: text.clone(),
                 seq: *seq,
+                attachments: *attachments,
                 ..empty_item()
             },
             Bubble::Tool(r, label) => Item {
@@ -267,6 +270,7 @@ fn empty_item() -> Item {
         summary: String::new(),
         steps: Vec::new(),
         seq: 0,
+        attachments: 0,
     }
 }
 
@@ -646,6 +650,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
                 text: it.text.clone(),
                 thought: matches!(it.kind, ItemKind::Thought),
                 seq: it.seq,
+                attachments: it.attachments,
             })
         }
         ItemKind::Tool => Some(Bubble::Tool(
@@ -825,6 +830,7 @@ impl TranscriptStore {
                     text: text.to_string(),
                     thought,
                     seq,
+                    attachments: 0,
                 });
                 let idx = st.bubbles.len() - 1;
                 st.stream_idx = Some(idx);
@@ -890,7 +896,7 @@ impl TranscriptStore {
     /// message id), [`Self::append_chunk`] adopts this row instead of appending
     /// a duplicate. Closing the live stream is what makes the reply that
     /// follows its own row rather than an extension of the previous turn.
-    pub fn echo_prompt(&self, text: &str) {
+    pub fn echo_prompt(&self, text: &str, attachments: u32) {
         if text.is_empty() {
             return;
         }
@@ -919,6 +925,7 @@ impl TranscriptStore {
                 text: text.to_string(),
                 thought: false,
                 seq,
+                attachments,
             });
             let idx = st.bubbles.len() - 1;
             st.pending_echo.push_back((text.to_string(), idx));
@@ -1770,6 +1777,7 @@ impl TranscriptStore {
                         text: m.content.clone(),
                         thought: m.role == "thought",
                         seq,
+                        attachments: 0,
                     });
                 }
             }
@@ -2094,7 +2102,7 @@ mod tests {
         let (l, _i_evts) = listener();
         let store = TranscriptStore::new(l);
         store.append_chunk("agent", "an answer", Some("m1"), false);
-        store.echo_prompt("a question");
+        store.echo_prompt("a question", 0);
         store.tool_call("shell", "{}", "t1", ToolCallKind::Plain);
 
         let seqs: Vec<u32> = store.rich_transcript().iter().map(|i| i.seq).collect();
@@ -2571,6 +2579,7 @@ mod tests {
             summary: String::new(),
             steps: Vec::new(),
             seq: 0,
+            attachments: 0,
         }
     }
 
@@ -2807,6 +2816,7 @@ mod tests {
                 summary: String::new(),
                 steps: Vec::new(),
                 seq: 0,
+                attachments: 0,
             },
             Item {
                 id: "a1".into(),
@@ -2821,6 +2831,7 @@ mod tests {
                 summary: String::new(),
                 steps: Vec::new(),
                 seq: 0,
+                attachments: 0,
             },
             Item {
                 id: "t1".into(),
@@ -2831,6 +2842,7 @@ mod tests {
                 status: String::new(),
                 app_key: String::new(),
                 seq: 0,
+                attachments: 0,
                 calls: vec![
                     ToolCall {
                         id: "t1".into(),
@@ -3252,7 +3264,7 @@ mod tests {
     fn an_echoed_prompt_is_adopted_when_the_server_names_it() {
         let (l, _) = listener();
         let store = TranscriptStore::new(l);
-        store.echo_prompt("what time is it");
+        store.echo_prompt("what time is it", 0);
         assert_eq!(store.transcript().len(), 1);
 
         // goose never sends our own prompt live; a replay names it. The named
@@ -3278,8 +3290,8 @@ mod tests {
     fn two_echoed_prompts_are_two_rows() {
         let (l, _) = listener();
         let store = TranscriptStore::new(l);
-        store.echo_prompt("first");
-        store.echo_prompt("second");
+        store.echo_prompt("first", 0);
+        store.echo_prompt("second", 0);
         assert_eq!(store.transcript().len(), 2);
         // The oldest echo is adopted first (the server names prompts in order).
         store.append_chunk("user", "first", Some("m1"), false);
@@ -3291,7 +3303,7 @@ mod tests {
     fn a_cached_echo_is_adopted_after_a_paint() {
         let (l, _) = listener();
         let store = TranscriptStore::new(l);
-        store.echo_prompt("hello");
+        store.echo_prompt("hello", 0);
         let items = store.rich_transcript();
 
         let (l, _) = listener();

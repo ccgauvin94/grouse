@@ -979,6 +979,7 @@ mod tests {
             detail: String::new(),
             output: String::new(),
             seq: 0,
+            attachments: 0,
             status: String::new(),
             app_key: String::new(),
             calls: Vec::new(),

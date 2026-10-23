@@ -52,7 +52,7 @@ use crate::{Item, SessionSummary};
 /// the poisoned stamp, so a v3 file is not merely stale but possibly TRUNCATED
 /// and must not be trusted: reading it returns `None` and the next open replays
 /// and rewrites it.
-pub const TRANSCRIPT_CACHE_VERSION: u64 = 6;
+pub const TRANSCRIPT_CACHE_VERSION: u64 = 7;
 
 /// The tool catalog cache, mirroring the desktop's tool-cache JSON.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -325,6 +325,7 @@ mod tests {
             summary: String::new(),
             steps: Vec::new(),
             seq: 0,
+            attachments: 0,
         }
     }
 
@@ -348,6 +349,7 @@ mod tests {
                 summary: String::new(),
                 steps: Vec::new(),
                 seq: 0,
+                attachments: 0,
             },
             text("@1", ItemKind::Thought, "hmm"),
         ];
@@ -389,6 +391,7 @@ mod tests {
                 summary: String::new(),
                 steps: Vec::new(),
                 seq: 0,
+                attachments: 0,
             },
             Item {
                 id: "a1".into(),
@@ -403,6 +406,7 @@ mod tests {
                 summary: String::new(),
                 steps: Vec::new(),
                 seq: 0,
+                attachments: 0,
             },
             Item {
                 id: "t1".into(),
@@ -434,6 +438,7 @@ mod tests {
                 summary: "Let me run the pair".into(),
                 steps: Vec::new(),
                 seq: 0,
+                attachments: 0,
             },
         ];
         assert!(store.save_transcript("s1", &items, "2026-08-12T10:00:00Z"));

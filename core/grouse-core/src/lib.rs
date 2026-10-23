@@ -209,6 +209,13 @@ pub struct Item {
     /// delegate row, oldest first (bounded). Empty for ordinary calls.
     #[serde(default)]
     pub steps: Vec<SubagentStep>,
+    /// `ItemKind::User` only: how many attachments (images / resources) rode
+    /// this prompt. The store owns the ROW — identity, position, one row per
+    /// prompt — while the client owns the pixels, matching them to this row by
+    /// text. Without it a client that kept its own attachment bubble produced a
+    /// second row for the same prompt, with a position from a different counter.
+    #[serde(default)]
+    pub attachments: u32,
     /// Position in the transcript, ascending. Clients MUST insert by this rather
     /// than by arrival: an item can be (re)delivered late — a prompt echo after
     /// the reply it prompted, or a page of older rows drained back in — and
@@ -1774,8 +1781,8 @@ impl Core {
         // `session/load` replay. The echo lands here, at the send, so exactly
         // one row appears per prompt that reaches the wire; attachments stay
         // the client's own local echo (`Item` has no image field).
-        if let Some(text) = pure_text(&prompt) {
-            store.echo_prompt(&text);
+        if let Some(text) = crate::prompt_text(&prompt) {
+            store.echo_prompt(&text, crate::prompt_attachments(&prompt));
         }
         // A new turn's runs are a fresh worklist for the summarizer.
         self.inner.state.lock().turn_runs.remove(&session_id);
@@ -2510,6 +2517,30 @@ impl Core {
 /// carry (see the local echo in `spawn_prompt`). `None` when it has an image or
 /// resource block: those stay the client's own local echo, because `Item` has no
 /// image field to represent them.
+/// The prompt's own text, even when attachments ride along: the row still needs
+/// its question. `None` when there is no text block at all.
+fn prompt_text(prompt: &Prompt) -> Option<String> {
+    let mut text = String::new();
+    for block in &prompt.blocks {
+        if let PromptBlock::Text { text: t } = block {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(t);
+        }
+    }
+    (!text.is_empty()).then_some(text)
+}
+
+/// How many non-text blocks (images, resources) the prompt carries.
+fn prompt_attachments(prompt: &Prompt) -> u32 {
+    prompt
+        .blocks
+        .iter()
+        .filter(|b| !matches!(b, PromptBlock::Text { .. }))
+        .count() as u32
+}
+
 fn pure_text(prompt: &Prompt) -> Option<String> {
     let mut text = String::new();
     for block in &prompt.blocks {
