@@ -46,6 +46,8 @@ struct ToolRow {
     /// goose forwards them onto this row (`_meta.toolNotification`, logger
     /// `subagent:<id>`). Bounded — a long delegate must not grow without limit.
     steps: Vec<crate::SubagentStep>,
+    /// Transcript position (see `Item::seq`).
+    seq: u32,
 }
 
 impl ToolRow {
@@ -61,6 +63,7 @@ impl ToolRow {
             spec: String::new(),
             thought: String::new(),
             steps: Vec::new(),
+            seq: 0,
         }
     }
 
@@ -129,6 +132,8 @@ enum Bubble {
         role: String,
         text: String,
         thought: bool,
+        /// Transcript position (see `Item::seq`).
+        seq: u32,
     },
     /// A lone plain tool call (collapses into a `ToolGroup` on the next call).
     /// The `String` is the run's one-line label (issue #13); the thinking rides
@@ -184,7 +189,7 @@ impl Bubble {
     fn item(&self) -> Item {
         match self {
             Bubble::Text {
-                uid, role, text, ..
+                uid, role, text, seq, ..
             } => Item {
                 id: uid.clone(),
                 kind: match role.as_str() {
@@ -194,6 +199,7 @@ impl Bubble {
                     _ => ItemKind::Agent,
                 },
                 text: text.clone(),
+                seq: *seq,
                 ..empty_item()
             },
             Bubble::Tool(r, label) => Item {
@@ -206,6 +212,7 @@ impl Bubble {
                 thought: r.thought.clone(),
                 summary: label.clone(),
                 steps: r.steps.clone(),
+                seq: r.seq,
                 ..empty_item()
             },
             Bubble::ToolGroup(calls, label) => Item {
@@ -217,6 +224,8 @@ impl Bubble {
                 // (that is what puts the loop back in order when expanded).
                 thought: run_thought(calls),
                 summary: label.clone(),
+                // A group anchors on its first call's position.
+                seq: calls.first().map(|c| c.seq).unwrap_or_default(),
                 ..empty_item()
             },
             Bubble::Chart(r) => Item {
@@ -257,6 +266,7 @@ fn empty_item() -> Item {
         thought: String::new(),
         summary: String::new(),
         steps: Vec::new(),
+        seq: 0,
     }
 }
 
@@ -312,6 +322,9 @@ struct State {
     /// Monotonic counter for ids on live text rows the server sent without a
     /// `message_id` (see [`Bubble::Text::uid`]).
     next_uid: u64,
+    /// Next transcript position stamp. Assigned once per bubble, kept across
+    /// evictions, and rewritten to 0..n on a wholesale replace.
+    next_seq: u32,
     /// The assistant's visible text, sanitized and chunked into speakable
     /// sentences for a client's TTS engine (see [`crate::speak`]).
     speak: SpeakStream,
@@ -391,6 +404,13 @@ impl State {
     fn new_uid(&mut self) -> String {
         self.next_uid += 1;
         format!("@{}", self.next_uid)
+    }
+
+    /// The next transcript position. Monotonic, so a late delivery still sorts
+    /// into the right place on the client.
+    fn new_seq(&mut self) -> u32 {
+        self.next_seq += 1;
+        self.next_seq
     }
 
     /// Keep synthetic ids unique against ones already held: a cache written by
@@ -592,6 +612,7 @@ fn call_to_row(c: &ToolCall) -> ToolRow {
         spec: String::new(),
         thought: c.thought.clone(),
         steps: Vec::new(),
+        seq: 0,
     }
 }
 
@@ -624,6 +645,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
                 role: role.to_string(),
                 text: it.text.clone(),
                 thought: matches!(it.kind, ItemKind::Thought),
+                seq: it.seq,
             })
         }
         ItemKind::Tool => Some(Bubble::Tool(
@@ -637,6 +659,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
                 spec: String::new(),
                 thought: it.thought.clone(),
                 steps: it.steps.clone(),
+                seq: it.seq,
             },
             it.summary.clone(),
         )),
@@ -661,6 +684,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
             spec: it.detail.clone(),
             thought: it.thought.clone(),
             steps: Vec::new(),
+            seq: it.seq,
         })),
         ItemKind::McpApp => Some(Bubble::McpApp(ToolRow {
             title: it.text.clone(),
@@ -672,6 +696,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
             spec: String::new(),
             thought: it.thought.clone(),
             steps: Vec::new(),
+            seq: it.seq,
         })),
     }
 }
@@ -709,6 +734,7 @@ impl TranscriptStore {
                 emitted_from: 0,
                 has_older: false,
                 next_uid: 0,
+                next_seq: 0,
                 speak: SpeakStream::new(),
                 pending_thought: None,
                 pending_echo: VecDeque::new(),
@@ -791,12 +817,14 @@ impl TranscriptStore {
                     Some(m) => m.to_string(),
                     None => st.new_uid(),
                 };
+                let seq = st.new_seq();
                 st.bubbles.push(Bubble::Text {
                     id: message_id.unwrap_or("").to_string(),
                     uid,
                     role: role.to_string(),
                     text: text.to_string(),
                     thought,
+                    seq,
                 });
                 let idx = st.bubbles.len() - 1;
                 st.stream_idx = Some(idx);
@@ -883,12 +911,14 @@ impl TranscriptStore {
             }
             let uid = st.new_uid();
             st.stream_idx = None;
+            let seq = st.new_seq();
             st.bubbles.push(Bubble::Text {
                 id: String::new(),
                 uid,
                 role: "user".to_string(),
                 text: text.to_string(),
                 thought: false,
+                seq,
             });
             let idx = st.bubbles.len() - 1;
             st.pending_echo.push_back((text.to_string(), idx));
@@ -943,6 +973,7 @@ impl TranscriptStore {
                 }
             }
             let mut row = ToolRow::new(title, detail, tool_call_id);
+            row.seq = st.new_seq();
             row.thought = thought;
             // Retain the payload the flat Message projection drops, so the cache
             // round-trips a chart's spec and an app's key.
@@ -1630,6 +1661,22 @@ impl TranscriptStore {
             let st = &mut *st;
             st.tool_by_id.clear();
             index_bubbles(&mut st.tool_by_id, &st.bubbles);
+            // A wholesale paint re-stamps the order it just built: the client
+            // clears on Reset, so these positions are what it inserts by.
+            for (i, b) in st.bubbles.iter_mut().enumerate() {
+                match b {
+                    Bubble::Text { seq, .. } => *seq = i as u32,
+                    Bubble::Tool(r, _) | Bubble::Chart(r) | Bubble::McpApp(r) => {
+                        r.seq = i as u32
+                    }
+                    Bubble::ToolGroup(calls, _) => {
+                        for c in calls.iter_mut() {
+                            c.seq = i as u32;
+                        }
+                    }
+                }
+            }
+            st.next_seq = st.bubbles.len() as u32;
             st.seed_next_uid();
             st.rebuild_pending_echo();
             st.provisional = provisional;
@@ -1691,10 +1738,12 @@ impl TranscriptStore {
             st.reset();
             for m in messages {
                 if m.role == "tool" {
+                    let seq = st.new_seq();
                     let idx = st.bubbles.len();
                     st.tool_by_id.insert(m.id.clone(), idx);
                     st.bubbles.push(Bubble::Tool(
                         ToolRow {
+                            seq,
                             title: m.content.clone(),
                             detail: String::new(),
                             tool_call_id: m.id.clone(),
@@ -1713,12 +1762,14 @@ impl TranscriptStore {
                     } else {
                         m.id.clone()
                     };
+                    let seq = st.new_seq();
                     st.bubbles.push(Bubble::Text {
                         id: m.id.clone(),
                         uid,
                         role: m.role.clone(),
                         text: m.content.clone(),
                         thought: m.role == "thought",
+                        seq,
                     });
                 }
             }
@@ -2035,6 +2086,65 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn items_carry_their_transcript_position() {
+        // Clients insert by `seq`, not by arrival: an item can be delivered late
+        // (a prompt echo after the reply it prompted, or a page of older rows
+        // drained back in) and must still sort into place.
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("agent", "an answer", Some("m1"), false);
+        store.echo_prompt("a question");
+        store.tool_call("shell", "{}", "t1", ToolCallKind::Plain);
+
+        let seqs: Vec<u32> = store.rich_transcript().iter().map(|i| i.seq).collect();
+        assert_eq!(seqs.len(), 3, "{seqs:?}");
+        assert!(
+            seqs.windows(2).all(|w| w[0] < w[1]),
+            "positions must ascend as the transcript grows: {seqs:?}"
+        );
+    }
+
+    #[test]
+    fn a_replayed_message_keeps_its_position() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("agent", "Hello", Some("m1"), false);
+        store.append_chunk("agent", " world", Some("m1"), false);
+        let before = store.rich_transcript()[0].seq;
+
+        // The same message re-delivered by a replay updates the row in place.
+        store.append_chunk("agent", "Hello", Some("m1"), false);
+        let after = store.rich_transcript();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].seq, before, "identity means the position does not move");
+    }
+
+    #[test]
+    fn a_wholesale_paint_restamps_positions_in_order() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        let items = vec![
+            crate::Item {
+                id: "a".into(),
+                kind: ItemKind::User,
+                text: "one".into(),
+                seq: 99,
+                ..super::empty_item()
+            },
+            crate::Item {
+                id: "b".into(),
+                kind: ItemKind::Agent,
+                text: "two".into(),
+                seq: 99,
+                ..super::empty_item()
+            },
+        ];
+        store.replace_rich(items, false);
+        let seqs: Vec<u32> = store.rich_transcript().iter().map(|i| i.seq).collect();
+        assert_eq!(seqs, vec![0, 1], "a repaint owns the order it just built");
+    }
+
     fn a_delegate_row_carries_its_subagent_steps_through_a_reload() {
         let (l, _i_evts) = listener();
         let store = TranscriptStore::new(l);
@@ -2460,6 +2570,7 @@ mod tests {
             thought: String::new(),
             summary: String::new(),
             steps: Vec::new(),
+            seq: 0,
         }
     }
 
@@ -2695,6 +2806,7 @@ mod tests {
                 thought: String::new(),
                 summary: String::new(),
                 steps: Vec::new(),
+                seq: 0,
             },
             Item {
                 id: "a1".into(),
@@ -2708,6 +2820,7 @@ mod tests {
                 thought: String::new(),
                 summary: String::new(),
                 steps: Vec::new(),
+                seq: 0,
             },
             Item {
                 id: "t1".into(),
@@ -2717,6 +2830,7 @@ mod tests {
                 output: String::new(),
                 status: String::new(),
                 app_key: String::new(),
+                seq: 0,
                 calls: vec![
                     ToolCall {
                         id: "t1".into(),

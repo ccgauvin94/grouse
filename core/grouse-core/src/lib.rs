@@ -209,6 +209,12 @@ pub struct Item {
     /// delegate row, oldest first (bounded). Empty for ordinary calls.
     #[serde(default)]
     pub steps: Vec<SubagentStep>,
+    /// Position in the transcript, ascending. Clients MUST insert by this rather
+    /// than by arrival: an item can be (re)delivered late — a prompt echo after
+    /// the reply it prompted, or a page of older rows drained back in — and
+    /// appending it on arrival put the question below its own answer.
+    #[serde(default)]
+    pub seq: u32,
 }
 
 /// One tool call a SUBAGENT made on behalf of a delegate call.

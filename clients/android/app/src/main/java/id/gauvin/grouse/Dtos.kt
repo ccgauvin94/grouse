@@ -249,6 +249,11 @@ data class ChatMessage(
     // server as they happen. goose keeps subagent sessions off ACP, so this is
     // the only view of the child's work — see Item.steps in the core.
     val steps: List<uniffi.grouse_core.SubagentStep> = emptyList(),
+    // The core's transcript position. Rows are INSERTED by this, not appended on
+    // arrival: an item can be delivered late (a page of older rows drained back
+    // in, an echo after the reply it prompted) and appending put a question
+    // below its own answer.
+    val seq: Int = 0,
 )
 
 /** The UI role a rich transcript item renders as (docs/TRANSCRIPT_MODEL.md). A

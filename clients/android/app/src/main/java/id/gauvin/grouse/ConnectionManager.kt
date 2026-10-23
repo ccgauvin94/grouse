@@ -1475,7 +1475,7 @@ class ConnectionManager private constructor(context: Context) {
         // those, which is also what renders the thumbnail(s), not a "[📎 N]" placeholder.
         // (A reloaded session replays text; images are never reconstructed.)
         if (images.isNotEmpty() || files.isNotEmpty()) {
-            messages.add(ChatMessage("user", text, images, files))
+            messages.add(ChatMessage("user", text, images, files, seq = nextSeq()))
         }
         busy.value = true
         lastMessageUsage.value = null   // stale stats from the previous turn shouldn't linger
@@ -1963,7 +1963,7 @@ class ConnectionManager private constructor(context: Context) {
             replayWiped = false
             // Only THIS session's unsent prompts -- the transcript on screen is this chat's.
             pendingSends.filter { it.sessionId == sid && (it.images.isNotEmpty() || it.files.isNotEmpty()) }
-                .forEach { messages.add(ChatMessage("user", it.text, it.images, it.files)) }
+                .forEach { messages.add(ChatMessage("user", it.text, it.images, it.files, seq = nextSeq())) }
         }
         // Send ONE queued prompt (bubbles were already added when queued); RunEnded drains
         // the rest. Firing the whole deque at once would interleave the prompts in the
@@ -2064,7 +2064,7 @@ class ConnectionManager private constructor(context: Context) {
             is TranscriptOp.Window -> {
                 if (loadingOlder) {
                     // Older items arrive oldest-first; insert them as one batch.
-                    olderPending.asReversed().forEach { (key, bubble) -> prependBubble(key, bubble) }
+                    olderPending.forEach { (key, bubble) -> upsertBubble(key, bubble) }
                     olderPending.clear()
                     loadingOlder = false
                 }
@@ -2106,14 +2106,25 @@ class ConnectionManager private constructor(context: Context) {
         core.loadOlder(count.toUInt())
     }
 
+    /** Insert-or-replace, ordered by the core's transcript position.
+     *
+     *  NOT an append: a row can arrive after rows that belong below it (an older
+     *  page drained back in, an echo landing after the reply it prompted, a row
+     *  re-delivered by a replay). Appending those put questions underneath their
+     *  own answers and left hard refreshes looking broken. */
+    /** A position after everything on screen, for a row the CLIENT owns: an
+     *  attachment prompt (the core cannot place it — `Item` has no image field),
+     *  which must sit at the newest end, not jump to the front on `seq = 0`. */
+    private fun nextSeq(): Int = (messages.maxOfOrNull { it.seq } ?: 0) + 1
+
     private fun upsertBubble(coreId: String, bubble: ChatMessage) {
         val idx = rowIndexOf(coreId)
-        if (idx >= 0) messages[idx] = bubble else messages.add(bubble)
-    }
-
-    private fun prependBubble(coreId: String, bubble: ChatMessage) {
-        val idx = rowIndexOf(coreId)
-        if (idx >= 0) messages[idx] = bubble else messages.add(0, bubble)
+        if (idx >= 0) {
+            messages[idx] = bubble
+            return
+        }
+        val at = messages.indexOfFirst { it.seq > bubble.seq }
+        if (at < 0) messages.add(bubble) else messages.add(at, bubble)
     }
 
     /** One rich item as UI rows (a ToolGroup is one row per call). */
@@ -2139,7 +2150,7 @@ class ConnectionManager private constructor(context: Context) {
             itemRole(item.kind), item.text, detail = item.detail, toolCallId = item.id,
             status = item.status, output = item.output, id = appIdFor(item.id),
             summary = item.summary, stepThought = item.thought, stepId = item.id,
-            steps = item.steps))
+            steps = item.steps, seq = item.seq.toInt()))
         ItemKind.USER, ItemKind.THOUGHT, ItemKind.ERROR, ItemKind.AGENT ->
             listOf(item.id to ChatMessage(itemRole(item.kind), item.text, id = appIdFor(item.id)))
     }
@@ -2327,7 +2338,7 @@ class ConnectionManager private constructor(context: Context) {
                         // prompt as a User item at send time, so re-adding one
                         // here would show the question twice.
                         pendingSends.filter { it.sessionId == sid && (it.images.isNotEmpty() || it.files.isNotEmpty()) }
-                            .forEach { messages.add(ChatMessage("user", it.text, it.images, it.files)) }
+                            .forEach { messages.add(ChatMessage("user", it.text, it.images, it.files, seq = nextSeq())) }
                     }
                     if (!turnInFlight) {
                         dequeueFor(sid)?.let { p ->

@@ -4562,6 +4562,14 @@ data class Item (
      * delegate row, oldest first (bounded). Empty for ordinary calls.
      */
     var `steps`: List<SubagentStep>
+    , 
+    /**
+     * Position in the transcript, ascending. Clients MUST insert by this rather
+     * than by arrival: an item can be (re)delivered late — a prompt echo after
+     * the reply it prompted, or a page of older rows drained back in — and
+     * appending it on arrival put the question below its own answer.
+     */
+    var `seq`: kotlin.UInt
     
 ){
     
@@ -4589,6 +4597,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterSequenceTypeSubagentStep.read(buf),
+            FfiConverterUInt.read(buf),
         )
     }
 
@@ -4603,7 +4612,8 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterSequenceTypeToolCall.allocationSize(value.`calls`) +
             FfiConverterString.allocationSize(value.`thought`) +
             FfiConverterString.allocationSize(value.`summary`) +
-            FfiConverterSequenceTypeSubagentStep.allocationSize(value.`steps`)
+            FfiConverterSequenceTypeSubagentStep.allocationSize(value.`steps`) +
+            FfiConverterUInt.allocationSize(value.`seq`)
     )
 
     override fun write(value: Item, buf: ByteBuffer) {
@@ -4618,6 +4628,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.write(value.`thought`, buf)
             FfiConverterString.write(value.`summary`, buf)
             FfiConverterSequenceTypeSubagentStep.write(value.`steps`, buf)
+            FfiConverterUInt.write(value.`seq`, buf)
     }
 }
 

@@ -978,6 +978,7 @@ mod tests {
             text: "hi".into(),
             detail: String::new(),
             output: String::new(),
+            seq: 0,
             status: String::new(),
             app_key: String::new(),
             calls: Vec::new(),

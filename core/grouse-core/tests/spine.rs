@@ -129,6 +129,7 @@ fn item(id: &str, kind: grouse_core::ItemKind, text: &str) -> grouse_core::Item 
         thought: String::new(),
         summary: String::new(),
         steps: Vec::new(),
+        seq: 0,
     }
 }
 
