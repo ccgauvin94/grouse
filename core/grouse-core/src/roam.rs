@@ -1007,6 +1007,13 @@ impl RoamPeer {
             .await;
         match load {
             Ok(reply) => {
+                // End the replay HERE too. Only the error arm used to disarm it,
+                // so after any successful peer open `host.replaying(key)` stayed
+                // true for the life of the session — and dispatch reads that flag
+                // to decide whether a thought chunk is "replay framing" to fold
+                // into the run or a row to render. Every reasoning block in that
+                // chat was silently folded in as a result.
+                self.host.end_replay(&key);
                 self.emit_status("ready");
                 self.emit_config(&reply, &key);
             }
@@ -1445,7 +1452,7 @@ mod tests {
                 .lock()
                 .push(format!("usage {used} {size} {currency}"));
         }
-        fn on_run_ended(&self, stop_reason: String) {
+        fn on_run_ended(&self, _session_id: String, stop_reason: String) {
             self.events.lock().push(format!("run_ended {stop_reason}"));
         }
         fn on_speak(&self, text: String) {

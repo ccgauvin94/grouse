@@ -1241,7 +1241,9 @@ impl TranscriptStore {
         for sentence in speak {
             self.listener.on_speak(sentence);
         }
-        self.listener.on_run_ended(stop_reason.to_string());
+        let session_id = self.state.lock().session_id.clone();
+        self.listener
+            .on_run_ended(session_id, stop_reason.to_string());
     }
 
     /// Wipe the transcript and reset the stream state; emits an item `Reset` +
@@ -1827,7 +1829,7 @@ mod tests {
             self.item_events.lock().push(op_desc(&op));
         }
         fn on_usage(&self, _used: i64, _size: i64, _cost: f64, _currency: String) {}
-        fn on_run_ended(&self, _stop_reason: String) {}
+        fn on_run_ended(&self, _session: String, _stop_reason: String) {}
         fn on_speak(&self, text: String) {
             self.speak_events.lock().push(text);
         }

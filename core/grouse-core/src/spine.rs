@@ -461,6 +461,17 @@ impl Conn {
 
     /// A fresh-cache open is dropping replayed rows; the shared dispatch must
     /// not ingest them into the store at all.
+    /// The display key (`roam:<label>:<id>` / `<id>`) of the session this
+    /// connection is currently loading or bound to — what a chunk's key is
+    /// compared against.
+    pub(crate) fn display_key(&self) -> Option<String> {
+        let id = self.inner.session_id.lock().clone()?;
+        Some(crate::session::display_id(
+            self.inner.label.as_deref(),
+            &id,
+        ))
+    }
+
     pub(crate) fn suppresses_replay(&self) -> bool {
         self.inner.suppress_replay.load(Ordering::SeqCst)
     }

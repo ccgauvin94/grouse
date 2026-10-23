@@ -864,6 +864,16 @@ mod tests {
         assert!(tool_subagent_step(&update).is_none());
     }
 
+    #[test]
+    fn a_replay_window_only_gags_its_own_session() {
+        // The window belongs to the session being replayed in. Another chat's
+        // chunks — on either transport — must keep landing.
+        assert!(chat_accepted(None, "20261021_2"));
+        assert!(!chat_accepted(Some("20261021_2"), "20261021_2"));
+        assert!(chat_accepted(Some("20261021_2"), "roam:Phaethon:20261021_2"));
+        assert!(chat_accepted(Some("20261021_2"), "20261021_9"));
+    }
+
     struct Recorder {
         events: StdMutex<Vec<String>>,
     }
@@ -883,7 +893,7 @@ mod tests {
             self.events.lock().unwrap().push(line);
         }
         fn on_usage(&self, _: i64, _: i64, _: f64, _: String) {}
-        fn on_run_ended(&self, stop: String) {
+        fn on_run_ended(&self, _session: String, stop: String) {
             self.events
                 .lock()
                 .unwrap()
@@ -1259,6 +1269,19 @@ impl DispatchHost for PrefixHost {
 
 /// The single `session/update` dispatch. Every transport calls this; there is
 /// no second copy of the accumulation rules.
+/// May a chunk for `key` land in its store while `suppressing_key` is mid-replay?
+///
+/// The suppression window belongs to ONE session (the one being replayed in
+/// silently and painted once). Treating it as connection-wide dropped a chat's
+/// chunks for another chat's reason — measured on a roam peer whose stream went
+/// silent whenever the main connection happened to be loading with a fresh cache.
+pub(crate) fn chat_accepted(suppressing_key: Option<&str>, key: &str) -> bool {
+    match suppressing_key {
+        Some(held) => held != key,
+        None => true,
+    }
+}
+
 pub(crate) fn dispatch(
     host: &dyn DispatchHost,
     notif: agent_client_protocol::schema::v1::SessionNotification,
@@ -1567,10 +1590,10 @@ impl crate::CoreListener for SessionGate {
             self.inner.on_usage(used, size, cost, currency);
         }
     }
-    fn on_run_ended(&self, stop_reason: String) {
+    fn on_run_ended(&self, session_id: String, stop_reason: String) {
         // Turn control, not painting: a background turn must still release
-        // its chat's in-flight state.
-        self.inner.on_run_ended(stop_reason);
+        // its chat's in-flight state — which is why the key travels with it.
+        self.inner.on_run_ended(session_id, stop_reason);
     }
     fn on_speak(&self, text: String) {
         if self.shown() {

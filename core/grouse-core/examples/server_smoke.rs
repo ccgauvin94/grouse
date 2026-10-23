@@ -36,7 +36,7 @@ impl CoreListener for L {
     }
     fn on_item(&self, _op: grouse_core::TranscriptOp) {}
     fn on_usage(&self, _u: i64, _s: i64, _c: f64, _cur: String) {}
-    fn on_run_ended(&self, _r: String) {}
+    fn on_run_ended(&self, _s: String, _r: String) {}
     fn on_speak(&self, _t: String) {}
     fn on_config(&self, _o: Vec<grouse_core::ConfigOption>) {}
     fn on_permission_request(&self, _r: grouse_core::PermissionRequest) {}

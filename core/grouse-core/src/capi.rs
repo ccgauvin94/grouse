@@ -147,7 +147,9 @@ pub struct GrouseCoreListener {
     /// Context-window usage + cost: `(used, size, cost, currency)`.
     pub on_usage: Option<extern "C" fn(*mut c_void, i64, i64, f64, *const c_char)>,
     /// A turn finished; the C string is the server's stop reason.
-    pub on_run_ended: Option<extern "C" fn(*mut c_void, *const c_char)>,
+    /// `(user_data, session_id, stop_reason)` — the session id is what routes a
+    /// completion to its chat when more than one is streaming.
+    pub on_run_ended: Option<extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
     /// A sanitized, sentence-sized speakable chunk of the assistant's text
     /// (docs/TRANSCRIPT_MODEL.md) — feed it to a TTS engine.
     pub on_speak: Option<extern "C" fn(*mut c_void, *const c_char)>,
@@ -371,13 +373,15 @@ impl CoreListener for CoreCallbackForwarder {
             }
         }
     }
-    fn on_run_ended(&self, stop_reason: String) {
+    fn on_run_ended(&self, session_id: String, stop_reason: String) {
+        let sid = c_str(&session_id);
         let p = c_str(&stop_reason);
         unsafe {
             let table = &*self.table;
             if let Some(f) = table.on_run_ended {
-                f(self.user_data, p);
+                f(self.user_data, sid, p);
             }
+            grouse_string_free(sid);
             grouse_string_free(p);
         }
     }

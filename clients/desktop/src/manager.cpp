@@ -2301,9 +2301,15 @@ void Manager::coreOnUsage(qint64 used, qint64 size, double cost, const QString &
     onUsage(int(used), int(size), cost, currency);
 }
 
-void Manager::coreOnRunEnded(const QString &stopReason)
+void Manager::coreOnRunEnded(const QString &sessionId, const QString &stopReason)
 {
     Q_UNUSED(stopReason);
+    // A turn belongs to ONE chat: a completion for some other chat must not clear
+    // the state of the one on screen (same rule as the Android client).
+    if (!sessionId.isEmpty() && !m_promptingSessionId.isEmpty()
+        && sessionId != m_promptingSessionId) {
+        return;
+    }
     m_prompting = false;
     m_promptingSessionId.clear();
     m_compacting = false;

@@ -224,9 +224,12 @@ static void cb_on_usage(void *u, long long used, long long size, double cost, co
     const QString c = copyStr(currency);
     marshal(u, nullptr, [=](Manager *m) { m->coreOnUsage(used, size, cost, c); });
 }
-static void cb_on_run_ended(void *u, const char *stop) {
+static void cb_on_run_ended(void *u, const char *sessionId, const char *stop) {
+    // The session id rides along: a completion must be routed to the chat that
+    // owns the turn, not to whatever is on screen when it lands.
+    const QString sid = copyStr(sessionId);
     const QString s = copyStr(stop);
-    marshal(u, nullptr, [=](Manager *m) { m->coreOnRunEnded(s); });
+    marshal(u, nullptr, [=](Manager *m) { m->coreOnRunEnded(sid, s); });
 }
 static void cb_on_speak(void *u, const char *text) {
     // The core's sanitized, sentence-sized speakable text (docs/TRANSCRIPT_MODEL.md).

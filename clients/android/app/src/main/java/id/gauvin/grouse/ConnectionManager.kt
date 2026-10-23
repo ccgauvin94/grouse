@@ -214,7 +214,9 @@ class ConnectionManager private constructor(context: Context) {
         override fun onUsage(used: Long, size: Long, cost: Double, currency: String) {
             main.post { usage.value = AcpEvent.Usage(used.toInt(), size.toInt(), cost, currency) }
         }
-        override fun onRunEnded(stopReason: String) { main.post { onRunEnded(stopReason) } }
+        override fun onRunEnded(sessionId: String, stopReason: String) {
+            main.post { onRunEnded(sessionId, stopReason) }
+        }
         // Sanitized, sentence-sized speakable text (docs/TRANSCRIPT_MODEL.md) — one
         // TTS utterance per chunk, played in order as it arrives. Speech belongs to
         // conversation mode: with the mic off a reply is read, not heard.
@@ -2169,7 +2171,12 @@ class ConnectionManager private constructor(context: Context) {
 
 
 
-    private fun onRunEnded(stopReason: String) {
+    private fun onRunEnded(sessionId: String, stopReason: String) {
+        // A turn belongs to ONE chat. With more than one streaming, a completion
+        // must not clear the state of whatever happens to be on screen.
+        val owned = sessionId.isEmpty() || turnInFlightSession == null ||
+            sessionId == turnInFlightSession
+        if (!owned) return
         compacting.value = false
         turnInFlight = false
         // The turn is over: a filler still waiting has nothing left to cover.

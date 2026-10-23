@@ -389,7 +389,7 @@ pub trait CoreListener: Send + Sync {
     /// Context-window usage + cost (`used`/`size` in tokens).
     fn on_usage(&self, used: i64, size: i64, cost: f64, currency: String);
     /// A turn finished (`stop_reason` is the server's).
-    fn on_run_ended(&self, stop_reason: String);
+    fn on_run_ended(&self, session_id: String, stop_reason: String);
     /// A sanitized, sentence-sized chunk of the assistant's visible text, ready
     /// for a client's TTS engine (see `docs/TRANSCRIPT_MODEL.md`). Emitted as
     /// the reply streams (and on the finalizing flush), so a conversation loop
@@ -2581,14 +2581,18 @@ impl crate::session::DispatchHost for Core {
     fn replaying(&self, key: &str) -> bool {
         self.inner.state.lock().replaying.contains(key)
     }
-    fn accepts_chat(&self, _key: &str) -> bool {
-        !self
-            .inner
-            .conn
-            .lock()
-            .as_ref()
-            .map(|conn| conn.suppresses_replay())
-            .unwrap_or(false)
+    /// May a chunk for `key` land in its store right now?
+    ///
+    /// The main connection suppresses content ONLY while it is replay-ing that
+    /// one session in (the store is held and painted once at the end). Asking
+    /// the connection-wide flag without comparing the key dropped a PEER's
+    /// chunks whenever the main wire happened to be in that window — a chat on
+    /// another transport went silent for a main-connection reason.
+    fn accepts_chat(&self, key: &str) -> bool {
+        let held = self.inner.conn.lock().clone().and_then(|conn| {
+            conn.suppresses_replay().then(|| conn.display_key()).flatten()
+        });
+        crate::session::chat_accepted(held.as_deref(), key)
     }
     fn background(&self, key: &str) {
         self.inner.hub.mark_new(key);

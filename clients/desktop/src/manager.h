@@ -357,7 +357,7 @@ public:
     void coreOnSessions(const QString &json);
     void coreOnItem(const QString &json);
     void coreOnUsage(qint64 used, qint64 size, double cost, const QString &currency);
-    void coreOnRunEnded(const QString &stopReason);
+    void coreOnRunEnded(const QString &sessionId, const QString &stopReason);
     void coreOnConfig(const QString &json);
     void coreOnPermission(const QString &json);
     void coreOnSessionTouched(const QString &sid, const QString &title, const QString &u);

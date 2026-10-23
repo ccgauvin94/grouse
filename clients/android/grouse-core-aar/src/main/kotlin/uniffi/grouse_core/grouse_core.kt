@@ -663,7 +663,7 @@ internal interface UniffiCallbackInterfaceCoreListenerMethod3 : com.sun.jna.Call
     fun callback(`uniffiHandle`: Long,`used`: Long,`size`: Long,`cost`: Double,`currency`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCoreListenerMethod4 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`stopReason`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`stopReason`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCoreListenerMethod5 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`text`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
@@ -1689,7 +1689,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_usage() and 0xFFFF) != 56483) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_run_ended() and 0xFFFF) != 44189) {
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_run_ended() and 0xFFFF) != 31569) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_speak() and 0xFFFF) != 48845) {
@@ -6302,7 +6302,7 @@ public interface CoreListener {
     /**
      * A turn finished (`stop_reason` is the server's).
      */
-    fun `onRunEnded`(`stopReason`: kotlin.String)
+    fun `onRunEnded`(`sessionId`: kotlin.String, `stopReason`: kotlin.String)
     
     /**
      * A sanitized, sentence-sized chunk of the assistant's visible text, ready
@@ -6420,10 +6420,11 @@ internal object uniffiCallbackInterfaceCoreListener {
         }
     }
     internal object `onRunEnded`: UniffiCallbackInterfaceCoreListenerMethod4 {
-        override fun callback(`uniffiHandle`: Long,`stopReason`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+        override fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`stopReason`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
                 uniffiObj.`onRunEnded`(
+                    FfiConverterString.lift(`sessionId`),
                     FfiConverterString.lift(`stopReason`),
                 )
             }

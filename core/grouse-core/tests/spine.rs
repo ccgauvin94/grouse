@@ -39,7 +39,7 @@ enum Ev {
     Sessions(Vec<SessionSummary>),
     Item(TranscriptOp),
     Usage(i64, i64, f64, String),
-    RunEnded(String),
+    RunEnded(String, String),
     Speak(String),
     Config(Vec<ConfigOption>),
     Permission(PermissionRequest),
@@ -77,8 +77,8 @@ impl CoreListener for RecordingListener {
     fn on_usage(&self, used: i64, size: i64, cost: f64, currency: String) {
         let _ = self.tx.send(Ev::Usage(used, size, cost, currency));
     }
-    fn on_run_ended(&self, stop_reason: String) {
-        let _ = self.tx.send(Ev::RunEnded(stop_reason));
+    fn on_run_ended(&self, session_id: String, stop_reason: String) {
+        let _ = self.tx.send(Ev::RunEnded(session_id, stop_reason));
     }
     fn on_speak(&self, text: String) {
         let _ = self.tx.send(Ev::Speak(text));
@@ -1175,10 +1175,10 @@ fn spine_e2e_connect_prompt_stream() {
 
     let ended = wait_for(
         &ev_rx,
-        |ev| matches!(ev, Ev::RunEnded(r) if r == "end_turn"),
+        |ev| matches!(ev, Ev::RunEnded(_, r) if r == "end_turn"),
         "RunEnded",
     );
-    let Ev::RunEnded(stop_reason) = ended else {
+    let Ev::RunEnded(_session, stop_reason) = ended else {
         unreachable!()
     };
     assert_eq!(stop_reason, "end_turn");
@@ -1266,7 +1266,7 @@ fn prompt_does_not_resync_its_own_turn() {
     );
     wait_for(
         &ev_rx,
-        |ev| matches!(ev, Ev::RunEnded(_)),
+        |ev| matches!(ev, Ev::RunEnded(_, _)),
         "RunEnded",
     );
 
@@ -2010,7 +2010,7 @@ fn a_prompt_survives_a_reopen_because_the_core_echoes_it() {
         Prompt { blocks: vec![PromptBlock::Text { text: "what did I ask?".to_string() }] },
         Some(SendExpect { session_id: "sess-e2e".to_string() }),
     );
-    wait_for(&ev_rx, |ev| matches!(ev, Ev::RunEnded(_)), "RunEnded");
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::RunEnded(_, _)), "RunEnded");
 
     // No user chunk ever arrived (the fake no longer invents one), so this row is
     // the CORE's echo — the only record of the question.

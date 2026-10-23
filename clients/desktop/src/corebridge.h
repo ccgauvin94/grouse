@@ -187,7 +187,7 @@ struct GrouseCoreListener {
     void (*on_sessions)(void *, const char *);
     void (*on_item)(void *, const char *);
     void (*on_usage)(void *, long long, long long, double, const char *);
-    void (*on_run_ended)(void *, const char *);
+    void (*on_run_ended)(void *, const char *session_id, const char *stop_reason);
     void (*on_speak)(void *, const char *);
     void (*on_config)(void *, const char *);
     void (*on_permission_request)(void *, const char *);
