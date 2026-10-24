@@ -489,6 +489,8 @@ private:
     void dispatchSend(const QString &text, const QVariantList &blocks);
     void enqueue(const PendingSend &p);
     void flushQueue();
+    /// Point the displayed-chat turn state at `sessionId` (busy + steer key).
+    void restoreTurnState(const QString &sessionId);
     /** Assign the steer key, emitting activeRunIdChanged only on a real change. */
     void setActiveRunId(const QString &runId);
     /** The wire that owns the in-flight turn is gone for good: release it so the
@@ -529,6 +531,11 @@ private:
     /// Which session owns the in-flight prompt. A wire may only release the turn it
     /// owns; empty falls back to the session on screen (the stuck composer).
     QString m_promptingSessionId;
+    /// Every chat with a turn on the wire. A completion clears only its own, and
+    /// opening a chat restores that chat's busy/steer state instead of forgetting it.
+    QSet<QString> m_inFlight;
+    /// The live run id per session (the steer key), so a turn survives a switch.
+    QHash<QString, QString> m_activeRunIds;
 
     QVariantList m_sessions;
     QVariantList m_projects;

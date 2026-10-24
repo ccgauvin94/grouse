@@ -4,6 +4,17 @@ All notable changes to Grouse are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Concurrent turns, one per chat.** A reply can stream in a roam chat while
+  another runs on a different peer or on the main connection: in-flight state is
+  keyed per session, each chat keeps its own queue, and a completion clears only
+  its own chat. Switching to a running chat restores its spinner and steer key
+  instead of showing it idle; a prompt queued in a background chat starts when
+  that chat's turn ends, even while another chat is on screen.
+
 ## [0.2.22] - 2026-10-23
 
 ### Added

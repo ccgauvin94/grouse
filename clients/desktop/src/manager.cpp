@@ -298,6 +298,9 @@ void Manager::disconnect()
         m_bridge->api().grouse_disconnect(m_bridge->handle());
     setOnline(false);
     m_prompting = false;
+    m_promptingSessionId.clear();
+    m_inFlight.clear();
+    m_activeRunIds.clear();
     emit promptingChanged();
     m_compacting = false;
     emit compactingChanged();
@@ -386,6 +389,7 @@ void Manager::openRoamSession(const QString &label, const QString &sessionId, co
     m_landing = false;
     emit landingChanged();
     m_currentSessionId = sessionId;
+    restoreTurnState(sessionId);
     m_currentSessionTitle.clear();
     m_tools.clear();
     m_extDefs.clear();
@@ -555,6 +559,7 @@ void Manager::openSession(const QString &sessionId)
     m_landing = false;
     emit landingChanged();
     m_currentSessionId = sessionId;
+    restoreTurnState(sessionId);
     m_currentSessionTitle.clear();
     for (const auto &v : m_sessions) {
         const QVariantMap s = v.toMap();
@@ -719,9 +724,12 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
         m_currentIndex = m_messageModel->count() - 1;
         requestMessagesUpdate();
     }
-    if (ready && !m_prompting) {
+    const bool sameChatBusy = m_prompting && m_promptingSessionId == m_currentSessionId;
+    if (ready && !sameChatBusy) {
         m_prompting = true;
         m_promptingSessionId = m_currentSessionId;
+        if (!m_currentSessionId.isEmpty())
+            m_inFlight.insert(m_currentSessionId);
         emit promptingChanged();
         char *err = nullptr;
         const QByteArray prompt = promptJson(text, blocks).toUtf8();
@@ -732,7 +740,7 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
             onError(QString::fromUtf8(err), false);
             m_bridge->api().grouse_string_free(err);
         }
-    } else if (ready && m_prompting && !m_activeRunId.isEmpty() && shown.isEmpty()) {
+    } else if (ready && sameChatBusy && !m_activeRunId.isEmpty() && shown.isEmpty()) {
         // STEER (Android parity): the turn already running on THIS session is
         // redirected by this message instead of queueing behind it. m_activeRunId
         // is only ever set for the current session, so a run on another session
@@ -766,6 +774,8 @@ void Manager::releaseTurnForLostWire(const QString &lostSessionId)
     // the main socket while a peer owns the turn, must leave it alone (Android parity).
     if (!turnOwnerMatches(m_promptingSessionId, m_currentSessionId, lostSessionId))
         return;
+    m_inFlight.remove(lostSessionId);
+    m_activeRunIds.remove(lostSessionId);
     // A dead host emits neither RunEnded nor a cleared run id, so without this
     // m_prompting stays true forever: "N queued — will send when this turn finishes"
     // is a promise that can never be kept and the queue never drains.
@@ -798,9 +808,21 @@ void Manager::enqueue(const PendingSend &p)
     emit queuedChanged();
 }
 
+void Manager::restoreTurnState(const QString &sessionId)
+{
+    const bool busy = m_inFlight.contains(sessionId);
+    m_prompting = busy;
+    m_promptingSessionId = busy ? sessionId : QString();
+    m_compacting = false;
+    setActiveRunId(busy ? m_activeRunIds.value(sessionId) : QString());
+    emit promptingChanged();
+    emit compactingChanged();
+}
+
 void Manager::flushQueue()
 {
-    if (m_pendingQueue.isEmpty() || m_prompting)
+    if (m_pendingQueue.isEmpty()
+        || (m_prompting && m_promptingSessionId == m_currentSessionId))
         return;
     const PendingSend p = m_pendingQueue.takeFirst();
     emit queuedChanged();
@@ -924,7 +946,8 @@ void Manager::cancelTurn()
 
 void Manager::compactConversation()
 {
-    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_ready(m_bridge->handle()) || m_prompting)
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_ready(m_bridge->handle())
+        || (m_prompting && m_promptingSessionId == m_currentSessionId))
         return;
     m_compacting = true;
     emit compactingChanged();
@@ -1604,6 +1627,10 @@ void Manager::coreOnStatus(const QString &json)
         setOnline(true);
         setStatus(QStringLiteral("ready"));
         m_prompting = false;
+        m_promptingSessionId.clear();
+        // A reconnected client cannot receive the old turns' run ends.
+        m_inFlight.clear();
+        m_activeRunIds.clear();
         emit promptingChanged();
         // Resolve a pending testConnection() probe. The failure paths
         // (Disconnected/Error) already reported; only Ready completed silently,
@@ -1875,6 +1902,7 @@ void Manager::coreOnPeerNewSession(const QString &label, const QString &sid)
     refreshSessions();
     if (label == m_activePeerLabel) {
         m_currentSessionId = sid;
+        restoreTurnState(sid);
         m_currentSessionTitle.clear();
         emit currentSessionChanged();
     emit pinnedAppsChanged();
@@ -2304,12 +2332,11 @@ void Manager::coreOnUsage(qint64 used, qint64 size, double cost, const QString &
 void Manager::coreOnRunEnded(const QString &sessionId, const QString &stopReason)
 {
     Q_UNUSED(stopReason);
-    // A turn belongs to ONE chat: a completion for some other chat must not clear
-    // the state of the one on screen (same rule as the Android client).
-    if (!sessionId.isEmpty() && !m_promptingSessionId.isEmpty()
-        && sessionId != m_promptingSessionId) {
+    // Every completion clears ITS chat; only the chat on screen owns the UI state.
+    m_inFlight.remove(sessionId);
+    m_activeRunIds.remove(sessionId);
+    if (!sessionId.isEmpty() && sessionId != m_currentSessionId)
         return;
-    }
     m_prompting = false;
     m_promptingSessionId.clear();
     m_compacting = false;
@@ -2606,10 +2633,19 @@ void Manager::onModeChanged(const QString &modeId)
 
 void Manager::onActiveRunChanged(const QString &sessionId, const QString &runId)
 {
-    if (sessionId == m_currentSessionId || sessionId.isEmpty())
+    // Run ids are per session: a background chat's run must not replace the
+    // steer key of the chat on screen, and its end must not clear it.
+    if (runId.isEmpty()) {
+        m_activeRunIds.remove(sessionId);
+        m_inFlight.remove(sessionId);
+        if (sessionId == m_currentSessionId || sessionId.isEmpty())
+            setActiveRunId(QString());
+        return;
+    }
+    m_activeRunIds.insert(sessionId, runId);
+    m_inFlight.insert(sessionId);
+    if (sessionId == m_currentSessionId)
         setActiveRunId(runId);
-    else
-        setActiveRunId(QString());
 }
 
 void Manager::onUsage(int used, int size, double cost, const QString &currency)

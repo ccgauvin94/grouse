@@ -1539,7 +1539,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_run_summaries() and 0xFFFF) != 42596) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_send_prompt() and 0xFFFF) != 19143) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_send_prompt() and 0xFFFF) != 30000) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_sessions() and 0xFFFF) != 51807) {
@@ -2465,9 +2465,9 @@ public interface CoreInterface {
     fun `runSummaries`(): kotlin.Boolean
     
     /**
-     * Send a prompt (text/image/resource blocks). Queues until the owning
-     * connection can accept it; rejected (not queued) when `expect` mismatches
-     * the displayed session. One path for the main wire and every peer.
+     * Send a prompt (text/image/resource blocks). Routes by `expect.session_id`
+     * (fallback: the displayed session), queues per session until that chat's
+     * owner can accept it. A turn in another chat never blocks this one.
      */
     fun `sendPrompt`(`prompt`: Prompt, `expect`: SendExpect?)
     
@@ -3119,9 +3119,9 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
-     * Send a prompt (text/image/resource blocks). Queues until the owning
-     * connection can accept it; rejected (not queued) when `expect` mismatches
-     * the displayed session. One path for the main wire and every peer.
+     * Send a prompt (text/image/resource blocks). Routes by `expect.session_id`
+     * (fallback: the displayed session), queues per session until that chat's
+     * owner can accept it. A turn in another chat never blocks this one.
      */override fun `sendPrompt`(`prompt`: Prompt, `expect`: SendExpect?)
         = 
     callWithHandle {
@@ -4559,7 +4559,8 @@ data class Item (
     , 
     /**
      * `ItemKind::Tool` only: the child tool calls a SUBAGENT made under this
-     * delegate row, oldest first (bounded). Empty for ordinary calls.
+     * delegate row, oldest first (bounded). Empty for ordinary calls. A
+     * grouped run carries them per `ToolCall` instead.
      */
     var `steps`: List<SubagentStep>
     , 

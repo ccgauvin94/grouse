@@ -118,9 +118,12 @@ one-line labels for a run of tool calls), `capi.rs` (the C ABI above).
 - **Intents** never return the result of network work; they change a state machine
   or queue a request. Outcomes arrive as events.
 - **Session lifecycle** is owned by the core: `ready` ⇔ an open session id exists;
-  `send_prompt`/`set_config_option`/tool queries queue per session until the
-  owner of the displayed id can accept them, then flush in order
-  (`Core::owner_for` → `ChatEndpoint`). Reconnect uses exponential backoff
+  `send_prompt`/`set_config_option`/tool queries queue per session until that
+  chat's owner can accept them, then flush in order (`Core::owner_for` →
+  `ChatEndpoint`). Turns are concurrent **per session** (`CoreState::in_flight`
+  is a set of display ids): a reply can stream in a roam chat while another
+  runs on a different peer or the main wire, and a completion clears only its
+  own chat. Reconnect uses exponential backoff
   (500ms·2ⁿ, cap 15s, 6 attempts, reset on Ready; none on explicit `disconnect`);
   a roam peer re-dials on the same curve with its own budget. Remote-change
   resync debounces `session_info_update` (1.5s) → probes

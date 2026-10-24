@@ -167,6 +167,10 @@ struct FakeServer {
     /// When set, the fake pushes `session_info_update` (with an activeRunId)
     /// + `available_commands_update` notifications right after session/new.
     notify: Arc<std::sync::atomic::AtomicBool>,
+    /// When set, `session/prompt` is recorded and left UNANSWERED, so a test can
+    /// observe the core sending a SECOND chat's prompt while the first turn is
+    /// still in flight (per-session concurrency).
+    hold_prompts: Arc<std::sync::atomic::AtomicBool>,
     /// When set, `session/prompt` emits a run-end `session_info_update` (no
     /// activeRunId) before answering — the server's own post-turn touch that
     /// must not be mistaken for a remote change.
@@ -208,6 +212,7 @@ impl FakeServer {
             frames: Arc::new(Mutex::new(Vec::new())),
             secret_header: Arc::new(Mutex::new(None)),
             notify: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            hold_prompts: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             post_turn_touch: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             drop_now: Arc::new(tokio::sync::Notify::new()),
             replay_alt_id: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -457,6 +462,12 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
                 });
                 let _ = tx.send(WsMessage::Text(frame.to_string().into())).await;
                 json!({ "stopReason": "end_turn" })
+            }
+            "session/prompt" if server.hold_prompts.load(std::sync::atomic::Ordering::SeqCst) => {
+                // The frame is already recorded. Leave the request unanswered:
+                // the concurrency test asserts a SECOND chat's prompt goes out
+                // while this turn is still in flight.
+                continue;
             }
             "session/prompt" => {
                 // Stream the turn BEFORE the reply: two chunks of one agent
@@ -1072,6 +1083,93 @@ fn spine_e2e_active_run_commands_and_recipe_connect() {
 // ---------------------------------------------------------------------------
 // End-to-end: connect -> ready -> send_prompt -> streamed chunk on the listener
 // ---------------------------------------------------------------------------
+
+/// Turns are concurrent PER SESSION: with the first chat's `session/prompt`
+/// still unanswered, a prompt for a second chat on the same wire must go out.
+/// The old global `prompting` latch queued it until the first turn ended.
+#[test]
+fn a_second_chat_prompts_while_the_first_turn_is_in_flight() {
+    let _guard = CACHE_TEST_LOCK.lock();
+    let data_dir =
+        std::env::temp_dir().join(format!("grouse-concurrent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    // Neither prompt is answered: the test observes the wire, not run ends.
+    server
+        .hold_prompts
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        data_dir.to_string_lossy().to_string(),
+    );
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+        initial_project_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "Ready");
+    assert_eq!(core.active_session_id().as_deref(), Some("sess-e2e"));
+
+    core.send_prompt(
+        Prompt { blocks: vec![PromptBlock::Text { text: "first".to_string() }] },
+        Some(SendExpect { session_id: "sess-e2e".to_string() }),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while server.frames_for("session/prompt").is_empty() {
+        assert!(Instant::now() < deadline, "the first prompt never reached the wire");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // A second chat on the same wire (the display moves; the first turn is
+    // still in flight).
+    core.open_session("sess-b".to_string());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while core.active_session_id().as_deref() != Some("sess-b") {
+        assert!(Instant::now() < deadline, "sess-b never became the displayed chat");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    core.send_prompt(
+        Prompt { blocks: vec![PromptBlock::Text { text: "second".to_string() }] },
+        Some(SendExpect { session_id: "sess-b".to_string() }),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while server.frames_for("session/prompt").len() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "a turn in the first chat held the second chat's prompt"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let ids: Vec<String> = server
+        .frames_for("session/prompt")
+        .iter()
+        .filter_map(|frame| {
+            frame
+                .pointer("/params/sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    assert!(ids.contains(&"sess-e2e".to_string()), "{ids:?}");
+    assert!(ids.contains(&"sess-b".to_string()), "{ids:?}");
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
 
 #[test]
 fn spine_e2e_connect_prompt_stream() {

@@ -1503,6 +1503,12 @@ impl SessionHub {
         store
     }
 
+    /// Whether a store exists for `key` — the chat has been opened (or painted)
+    /// in this process, so a prompt naming it is not a stale UI id.
+    pub(crate) fn has_store(&self, key: &str) -> bool {
+        self.stores.lock().contains_key(key)
+    }
+
     /// Make `key` the session the UI shows. Does not paint by itself.
     pub(crate) fn display(&self, key: &str) -> Arc<crate::transcript::TranscriptStore> {
         let store = self.store(key);

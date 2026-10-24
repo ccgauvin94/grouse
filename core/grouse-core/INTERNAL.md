@@ -24,7 +24,8 @@ during a pending `send_request`.
 lib.rs         the uniffi surface: records/enums (DONE), Core + GrouseUnstable
                objects, listener fan-out. Owns the intents, status machine,
                reconnect orchestration, the resync cycle (both transports), the
-               one prompt path (send_prompt → owner_for → queue → on_turn_ended),
+               one prompt path (send_prompt → owner_for → per-session queue →
+               on_turn_ended; turns are concurrent per session, keyed by display id),
                and Core's DispatchHost impl (main namespace).
 transport.rs   WsTransport (DONE) — ConnectTo<Client>, X-Secret-Key + WebPKI-verifying TLS
                (accept_invalid_certs opt-out).

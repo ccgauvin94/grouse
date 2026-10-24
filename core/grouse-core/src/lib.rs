@@ -516,8 +516,10 @@ struct CoreState {
     config: Vec<ConfigOption>,
     /// The server the connection (and reconnects) use.
     last_config: Option<ServerConfig>,
-    /// A turn is in flight on the main connection; the pending queue waits.
-    prompting: bool,
+    /// Display ids with a turn on the wire. A turn in chat A must not gate
+    /// chat B — the two may even be different connections (a roam peer and the
+    /// main wire), and goose multiplexes prompts per session.
+    in_flight: HashSet<String>,
     /// The store may NOT be a complete copy of the server's transcript: a turn
     /// was in flight (or ended in error) and the last rows are partial. Drives
     /// two things: `save_cache_for` writes an EMPTY `updatedAt` stamp for an
@@ -737,7 +739,19 @@ impl Core {
             let mut state = self.inner.state.lock();
             state.user_disconnect = true;
             state.reconnect_gen += 1;
-            state.prompting = false;
+            // A main-wire turn that was in flight is gone with the wire: its
+            // store is no longer a settled copy of the server's transcript.
+            // Roam peers have their own connections and survive this.
+            let dropped: Vec<String> = state
+                .in_flight
+                .iter()
+                .filter(|key| !key.starts_with(crate::session::ROAM_PREFIX))
+                .cloned()
+                .collect();
+            for key in dropped {
+                state.in_flight.remove(&key);
+                state.incomplete.insert(key);
+            }
             state.sync_stamp = None;
             state.resync_ticks = 0;
         }
@@ -993,31 +1007,39 @@ impl Core {
         });
     }
 
-    /// Send a prompt (text/image/resource blocks). Queues until the owning
-    /// connection can accept it; rejected (not queued) when `expect` mismatches
-    /// the displayed session. One path for the main wire and every peer.
+    /// Send a prompt (text/image/resource blocks). Routes by `expect.session_id`
+    /// (fallback: the displayed session), queues per session until that chat's
+    /// owner can accept it. A turn in another chat never blocks this one.
     pub fn send_prompt(&self, prompt: Prompt, expect: Option<SendExpect>) {
-        let Some(display) = self.active_session_id() else {
+        // The prompt names its chat. The UI sends only for the chat it shows,
+        // but a queue drain may target a background chat — routing by `expect`
+        // is what lets one chat's turn proceed while another waits.
+        let Some(target) = expect
+            .as_ref()
+            .map(|exp| exp.session_id.clone())
+            .or_else(|| self.active_session_id())
+        else {
             self.queue_prompt(prompt, expect);
             return;
         };
-        if let Some(exp) = &expect {
-            if exp.session_id != display {
-                eprintln!(
-                    "grouse-core: send_prompt rejected — UI expects a different session than the one displayed"
-                );
-                return;
-            }
+        // An id the core has never opened is a stale UI reference, not a
+        // background chat: drop it instead of prompting an unrelated session.
+        if self.active_session_id().as_deref() != Some(target.as_str())
+            && !self.inner.hub.has_store(&target)
+        {
+            eprintln!("grouse-core: send_prompt rejected — unknown session");
+            return;
         }
-        let Some(owner) = self.owner_for(&display) else {
+        let Some(owner) = self.owner_for(&target) else {
             self.queue_prompt(prompt, expect);
             return;
         };
-        if self.inner.state.lock().prompting || !owner.accepts_prompt() {
+        let busy = self.inner.state.lock().in_flight.contains(&target);
+        if busy || !owner.accepts_prompt() {
             self.queue_prompt(prompt, expect);
             return;
         }
-        self.spawn_prompt(owner, display, prompt);
+        self.spawn_prompt(owner, target, prompt);
     }
 
     /// `session/cancel` (a notification; never waits for a reply).
@@ -1366,14 +1388,11 @@ impl Core {
     }
 
     /// Reset the per-chat state a fresh open/new starts from (desktop
-    /// openSession/newChat: clear the queue, drop the prompt flag, cancel any
-    /// in-flight resync cycle).
+    /// openSession/newChat: cancel any in-flight resync cycle). Turns and the
+    /// pending queues are PER SESSION and deliberately survive: opening chat B
+    /// must not clear chat A's in-flight turn or its queued prompts.
     fn reset_chat_state(&self) {
         let mut state = self.inner.state.lock();
-        // Per-session pending stays queued for its session; don't clear the
-        // whole map when switching chats (a prompt queued in Chat A while
-        // busy must not vanish when you open Chat B).
-        state.prompting = false;
         state.resync_ticks = 0;
         state.sync_stamp = None;
         state.touch_gen += 1; // stale debounces no-op
@@ -1473,6 +1492,19 @@ impl Core {
         if matches!(status, ConnectionStatus::Ready) {
             state.reconnect_attempts = 0;
             state.reconnect_gen += 1;
+        } else {
+            // A main-wire drop kills ITS turns; a roam peer's turn is a
+            // different connection and must survive this.
+            let lost: Vec<String> = state
+                .in_flight
+                .iter()
+                .filter(|key| !key.starts_with(crate::session::ROAM_PREFIX))
+                .cloned()
+                .collect();
+            for key in lost {
+                state.in_flight.remove(&key);
+                state.incomplete.insert(key);
+            }
         }
         drop(state);
         if matches!(status, ConnectionStatus::Ready) {
@@ -1498,7 +1530,7 @@ impl Core {
                     // The replay/new just completed, so the store is a faithful
                     // copy of the server's transcript — unless a turn is still
                     // in flight.
-                    if state.prompting {
+                    if state.in_flight.contains(&key) {
                         state.incomplete.insert(key.clone());
                     } else {
                         state.incomplete.remove(&key);
@@ -1717,32 +1749,27 @@ impl Core {
 
     // -- prompt / config plumbing --------------------------------------------
 
-    fn try_send_prompt(
+    fn try_send_prompt_for(
         &self,
+        session: &str,
         prompt: Prompt,
         expect: Option<SendExpect>,
     ) -> Result<(), (Prompt, Option<SendExpect>)> {
-        let Some(display) = self.active_session_id() else {
-            return Err((prompt, expect));
-        };
-        let Some(owner) = self.owner_for(&display) else {
-            return Err((prompt, expect));
-        };
-        if !owner.accepts_prompt() {
-            return Err((prompt, expect));
-        }
         if let Some(exp) = &expect {
-            if exp.session_id != display {
-                // The UI is showing a different chat than the one displayed;
-                // reject instead of mis-routing (CONTRACT §3.1). Neither id is
-                // printed: a session id is a bearer-like identifier.
-                eprintln!(
-                    "grouse-core: send_prompt rejected — UI expects a different session than the one displayed"
-                );
+            if exp.session_id != session {
+                // A mis-keyed queue entry: drop it rather than route it to a
+                // different chat.
                 return Ok(());
             }
         }
-        self.spawn_prompt(owner, display, prompt);
+        let Some(owner) = self.owner_for(session) else {
+            return Err((prompt, expect));
+        };
+        let busy = self.inner.state.lock().in_flight.contains(session);
+        if busy || !owner.accepts_prompt() {
+            return Err((prompt, expect));
+        }
+        self.spawn_prompt(owner, session.to_string(), prompt);
         Ok(())
     }
 
@@ -1804,7 +1831,8 @@ impl Core {
         self.inner.state.lock().turn_runs.remove(&session_id);
         {
             let mut state = self.inner.state.lock();
-            state.prompting = true;
+            // Only THIS session is busy; a turn elsewhere is unrelated.
+            state.in_flight.insert(session_id.clone());
             // The turn's rows are not final until it ends: mark THIS session
             // incomplete so a save or reconnect in the meantime cannot treat it
             // as a settled copy.
@@ -2016,7 +2044,7 @@ impl Core {
         self.store_for(key).run_ended(&stop);
         {
             let mut state = self.inner.state.lock();
-            state.prompting = false;
+            state.in_flight.remove(key);
             if clean {
                 state.incomplete.remove(key);
             } else {
@@ -2035,83 +2063,105 @@ impl Core {
         self.flush_pending();
     }
 
-    /// Drain the pending queue in order once the socket is ready (CONTRACT §4).
+    /// Drain pending intents. Turns are concurrent PER SESSION, so this starts
+    /// one prompt for every session whose owner is ready and idle — a turn in
+    /// chat A must not hold chat B's queued prompt (they may be different
+    /// connections).
     fn flush_pending(&self) {
+        // Global intents first: config has no session, and an orphan prompt
+        // (typed before any chat bound) binds to whatever is displayed now.
         loop {
-            let (_key, intent) = {
+            let intent = {
                 let mut state = self.inner.state.lock();
-                if state.prompting {
-                    return;
+                let Some(q) = state.pending.get_mut("") else { break };
+                let Some(intent) = q.pop_front() else {
+                    state.pending.remove("");
+                    break;
+                };
+                if q.is_empty() {
+                    state.pending.remove("");
                 }
-                // Global SetConfig queue first (key ""), then current session's SendPrompt queue.
-                let sid = self.active_session_id().unwrap_or_default();
-                if let Some(q) = state.pending.get_mut("") {
-                    if let Some(intent) = q.pop_front() {
-                        if q.is_empty() {
-                            state.pending.remove("");
-                        }
-                        (String::new(), intent)
-                    } else {
-                        // No global pending, try current session
-                        if let Some(q) = state.pending.get_mut(&sid) {
-                            if let Some(intent) = q.pop_front() {
-                                if q.is_empty() {
-                                    state.pending.remove(&sid);
-                                }
-                                (sid.clone(), intent)
-                            } else {
-                                return;
-                            }
-                        } else {
-                            return;
-                        }
-                    }
-                } else if let Some(q) = state.pending.get_mut(&sid) {
-                    if let Some(intent) = q.pop_front() {
-                        if q.is_empty() {
-                            state.pending.remove(&sid);
-                        }
-                        (sid.clone(), intent)
-                    } else {
-                        return;
-                    }
-                } else {
-                    return;
-                }
+                intent
             };
-            let requeue = match intent {
-                PendingIntent::SendPrompt(prompt, expect, id) => {
-                    match self.try_send_prompt(prompt, expect) {
-                        Ok(()) => None,
-                        Err((prompt, expect)) => {
-                            let k = expect
-                                .as_ref()
-                                .map(|e| e.session_id.clone())
-                                .unwrap_or_default();
-                            Some((k, PendingIntent::SendPrompt(prompt, expect, id)))
-                        }
-                    }
-                }
+            match intent {
                 PendingIntent::SetConfig(config_id, value) => {
-                    match self.try_set_config(config_id, value) {
-                        Ok(()) => None,
-                        Err((config_id, value)) => {
-                            Some((String::new(), PendingIntent::SetConfig(config_id, value)))
-                        }
+                    if let Err((config_id, value)) = self.try_set_config(config_id, value) {
+                        self.requeue("", PendingIntent::SetConfig(config_id, value));
+                        break;
                     }
                 }
-            };
-            if let Some((k, intent)) = requeue {
-                self.inner
-                    .state
-                    .lock()
-                    .pending
-                    .entry(k)
-                    .or_default()
-                    .push_front(intent);
-                return;
+                PendingIntent::SendPrompt(prompt, expect, id) => {
+                    let target = expect
+                        .as_ref()
+                        .map(|exp| exp.session_id.clone())
+                        .or_else(|| self.active_session_id());
+                    let Some(target) = target else {
+                        self.requeue("", PendingIntent::SendPrompt(prompt, expect, id));
+                        break;
+                    };
+                    if let Err((prompt, expect)) =
+                        self.try_send_prompt_for(&target, prompt, expect)
+                    {
+                        self.requeue("", PendingIntent::SendPrompt(prompt, expect, id));
+                        break;
+                    }
+                }
             }
         }
+
+        // One prompt per session, for every session that can take it. A session
+        // whose owner is not ready (or is still running) stays parked.
+        let keys: Vec<String> = {
+            let state = self.inner.state.lock();
+            state
+                .pending
+                .keys()
+                .filter(|key| !key.is_empty())
+                .cloned()
+                .collect()
+        };
+        for key in keys {
+            let intent = {
+                let mut state = self.inner.state.lock();
+                let Some(q) = state.pending.get_mut(&key) else {
+                    continue;
+                };
+                let Some(intent) = q.pop_front() else {
+                    state.pending.remove(&key);
+                    continue;
+                };
+                if q.is_empty() {
+                    state.pending.remove(&key);
+                }
+                intent
+            };
+            match intent {
+                PendingIntent::SendPrompt(prompt, expect, id) => {
+                    if let Err((prompt, expect)) = self.try_send_prompt_for(&key, prompt, expect)
+                    {
+                        self.requeue(&key, PendingIntent::SendPrompt(prompt, expect, id));
+                    }
+                }
+                // Config intents are queued globally (key ""); route one that
+                // somehow carries a session key back through that path.
+                PendingIntent::SetConfig(config_id, value) => {
+                    if let Err((config_id, value)) = self.try_set_config(config_id, value) {
+                        self.requeue("", PendingIntent::SetConfig(config_id, value));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Put an intent back at the FRONT of its queue (the next flush retries it).
+    fn requeue(&self, key: &str, intent: PendingIntent) {
+        self.inner
+            .state
+            .lock()
+            .pending
+            .entry(key.to_string())
+            .or_default()
+            .push_front(intent);
     }
 
     /// Persist the accumulated transcript under the current session's
@@ -2320,9 +2370,9 @@ impl Core {
         if state.touch_gen != gen {
             return;
         }
-        // Our own turn owns the transcript; the session re-syncs on open
-        // (desktop probeAndMaybeResync).
-        if state.prompting {
+        // THIS chat's own turn owns its transcript; other chats' turns are
+        // irrelevant to whether a resync of this one is safe.
+        if state.in_flight.contains(&session_id) {
             return;
         }
         if self.active_session_id().as_deref() != Some(session_id.as_str()) {

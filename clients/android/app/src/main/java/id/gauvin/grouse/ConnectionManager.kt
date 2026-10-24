@@ -149,24 +149,37 @@ class ConnectionManager private constructor(context: Context) {
     // on its own connection) and wedge the whole app. Keep the owner so we only steer/block
     // the session that actually holds the turn.
     @Volatile private var turnInFlightSession: String? = null
+    // Every chat with a turn on the wire. Turns are concurrent per session (a
+    // roam peer and main can stream together), so a background chat's turn must
+    // survive a switch and its completion must not clear the chat on screen.
+    private val inFlight = mutableSetOf<String>()
+    private val activeRunIds = mutableMapOf<String, String>()
 
-    /** A turn belongs to the session that started it. Moving to another session must not
-     *  steer into or block on the old one — clear the stale routing so the next send in the
-     *  new session starts its own run. Call on every session switch (open/new/peer-created). */
-    private fun resetTurnRouting() {
-        activeRunId = null
-        activeRunIdState.value = null
+    /** The chat being opened becomes the one whose turn state the UI shows. */
+    private fun resetTurnRouting(sessionId: String? = currentSession.value) {
+        activeRunId = sessionId?.let { activeRunIds[it] }
+        activeRunIdState.value = activeRunId
+        turnInFlightSession = sessionId?.takeIf { inFlight.contains(it) }
+        turnInFlight = turnInFlightSession != null
+        busy.value = turnInFlight
+        // `compacting` is a transient hint for the chat on screen; a switch
+        // clears it and the server's status re-arms it if still relevant.
+        compacting.value = false
+        // The chip describes THIS chat's queue, and the queue is per-chat. Use
+        // the session being opened (currentSession is still the old one here).
+        queuedCount.value = queuedFor(sessionId)
+    }
+
+    /** A new wire cannot deliver the old turns' RunEnded: drop every turn. */
+    private fun clearTurnState() {
+        inFlight.clear()
+        activeRunIds.clear()
         turnInFlight = false
         turnInFlightSession = null
-        // `busy`/`compacting` describe the chat ON SCREEN. `open()` clears them, but a roam
-        // open bypasses it (and every tap reaches here), so without this a turn from the chat
-        // you left kept "Grouse is thinking…" under every chat opened next — including a
-        // brand-new one — and pull-to-refresh could not clear it.
         busy.value = false
         compacting.value = false
-        // The chip describes THIS chat's queue, and the queue is now per-chat -- so re-point it
-        // at the session being opened. Prompts parked for the chat you left stay parked there.
-        refreshQueuedCount()
+        activeRunId = null
+        activeRunIdState.value = null
     }
 
 
@@ -1180,10 +1193,9 @@ class ConnectionManager private constructor(context: Context) {
         // session and that choice wins.
         pendingOpenAssistant = false
         pendingAssistantRename = false
-        // A turn belongs to the session that started it. Switching chats — roaming bypasses
-        // `open` entirely — must clear stale run routing: a dead run id left behind would make
-        // the next send steer into nothing and wedge the app.
-        resetTurnRouting()
+        // Switching chats re-points the turn state at the chat being opened; a
+        // turn still running in the chat you left is neither steered nor cleared.
+        resetTurnRouting(sessionId)
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
         // A new tap supersedes any earlier failure notice.
         openFailed.value = null
@@ -1503,6 +1515,7 @@ class ConnectionManager private constructor(context: Context) {
             if (!sameTurn) {
                 turnInFlight = true
                 turnInFlightSession = targetSid
+                inFlight.add(targetSid)
                 if (currentSession.value != null) store.pendingPushSessionId = currentSession.value
                 sendPromptBlocks(text, images, files, expect = targetSid)
                 return
@@ -1536,7 +1549,15 @@ class ConnectionManager private constructor(context: Context) {
         if (text.isNotBlank()) blocks.add(PromptBlock.Text(text))
         images.forEach { img -> blocks.add(PromptBlock.Image(img.mimeType, img.dataB64)) }
         files.forEach { f -> blocks.add(PromptBlock.Resource(f.name, f.mimeType, f.text, f.blobB64)) }
-        if (blocks.isEmpty()) { busy.value = false; turnInFlight = false; turnInFlightSession = null; return }
+        if (blocks.isEmpty()) {
+            if (expect != null) inFlight.remove(expect)
+            if (expect == null || expect == currentSession.value) {
+                busy.value = false
+                turnInFlight = false
+                turnInFlightSession = null
+            }
+            return
+        }
         speaker.stop()   // a new prompt supersedes any reply still being spoken
         // Conversation mode: the model's first word is a second or more away, so arm
         // the spoken filler to cover the silence. The reply cancels it; a turn that
@@ -1671,6 +1692,10 @@ class ConnectionManager private constructor(context: Context) {
         core.cancel()
         main.removeCallbacks(thinkingFiller)
         speaker.stop()   // Stop means stop — spoken replies included
+        currentSession.value?.let { sid ->
+            inFlight.remove(sid)
+            activeRunIds.remove(sid)
+        }
         busy.value = false
         turnInFlight = false   // wire is free again; without this the queue never drains
         turnInFlightSession = null
@@ -1961,6 +1986,7 @@ class ConnectionManager private constructor(context: Context) {
             store.pendingPushSessionId = sid
             turnInFlight = true
             turnInFlightSession = sid
+            inFlight.add(sid)
             busy.value = true
             sendPromptBlocks(p.text, p.images, p.files, expect = sid)
         }
@@ -2211,62 +2237,65 @@ class ConnectionManager private constructor(context: Context) {
 
 
     private fun onRunEnded(sessionId: String, stopReason: String) {
-        // A turn belongs to ONE chat. With more than one streaming, a completion
-        // must not clear the state of whatever happens to be on screen.
-        val owned = sessionId.isEmpty() || turnInFlightSession == null ||
-            sessionId == turnInFlightSession
-        if (!owned) return
-        compacting.value = false
-        turnInFlight = false
-        // The turn is over: a filler still waiting has nothing left to cover.
-        main.removeCallbacks(thinkingFiller)
-        // The chat whose run just ended is the one whose queue is now releasable. Fall back to
-        // the visible chat only when no owner was ever recorded; draining the global head into
-        // whatever was on screen is exactly the cross-talk this replaces.
-        val owner = turnInFlightSession ?: currentSession.value
-        turnInFlightSession = null
-        // The run is over: drop any stale run id so the next send doesn't try to
-        // steer a dead turn ("no turn exists to steer"). activeRunId is app-global,
-        // so an un-cleared value would infect every chat, not just the one that ran.
-        activeRunId = null
-        activeRunIdState.value = null
-        // We got the authoritative completion straight from our own socket -- stop waiting
-        // on the Stop-hook push for this turn so a later turn from another client in the
-        // same (possibly shared) session doesn't spuriously match the stale flag.
-        store.pendingPushSessionId = null
-        // Drain one queued prompt, if any: send it and STAY busy, so the UI never flickers
-        // idle between a queue and its turn.
-        val queued = dequeueFor(owner)
-        busy.value = queued != null
-        if (!appForeground) {
-            // The live path: this app's own turn, so it is announced whenever the app is not
-            // in front (announceAnyTurn). The empty-transcript fallback and the wording come
-            // from the core, so the phone and the desktop read identically.
-            val decision = decideNotify(
-                PushEnvelope(PushKind.TURN, currentSession.value, lastAssistantText()),
-                NotifyContext(
-                    appVisible = appForeground,
-                    armedSession = null,
-                    sessionTitle = sessions.value.firstOrNull { it.sessionId == currentSession.value }?.title,
-                    // This path IS the announcer for a turn it watched end; the dedupe
-                    // fields exist to silence the *other* path (the operator's push for
-                    // the same turn), never a genuine second turn of our own.
-                    announcedSession = null,
-                    announcedSecsAgo = null,
-                    announceAnyTurn = true))
-            if (decision.show) {
-                notifier.postMessage(decision.summary, decision.body)
-                noteAnnouncedTurn(currentSession.value)
+        // Every completion clears ITS chat; only the chat on screen owns the
+        // busy/compacting/run-id state the UI draws.
+        inFlight.remove(sessionId)
+        activeRunIds.remove(sessionId)
+        val shown = sessionId == currentSession.value
+        if (shown) {
+            compacting.value = false
+            // The turn is over: a filler still waiting has nothing left to cover.
+            main.removeCallbacks(thinkingFiller)
+            turnInFlight = false
+            turnInFlightSession = null
+            activeRunId = null
+            activeRunIdState.value = null
+            // We got the authoritative completion straight from our own socket -- stop waiting
+            // on the Stop-hook push for this turn so a later turn from another client in the
+            // same (possibly shared) session doesn't spuriously match the stale flag.
+            store.pendingPushSessionId = null
+        }
+        // Drain ONE prompt queued in THIS chat. The queue is per chat, and the
+        // core routes by session id, so a background chat's next turn can start
+        // while another chat is on screen.
+        val queued = dequeueFor(sessionId)
+        if (queued != null) {
+            inFlight.add(sessionId)
+            if (shown) {
+                turnInFlight = true
+                turnInFlightSession = sessionId
+                busy.value = true
+            } else {
+                store.pendingPushSessionId = sessionId
+            }
+            sendPromptBlocks(queued.text, queued.images, queued.files, expect = sessionId)
+            return
+        }
+        if (shown) {
+            busy.value = false
+            if (!appForeground) {
+                // The live path: this app's own turn, so it is announced whenever the app is
+                // not in front (announceAnyTurn). The empty-transcript fallback and the wording
+                // come from the core, so the phone and the desktop read identically.
+                val decision = decideNotify(
+                    PushEnvelope(PushKind.TURN, currentSession.value, lastAssistantText()),
+                    NotifyContext(
+                        appVisible = appForeground,
+                        armedSession = null,
+                        sessionTitle = sessions.value.firstOrNull { it.sessionId == currentSession.value }?.title,
+                        // This path IS the announcer for a turn it watched end; the dedupe
+                        // fields exist to silence the *other* path (the operator's push for
+                        // the same turn), never a genuine second turn of our own.
+                        announcedSession = null,
+                        announcedSecsAgo = null,
+                        announceAnyTurn = true))
+                if (decision.show) {
+                    notifier.postMessage(decision.summary, decision.body)
+                    noteAnnouncedTurn(currentSession.value)
+                }
             }
         }
-        if (queued != null) {
-            // Send the queued prompt now that the wire is free. Service stays up (we are
-            // still busy), so backgrounding between the two turns is safe.
-            turnInFlight = true
-            turnInFlightSession = owner
-            lastSessionId?.let { store.pendingPushSessionId = it }
-            sendPromptBlocks(queued.text, queued.images, queued.files, expect = owner)
-        } else if (store.persistentConnection || (!appForeground && connectionHeld())) {
+        if (store.persistentConnection || (!appForeground && connectionHeld())) {
             // Backgrounded with a wire still live (or being re-dialed): the hold
             // setForeground(false) established stays — releasing it here is what
             // dropped idle background connections. In the foreground the process
@@ -2423,42 +2452,30 @@ class ConnectionManager private constructor(context: Context) {
     @Volatile private var activeRunId: String? = null
     val activeRunIdState = mutableStateOf<String?>(null)
     private fun onCoreActiveRun(sessionId: String, runId: String) {
-        // Steer only targets the session on screen; a peer's or background
-        // session's non-empty run id is irrelevant here. BUT an EMPTY run id
-        // (the run ended) must always clear the key: if we only cleared it for
-        // the on-screen session, a roam turn that finished while its session was
-        // NOT on screen would leave a stale dead run id behind — the next send
-        // anywhere would try to steer it ("no turn found to steer") and the
+        // Run ids are per session: keep them all so switching back to a running
+        // chat restores steer/busy, and a completion for a background chat never
+        // touches the chat on screen.
         if (runId.isEmpty()) {
-            activeRunId = null
-            activeRunIdState.value = null
-            // A cleared run id is also a turn-end fallback: hosts (e.g. a roam
-            // peer running go/opencode) may not emit a RunEnded stream event,
-            // which would otherwise leave busy/turnInFlight wedged so the user
-            // has to hit Stop. Only clear the busy state if we're actually mid
-            // turn — if we're already idle, a peer's background turn ending
-            // must not spuriously clear unrelated state.
-            if (turnInFlight or busy.value) {
-                turnInFlight = false
-                turnInFlightSession = null
-                busy.value = false
+            // The steer key dies with the run, but the busy state belongs to
+            // `onRunEnded`: a queued follow-up may already have restarted this
+            // chat, and this (possibly late) event must not clear it.
+            activeRunIds.remove(sessionId)
+            if (sessionId == currentSession.value) {
+                activeRunId = null
+                activeRunIdState.value = null
             }
-        } else if (sessionId == currentSession.value) {
+            return
+        }
+        activeRunIds[sessionId] = runId
+        inFlight.add(sessionId)
+        if (sessionId == currentSession.value) {
             activeRunId = runId
             activeRunIdState.value = runId
-            // Reconcile: a live run id on the session ON SCREEN is a running turn,
-            // whoever started it. After a background drop the re-dial cleared the
-            // send-side flags (open() must clear them, or a missed RunEnded wedges
-            // every later chat), and this update is the only signal that the server
-            // is still working — the indicator, Stop and steer-vs-queue all gate on
-            // busy. Adopt ownership only when nothing is in flight, so a turn this
-            // app is driving elsewhere keeps its queue routing; a run id here while
-            // another turn is owned is recorded (as before) for the next dispatch.
-            if (!turnInFlight) {
-                turnInFlight = true
-                turnInFlightSession = sessionId
-                busy.value = true
-            }
+            // A live run id on the session ON SCREEN is a running turn, whoever
+            // started it (this app before a reconnect, or another client).
+            turnInFlight = true
+            turnInFlightSession = sessionId
+            busy.value = true
         }
     }
 
@@ -2729,9 +2746,8 @@ class ConnectionManager private constructor(context: Context) {
         // A new client can't receive the old turn's RunEnded, so clear turn state here.
         // Otherwise a hung/dropped turn leaves busy=true and every new chat + reconnect
         // inherits a stuck "goose is thinking…" with nothing sent. Same logic for compacting.
-        busy.value = false; compacting.value = false
-        turnInFlight = false
-        resetTurnRouting()
+        // A new client can't receive the old turn's RunEnded: drop every turn.
+        clearTurnState()
         // Live reuse (core already Ready on same host/port/key) must not
         // flip to `connecting`/`Loading 0` — the wire stays up. Only a true
         // reconnect (new host/port/key or no wire) shows connecting.
