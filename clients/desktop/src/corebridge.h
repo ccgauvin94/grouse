@@ -36,6 +36,8 @@ public:
     /// table. Strings are malloc'd UTF-8 owned by the core; free with
     /// `grouse_string_free` (`takeString` does this).
     struct AimsApi {
+        // Generic intents first: the ABI version gates the rest.
+        unsigned int (*grouse_abi_version)(void);
         // lifecycle / stable intents
         void *(*grouse_core_create)(const void *listener, void *user_data,
                                     const char *cache_dir, char **out_err);

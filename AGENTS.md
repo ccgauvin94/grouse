@@ -398,6 +398,9 @@ change before tagging.
   as JSON C-strings that the consumer must copy inside the callback. A new intent
   or listener event lands in `capi.rs` and `clients/desktop/src/corebridge.cpp`
   in the same change — the desktop cannot reach the core any other way.
+  `grouse_abi_version()` gates the listener table: the desktop refuses a library
+  whose version does not match (a signature change would otherwise be a callback
+  called with the wrong arity).
 - **Naming**: Rust is `snake_case`; protocol JSON is `camelCase` (except
   `recipes/*`/`schedules/*` params) — do not confuse the two; a misspelled param
   is silently dropped.

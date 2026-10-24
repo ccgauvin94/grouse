@@ -809,9 +809,6 @@ class ConnectionManager private constructor(context: Context) {
     private var live = false
     private var connecting = false
     private var lastSessionId: String? = null
-    // True when a Clear wiped `messages` while prompts were still queued (their bubbles are
-    // not in the server history); the Ready handler re-adds them.
-    private var replayWiped = false
     // Replay scroll-pinning: while the core rebuilds the transcript (Clear → chunks), the UI
     // pins unconditionally; the tick fires one final snap when Ready completes the rebuild.
     val replayActive = mutableStateOf(false)
@@ -1467,15 +1464,15 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     fun send(text: String, images: List<ImageBlock> = emptyList(), files: List<FileBlock> = emptyList()) {
-        // The core echoes a PURE-TEXT prompt into the transcript itself: the wire carries
+        // The core echoes the prompt into the transcript itself: the wire carries
         // no user_message_chunk for our own send, so the core keeps its own copy
-        // (otherwise the question is never recorded, and a reopen that trusts the cache
-        // shows the replies with the questions missing). Attachments are the exception —
-        // the item model has no image field — so the client keeps its own bubble for
-        // those, which is also what renders the thumbnail(s), not a "[📎 N]" placeholder.
+        // (otherwise the question is never recorded, and a reopen that trusts the
+        // cache shows the replies with the questions missing). The item carries
+        // only an attachment COUNT — the pixels are matched back to the echoed row
+        // here, which renders the thumbnail(s), not a "[📎 N]" placeholder.
         // (A reloaded session replays text; images are never reconstructed.)
         if (images.isNotEmpty() || files.isNotEmpty()) {
-            promptAttachments[text] = images to files
+            pendingAttachments.getOrPut(text) { ArrayDeque() }.addLast(images to files)
         }
         busy.value = true
         lastMessageUsage.value = null   // stale stats from the previous turn shouldn't linger
@@ -1954,20 +1951,12 @@ class ConnectionManager private constructor(context: Context) {
             replayActive.value = false
             replayDoneTick.value++   // ChatScreen: new content -> snap to bottom
         }
-        // Prompts still waiting in the queue aren't in the server history (they haven't
-        // been sent), so their bubbles must be re-added on top or they vanish from the
-        // screen (the rebuild wiped them). Only ATTACHMENT prompts: a pure-text one is
-        // echoed by the core when it finally goes out, and re-adding it here would show
-        // the same message twice.
-        if (replayWiped) {
-            replayWiped = false
-            // Only THIS session's unsent prompts -- the transcript on screen is this chat's.
-            pendingSends.filter { it.sessionId == sid && (it.images.isNotEmpty() || it.files.isNotEmpty()) }
-                .forEach { messages.add(ChatMessage("user", it.text, it.images, it.files, seq = nextSeq())) }
-        }
-        // Send ONE queued prompt (bubbles were already added when queued); RunEnded drains
-        // the rest. Firing the whole deque at once would interleave the prompts in the
-        // transcript and misattribute each reply — the exact failure the queue exists to prevent.
+        // A queued prompt is not in the server history yet; the core echoes it
+        // when it finally goes out, so the client must not add a row of its own
+        // here (it would survive the echo and show the prompt twice).
+        // Send ONE queued prompt; RunEnded drains the rest. Firing the whole
+        // deque at once would interleave the prompts in the transcript and
+        // misattribute each reply — the exact failure the queue exists to prevent.
         dequeueFor(sid)?.let { p ->
             store.pendingPushSessionId = sid
             turnInFlight = true
@@ -2031,7 +2020,6 @@ class ConnectionManager private constructor(context: Context) {
                 // A fresh paint means the chat contents are being replaced: a
                 // previous open failure no longer describes what is on screen.
                 openFailed.value = null
-                if (pendingSends.isNotEmpty()) replayWiped = true
                 replayProgress.value = 0
                 // replayActive stays as openChat set it; a Window over a non-empty
                 // paint clears it (a cache paint needs no spinner).
@@ -2112,16 +2100,33 @@ class ConnectionManager private constructor(context: Context) {
      *  page drained back in, an echo landing after the reply it prompted, a row
      *  re-delivered by a replay). Appending those put questions underneath their
      *  own answers and left hard refreshes looking broken. */
-    /** Attachments by prompt text: the core owns the ROW (identity, position,
-     *  one row per prompt) and carries only a COUNT, so the pixels are matched
-     *  back to it here. Not persisted — a reloaded session replays text, exactly
-     *  as before. */
-    private val promptAttachments = mutableMapOf<String, Pair<List<ImageBlock>, List<FileBlock>>>()
+    /** Attachments that rode a prompt, by prompt text, consumed in send order.
+     *  The core owns the row (identity, position, one row per prompt) and carries
+     *  only a COUNT, so the pixels are matched back to the echoed row here. The
+     *  queue handles two prompts with the same text; the id map keeps a
+     *  re-delivered item's thumbnails. Not persisted: a reload replays text. */
+    private val pendingAttachments =
+        mutableMapOf<String, ArrayDeque<Pair<List<ImageBlock>, List<FileBlock>>>>()
+    private val attachmentsByRow =
+        mutableMapOf<String, Pair<List<ImageBlock>, List<FileBlock>>>()
 
-    /** A position after everything on screen, for a row the CLIENT owns: an
-     *  attachment prompt (the core cannot place it — `Item` has no image field),
-     *  which must sit at the newest end, not jump to the front on `seq = 0`. */
-    private fun nextSeq(): Int = (messages.maxOfOrNull { it.seq } ?: 0) + 1
+    /** The attachments for a user item, gated by the core's count: a text-only
+     *  prompt can share its text with an earlier attachment prompt and must not
+     *  inherit its pixels. */
+    private fun attachmentsFor(item: Item): Pair<List<ImageBlock>, List<FileBlock>>? {
+        if (item.attachments == 0u) return null
+        attachmentsByRow[item.id]?.let { return it }
+        val queue = pendingAttachments[item.text] ?: return null
+        val pair = if (queue.isEmpty()) null else queue.removeFirst()
+        if (queue.isEmpty()) pendingAttachments.remove(item.text)
+        if (pair != null) {
+            attachmentsByRow[item.id] = pair
+            if (attachmentsByRow.size > 512) {
+                attachmentsByRow.remove(attachmentsByRow.keys.first())
+            }
+        }
+        return pair
+    }
 
     private fun upsertBubble(coreId: String, bubble: ChatMessage) {
         val idx = rowIndexOf(coreId)
@@ -2131,8 +2136,8 @@ class ConnectionManager private constructor(context: Context) {
         }
         // `seq == 0` is a legitimate position (the first row after a repaint), so
         // the rule is purely ordinal: insert before the first row that outranks
-        // this one. Both `itemRows` branches stamp it; nothing else may build a
-        // core row without one.
+        // this one. Every core row carries its own stamp — a group's calls
+        // included; a row added without one would sort to the front.
         val at = messages.indexOfFirst { it.seq > bubble.seq }
         if (at < 0) messages.add(bubble) else messages.add(at, bubble)
     }
@@ -2146,30 +2151,36 @@ class ConnectionManager private constructor(context: Context) {
                                 status = c.status, output = c.output, id = appIdFor(c.id),
                                 summary = if (i == 0) item.summary else "",
                                 // Each call carries the thinking that preceded IT, so the
-                                // expanded run reads as think → act → think → act.
+                                // expanded run reads as think → act → think → act. Its own
+                                // position keeps the run's rows together and in order.
                                 stepThought = c.thought,
+                                steps = c.steps,
+                                seq = c.seq.toInt(),
                                 stepId = item.id)
         }
-        ItemKind.CHART -> listOf(item.id to ChatMessage("chart", item.detail, id = appIdFor(item.id)))
+        ItemKind.CHART -> listOf(item.id to ChatMessage(
+            "chart", item.detail, id = appIdFor(item.id), seq = item.seq.toInt()))
         ItemKind.MCP_APP -> listOf(item.id to ChatMessage(
             "mcpapp", item.text, detail = item.detail, toolCallId = item.id,
             appKey = item.appKey, appHtml = appHtmlCache[item.appKey] ?: "",
-            status = item.status, id = appIdFor(item.id),
+            status = item.status, id = appIdFor(item.id), seq = item.seq.toInt(),
         ).also { fetchAppTemplate(item.appKey) })
         ItemKind.TOOL -> listOf(item.id to ChatMessage(
             itemRole(item.kind), item.text, detail = item.detail, toolCallId = item.id,
             status = item.status, output = item.output, id = appIdFor(item.id),
             summary = item.summary, stepThought = item.thought, stepId = item.id,
             steps = item.steps, seq = item.seq.toInt()))
-        ItemKind.USER, ItemKind.THOUGHT, ItemKind.ERROR, ItemKind.AGENT ->
+        ItemKind.USER, ItemKind.THOUGHT, ItemKind.ERROR, ItemKind.AGENT -> {
+            val att = attachmentsFor(item)
             listOf(item.id to ChatMessage(
                 itemRole(item.kind), item.text, id = appIdFor(item.id),
-                images = promptAttachments[item.text]?.first ?: emptyList(),
-                files = promptAttachments[item.text]?.second ?: emptyList(),
+                images = att?.first ?: emptyList(),
+                files = att?.second ?: emptyList(),
                 // EVERY row carries its position. Omitting it here left all
                 // text at seq 0, which the ordered insert then placed ABOVE the
                 // first tool row — the transcript read as nothing but tool calls.
                 seq = item.seq.toInt()))
+        }
     }
 
     /** Fetch an MCP-App template once per key; the bubble renders as a plain tool
@@ -2349,7 +2360,6 @@ class ConnectionManager private constructor(context: Context) {
                 val sid = currentSession.value
                 if (currentRoamPeer == label && sid != null &&
                     core.activeSessionId() == sid) {
-                    replayWiped = false
                     if (!turnInFlight) {
                         dequeueFor(sid)?.let { p ->
                             store.pendingPushSessionId = sid
@@ -2744,7 +2754,7 @@ class ConnectionManager private constructor(context: Context) {
         // not from whenever the core's first event happens to land. onCoreTranscript
         // turns it straight back off if a cached snapshot paints (content on screen
         // needs no spinner); a new chat is empty by definition and never loads.
-        replayActive.value = resume != null; replayProgress.value = 0; replayWiped = false
+        replayActive.value = resume != null; replayProgress.value = 0
         // A fresh config (first connect of the process, or host/port/key/cwd changed) needs a
         // real `connect()` — the core's new/open intents reuse the LAST config only. connect()
         // is the one blocking core intent (bounded ≤15s), so it runs on a worker thread.

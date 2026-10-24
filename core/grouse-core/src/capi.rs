@@ -42,6 +42,18 @@ use crate::{
     ServerConfig, SessionSummary, TranscriptOp,
 };
 
+/// Bumped whenever the listener table's layout or a symbol's signature changes.
+/// The desktop refuses a library whose value it does not expect — a mismatch is
+/// a callback called with the wrong arity (a garbage pointer), not a compile
+/// error, so it must be caught at load time.
+pub const GROUSE_ABI_VERSION: u32 = 2;
+
+/// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
+#[no_mangle]
+pub extern "C" fn grouse_abi_version() -> u32 {
+    GROUSE_ABI_VERSION
+}
+
 /// malloc-allocated UTF-8 copy of `s`; NULL when the input contains an interior
 /// NUL byte.
 fn c_str(s: &str) -> *mut c_char {

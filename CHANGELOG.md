@@ -4,6 +4,24 @@ All notable changes to Grouse are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A hard refresh no longer reorders the chat.** Every item now carries its
+  transcript position — including each call inside a collapsed tool run, and
+  chart/MCP-app rows — so a late delivery sorts into place instead of landing at
+  the top of the transcript.
+- **A delegate's subagent steps survive a collapsed run.** The steps were only
+  recorded when the delegate call was alone; a delegate that joined a run lost
+  them. They now ride the call inside the group, and the client renders them.
+- **Attachment prompts:** an image-only prompt gets a row (with an empty caption)
+  instead of vanishing; a later text-only prompt that shares its text no longer
+  inherits the earlier prompt's thumbnails; and an attachment prompt queued
+  through a replay no longer appears twice when it is finally sent.
+- The desktop refuses a core library whose C ABI version does not match the
+  app's, instead of calling a callback with the wrong arity.
+
 ## [0.2.14] - 2026-10-21
 
 ### Added

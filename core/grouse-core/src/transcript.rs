@@ -76,6 +76,8 @@ impl ToolRow {
             output: self.output.clone(),
             status: self.status.clone(),
             thought: self.thought.clone(),
+            seq: self.seq,
+            steps: self.steps.clone(),
         }
     }
 }
@@ -897,7 +899,9 @@ impl TranscriptStore {
     /// a duplicate. Closing the live stream is what makes the reply that
     /// follows its own row rather than an extension of the previous turn.
     pub fn echo_prompt(&self, text: &str, attachments: u32) {
-        if text.is_empty() {
+        // An attachment-only prompt still needs its row; an empty prompt with
+        // no attachments is the one case with nothing to show.
+        if text.is_empty() && attachments == 0 {
             return;
         }
         let ops = {
@@ -1061,13 +1065,6 @@ impl TranscriptStore {
         self.emit_ops(ops);
     }
 
-    /// A tool lifecycle update. Searches from the newest bubble backwards for
-    /// the tool call (tool / toolgroup / chart / mcpapp all carry their id).
-    /// Status always updates; `output` follows the desktop rule: live output
-    /// APPENDS to the accumulated output, the completion update (live=false)
-    /// REPLACES it, and an empty output leaves it untouched. Chart/mcp-app
-    /// bubbles take status only (desktop quirk).
-    ///
     /// Record one child tool call a SUBAGENT made under a delegate row.
     ///
     /// goose keeps subagent sessions out of ACP (`ACP_VISIBLE_SESSION_TYPES`), so
@@ -1093,18 +1090,33 @@ impl TranscriptStore {
                 .copied()
                 .filter(|i| *i < st.bubbles.len());
             if let Some(idx) = idx {
-                let emitted = match &mut st.bubbles[idx] {
-                    Bubble::Tool(r, _) if r.tool_call_id == id => {
-                        if r.steps.len() >= MAX_SUBAGENT_STEPS {
-                            r.steps.remove(0);
-                        }
-                        r.steps.push(step);
-                        Some(st.bubbles[idx].item())
+                let push = |steps: &mut Vec<crate::SubagentStep>, step| {
+                    if steps.len() >= MAX_SUBAGENT_STEPS {
+                        steps.remove(0);
                     }
-                    _ => None,
+                    steps.push(step);
                 };
-                if let Some(item) = emitted {
-                    ops.push(TranscriptOp::Upsert { item });
+                let mut found = false;
+                match &mut st.bubbles[idx] {
+                    Bubble::Tool(r, _) if r.tool_call_id == id => {
+                        push(&mut r.steps, step);
+                        found = true;
+                    }
+                    // A delegate call that joined a run lives in the group, not
+                    // in its own bubble; sharing the group's anchor must not
+                    // lose its child activity.
+                    Bubble::ToolGroup(calls, _) => {
+                        if let Some(call) = calls.iter_mut().find(|c| c.tool_call_id == id) {
+                            push(&mut call.steps, step);
+                            found = true;
+                        }
+                    }
+                    _ => {}
+                }
+                if found {
+                    ops.push(TranscriptOp::Upsert {
+                        item: st.bubbles[idx].item(),
+                    });
                 }
             }
             ops
@@ -1112,6 +1124,12 @@ impl TranscriptStore {
         self.emit_ops(ops);
     }
 
+    /// A tool lifecycle update. Searches from the newest bubble backwards for
+    /// the tool call (tool / toolgroup / chart / mcpapp all carry their id).
+    /// Status always updates; `output` follows the desktop rule: live output
+    /// APPENDS to the accumulated output, the completion update (live=false)
+    /// REPLACES it, and an empty output leaves it untouched. Chart/mcp-app
+    /// bubbles take status only (desktop quirk).
     pub fn tool_update(&self, id: &str, status: &str, output: &str, live: bool) {
         let ops = {
             let mut st = self.state.lock();
@@ -1669,21 +1687,30 @@ impl TranscriptStore {
             st.tool_by_id.clear();
             index_bubbles(&mut st.tool_by_id, &st.bubbles);
             // A wholesale paint re-stamps the order it just built: the client
-            // clears on Reset, so these positions are what it inserts by.
-            for (i, b) in st.bubbles.iter_mut().enumerate() {
+            // clears on Reset, so these positions are what it inserts by. A
+            // group is ONE bubble but N client rows, so each call consumes its
+            // own position — sharing the group's anchor put every call in a run
+            // at the same place.
+            let mut next = 0u32;
+            for b in st.bubbles.iter_mut() {
                 match b {
-                    Bubble::Text { seq, .. } => *seq = i as u32,
+                    Bubble::Text { seq, .. } => {
+                        *seq = next;
+                        next += 1;
+                    }
                     Bubble::Tool(r, _) | Bubble::Chart(r) | Bubble::McpApp(r) => {
-                        r.seq = i as u32
+                        r.seq = next;
+                        next += 1;
                     }
                     Bubble::ToolGroup(calls, _) => {
                         for c in calls.iter_mut() {
-                            c.seq = i as u32;
+                            c.seq = next;
+                            next += 1;
                         }
                     }
                 }
             }
-            st.next_seq = st.bubbles.len() as u32;
+            st.next_seq = next;
             st.seed_next_uid();
             st.rebuild_pending_echo();
             st.provisional = provisional;
@@ -2094,7 +2121,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn items_carry_their_transcript_position() {
         // Clients insert by `seq`, not by arrival: an item can be delivered late
         // (a prompt echo after the reply it prompted, or a page of older rows
@@ -2153,6 +2179,7 @@ mod tests {
         assert_eq!(seqs, vec![0, 1], "a repaint owns the order it just built");
     }
 
+    #[test]
     fn a_delegate_row_carries_its_subagent_steps_through_a_reload() {
         let (l, _i_evts) = listener();
         let store = TranscriptStore::new(l);
@@ -2162,7 +2189,6 @@ mod tests {
             crate::SubagentStep {
                 name: "developer__shell".into(),
                 detail: "git status".into(),
-                status: "in_progress".into(),
             },
         );
         store.tool_step(
@@ -2170,7 +2196,6 @@ mod tests {
             crate::SubagentStep {
                 name: "read_file".into(),
                 detail: "src/main.rs".into(),
-                status: "in_progress".into(),
             },
         );
         let items = store.rich_transcript();
@@ -2185,6 +2210,72 @@ mod tests {
         let after = reloaded.rich_transcript();
         assert_eq!(after[0].steps.len(), 2, "{after:?}");
         assert_eq!(after[0].steps[1].detail, "src/main.rs");
+    }
+
+    #[test]
+    fn a_grouped_run_gives_every_call_its_own_position() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.tool_call("shell", "{}", "t1", ToolCallKind::Plain);
+        store.tool_call("read", "{}", "t2", ToolCallKind::Plain);
+        let items = store.rich_transcript();
+        let group = items
+            .iter()
+            .find(|i| i.kind == ItemKind::ToolGroup)
+            .expect("two consecutive calls form a run");
+        let seqs: Vec<u32> = group.calls.iter().map(|c| c.seq).collect();
+        assert_eq!(seqs.len(), 2, "{group:?}");
+        assert!(seqs[0] < seqs[1], "each call needs its own position: {seqs:?}");
+
+        // A repaint stamps them consecutively, not with the group's anchor. Use a
+        // fresh store: an identical re-paint is a no-op by design.
+        let (l2, _e2) = listener();
+        let repainted_store = TranscriptStore::new(l2);
+        repainted_store.replace_rich(items, false);
+        let repainted = repainted_store.rich_transcript();
+        let group = repainted
+            .iter()
+            .find(|i| i.kind == ItemKind::ToolGroup)
+            .expect("the run survives the repaint");
+        let seqs: Vec<u32> = group.calls.iter().map(|c| c.seq).collect();
+        assert_eq!(seqs, vec![0, 1], "a repaint owns the order it built");
+    }
+
+    #[test]
+    fn a_grouped_delegate_keeps_its_subagent_steps() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.tool_call("shell", "{}", "t1", ToolCallKind::Plain);
+        store.tool_call("delegate", "{}", "d1", ToolCallKind::Plain);
+        store.tool_step(
+            "d1",
+            crate::SubagentStep {
+                name: "read_file".into(),
+                detail: "src/lib.rs".into(),
+            },
+        );
+        let items = store.rich_transcript();
+        let group = items
+            .iter()
+            .find(|i| i.kind == ItemKind::ToolGroup)
+            .expect("the delegate joined the run");
+        let step_names: Vec<&str> = group
+            .calls
+            .iter()
+            .flat_map(|c| c.steps.iter().map(|s| s.name.as_str()))
+            .collect();
+        assert_eq!(step_names, vec!["read_file"], "{group:?}");
+    }
+
+    #[test]
+    fn an_attachment_only_prompt_gets_a_row() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.echo_prompt("", 2);
+        let items = store.rich_transcript();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].kind, ItemKind::User);
+        assert_eq!(items[0].attachments, 2);
     }
 
     #[test]
@@ -2851,6 +2942,8 @@ mod tests {
                         output: "x".into(),
                         status: "completed".into(),
                         thought: String::new(),
+                        seq: 0,
+                        steps: Vec::new(),
                     },
                     ToolCall {
                         id: "t2".into(),
@@ -2859,6 +2952,8 @@ mod tests {
                         output: "y".into(),
                         status: "completed".into(),
                         thought: String::new(),
+                        seq: 1,
+                        steps: Vec::new(),
                     },
                 ],
                 thought: String::new(),

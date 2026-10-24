@@ -649,7 +649,7 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             // display like the flat list was. NOT remembered on messages.size: the streaming
                             // assistant message updates via .copy() (new object, same id, size unchanged), so
                             // a size-keyed cache would go stale mid-stream. Grouping is O(#messages) — cheap.
-                            val grouped = groupChatItems(cm.messages).asReversed()
+                            val grouped = chatRows.asReversed()
                             // key on the stable id of the group's first message so a growing tool-call run
                             // (or the streaming assistant bubble) reuses its composition instead of rebuilding;
                             // i==0 is the newest item → mark an assistant Msg streaming so it renders as plain
@@ -747,7 +747,10 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             .clickable {
                                 val idx = chatRows.asReversed()
                                     .indexOfFirst { it.firstId == delegateRow?.firstId }
-                                if (idx >= 0) scope.launch { listState.animateScrollToItem(idx) }
+                                // reverseLayout index 0 is the typing indicator while a
+                                // turn is busy — which it always is with a live delegate.
+                                val offset = if (cm.busy.value) 1 else 0
+                                if (idx >= 0) scope.launch { listState.animateScrollToItem(idx + offset) }
                             }
                             .padding(start = 4.dp, top = 2.dp, bottom = 2.dp),
                         verticalAlignment = Alignment.CenterVertically,

@@ -5359,11 +5359,6 @@ data class SubagentStep (
      * One line of its arguments (command, path, query), already trimmed.
      */
     var `detail`: kotlin.String
-    , 
-    /**
-     * `in_progress` while running; `completed` / `failed` once known.
-     */
-    var `status`: kotlin.String
     
 ){
     
@@ -5382,20 +5377,17 @@ public object FfiConverterTypeSubagentStep: FfiConverterRustBuffer<SubagentStep>
         return SubagentStep(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
         )
     }
 
     override fun allocationSize(value: SubagentStep) = (
             FfiConverterString.allocationSize(value.`name`) +
-            FfiConverterString.allocationSize(value.`detail`) +
-            FfiConverterString.allocationSize(value.`status`)
+            FfiConverterString.allocationSize(value.`detail`)
     )
 
     override fun write(value: SubagentStep, buf: ByteBuffer) {
             FfiConverterString.write(value.`name`, buf)
             FfiConverterString.write(value.`detail`, buf)
-            FfiConverterString.write(value.`status`, buf)
     }
 }
 
@@ -5424,6 +5416,20 @@ data class ToolCall (
      * run shows the loop in order: think, call, think, call.
      */
     var `thought`: kotlin.String
+    , 
+    /**
+     * This call's own position (see `Item::seq`). A grouped run is ONE bubble
+     * but N client rows, so every call needs a distinct position; reusing the
+     * group's anchor would sort them all to the same place.
+     */
+    var `seq`: kotlin.UInt
+    , 
+    /**
+     * A delegate call's subagent activity (see [`SubagentStep`]); empty for an
+     * ordinary call. Rides the call, not the group, so a delegate inside a
+     * collapsed run still shows its child's work.
+     */
+    var `steps`: List<SubagentStep>
     
 ){
     
@@ -5446,6 +5452,8 @@ public object FfiConverterTypeToolCall: FfiConverterRustBuffer<ToolCall> {
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterSequenceTypeSubagentStep.read(buf),
         )
     }
 
@@ -5455,7 +5463,9 @@ public object FfiConverterTypeToolCall: FfiConverterRustBuffer<ToolCall> {
             FfiConverterString.allocationSize(value.`detail`) +
             FfiConverterString.allocationSize(value.`output`) +
             FfiConverterString.allocationSize(value.`status`) +
-            FfiConverterString.allocationSize(value.`thought`)
+            FfiConverterString.allocationSize(value.`thought`) +
+            FfiConverterUInt.allocationSize(value.`seq`) +
+            FfiConverterSequenceTypeSubagentStep.allocationSize(value.`steps`)
     )
 
     override fun write(value: ToolCall, buf: ByteBuffer) {
@@ -5465,6 +5475,8 @@ public object FfiConverterTypeToolCall: FfiConverterRustBuffer<ToolCall> {
             FfiConverterString.write(value.`output`, buf)
             FfiConverterString.write(value.`status`, buf)
             FfiConverterString.write(value.`thought`, buf)
+            FfiConverterUInt.write(value.`seq`, buf)
+            FfiConverterSequenceTypeSubagentStep.write(value.`steps`, buf)
     }
 }
 

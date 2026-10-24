@@ -388,7 +388,6 @@ pub(crate) fn tool_subagent_step(
     Some(crate::SubagentStep {
         name,
         detail: summarize_tool_args(call.get("arguments")),
-        status: "in_progress".to_string(),
     })
 }
 
@@ -826,7 +825,6 @@ mod tests {
         let step = tool_subagent_step(&update).expect("a subagent step");
         assert_eq!(step.name, "developer__shell");
         assert_eq!(step.detail, "git status --short");
-        assert_eq!(step.status, "in_progress");
     }
 
     #[test]
@@ -1269,8 +1267,6 @@ impl DispatchHost for PrefixHost {
     }
 }
 
-/// The single `session/update` dispatch. Every transport calls this; there is
-/// no second copy of the accumulation rules.
 /// May a chunk for `key` land in its store while `suppressing_key` is mid-replay?
 ///
 /// The suppression window belongs to ONE session (the one being replayed in
@@ -1284,6 +1280,8 @@ pub(crate) fn chat_accepted(suppressing_key: Option<&str>, key: &str) -> bool {
     }
 }
 
+/// The single `session/update` dispatch. Every transport calls this; there is
+/// no second copy of the accumulation rules.
 pub(crate) fn dispatch(
     host: &dyn DispatchHost,
     notif: agent_client_protocol::schema::v1::SessionNotification,

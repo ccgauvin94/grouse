@@ -102,10 +102,23 @@ rows. A `toolgroup`'s id is its first child's id.
 a later `session/load` replay (verified against a live serve). So without a local
 copy the transcript, and the cache saved from it, holds no record of what was
 asked, and a reopen that trusts the cache shows the replies with the questions
-missing. `spawn_prompt` therefore appends a pure-text prompt to the store as a
-`user` item. Attachments are the exception — `Item` has no image field — so an
-attachment prompt stays the *client's* own local echo (which is also what renders
-the thumbnails; a replay reconstructs text only).
+missing. `spawn_prompt` therefore appends the prompt to the store as a `user`
+item — its text when it has one, and an empty caption for an attachment-only
+prompt. The item carries only the attachment COUNT (`attachments`); the client
+matches its own pixels to the row by that count. Gate the match on the count: a
+later text-only prompt can share its text with an earlier attachment prompt and
+must not inherit its pixels.
+
+A `Tool` row may also carry `steps`: the child tool calls a SUBAGENT made under
+a delegate (goose forwards them as `_meta.toolNotification`; subagent sessions
+are not ACP-visible). A `ToolCall` inside a group carries its own `steps` for the
+same reason — a delegate often joins a run.
+
+**`seq` is the transcript position.** Clients MUST insert by it, never by
+arrival: a prompt echo can land after the reply it prompted, and a page of older
+rows drains in after newer ones. A `toolgroup` is one item but several client
+rows, so each `ToolCall` carries its own `seq`; a wholesale paint re-stamps the
+whole list in order.
 
 A whitespace-only agent/thought message is **not** an item: goose emits the
 assistant's text as `"\n\n"` between tool calls, and the core drops a chunk that

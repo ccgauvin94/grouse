@@ -104,7 +104,7 @@ pub trait CoreListener {
     fn on_sessions(&self, sessions: Vec<SessionSummary>);
     fn on_item(&self, op: TranscriptOp);                   // the rich item stream (§3.5)
     fn on_usage(&self, used: i64, size: i64, cost: f64, currency: String); // context window + cost
-    fn on_run_ended(&self, stop_reason: String);           // a turn finished
+    fn on_run_ended(&self, session_id: String, stop_reason: String); // a turn finished
     // A sanitized, sentence-sized chunk of the assistant's visible text, ready
     // for a TTS engine (see docs/TRANSCRIPT_MODEL.md "Speaking"). Emitted as
     // the reply streams and on the finalizing flush, so a conversation loop can
@@ -195,7 +195,9 @@ channel; the legacy `on_transcript` / `on_stream` surface is deleted.
 ```rust
 pub enum ItemKind { User, Agent, Thought, Tool, ToolGroup, Chart, McpApp, Error }
 
-pub struct ToolCall { id, title, detail, output, status, thought }
+pub struct SubagentStep { name, detail }
+
+pub struct ToolCall { id, title, detail, output, status, thought, seq, steps }
 
 pub struct Item {
     id: String,          // message_id (text) / tool_call_id, or a core "@n"
@@ -205,9 +207,12 @@ pub struct Item {
     output: String,      // tool result
     status: String,      // tool lifecycle
     app_key: String,     // McpApp: "<extension>|<uri>"
-    calls: Vec<ToolCall>,// ToolGroup children
+    calls: Vec<ToolCall>,// ToolGroup children (each with its own `seq`)
     thought: String,     // Tool/ToolGroup: the run's thinking, joined
     summary: String,     // Tool/ToolGroup: the run's one-line label
+    steps: Vec<SubagentStep>, // Tool: a delegate's child calls (bounded)
+    attachments: u32,    // User: how many images/resources rode the prompt
+    seq: u32,            // transcript position; clients insert by this
 }
 
 pub enum TranscriptOp {

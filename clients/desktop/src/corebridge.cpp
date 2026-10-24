@@ -76,6 +76,7 @@ bool CoreBridge::resolve()
     }
     AimsApi a{};
 #define RESOLVE(name) do { a.name = reinterpret_cast<decltype(a.name)>(lib->resolve(#name)); } while (0)
+    RESOLVE(grouse_abi_version);
     RESOLVE(grouse_core_create);
     RESOLVE(grouse_core_free);
     RESOLVE(grouse_string_free);
@@ -154,6 +155,19 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_unstable_respond_elicitation);
 #undef RESOLVE
 
+    // The listener table's layout and the symbol signatures are the contract.
+    // An older core (or a stale GROUSE_CORE) is refused before any callback can
+    // be invoked with the wrong arity.
+    static constexpr unsigned kExpectedAbiVersion = 2;
+    if (!a.grouse_abi_version) {
+        qWarning() << "CoreBridge: core library predates the ABI version symbol; refusing it";
+        return false;
+    }
+    if (const unsigned got = a.grouse_abi_version(); got != kExpectedAbiVersion) {
+        qWarning() << "CoreBridge: core ABI" << got << "does not match the app's"
+                   << kExpectedAbiVersion << "; refusing it";
+        return false;
+    }
     // The core must export every stable+unstable intent we depend on. If any
     // resolved NULL, the core is not the expected version — refuse to proceed
     // so failures are loud rather than segfaults on a NULL call later.

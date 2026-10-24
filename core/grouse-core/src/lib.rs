@@ -171,6 +171,16 @@ pub struct ToolCall {
     /// run shows the loop in order: think, call, think, call.
     #[serde(default)]
     pub thought: String,
+    /// This call's own position (see `Item::seq`). A grouped run is ONE bubble
+    /// but N client rows, so every call needs a distinct position; reusing the
+    /// group's anchor would sort them all to the same place.
+    #[serde(default)]
+    pub seq: u32,
+    /// A delegate call's subagent activity (see [`SubagentStep`]); empty for an
+    /// ordinary call. Rides the call, not the group, so a delegate inside a
+    /// collapsed run still shows its child's work.
+    #[serde(default)]
+    pub steps: Vec<SubagentStep>,
 }
 
 /// A rich transcript item — the unit the new clients render
@@ -206,7 +216,8 @@ pub struct Item {
     #[serde(default)]
     pub summary: String,
     /// `ItemKind::Tool` only: the child tool calls a SUBAGENT made under this
-    /// delegate row, oldest first (bounded). Empty for ordinary calls.
+    /// delegate row, oldest first (bounded). Empty for ordinary calls. A
+    /// grouped run carries them per `ToolCall` instead.
     #[serde(default)]
     pub steps: Vec<SubagentStep>,
     /// `ItemKind::User` only: how many attachments (images / resources) rode
@@ -236,14 +247,15 @@ pub struct SubagentStep {
     pub name: String,
     /// One line of its arguments (command, path, query), already trimmed.
     pub detail: String,
-    /// `in_progress` while running; `completed` / `failed` once known.
-    pub status: String,
 }
 
 /// One transcript mutation carried by `CoreListener::on_item`
 /// (docs/TRANSCRIPT_MODEL.md). The single stream: `Upsert` is authoritative and
 /// idempotent, the `Append*` ops are O(chunk) streaming shortcuts.
 #[derive(uniffi::Enum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+// `Item` is the payload by design (the stream's system of record); boxing it
+// would change the generated uniffi shape and add an allocation per update.
+#[allow(clippy::large_enum_variant)]
 pub enum TranscriptOp {
     /// The window is being replaced wholesale (session switch, cache paint, or
     /// a replay that could not merge). Clients clear their item store.
@@ -1779,10 +1791,14 @@ impl Core {
         // Local echo of the prompt. goose does NOT send a `user_message_chunk`
         // for a prompt WE sent: the prompt next crosses the wire in a later
         // `session/load` replay. The echo lands here, at the send, so exactly
-        // one row appears per prompt that reaches the wire; attachments stay
-        // the client's own local echo (`Item` has no image field).
-        if let Some(text) = crate::prompt_text(&prompt) {
-            store.echo_prompt(&text, crate::prompt_attachments(&prompt));
+        // one row appears per prompt that reaches the wire. The item carries
+        // only an attachment COUNT (there is no image field); the client
+        // matches its own pixels to the row by that count. An attachment-only
+        // prompt still gets a row, with an empty caption.
+        let text = crate::prompt_text(&prompt);
+        let attachments = crate::prompt_attachments(&prompt);
+        if text.is_some() || attachments > 0 {
+            store.echo_prompt(text.as_deref().unwrap_or(""), attachments);
         }
         // A new turn's runs are a fresh worklist for the summarizer.
         self.inner.state.lock().turn_runs.remove(&session_id);
@@ -2513,12 +2529,9 @@ impl Core {
 // Wire-format helpers
 // ---------------------------------------------------------------------------
 
-/// The prompt's text when it is PURE text — the only shape the item model can
-/// carry (see the local echo in `spawn_prompt`). `None` when it has an image or
-/// resource block: those stay the client's own local echo, because `Item` has no
-/// image field to represent them.
 /// The prompt's own text, even when attachments ride along: the row still needs
-/// its question. `None` when there is no text block at all.
+/// its question. `None` when there is no text block at all — the caller must
+/// still echo an attachment-only prompt, with an empty caption.
 fn prompt_text(prompt: &Prompt) -> Option<String> {
     let mut text = String::new();
     for block in &prompt.blocks {
@@ -2539,27 +2552,6 @@ fn prompt_attachments(prompt: &Prompt) -> u32 {
         .iter()
         .filter(|b| !matches!(b, PromptBlock::Text { .. }))
         .count() as u32
-}
-
-fn pure_text(prompt: &Prompt) -> Option<String> {
-    let mut text = String::new();
-    for block in &prompt.blocks {
-        match block {
-            PromptBlock::Text { text: t } => {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(t);
-            }
-            _ => return None,
-        }
-    }
-    let text = text.trim();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text.to_string())
-    }
 }
 
 /// The core is the dispatch host for the main connection: display ids are the
