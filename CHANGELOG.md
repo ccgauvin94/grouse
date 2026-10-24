@@ -4,23 +4,58 @@ All notable changes to Grouse are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.22] - 2026-10-23
+
+### Added
+
+- **A delegate row shows what its subagent is doing.** goose keeps subagent
+  sessions off ACP, but forwards each child tool request onto the parent's
+  delegate row; the row now carries those calls (name plus one line of
+  arguments, bounded to the last 200). The chip shows "N steps", the expanded
+  body lists them live, and a one-line strip above the composer follows a
+  running delegate that is scrolled out of view — tap it to jump there. Steps
+  ride the individual call, so a delegate inside a collapsed run keeps them,
+  and they survive a reload.
+
+### Changed
+
+- **The transcript is ordered by the core, not by arrival.** Every item carries
+  `seq`, its position in the store; the calls inside a tool run each carry
+  their own. Clients insert by that position instead of appending, so a prompt
+  echoed after the reply it prompted, a page of older rows, or a re-delivered
+  row lands where it belongs.
+- **The core owns the prompt row, attachments included.** One row per prompt,
+  with `Item.attachments` counting the non-text blocks; the client matches its
+  own pixels to that row. An image-only prompt gets a row with an empty caption.
+- **A hard refresh returns the history, not a screenful.** Android drains the
+  `loadOlder` pages after a FULL refresh (400 items at a time) instead of
+  stopping at the newest 60.
+- The C ABI exposes `grouse_abi_version()` and `on_run_ended` carries the
+  session id; the desktop refuses a core library whose ABI version does not
+  match the app's.
 
 ### Fixed
 
-- **A hard refresh no longer reorders the chat.** Every item now carries its
-  transcript position — including each call inside a collapsed tool run, and
-  chart/MCP-app rows — so a late delivery sorts into place instead of landing at
-  the top of the transcript.
-- **A delegate's subagent steps survive a collapsed run.** The steps were only
-  recorded when the delegate call was alone; a delegate that joined a run lost
-  them. They now ride the call inside the group, and the client renders them.
-- **Attachment prompts:** an image-only prompt gets a row (with an empty caption)
-  instead of vanishing; a later text-only prompt that shares its text no longer
-  inherits the earlier prompt's thumbnails; and an attachment prompt queued
-  through a replay no longer appears twice when it is finally sent.
-- The desktop refuses a core library whose C ABI version does not match the
-  app's, instead of calling a callback with the wrong arity.
+- **A replay could silently discard thousands of messages.** The store cap was
+  2,000 bubbles; a full replay of a measured 4,761/6,161-bubble session dropped
+  everything past it and wrote the truncated list back over the cache, so a
+  hard refresh could never recover it. The cap is now 20,000 — a safety net for
+  a pathological session, not a screenful estimate.
+- **Text rows piled above the tool rows.** Only one item branch stamped a
+  position, so ordered insertion put every user/agent/thought row at the top.
+- **Charts, MCP apps and tool runs jumped to the top** of a refreshed chat:
+  their rows carried no position, and a run's calls all shared one.
+- **A roam chat's reasoning was folded into its tool runs.** A peer's
+  successful open never cleared the "replaying" flag, so every thought chunk
+  was treated as replay framing.
+- **A main-connection replay silenced a roam peer.** The suppression window was
+  connection-wide; it now applies only to the session being replayed in.
+- **A turn end in one chat cleared another chat's busy state.** `on_run_ended`
+  now carries the session id, and each client ignores a completion for a chat
+  it is not prompting in.
+- **An attachment prompt could be shown twice** (a queued one re-added by the
+  client, then echoed by the core), and a text-only prompt that reused an
+  earlier prompt's text inherited its thumbnails.
 
 ## [0.2.14] - 2026-10-21
 
@@ -137,6 +172,7 @@ Initial release: Android (Kotlin/Compose) and Linux desktop (Qt6/KF6 Kirigami)
 clients for a self-hosted `goose serve`, over ACP (JSON-RPC 2.0) on WebSocket,
 sharing one Rust core (`libgrouse_core.so`) and the roam peer transport.
 
+[0.2.22]: https://github.com/ccgauvin94/grouse/compare/v0.2.14...v0.2.22
 [0.2.14]: https://github.com/ccgauvin94/grouse/compare/v0.2.10...v0.2.14
 [0.2.0]: https://github.com/ccgauvin94/grouse/compare/v0.1...v0.2.0
 [0.1]: https://github.com/ccgauvin94/grouse/releases/tag/v0.1
