@@ -193,9 +193,16 @@ impl Bubble {
     fn item(&self) -> Item {
         match self {
             Bubble::Text {
-                uid, role, text, seq, attachments, ..
+                id,
+                uid,
+                role,
+                text,
+                seq,
+                attachments,
+                ..
             } => Item {
                 id: uid.clone(),
+                message_id: id.clone(),
                 kind: match role.as_str() {
                     "user" => ItemKind::User,
                     "thought" => ItemKind::Thought,
@@ -273,6 +280,7 @@ fn empty_item() -> Item {
         steps: Vec::new(),
         seq: 0,
         attachments: 0,
+        message_id: String::new(),
     }
 }
 
@@ -341,9 +349,14 @@ struct State {
     /// trail), so it waits here until a call claims it.
     pending_thought: Option<String>,
     /// Prompts echoed locally that the server has not named yet, oldest first
-    /// (`text`, bubble index). goose sends no user chunk for our own prompt;
-    /// when a replay later names it, the row is adopted instead of duplicated.
-    pending_echo: VecDeque<(String, usize)>,
+    /// (`text`, row uid). goose sends no user chunk for our own prompt; when a
+    /// replay later names it, the row is adopted instead of duplicated.
+    ///
+    /// Keyed by UID, not index: a merge anchor truncates the bubbles and a cache
+    /// paint replaces them, and an index then either points at nothing — which
+    /// used to leave the entry at the head of the queue forever, blocking every
+    /// later prompt from matching too — or at an unrelated row.
+    pending_echo: VecDeque<(String, String)>,
 }
 
 /// Hard cap on retained bubbles (S-RC-4): a pathological session must not grow
@@ -401,7 +414,7 @@ impl State {
         self.pending_echo = self
             .pending_echo
             .drain(..)
-            .filter_map(|(text, idx)| idx.checked_sub(drop).map(|i| (text, i)))
+            .filter(|(_, uid)| self.bubbles.iter().any(|b| bubble_uid(b) == *uid))
             .collect();
         self.stream_idx = None;
     }
@@ -456,8 +469,7 @@ impl State {
         self.pending_echo = self
             .bubbles
             .iter()
-            .enumerate()
-            .filter_map(|(idx, bubble)| match bubble {
+            .filter_map(|bubble| match bubble {
                 Bubble::Text {
                     id,
                     uid,
@@ -465,7 +477,7 @@ impl State {
                     text,
                     ..
                 } if id.is_empty() && uid.starts_with('@') && role == "user" => {
-                    Some((text.clone(), idx))
+                    Some((text.clone(), uid.clone()))
                 }
                 _ => None,
             })
@@ -639,8 +651,12 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
                 ItemKind::Error => "error",
                 _ => "agent",
             };
-            // A core-assigned `@n` id has no server message_id to recover.
-            let id = if it.id.starts_with('@') {
+            // The server's own id travels separately now, so a cached row keeps
+            // it (and can anchor a merge). A v7 cache has none: fall back to the
+            // old inference, where a core-assigned `@n` has nothing to recover.
+            let id = if !it.message_id.is_empty() {
+                it.message_id.clone()
+            } else if it.id.starts_with('@') {
                 String::new()
             } else {
                 it.id.clone()
@@ -777,19 +793,35 @@ impl TranscriptStore {
             // in the order it received them.
             if let Some(mid) = message_id.filter(|m| !m.is_empty()) {
                 if st.stream_msg_id != mid && role == "user" {
-                    if let Some((echo_text, idx)) = st.pending_echo.front().cloned() {
-                        if echo_text == text && idx < st.bubbles.len() {
-                            st.pending_echo.pop_front();
-                            if let Bubble::Text { id, .. } = &mut st.bubbles[idx] {
-                                *id = mid.to_string();
+                    // A prompt the store ALREADY holds under this server id needs
+                    // no adoption: `anchor_merge` above truncated the cache at
+                    // that row, so the replayed one is the row. Identity first.
+                    if let Some((echo_text, echo_uid)) = st.pending_echo.front().cloned() {
+                        let at = st.bubbles.iter().position(|b| bubble_uid(b) == echo_uid);
+                        match at {
+                            Some(idx) if echo_text == text => {
+                                st.pending_echo.pop_front();
+                                if let Bubble::Text { id, .. } = &mut st.bubbles[idx] {
+                                    *id = mid.to_string();
+                                }
+                                st.stream_idx = Some(idx);
+                                st.stream_role = role.to_string();
+                                st.stream_msg_id = mid.to_string();
+                                let item = st.bubbles[idx].item();
+                                drop(st);
+                                self.emit_ops(vec![TranscriptOp::Upsert { item }]);
+                                return;
                             }
-                            st.stream_idx = Some(idx);
-                            st.stream_role = role.to_string();
-                            st.stream_msg_id = mid.to_string();
-                            let item = st.bubbles[idx].item();
-                            drop(st);
-                            self.emit_ops(vec![TranscriptOp::Upsert { item }]);
-                            return;
+                            Some(_) => {} // a different prompt: append this one
+                            None => {
+                                // The paint (or the merge anchor) replaced the row
+                                // this echo was waiting on, so it can never be
+                                // adopted. Left at the head it also blocked every
+                                // LATER prompt from matching, which is how one
+                                // missed adoption turned into a run of prompts
+                                // appended a second time at the bottom.
+                                st.pending_echo.pop_front();
+                            }
                         }
                     }
                 }
@@ -932,7 +964,8 @@ impl TranscriptStore {
                 attachments,
             });
             let idx = st.bubbles.len() - 1;
-            st.pending_echo.push_back((text.to_string(), idx));
+            let uid = bubble_uid(&st.bubbles[idx]);
+            st.pending_echo.push_back((text.to_string(), uid));
             st.trim();
             let idx = idx.min(st.bubbles.len().saturating_sub(1));
             ops.push(TranscriptOp::Upsert {
@@ -2685,6 +2718,7 @@ mod tests {
             steps: Vec::new(),
             seq: 0,
             attachments: 0,
+            message_id: String::new(),
         }
     }
 
@@ -2922,6 +2956,7 @@ mod tests {
                 steps: Vec::new(),
                 seq: 0,
                 attachments: 0,
+                message_id: String::new(),
             },
             Item {
                 id: "a1".into(),
@@ -2937,6 +2972,7 @@ mod tests {
                 steps: Vec::new(),
                 seq: 0,
                 attachments: 0,
+                message_id: String::new(),
             },
             Item {
                 id: "t1".into(),
@@ -2948,6 +2984,7 @@ mod tests {
                 app_key: String::new(),
                 seq: 0,
                 attachments: 0,
+                message_id: String::new(),
                 calls: vec![
                     ToolCall {
                         id: "t1".into(),
@@ -3021,6 +3058,69 @@ mod tests {
         assert!(ops.first().unwrap().starts_with("reset"), "{ops:?}");
         assert!(ops.iter().any(|o| o.starts_with("upsert:")), "{ops:?}");
         assert!(ops.last().unwrap().starts_with("window:"), "{ops:?}");
+    }
+
+    #[test]
+    fn a_replayed_prompt_is_recognised_by_its_server_id() {
+        // The duplicate-at-the-bottom report, in three steps.
+        //
+        // 1. A live turn echoes the prompt. goose never ids a prompt we sent, so
+        //    the row carries only the core's `@n` key.
+        // 2. A reopen's tail re-delivers it with the server's own id. The merged
+        //    cache has no id on that row, so the merge can only fall back to
+        //    TEXT — and its anchor misses, which is the gap that forces a full
+        //    reload (`end_merge` true): correct, expensive, and what kept the
+        //    prompts from duplicating only because the caller then repaints.
+        // 3. Now the row HAS the server id, so the next reopen anchors by
+        //    identity: the tail folds in place instead of reloading.
+        let (l, _evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.set_session("roam:Phaethon:s1");
+        store.echo_prompt("huh. I can use the remote", 0);
+        store.tool_call("Bash", "ha state", "t7", ToolCallKind::Plain);
+        store.append_chunk("agent", "It works because…", Some("m_a1"), false);
+        store.run_ended("end_turn");
+        let first_paint = store.rich_transcript();
+
+        // Reopen #1: no server id on the prompt, so the tail cannot anchor.
+        let one = TranscriptStore::new(listener().0);
+        one.set_session("roam:Phaethon:s1");
+        one.replace_rich_for_merge(first_paint);
+        one.append_chunk("user", "huh. I can use the remote", Some("m_u1"), false);
+        assert!(
+            one.end_merge(),
+            "a tail whose first row the paint cannot name is a gap: full reload"
+        );
+        // The adopted row now carries the id, and the cache keeps it.
+        let prompts = |s: &TranscriptStore| -> Vec<(String, String)> {
+            s.rich_transcript()
+                .into_iter()
+                .filter(|i| i.kind == ItemKind::User)
+                .map(|i| (i.text, i.message_id))
+                .collect()
+        };
+        assert_eq!(
+            prompts(&one),
+            vec![("huh. I can use the remote".to_string(), "m_u1".to_string())]
+        );
+
+        // Reopen #2: the cache carries the id, so the tail anchors ON the prompt
+        // — the suffix is replaced in place and nothing duplicates.
+        let second_paint = one.rich_transcript();
+        let two = TranscriptStore::new(listener().0);
+        two.set_session("roam:Phaethon:s1");
+        two.replace_rich_for_merge(second_paint);
+        two.append_chunk("user", "huh. I can use the remote", Some("m_u1"), false);
+        two.append_chunk("agent", "It works because…", Some("m_a1"), false);
+        assert!(
+            !two.end_merge(),
+            "the tail overlapped the paint, so the merge folds in place"
+        );
+        assert_eq!(
+            prompts(&two),
+            vec![("huh. I can use the remote".to_string(), "m_u1".to_string())],
+            "the prompt must appear exactly once"
+        );
     }
 
     #[test]

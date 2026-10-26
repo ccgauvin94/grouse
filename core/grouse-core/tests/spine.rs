@@ -131,6 +131,7 @@ fn item(id: &str, kind: grouse_core::ItemKind, text: &str) -> grouse_core::Item 
         steps: Vec::new(),
         seq: 0,
         attachments: 0,
+        message_id: String::new(),
     }
 }
 

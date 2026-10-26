@@ -17,6 +17,21 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed
 
+- **A roam chat's recent prompts appeared twice after reopening: inline and
+  again at the bottom.** Two causes, both in the reopen path. First, the peer
+  wrote its own copy of the `session/load` replay lifecycle and had lost two
+  steps of it — no held emissions and no merge close — so the replayed tail was
+  appended onto a cache paint whose stale suffix the merge anchor had already
+  truncated *in the store*. The client was never told about the truncation, so it
+  kept drawing the old rows inline while the replayed copies landed after them.
+  The lifecycle now lives in one place (`session::replay_session`) and both wires
+  call it, so the peer cannot drift again. Second, a cached user row had no
+  server identity at all: the item's `id` is the client's own `@n` key, so a
+  replayed prompt could only be matched by its TEXT — a merge could not anchor on
+  a prompt, and one failed match stayed at the head of the echo queue and blocked
+  every later prompt from matching too. `Item::message_id` now carries the
+  server's id (cache v8; a v7 file repaints once), and the echo queue is keyed by
+  row uid instead of a bubble index that a paint or an anchor invalidates.
 - **A roam turn could stay "thinking" until Stop was pressed.** A turn ended
   only on its `session/prompt` response, so when that response reached the app
   late or not at all the chat stayed busy and its composer queued every later

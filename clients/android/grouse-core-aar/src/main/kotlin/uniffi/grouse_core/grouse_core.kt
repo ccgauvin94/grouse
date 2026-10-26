@@ -4615,6 +4615,19 @@ data class Item (
     var `attachments`: kotlin.UInt
     , 
     /**
+     * Text rows only: the SERVER's own id for this message (`message_id`),
+     * empty when it sent none.
+     *
+     * `id` cannot carry it: that is the client's stable key (a core-assigned
+     * `@n` for a locally echoed prompt), and overloading the two meant a
+     * cached user row had no server identity at all. A replay could then only
+     * recognise the prompt it was re-delivering by comparing TEXT, and when
+     * that match failed the same question landed twice — the copy at the bottom
+     * of a reopened chat. Identity is what anchors a merge; never text.
+     */
+    var `messageId`: kotlin.String
+    , 
+    /**
      * Position in the transcript, ascending. Clients MUST insert by this rather
      * than by arrival: an item can be (re)delivered late — a prompt echo after
      * the reply it prompted, or a page of older rows drained back in — and
@@ -4649,6 +4662,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.read(buf),
             FfiConverterSequenceTypeSubagentStep.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterString.read(buf),
             FfiConverterUInt.read(buf),
         )
     }
@@ -4666,6 +4680,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.allocationSize(value.`summary`) +
             FfiConverterSequenceTypeSubagentStep.allocationSize(value.`steps`) +
             FfiConverterUInt.allocationSize(value.`attachments`) +
+            FfiConverterString.allocationSize(value.`messageId`) +
             FfiConverterUInt.allocationSize(value.`seq`)
     )
 
@@ -4682,6 +4697,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.write(value.`summary`, buf)
             FfiConverterSequenceTypeSubagentStep.write(value.`steps`, buf)
             FfiConverterUInt.write(value.`attachments`, buf)
+            FfiConverterString.write(value.`messageId`, buf)
             FfiConverterUInt.write(value.`seq`, buf)
     }
 }

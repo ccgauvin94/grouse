@@ -52,7 +52,14 @@ use crate::{Item, SessionSummary};
 /// the poisoned stamp, so a v3 file is not merely stale but possibly TRUNCATED
 /// and must not be trusted: reading it returns `None` and the next open replays
 /// and rewrites it.
-pub const TRANSCRIPT_CACHE_VERSION: u64 = 7;
+///
+/// Bumped to 8 when a text row started carrying the SERVER's message id
+/// alongside the client key (`Item::message_id`). A v7 row has only the key, so
+/// a cached prompt cannot be anchored by identity — a reopen falls back to the
+/// text-matching adoption that duplicated recent prompts at the bottom of the
+/// chat. Reading a v7 file returns `None` so the next open replays and rewrites
+/// it with ids.
+pub const TRANSCRIPT_CACHE_VERSION: u64 = 8;
 
 /// The tool catalog cache, mirroring the desktop's tool-cache JSON.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -326,6 +333,7 @@ mod tests {
             steps: Vec::new(),
             seq: 0,
             attachments: 0,
+            message_id: String::new(),
         }
     }
 
@@ -350,6 +358,7 @@ mod tests {
                 steps: Vec::new(),
                 seq: 0,
                 attachments: 0,
+                message_id: String::new(),
             },
             text("@1", ItemKind::Thought, "hmm"),
         ];
@@ -392,6 +401,7 @@ mod tests {
                 steps: Vec::new(),
                 seq: 0,
                 attachments: 0,
+                message_id: String::new(),
             },
             Item {
                 id: "a1".into(),
@@ -407,6 +417,7 @@ mod tests {
                 steps: Vec::new(),
                 seq: 0,
                 attachments: 0,
+                message_id: String::new(),
             },
             Item {
                 id: "t1".into(),
@@ -445,6 +456,7 @@ mod tests {
                 steps: Vec::new(),
                 seq: 0,
                 attachments: 0,
+                message_id: String::new(),
             },
         ];
         assert!(store.save_transcript("s1", &items, "2026-08-12T10:00:00Z"));

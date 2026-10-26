@@ -1010,6 +1010,7 @@ mod tests {
             output: String::new(),
             seq: 0,
             attachments: 0,
+            message_id: String::new(),
             status: String::new(),
             app_key: String::new(),
             calls: Vec::new(),
@@ -1120,6 +1121,74 @@ pub(crate) fn apply_paint(store: &crate::transcript::TranscriptStore, plan: &Pai
         Some(items) => store.replace_rich(items.clone(), true),
         None => store.clear(),
     }
+}
+
+/// The `session/load` replay lifecycle — one implementation for every wire.
+///
+/// The caller paints first (`apply_paint`) and owns everything transport-shaped
+/// around this: binding the session id, surfacing config, reporting an open
+/// failure. What lives HERE is only the part that must be identical everywhere:
+///
+///   1. begin the replay,
+///   2. hold emissions, so a tail lands as ONE repaint instead of the history
+///      streaming in from the top (grouse#18),
+///   3. request the load with the tail the plan owes,
+///   4. close the merge (`end_merge`): on a gap the cached prefix does not meet
+///      the replayed tail, so clear and load the whole transcript,
+///   5. release the hold and disarm the replay.
+///
+/// This used to be hand-written once per transport, and the copies drifted: the
+/// peer's lost steps 2 and 4, so a reopened roam chat appended its replayed tail
+/// on top of a silently truncated cache paint — recent prompts twice, the second
+/// copy at the bottom. Anything sequenced around a `session/load` belongs in
+/// this function, not in a transport.
+///
+/// `key` is the DISPLAY id; the endpoint strips its own prefix (`wire_id`).
+pub(crate) async fn replay_session(
+    endpoint: &dyn ChatEndpoint,
+    host: &dyn DispatchHost,
+    store: &crate::transcript::TranscriptStore,
+    key: &str,
+    cwd: &str,
+    suppress: bool,
+    merge: bool,
+) -> Result<Value, AcpError> {
+    // A fresh cache asks for the minimum tail; a stale one for a bounded tail
+    // it merges; otherwise the full replay.
+    let tail = if suppress {
+        Some(1)
+    } else if merge {
+        Some(REPLAY_TAIL)
+    } else {
+        None
+    };
+    host.begin_replay(key);
+    store.hold_emissions(true);
+    let reply = endpoint
+        .request("session/load", session_load_params(key, cwd, tail))
+        .await;
+    let reply = match reply {
+        Ok(reply) => reply,
+        Err(error) => {
+            // Discard the hold WITHOUT painting: the rows on screen are the
+            // provisional cache paint, which is the right thing to keep for a
+            // chat that failed to load.
+            store.hold_emissions(false);
+            host.end_replay(key);
+            return Err(error);
+        }
+    };
+    host.end_replay(key);
+    // Merge gap: the tail started past the cached prefix, so extending the
+    // cache would leave a hole. Clear and load the whole transcript now.
+    if store.end_merge() {
+        store.clear();
+        let full = session_load_params(key, cwd, None);
+        let _ = endpoint.request("session/load", full).await;
+    }
+    // The replay is in: paint the newest window (or the empty transcript) once.
+    store.release_held_replay();
+    Ok(reply)
 }
 
 // ---------------------------------------------------------------------------

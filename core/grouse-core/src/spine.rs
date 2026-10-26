@@ -701,42 +701,25 @@ impl Conn {
                 // drop them. start_new_session overwrites this if load fails.
                 *self.inner.session_id.lock() = Some(session_id.clone());
                 let store = self.store_for(&session_id);
-                // Ingest the replay SILENTLY and paint the result once (grouse#18):
-                // the rows still land in the store, the cache and the window, but
-                // the client does not watch the history arrive from the top.
-                store.hold_emissions(true);
-                // A fresh cache asks for the minimum tail; a stale one for a
-                // bounded tail it merges; otherwise the full replay.
-                let tail = if self.inner.suppress_replay.load(Ordering::SeqCst) {
-                    Some(1)
-                } else if self.inner.merge_replay.load(Ordering::SeqCst) {
-                    Some(crate::session::REPLAY_TAIL)
-                } else {
-                    None
-                };
-                let params = crate::session::session_load_params(&session_id, &cwd, tail);
-                match cx
-                    .send_request(UntypedMessage::new("session/load", params)?)
-                    .block_task()
-                    .await
+                let suppress_replay = self.inner.suppress_replay.load(Ordering::SeqCst);
+                let merge_replay = self.inner.merge_replay.load(Ordering::SeqCst);
+                // The replay itself (silent ingest → merge → one repaint) is the
+                // shared lifecycle, so this wire cannot drift from the peer's.
+                let endpoint: &dyn crate::session::ChatEndpoint = self;
+                match crate::session::replay_session(
+                    endpoint,
+                    self.inner.host.as_ref(),
+                    &store,
+                    &replay_key,
+                    &cwd,
+                    suppress_replay,
+                    merge_replay,
+                )
+                .await
                 {
                     Ok(reply) => {
-                        // Merge gap: the tail started past the cached prefix, so
-                        // extending the cache would leave a hole. Clear and load
-                        // the whole transcript now.
-                        if store.end_merge() {
-                            store.clear();
-                            let full = crate::session::session_load_params(&session_id, &cwd, None);
-                            let _ = cx
-                                .send_request(UntypedMessage::new("session/load", full)?)
-                                .block_task()
-                                .await;
-                        }
                         self.bind_session(&session_id);
                         self.emit_config(&reply);
-                        // The replay is in: paint the newest window (or the empty
-                        // transcript) in ONE shot.
-                        store.release_held_replay();
                         if persist_stamp {
                             // The merge fetched the overlap and tail; stamp the
                             // result with the server's current updatedAt.
@@ -753,10 +736,6 @@ impl Conn {
                         // replay of a later successful load) and report; the
                         // client decides to retry or to start a new chat.
                         *self.inner.session_id.lock() = None;
-                        // Discard the hold WITHOUT painting: the rows on screen
-                        // are the provisional cache paint, which is the right
-                        // thing to keep for a chat that failed to load.
-                        store.hold_emissions(false);
                         self.report_open_failed(
                             session_id,
                             format!("session/load failed: {error}"),
@@ -869,56 +848,38 @@ impl Conn {
         self.inner
             .merge_replay
             .store(merge_replay, Ordering::SeqCst);
-        // Ingest the replay SILENTLY and paint it once at the end (grouse#18).
         let store = self.store_for(&session_id);
-        store.hold_emissions(true);
         let replay_key = crate::session::display_id(self.inner.label.as_deref(), &session_id);
-        self.inner.host.begin_replay(&replay_key);
-        let tail = if suppress_replay {
-            Some(1)
-        } else if merge_replay {
-            Some(crate::session::REPLAY_TAIL)
-        } else {
-            None
-        };
         // A merge fetched the tail, so its result may be stamped with a newer
         // probe; a full replay (no cache) may still lag it, and a fresh cache
         // is already current.
         let persist_stamp = merge_replay && !suppress_replay;
-        let params = crate::session::session_load_params(&session_id, &cwd, tail);
-        let reply = self.rpc_async("session/load", params).await;
+        // One shared replay lifecycle (see `session::replay_session`): hold the
+        // rows, load, close any merge, repaint once — the peer path uses the
+        // same function, which is what keeps the two from drifting apart.
+        let endpoint: &dyn crate::session::ChatEndpoint = self;
+        let reply = crate::session::replay_session(
+            endpoint,
+            self.inner.host.as_ref(),
+            &store,
+            &replay_key,
+            &cwd,
+            suppress_replay,
+            merge_replay,
+        )
+        .await;
         // Disarm the replay gates for the NEXT load: a fresh-cache open arms
         // `suppress_replay`, and a later full rebuild (resync) that did not reset
         // it would have every replayed row dropped — an empty transcript.
-        self.inner.suppress_replay.store(false, Ordering::SeqCst);
-        self.inner.merge_replay.store(false, Ordering::SeqCst);
-        let reply: Value = match reply {
-            Ok(reply) => reply,
-            Err(error) => {
-                // The load never happened, so the connection must NOT keep
-                // claiming this session (grouse#19): nothing is bound, and the
-                // gate names nothing, until a retry or a new chat binds one.
-                *self.inner.session_id.lock() = None;
-                // Drop the hold without painting — the rows on screen are the
-                // provisional cache paint, which is what a failed load should
-                // leave behind.
-                store.hold_emissions(false);
-                self.inner.host.end_replay(&replay_key);
-                return Err(error);
-            }
-        };
-        self.inner.host.end_replay(&replay_key);
-        // Merge gap: the tail started past the cached prefix — clear and reload
-        // the whole transcript (see the handshake Resume branch).
-        if store.end_merge() {
-            store.clear();
-            let full = crate::session::session_load_params(&session_id, &cwd, None);
-            let _ = self.rpc_async("session/load", full).await;
-        }
+        endpoint.reset_replay_gates();
+        let reply = reply.inspect_err(|_| {
+            // The load never happened, so the connection must NOT keep claiming
+            // this session (grouse#19): nothing is bound, and the gate names
+            // nothing, until a retry or a new chat binds one.
+            *self.inner.session_id.lock() = None;
+        })?;
         self.bind_session(&session_id);
         self.emit_config(&reply);
-        // The replay is in: paint the newest window in ONE shot (grouse#18).
-        store.release_held_replay();
         if persist_stamp {
             self.inner.host.stamp_probe(&replay_key, true);
         }

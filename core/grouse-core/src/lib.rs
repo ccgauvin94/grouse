@@ -227,6 +227,17 @@ pub struct Item {
     /// second row for the same prompt, with a position from a different counter.
     #[serde(default)]
     pub attachments: u32,
+    /// Text rows only: the SERVER's own id for this message (`message_id`),
+    /// empty when it sent none.
+    ///
+    /// `id` cannot carry it: that is the client's stable key (a core-assigned
+    /// `@n` for a locally echoed prompt), and overloading the two meant a
+    /// cached user row had no server identity at all. A replay could then only
+    /// recognise the prompt it was re-delivering by comparing TEXT, and when
+    /// that match failed the same question landed twice — the copy at the bottom
+    /// of a reopened chat. Identity is what anchors a merge; never text.
+    #[serde(default)]
+    pub message_id: String,
     /// Position in the transcript, ascending. Clients MUST insert by this rather
     /// than by arrival: an item can be (re)delivered late — a prompt echo after
     /// the reply it prompted, or a page of older rows drained back in — and

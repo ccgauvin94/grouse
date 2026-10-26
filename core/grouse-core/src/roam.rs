@@ -895,7 +895,7 @@ impl RoamPeer {
                 .get(&raw)
                 .cloned()
                 .unwrap_or_default();
-            if let Err(error) = self.load_session(&cx, raw, cwd, false).await {
+            if let Err(error) = self.load_session(raw, cwd, false).await {
                 self.fail(format!("roam resume: {error}"));
             }
         }
@@ -913,7 +913,7 @@ impl RoamPeer {
                     force,
                 } => {
                     let raw = self.strip_prefix(&session_id);
-                    if let Err(error) = self.load_session(&cx, raw, cwd, force).await {
+                    if let Err(error) = self.load_session(raw, cwd, force).await {
                         self.fail(format!("roam session/open: {error}"));
                     }
                 }
@@ -962,7 +962,6 @@ impl RoamPeer {
     /// wire-level load failure is handled (or surfaced) internally.
     async fn load_session(
         &self,
-        cx: &agent_client_protocol::ConnectionTo<Agent>,
         raw: String,
         cwd: String,
         force: bool,
@@ -992,28 +991,24 @@ impl RoamPeer {
         }
         let store = self.hub.display(&key);
         crate::session::apply_paint(&store, &plan);
-        self.host.begin_replay(&key);
-        let tail = if plan.suppress {
-            Some(1)
-        } else if plan.merge {
-            Some(crate::session::REPLAY_TAIL)
-        } else {
-            None
-        };
-        let params = crate::session::session_load_params(&raw, &cwd, tail);
-        let load = cx
-            .send_request(UntypedMessage::new("session/load", params)?)
-            .block_task()
-            .await;
-        match load {
+        // The replay lifecycle is the SHARED one (`session::replay_session`):
+        // silent ingest, merge against the paint, one repaint. This file used to
+        // hand-write it and lost two steps — no held emissions (the tail streamed
+        // onto the client) and no `end_merge` (the paint's stale suffix was
+        // truncated silently and merge mode never cleared), which is what made a
+        // reopened chat show its recent prompts twice, the copy at the bottom.
+        let reply = crate::session::replay_session(
+            self,
+            self.host.as_ref(),
+            &store,
+            &key,
+            &cwd,
+            plan.suppress,
+            plan.merge,
+        )
+        .await;
+        match reply {
             Ok(reply) => {
-                // End the replay HERE too. Only the error arm used to disarm it,
-                // so after any successful peer open `host.replaying(key)` stayed
-                // true for the life of the session — and dispatch reads that flag
-                // to decide whether a thought chunk is "replay framing" to fold
-                // into the run or a row to render. Every reasoning block in that
-                // chat was silently folded in as a result.
-                self.host.end_replay(&key);
                 self.emit_status("ready");
                 self.emit_config(&reply, &key);
             }
@@ -1023,7 +1018,6 @@ impl RoamPeer {
                 // session, and a blank replacement is the defect (grouse#19).
                 // Keep the painted cache and report against the prefixed id.
                 self.inner.lock().open_session_id = None;
-                self.host.end_replay(&key);
                 self.listener.on_session_open_failed(
                     format!("roam:{}:{}", self.label, raw),
                     format!("session/load failed: {error}"),
