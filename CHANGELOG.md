@@ -28,6 +28,21 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Added
 
+- **Steps are labelled while the turn runs, not only when it ends.** A step's
+  chip used to keep the provisional label (the thinking's first line) until the
+  whole turn finished, which is most of what a reader actually sees. Now the
+  moment a call opens a NEW step, the step before it is closed and its label is
+  requested — debounced, so a fast loop coalesces into one request per quiet gap,
+  and serialised against the end-of-turn pass so two prompts never share the
+  hidden session. Measured on a real turn: `Creating temp directory and timestamp
+  file` landed before the turn ended, and the remaining steps' labels followed
+  right after it. A step with no absorbed thinking is labelled from its call
+  titles instead of being skipped, since goose narrates between steps and the
+  call after a narration opens a step with nothing thought directly above it.
+- **The pulse is where the waiting is.** The thinking row and the "Grouse is
+  thinking…" line tick `…` as well, so a turn in progress always shows movement —
+  a chip's own pulse only lasts as long as its tool call, which for a shell
+  command is under a second.
 - **A running step's chip pulses.** While a step is actually working its label
   ticks `…` (and the collapsed run shows a spinner instead of the wrench), so a
   live chip reads as "Looking up the game time…" and settles the instant it

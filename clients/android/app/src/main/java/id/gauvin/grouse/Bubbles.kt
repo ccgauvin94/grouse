@@ -124,7 +124,7 @@ fun MessageBubble(
 ) {
     when (m.role) {
         "user" -> UserBubble(m)
-        "thought" -> ThoughtBubble(m.text)
+        "thought" -> ThoughtBubble(m.text, live = live)
         "tool" -> ToolChip(m, live = live)
         "error" -> ErrorBubble(m.text)
         "chart" -> ChartView(m.text)
@@ -550,7 +550,7 @@ private fun AssistantBubble(text: String, streaming: Boolean = false, usage: Acp
 }
 
 @Composable
-private fun ThoughtBubble(text: String) {
+private fun ThoughtBubble(text: String, live: Boolean = false) {
     var expanded by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
         Row(
@@ -565,7 +565,11 @@ private fun ThoughtBubble(text: String) {
             Icon(Icons.Filled.Psychology, contentDescription = null, modifier = Modifier.size(16.dp),
                 tint = MaterialTheme.colorScheme.outline)
             Spacer(Modifier.width(6.dp))
-            Text(stringResource(R.string.thinking), style = MaterialTheme.typography.labelMedium,
+            // The step in flight is the model THINKING, so that is where the pulse
+            // belongs once a chip is no longer running: a chip only exists after
+            // its call lands, and a fast tool finishes before a pulse would show.
+            Text(stringResource(R.string.thinking) + liveDots(live),
+                style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.outline)
         }
         AnimatedVisibility(expanded) {
@@ -816,7 +820,8 @@ internal fun TypingIndicator() {
     // Text-only: the spinner read as a stuck progress bar and the user wanted
     // the thinking message alone while a turn runs. The loading indicator is
     // reserved for opening a session and waiting for its replay.
-    Text(stringResource(R.string.grouse_is_thinking), style = MaterialTheme.typography.labelMedium,
+    Text(stringResource(R.string.grouse_is_thinking) + liveDots(true),
+        style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.outline,
         modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
 }

@@ -1608,6 +1608,7 @@ mod tests {
         fn cache_session(&self, _key: &str) {}
         fn session_stamp(&self, _key: &str, _updated_at: &str) {}
         fn tool_run(&self, _key: &str, _run_id: &str) {}
+        fn step_closed(&self, _key: &str) {}
         fn stamp_probe(&self, _key: &str, _persist: bool) {}
         fn is_summarizer(&self, _key: &str) -> bool {
             false

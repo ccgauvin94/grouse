@@ -515,6 +515,25 @@ enum PendingIntent {
     SetConfig(String, String),
 }
 
+/// The steps of a running turn that are CLOSED and not yet model-labelled.
+///
+/// The last run is the step in flight, so it is excluded; everything before it
+/// has finished and can be labelled while the turn continues. `labeled` holds the
+/// steps already rewritten this turn.
+pub(crate) fn closed_unlabeled_steps(
+    turn_runs: &[String],
+    labeled: &HashSet<String>,
+) -> Vec<String> {
+    let Some((_, closed)) = turn_runs.split_last() else {
+        return Vec::new();
+    };
+    closed
+        .iter()
+        .filter(|id| !labeled.contains(*id))
+        .cloned()
+        .collect()
+}
+
 /// How many of a turn's steps the end-of-turn summarizer labels. A step is one
 /// thinking burst plus the calls it ran, so a long loop is many steps; past this
 /// the rest keep their provisional label instead of queueing a huge request.
@@ -584,6 +603,18 @@ struct CoreState {
     /// Each session's plain tool runs for the turn in flight, oldest first.
     /// The end-of-turn summarizer drains this; shared by every transport.
     turn_runs: HashMap<String, Vec<String>>,
+    /// Runs of the current turn that already carry a MODEL-written label. A
+    /// closed step is labelled while the turn runs, so without this every later
+    /// pass would re-ask for the steps before it. Cleared when the turn ends.
+    labeled_runs: HashSet<String>,
+    /// Generation of the live labelling pass (see `schedule_step_labels`):
+    /// a newer closed step supersedes the pending pass, so a burst of steps
+    /// coalesces into one request instead of one per step.
+    label_gen: u64,
+    /// Endpoints whose hidden summarizer session is mid-request. Two passes
+    /// asking at once would interleave their prompts on ONE hidden session and
+    /// apply each other's labels.
+    summarizer_busy: HashSet<String>,
     /// Hidden run-label summarizer sessions currently in flight (display ids).
     summarizer_ids: HashSet<String>,
     /// Text streamed by those summarizer sessions.
@@ -1891,10 +1922,14 @@ impl Core {
         owner: Arc<dyn crate::session::ChatEndpoint>,
         key: String,
     ) {
-        let (enabled, run_ids) = {
+        let (enabled, run_ids, already) = {
             let mut state = self.inner.state.lock();
             let ids = state.turn_runs.remove(&key).unwrap_or_default();
-            (state.run_summaries, ids)
+            // Steps the live passes already labelled while the turn ran are done;
+            // the rest of the turn (including the step that was still open) is
+            // this pass's work. The bookkeeping is per turn.
+            let already = std::mem::take(&mut state.labeled_runs);
+            (state.run_summaries, ids, already)
         };
         if !enabled {
             return;
@@ -1902,6 +1937,7 @@ impl Core {
         let store = self.store_for(&key);
         let runs: Vec<(String, String, Vec<String>)> = run_ids
             .into_iter()
+            .filter(|id| !already.contains(id))
             // One step per thinking burst means a long loop is many labels; a
             // turn with an unusually long loop is capped so the request stays a
             // short one. Steps past the cap keep their provisional label (the
@@ -1922,9 +1958,69 @@ impl Core {
         });
     }
 
+    /// A step just closed: label it NOW, while the turn is still running.
+    ///
+    /// Debounced by a generation counter, so a burst of steps (a fast tool loop)
+    /// becomes one request per quiet gap instead of one per step, and only the
+    /// steps that are actually finished are sent — the one running keeps its
+    /// provisional label until the turn ends.
+    fn schedule_step_labels(&self, key: &str) {
+        let gen = {
+            let mut state = self.inner.state.lock();
+            if !state.run_summaries {
+                return;
+            }
+            state.label_gen += 1;
+            state.label_gen
+        };
+        let core = self.clone();
+        let key = key.to_string();
+        crate::roam::runtime().spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            core.label_closed_steps(gen, key).await;
+        });
+    }
+
+    async fn label_closed_steps(&self, gen: u64, key: String) {
+        let (enabled, ids, labeled) = {
+            let state = self.inner.state.lock();
+            if state.label_gen != gen {
+                return; // a newer step superseded this pass
+            }
+            (
+                state.run_summaries,
+                state.turn_runs.get(&key).cloned().unwrap_or_default(),
+                state.labeled_runs.clone(),
+            )
+        };
+        if !enabled {
+            return;
+        }
+        let Some(owner) = self.owner_for(&key) else {
+            return;
+        };
+        let store = self.store_for(&key);
+        let runs: Vec<(String, String, Vec<String>)> = closed_unlabeled_steps(&ids, &labeled)
+            .into_iter()
+            .filter_map(|id| {
+                store
+                    .run_framing(&id)
+                    .map(|(thought, tools)| (id, thought, tools))
+            })
+            .collect();
+        if runs.is_empty() {
+            return;
+        }
+        self.rewrite_run_labels(owner, key, runs).await;
+    }
+
     /// One hidden session on the CHAT'S OWN connection (main or peer). Its
     /// `session/update` chunks are intercepted centrally by `session::dispatch`
     /// via the summarizer ids, so they never touch a client store.
+    ///
+    /// Serialised per endpoint: a live pass and the end-of-turn pass would
+    /// otherwise prompt the SAME hidden session at once and apply each other's
+    /// labels (the reply is matched to the request by position).
     async fn rewrite_run_labels(
         &self,
         owner: Arc<dyn crate::session::ChatEndpoint>,
@@ -1932,6 +2028,21 @@ impl Core {
         runs: Vec<(String, String, Vec<String>)>,
     ) {
         let slot = owner.label().unwrap_or_default();
+        if !self.inner.state.lock().summarizer_busy.insert(slot.clone()) {
+            return; // the pass in flight will cover these at the turn's end
+        }
+        self.rewrite_run_labels_serial(owner, key, runs, slot.clone())
+            .await;
+        self.inner.state.lock().summarizer_busy.remove(&slot);
+    }
+
+    async fn rewrite_run_labels_serial(
+        &self,
+        owner: Arc<dyn crate::session::ChatEndpoint>,
+        key: String,
+        runs: Vec<(String, String, Vec<String>)>,
+        slot: String,
+    ) {
         let existing = self
             .inner
             .state
@@ -2022,9 +2133,19 @@ impl Core {
             return;
         }
         let store = self.store_for(&key);
+        let mut applied = Vec::new();
         for (n, label) in crate::summarize::parse_labels(&text) {
             if let Some((id, _, _)) = runs.get(n - 1) {
                 store.set_run_summary(id, &label);
+                applied.push(id.clone());
+            }
+        }
+        // Remember what carries a model label so a later pass of the same turn
+        // does not ask for it again.
+        {
+            let mut state = self.inner.state.lock();
+            for id in applied {
+                state.labeled_runs.insert(id);
             }
         }
     }
@@ -2795,6 +2916,9 @@ impl crate::session::DispatchHost for Core {
             runs.push(run_id.to_string());
         }
     }
+    fn step_closed(&self, key: &str) {
+        self.schedule_step_labels(key);
+    }
     fn stamp_probe(&self, key: &str, persist: bool) {
         self.refresh_stamp(key, persist);
     }
@@ -2999,6 +3123,25 @@ mod tests {
             core.turn_in_flight(other),
             "a drop on one session must not release another chat's turn"
         );
+    }
+
+    #[test]
+    fn only_closed_unlabelled_steps_are_summarised_mid_turn() {
+        // The last run is the step still in flight: labelling it mid-turn would
+        // summarise half a step. Steps already rewritten are skipped, so a pass
+        // never re-asks for work it has done.
+        let ids: Vec<String> = ["t1", "t2", "t3"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            closed_unlabeled_steps(&ids, &HashSet::new()),
+            vec!["t1".to_string(), "t2".to_string()]
+        );
+        let labeled: HashSet<String> = ["t1".to_string()].into_iter().collect();
+        assert_eq!(
+            closed_unlabeled_steps(&ids, &labeled),
+            vec!["t2".to_string()]
+        );
+        assert!(closed_unlabeled_steps(&["only".to_string()], &HashSet::new()).is_empty());
+        assert!(closed_unlabeled_steps(&[], &HashSet::new()).is_empty());
     }
 
     #[test]

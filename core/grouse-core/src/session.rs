@@ -1266,6 +1266,11 @@ pub(crate) trait DispatchHost: Send + Sync {
     /// A plain tool call landed in `run_id` — the end-of-turn summarizer's
     /// worklist for `key`, oldest first.
     fn tool_run(&self, key: &str, run_id: &str);
+    /// A call opened a NEW step, so every earlier step of this turn is now
+    /// closed and can be labelled while the turn is still running. Without this
+    /// a chip shows the provisional label (the thinking's first line) until the
+    /// whole turn ends, which is most of what a reader sees.
+    fn step_closed(&self, key: &str);
     /// Re-read `key`'s stamp from its server. `persist` writes the store with
     /// it — only after a FULL replay (the content is current) or our own turn.
     fn stamp_probe(&self, key: &str, persist: bool);
@@ -1395,6 +1400,11 @@ impl DispatchHost for PrefixHost {
             host.tool_run(key, run_id);
         }
     }
+    fn step_closed(&self, key: &str) {
+        if let Some(host) = self.host() {
+            host.step_closed(key);
+        }
+    }
     fn stamp_probe(&self, key: &str, persist: bool) {
         if let Some(host) = self.host() {
             host.stamp_probe(key, persist);
@@ -1499,7 +1509,14 @@ pub(crate) fn dispatch(
                 store.tool_call(&tool.title, &detail, &id, kind);
                 // The end-of-turn summarizer labels the turn's plain runs.
                 if let Some(run_id) = store.run_id_for(&id) {
+                    // The call anchors its own run ⇒ it OPENED a step, so the one
+                    // above it is finished and can be labelled now rather than at
+                    // the end of the turn.
+                    let opened_step = run_id == id;
                     host.tool_run(&key, &run_id);
+                    if opened_step {
+                        host.step_closed(&key);
+                    }
                 }
                 content = true;
             }

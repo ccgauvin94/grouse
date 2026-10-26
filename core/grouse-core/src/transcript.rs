@@ -1496,9 +1496,14 @@ impl TranscriptStore {
         }
     }
 
-    /// A run's framing for the summarizer: the thinking it absorbed and its call
-    /// titles. `None` when the run has no thinking — there is nothing to condense,
-    /// so the inference would be spent for nothing.
+    /// A step's framing for the summarizer: the thinking it absorbed and its call
+    /// titles. `None` only when the id is not a run of calls at all.
+    ///
+    /// A step can carry NO absorbed thinking and still be worth labelling: goose
+    /// often narrates between steps ("I'll do these sequentially…"), and a
+    /// visible message is a step boundary, so the call that follows it opens a
+    /// step with nothing thought directly above it — the titles alone are enough
+    /// for "Checking the date" instead of leaving the chip as a bare `shell · …`.
     pub fn run_framing(&self, id: &str) -> Option<(String, Vec<String>)> {
         let st = self.state.lock();
         let b = st.bubbles.get(*st.tool_by_id.get(id)?)?;
@@ -1507,11 +1512,13 @@ impl TranscriptStore {
             Bubble::ToolGroup(calls, _) => calls,
             _ => return None,
         };
-        let thought = run_thought(calls);
-        if thought.trim().is_empty() {
+        if calls.is_empty() {
             return None;
         }
-        Some((thought, calls.iter().map(|c| c.title.clone()).collect()))
+        Some((
+            run_thought(calls),
+            calls.iter().map(|c| c.title.clone()).collect(),
+        ))
     }
 
     /// Replace a run's label with the model's rewrite, emitting the `Upsert` the
@@ -3525,12 +3532,20 @@ mod tests {
     }
 
     #[test]
-    fn a_run_without_thinking_has_no_framing() {
-        // Nothing to condense: the inference would be spent for nothing.
+    fn a_step_without_thinking_still_has_framing() {
+        // goose narrates between steps, and a visible message is a boundary, so
+        // the call after it opens a step with nothing thought above it. Its call
+        // titles are still enough to name the intention — a bare `shell · …` chip
+        // is not.
         let (l, _i_evts) = listener();
         let store = TranscriptStore::new(l);
         store.tool_call("Bash", "ls", "t1", ToolCallKind::Plain);
-        assert!(store.run_framing("t1").is_none());
+        assert_eq!(
+            store.run_framing("t1"),
+            Some((String::new(), vec!["Bash".to_string()]))
+        );
+        // An id that is not a run of calls has no framing at all.
+        assert!(store.run_framing("nope").is_none());
     }
 
     #[test]
