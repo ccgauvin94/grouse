@@ -515,6 +515,11 @@ enum PendingIntent {
     SetConfig(String, String),
 }
 
+/// How many of a turn's steps the end-of-turn summarizer labels. A step is one
+/// thinking burst plus the calls it ran, so a long loop is many steps; past this
+/// the rest keep their provisional label instead of queueing a huge request.
+const MAX_SUMMARIZED_STEPS: usize = 40;
+
 /// The core's authoritative state, guarded by `CoreInner::state`.
 #[derive(Default)]
 struct CoreState {
@@ -1897,6 +1902,11 @@ impl Core {
         let store = self.store_for(&key);
         let runs: Vec<(String, String, Vec<String>)> = run_ids
             .into_iter()
+            // One step per thinking burst means a long loop is many labels; a
+            // turn with an unusually long loop is capped so the request stays a
+            // short one. Steps past the cap keep their provisional label (the
+            // thinking's own first line) rather than waiting for a rewrite.
+            .take(MAX_SUMMARIZED_STEPS)
             .filter_map(|id| {
                 store
                     .run_framing(&id)

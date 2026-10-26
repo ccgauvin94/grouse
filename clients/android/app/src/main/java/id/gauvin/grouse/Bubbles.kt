@@ -609,10 +609,11 @@ private fun splitToolTitle(title: String): Pair<String, String> {
     return if (idx >= 0) title.take(idx) to title.substring(idx + 3) else title to ""
 }
 
-/** Collapsed: one chip, labelled with the core's framing of the run — the model's own thinking
- *  that preceded it — or "N× <tool>" / "N tool calls" when there is nothing to draw on. Tap to
- *  expand into the LOOP: each call preceded by the thinking the core absorbed for it, oldest
- *  first, so a long run reads as think → act → think → act rather than as a wall of chips. */
+/** Collapsed: one chip per STEP — a burst of thinking and the calls it ran — labelled with what
+ *  the step set out to do (the model writes that line at the end of the turn; until then the
+ *  core's provisional label stands), or "N× <tool>" / "N tool calls" when there is nothing to
+ *  draw on. Tap to expand into the step: each call preceded by the thinking the core absorbed
+ *  for it, oldest first. */
 @Composable
 internal fun ToolChipGroup(items: List<ChatMessage>) {
     var expanded by remember { mutableStateOf(false) }
@@ -668,7 +669,8 @@ private fun ToolChip(m: ChatMessage, showThought: Boolean = true) {
     var expanded by remember { mutableStateOf(false) }
     val (name, inlineDetail) = splitToolTitle(title)
     // A lone call framed by the model's thinking reads as that framing rather
-    // than as a bare tool name (issue #13).
+    // than as a bare tool name — now the step's intention label, so a one-call
+    // step still reads as what it was for.
     val label = m.summary.ifBlank { name.replace('_', ' ') }
     val thought = if (showThought) m.stepThought else ""
     val hasBody = detail.isNotBlank() || m.output.isNotBlank() || thought.isNotBlank() ||

@@ -1053,17 +1053,33 @@ impl TranscriptStore {
                 Bubble::ToolGroup(..) => LastRow::Group,
                 _ => LastRow::Other,
             });
-            // A thought does NOT open a run: the run is the whole LOOP, so a call
-            // joins the run above it even though the model thought in between
-            // (issue #13). The run's label comes from the first thinking it saw,
-            // and the model rewrite replaces it at the end of the turn.
+            // A thinking burst OPENS a step. A run is one think → act step, not
+            // the whole loop: the loop is what the chat needs to read as a
+            // sequence of intentions ("looking up the game time", "checking the
+            // calendar"), so each burst of thinking starts its own run and the
+            // calls that share a step — parallel calls, nothing thought between
+            // them — still collapse into it. Issue #13 collapsed the loop into
+            // ONE run because a bare count of calls said nothing; with a label
+            // per step the loop reads as its steps instead.
+            let opens_step = !row.thought.trim().is_empty();
+            // A thought does not open a run when it has already been absorbed by
+            // a call in this same step: `take_thoughts` emptied the pending one.
             let label = summarize(&row.thought);
+            let continue_run = !opens_step
+                && matches!(last, Some(LastRow::Tool) | Some(LastRow::Group));
 
-            let idx = if plain {
+            let idx = if !plain {
+                let bubble = match &kind {
+                    ToolCallKind::Chart { .. } => Bubble::Chart(row),
+                    _ => Bubble::McpApp(row),
+                };
+                st.bubbles.push(bubble);
+                st.bubbles.len() - 1
+            } else if continue_run {
                 match last {
                     Some(LastRow::Tool) => {
-                        // Convert the lone first call into a run, keeping the
-                        // label of the call that opened it.
+                        // Convert the lone first call of this step into a run,
+                        // keeping the label of the call that opened it.
                         let idx = st.bubbles.len() - 1;
                         let first = match &st.bubbles[idx] {
                             Bubble::Tool(r, existing) => {
@@ -1089,17 +1105,12 @@ impl TranscriptStore {
                         }
                         idx
                     }
-                    _ => {
-                        st.bubbles.push(Bubble::Tool(row, label));
-                        st.bubbles.len() - 1
-                    }
+                    _ => unreachable!("continue_run implies a tool row above"),
                 }
             } else {
-                let bubble = match &kind {
-                    ToolCallKind::Chart { .. } => Bubble::Chart(row),
-                    _ => Bubble::McpApp(row),
-                };
-                st.bubbles.push(bubble);
+                // A new step: its own run, labelled from the thinking that
+                // opened it (and rewritten by the model at the end of the turn).
+                st.bubbles.push(Bubble::Tool(row, label));
                 st.bubbles.len() - 1
             };
             st.tool_by_id.insert(row_id, idx);
@@ -3338,7 +3349,7 @@ mod tests {
     }
 
     #[test]
-    fn the_whole_loop_is_one_run() {
+    fn each_thinking_burst_is_its_own_step() {
         let (l, _i_evts) = listener();
         let store = TranscriptStore::new(l);
         store.append_chunk("thought", "First, look it up.", None, true);
@@ -3346,21 +3357,55 @@ mod tests {
         store.append_chunk("thought", "Now read the page.", None, true);
         store.tool_call("Read", "u1", "t2", ToolCallKind::Plain);
 
-        // A thought does NOT split the run: the model thinking between calls is
-        // still the SAME loop, so this is one run with the loop inside it — not
-        // one chip per call (issue #13).
+        // A thought SPLITS the run: one think → act step is one chip, so a loop
+        // reads as the sequence of things the agent set out to do ("look up the
+        // game time", "check the calendar") instead of one chip carrying the
+        // whole loop inside it. Each step keeps its own label to be rewritten.
         let rows = store.rows_for_test();
-        assert_eq!(rows.len(), 1, "one run, got {rows:?}");
+        assert_eq!(rows.len(), 2, "one chip per step, got {rows:?}");
+        match &rows[0] {
+            Bubble::Tool(r, label) => {
+                assert_eq!(r.tool_call_id, "t1");
+                assert_eq!(r.thought, "First, look it up.");
+                assert_eq!(label, "First, look it up");
+            }
+            other => panic!("expected the first step, got {other:?}"),
+        }
+        match &rows[1] {
+            Bubble::Tool(r, label) => {
+                assert_eq!(r.tool_call_id, "t2");
+                assert_eq!(r.thought, "Now read the page.");
+                assert_eq!(label, "Now read the page");
+            }
+            other => panic!("expected the second step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_step_holds_the_calls_that_share_its_thinking() {
+        // Parallel calls are ONE step: nothing was thought between them, so they
+        // are one intention and one chip (two separate chips would read as two
+        // things the agent decided to do).
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("thought", "Check both calendars.", None, true);
+        store.tool_call("Bash", "a", "t1", ToolCallKind::Plain);
+        store.tool_call("Bash", "b", "t2", ToolCallKind::Plain);
+        store.append_chunk("thought", "Now compare them.", None, true);
+        store.tool_call("Bash", "c", "t3", ToolCallKind::Plain);
+
+        let rows = store.rows_for_test();
+        assert_eq!(rows.len(), 2, "two steps, got {rows:?}");
         match &rows[0] {
             Bubble::ToolGroup(calls, label) => {
-                assert_eq!(calls.len(), 2);
-                // The label comes from the first thinking the run saw...
-                assert_eq!(label, "First, look it up");
-                // ...and each call keeps its own, so the run expands in order.
-                assert_eq!(calls[0].thought, "First, look it up.");
-                assert_eq!(calls[1].thought, "Now read the page.");
+                assert_eq!(calls.len(), 2, "both calls belong to the first step");
+                assert_eq!(label, "Check both calendars");
             }
-            other => panic!("expected one run, got {other:?}"),
+            other => panic!("expected the first step to be a run, got {other:?}"),
+        }
+        match &rows[1] {
+            Bubble::Tool(r, _) => assert_eq!(r.tool_call_id, "t3"),
+            other => panic!("expected a second step, got {other:?}"),
         }
     }
 
@@ -3486,6 +3531,34 @@ mod tests {
         let store = TranscriptStore::new(l);
         store.tool_call("Bash", "ls", "t1", ToolCallKind::Plain);
         assert!(store.run_framing("t1").is_none());
+    }
+
+    #[test]
+    fn each_step_answers_with_its_own_framing() {
+        // What the end-of-turn summarizer addresses: the worklist holds one entry
+        // per STEP, so step 2 must not report step 1's thinking or its tools.
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("thought", "Look up the game time.", None, true);
+        store.tool_call("Search", "q", "t1", ToolCallKind::Plain);
+        store.append_chunk("thought", "Now check the calendar.", None, true);
+        store.tool_call("Read", "u", "t2", ToolCallKind::Plain);
+
+        assert_eq!(
+            store.run_framing("t1"),
+            Some(("Look up the game time.".to_string(), vec!["Search".to_string()])),
+            "the first step keeps its own thinking and call"
+        );
+        assert_eq!(
+            store.run_framing("t2"),
+            Some(("Now check the calendar.".to_string(), vec!["Read".to_string()])),
+            "the second step is its own step, not the run's tail"
+        );
+        // Rewriting one step's label leaves the other alone.
+        store.set_run_summary("t2", "Checking your calendar");
+        let items = store.rich_transcript();
+        assert_eq!(items[0].summary, "Look up the game time");
+        assert_eq!(items[1].summary, "Checking your calendar");
     }
 
     #[test]

@@ -1,33 +1,40 @@
-//! Model-written one-line labels for a run of tool calls (issue #13).
+//! Model-written one-line labels for a step of tool calls.
 //!
 //! The transcript store derives a *provisional* label from the thinking that
-//! preceded a run (see `transcript::summarize`). This module is the rewrite: at
+//! opened a step (see `transcript::summarize`). This module is the rewrite: at
 //! the end of a turn the core asks the model — on a hidden session, so the
-//! request never appears in any chat — for one short line per run, and the
+//! request never appears in any chat — for one short line per step, and the
 //! answer replaces the provisional label.
+//!
+//! The target register is an INTENTION, not a transcript of the reasoning: a chip
+//! should read "Looking up the Yankees game time", not "The user is asking what
+//! time the Yankees play". That is why the instruction forbids quoting the
+//! thinking and asks for the step's purpose.
 //!
 //! Everything here is pure so it can be tested without a server; the plumbing
 //! (hidden session, prompt, routing the reply) lives on `Core`/`Conn`.
 
-/// How much of a run's thinking to show the model. Thinking runs to paragraphs;
-/// the label is a handful of words, so the opening is enough to place it.
+/// How much of a step's thinking to show the model. A step's thinking runs to a
+/// paragraph or two; the label is a handful of words, so the opening places it.
 const THOUGHT_CHARS: usize = 400;
 
 /// The instruction sent to the hidden summarizer session: one numbered item per
-/// run, oldest first. `runs` is `(thinking, tool titles)`.
+/// step, oldest first. `runs` is `(thinking, tool titles)`.
 pub(crate) fn prompt(runs: &[(String, Vec<String>)]) -> String {
     // The wording is load-bearing: asked loosely, the model echoes the thinking
-    // back verbatim, which is no better than the provisional label the store
-    // already derived. "Compress, never copy" plus a verb-first rule is what
-    // makes it write "Search web for Fairphone charging issues" instead.
+    // back verbatim ("The user is asking what time…"), which is no better than
+    // the provisional label the store already derived. "Compress, never copy",
+    // the purpose rule and a worked example are what make it write the intention.
     let mut s = String::from(
         "You are labelling steps of your own earlier work for a chat UI, so a long tool \
          run reads as a few short steps instead of a wall of chips.\n\
-         Each numbered item is one step: the thinking that preceded it, and the tools it \
-         ran.\n\
+         Each numbered item is one step: the thinking that opened it, and the tools it ran.\n\
          Reply with ONE line per step, exactly \"<n>. <label>\", and nothing else.\n\
-         A label is at most 8 words, starts with a verb, and names the step's PURPOSE. \
-         Compress the thinking — never copy it.\n\n",
+         A label names what the step SET OUT TO DO, in the voice of the agent doing it: at \
+         most 8 words, starting with a verb (\"Looking up the game time\", \"Checking your \
+         calendar\", \"Writing the CLI wrapper\").\n\
+         Compress the thinking into that intention — never copy it, never quote it, never \
+         start with \"The user\" or \"Thinking\".\n\n",
     );
     for (i, (thought, tools)) in runs.iter().enumerate() {
         let mut t: String = thought.chars().take(THOUGHT_CHARS).collect();
@@ -88,6 +95,9 @@ mod tests {
         assert!(p.contains("1. thinking: Let me look up the charging issue. | tools: kagi_search"));
         assert!(p.contains("2. thinking: Now check the todo. | tools: Read, Bash"));
         assert!(p.contains("exactly \"<n>. <label>\""));
+        // The register is the point: an intention, in the agent's own voice.
+        assert!(p.contains("Looking up the game time"), "{p}");
+        assert!(p.contains("never start with \"The user\""), "{p}");
     }
 
     #[test]

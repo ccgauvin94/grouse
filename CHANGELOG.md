@@ -6,6 +6,26 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- **A tool run is now one chip per step, labelled with what it set out to do.**
+  A turn used to collapse its whole loop into one chip carrying a paraphrase of
+  the model's first thought ("The user is asking what time the Yankees ga…"), with
+  the rest of the thinking and every call hidden inside it. Now a burst of
+  thinking plus the calls it ran is ONE step — its own chip — so a turn reads as
+  its intentions in order: *Looking up the Yankees game time* → *Checking your
+  calendar for conflicts* → the answer. Calls that share a step (parallel calls,
+  nothing thought between them) still collapse into one chip, since they are one
+  decision. Issue #13 collapsed the loop into a single run when a chip could only
+  show a count; with a label per step the loop reads better as its steps.
+- **The step labels are written as intentions.** The end-of-turn summarizer (the
+  existing hidden session — no second model) now asks for what the step *set out
+  to do*, in the agent's own voice, and forbids quoting the thinking or starting
+  with "The user": measured against the live model, "The user is asking what time
+  the Yankees play today" becomes "Searching for today's Yankees game time". A
+  turn's steps are capped at 40 per rewrite; past that the provisional label (the
+  thinking's first line) stands.
+
 ### Added
 
 - **Concurrent turns, one per chat.** A reply can stream in a roam chat while

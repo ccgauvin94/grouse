@@ -126,38 +126,46 @@ would open a bubble with only whitespace (whitespace folded into an already-open
 bubble is kept — that is real intra-message spacing). Cache paints and replays
 drop such rows too, so a stale cache cannot re-create an empty bubble.
 
-### Run summaries
+### Step summaries
 
-A run of consecutive tool calls currently collapses to a bare count — "11 tool
-calls" — which says nothing about what the agent was doing. Instead, **the run is
-the whole loop**: everything the model thought and did between two visible
-messages is ONE `toolgroup` item, and the loop lives inside it.
+A run of consecutive tool calls collapses into a chip, and a chip labelled with a
+bare count — "11 tool calls" — says nothing about what the agent was doing. So a
+run is **one think → act STEP**: a burst of thinking and the calls it ran. A turn
+therefore reads as its intentions in order — "Looking up the game time",
+"Checking your calendar", then the answer — instead of one chip swallowing the
+whole loop.
 
 - **`ToolCall.thought`** — the thinking that immediately preceded that call,
   absorbed from the `Thought` item it used to render as (which is dropped with a
-  `Remove`). Held *per call*, so the expanded run reads in order: think → act →
-  think → act.
-- **`Item.thought`** — the run's thinking, joined (what the label was drawn from).
-- **`Item.summary`** — the run's one-line label, from the first thinking it saw
-  (first sentence, capped). Empty when the run has nothing to draw on, and the
+  `Remove`). A new step opens on it.
+- **`Item.thought`** — the step's thinking, joined (what the label was drawn from).
+- **`Item.summary`** — the step's one-line label, from the thinking that opened it
+  (first sentence, capped). Empty when the step has nothing to draw on, and the
   client then falls back to the call titles.
 
-A thought therefore does **not** split a run: the model thinking between two calls
-is still the same loop, so a 20-call loop is one row, not twenty. What *does* end
-a run is a **visible message** — the model's own narration, or your next prompt —
-which is where one loop stops and the next begins. Thinking that leads nowhere
-(no call follows before the turn ends) stays a `Thought` item of its own, and the
-turn's end seals it so a later turn's call can never claim it.
+A thought therefore **does** split a run. Calls that share a step — parallel
+calls with nothing thought between them — collapse into it (that is one decision,
+so one chip). A **visible message** also ends a step: the model's own narration,
+or your next prompt, is where one loop stops and the next begins. Thinking that
+leads nowhere (no call follows before the turn ends) stays a `Thought` item of its
+own, and the turn's end seals it so a later turn's call can never claim it.
 
 This is exactly the shape goose emits: a burst of thinking, a whitespace-only
 agent message (`"\n\n"`, dropped — see above), then the call, repeated. Because
-those agent chunks are empty they do not break the loop; a real narration does.
+those agent chunks are empty they do not break a step; a real narration does.
+
+(Issue #13 collapsed the whole loop into one run when a count was all a chip
+showed. With a label per step the loop reads better as its steps, so the rule is
+one chip per thinking burst.)
 
 **The rewrite.** The label above is *provisional*. At the end of a turn the core
 asks the model — on a **hidden session** (`_meta.hidden`, so goose's unlistable
 `hidden` session type keeps it out of `session/list` and it can never appear as a
-chat) — for one short line per run, and the answer replaces the label with an
-`Upsert`. It is one small inference per turn, sent after the turn is over (so it
+chat) — for one short line per step, in the register of an INTENTION ("Looking up
+the game time", not "The user is asking what time…"), and the answer replaces the
+label with an `Upsert`. A turn's steps are capped (`MAX_SUMMARIZED_STEPS`, 40) so
+an unusually long loop cannot turn this into a large request; steps past the cap
+keep their provisional label. It is one small inference per turn, sent after the turn is over (so it
 never delays a reply), skipped when the client turns it off
 (`set_run_summaries`), and skipped for a run with no thinking to condense.
 Wherever the model does not answer, the provisional label stands. The hidden
