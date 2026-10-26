@@ -894,16 +894,6 @@ mod tests {
         assert!(tool_subagent_step(&update).is_none());
     }
 
-    #[test]
-    fn a_replay_window_only_gags_its_own_session() {
-        // The window belongs to the session being replayed in. Another chat's
-        // chunks — on either transport — must keep landing.
-        assert!(chat_accepted(None, "20261021_2"));
-        assert!(!chat_accepted(Some("20261021_2"), "20261021_2"));
-        assert!(chat_accepted(Some("20261021_2"), "roam:Phaethon:20261021_2"));
-        assert!(chat_accepted(Some("20261021_2"), "20261021_9"));
-    }
-
     struct Recorder {
         events: StdMutex<Vec<String>>,
     }
@@ -1123,7 +1113,29 @@ pub(crate) fn apply_paint(store: &crate::transcript::TranscriptStore, plan: &Pai
     }
 }
 
-/// The `session/load` replay lifecycle — one implementation for every wire.
+/// Open a session: paint its plan, then replay. ONE implementation for every
+/// wire, and the load slot is claimed for the whole span — a paint that landed
+/// while another load was mid-flight would leave that load's rows appended to a
+/// transcript they do not belong to (see [`TranscriptStore::load_gate`]).
+///
+/// This is the entry point for a transport that decides paint and load
+/// together (the roam peer, the remote-change resync). The main wire paints
+/// before it dials, so its handshake calls [`replay_session`] directly.
+pub(crate) async fn load_with_plan(
+    endpoint: &dyn ChatEndpoint,
+    host: &dyn DispatchHost,
+    store: &crate::transcript::TranscriptStore,
+    key: &str,
+    cwd: &str,
+    plan: &PaintPlan,
+) -> Result<Value, AcpError> {
+    let _load = store.begin_load().await;
+    apply_paint(store, plan);
+    replay_held(endpoint, host, store, key, cwd, plan.suppress, plan.merge).await
+}
+
+/// The `session/load` replay lifecycle after the paint — one implementation for
+/// every wire.
 ///
 /// The caller paints first (`apply_paint`) and owns everything transport-shaped
 /// around this: binding the session id, surfacing config, reporting an open
@@ -1153,6 +1165,20 @@ pub(crate) async fn replay_session(
     suppress: bool,
     merge: bool,
 ) -> Result<Value, AcpError> {
+    let _load = store.begin_load().await;
+    replay_held(endpoint, host, store, key, cwd, suppress, merge).await
+}
+
+/// [`replay_session`]'s body, for callers already holding the load slot.
+async fn replay_held(
+    endpoint: &dyn ChatEndpoint,
+    host: &dyn DispatchHost,
+    store: &crate::transcript::TranscriptStore,
+    key: &str,
+    cwd: &str,
+    suppress: bool,
+    merge: bool,
+) -> Result<Value, AcpError> {
     // A fresh cache asks for the minimum tail; a stale one for a bounded tail
     // it merges; otherwise the full replay.
     let tail = if suppress {
@@ -1162,7 +1188,7 @@ pub(crate) async fn replay_session(
     } else {
         None
     };
-    host.begin_replay(key);
+    host.begin_replay(key, suppress);
     store.hold_emissions(true);
     let reply = endpoint
         .request("session/load", session_load_params(key, cwd, tail))
@@ -1217,8 +1243,12 @@ pub(crate) trait DispatchHost: Send + Sync {
     fn commands(&self, key: &str, names: Vec<String>);
     /// A permission prompt (only while `key` is displayed).
     fn permission(&self, key: &str, request: PermissionRequest);
-    /// A `session/load` replay is beginning for `key`.
-    fn begin_replay(&self, key: &str);
+    /// A `session/load` replay is beginning for `key`. `suppress` marks a load
+    /// whose rows must be DISCARDED: the cache it was planned from is current,
+    /// so the minimal tail the server replays is already on screen and letting
+    /// it land would append a second copy of the last turn (measured on the
+    /// peer, which had no such gate: +64 rows on every fresh-cache open).
+    fn begin_replay(&self, key: &str, suppress: bool);
     /// A live turn started for `key` (a replay is over).
     fn end_replay(&self, key: &str);
     fn replaying(&self, key: &str) -> bool;
@@ -1318,9 +1348,9 @@ impl DispatchHost for PrefixHost {
             host.permission(key, request);
         }
     }
-    fn begin_replay(&self, key: &str) {
+    fn begin_replay(&self, key: &str, suppress: bool) {
         if let Some(host) = self.host() {
-            host.begin_replay(key);
+            host.begin_replay(key, suppress);
         }
     }
     fn end_replay(&self, key: &str) {
@@ -1331,8 +1361,14 @@ impl DispatchHost for PrefixHost {
     fn replaying(&self, key: &str) -> bool {
         self.host().is_some_and(|host| host.replaying(key))
     }
-    fn accepts_chat(&self, _key: &str) -> bool {
-        true
+    fn accepts_chat(&self, key: &str) -> bool {
+        // The suppression window is the CORE's (one decision for both wires):
+        // hardcoding `true` here kept a fresh-cache open from discarding its
+        // replayed tail, so every such open appended the last turn again.
+        match self.host() {
+            Some(host) => host.accepts_chat(key),
+            None => true,
+        }
     }
     fn background(&self, key: &str) {
         if let Some(host) = self.host() {
@@ -1395,19 +1431,6 @@ pub(crate) fn declared_run_state(
         .and_then(|meta| meta.get("goose"))
         .and_then(|goose| goose.get("activeRunId"))
         .map(|value| value.as_str().unwrap_or_default().to_string())
-}
-
-/// May a chunk for `key` land in its store while `suppressing_key` is mid-replay?
-///
-/// The suppression window belongs to ONE session (the one being replayed in
-/// silently and painted once). Treating it as connection-wide dropped a chat's
-/// chunks for another chat's reason — measured on a roam peer whose stream went
-/// silent whenever the main connection happened to be loading with a fresh cache.
-pub(crate) fn chat_accepted(suppressing_key: Option<&str>, key: &str) -> bool {
-    match suppressing_key {
-        Some(held) => held != key,
-        None => true,
-    }
 }
 
 /// The single `session/update` dispatch. Every transport calls this; there is

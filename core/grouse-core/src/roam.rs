@@ -990,21 +990,22 @@ impl RoamPeer {
             }
         }
         let store = self.hub.display(&key);
-        crate::session::apply_paint(&store, &plan);
-        // The replay lifecycle is the SHARED one (`session::replay_session`):
-        // silent ingest, merge against the paint, one repaint. This file used to
-        // hand-write it and lost two steps — no held emissions (the tail streamed
-        // onto the client) and no `end_merge` (the paint's stale suffix was
-        // truncated silently and merge mode never cleared), which is what made a
-        // reopened chat show its recent prompts twice, the copy at the bottom.
-        let reply = crate::session::replay_session(
+        // Paint AND replay through the SHARED lifecycle (`session::load_with_plan`):
+        // it claims the session's load slot for both halves, so a resync (spawned
+        // onto the runtime, not the peer's command loop) can never append its rows
+        // beside this one's mid-flight replay — the interleaving that put the first
+        // turn's tool runs at the bottom of a reopened chat. It also ingests
+        // silently and paints once, and discards the tail a current cache does not
+        // need. This file used to hand-write the lifecycle and lost steps (no held
+        // emissions, no `end_merge`), which is what made a reopened chat show its
+        // recent prompts twice, the copy at the bottom.
+        let reply = crate::session::load_with_plan(
             self,
             self.host.as_ref(),
             &store,
             &key,
             &cwd,
-            plan.suppress,
-            plan.merge,
+            &plan,
         )
         .await;
         match reply {
@@ -1588,7 +1589,7 @@ mod tests {
                     .push(format!("permission {}", request.tool_call_id));
             }
         }
-        fn begin_replay(&self, key: &str) {
+        fn begin_replay(&self, key: &str, _suppress: bool) {
             self.replaying.lock().insert(key.to_string());
         }
         fn end_replay(&self, key: &str) {

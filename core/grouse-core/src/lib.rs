@@ -566,6 +566,12 @@ struct CoreState {
     /// chunks are framing for the following tool run, not rows of their own.
     /// Shared by every transport, so the rule is one rule.
     replaying: HashSet<String>,
+    /// Sessions whose replay rows must be DISCARDED: the load was planned from a
+    /// cache that is already current, so the tail the server sends is a second
+    /// copy of rows on screen. One gate for both wires — the spine used to carry
+    /// it on its connection (and the peer had none, so the peer's fresh-cache
+    /// opens appended the last turn again).
+    suppressing: HashSet<String>,
     /// The live turn's run id per displayed session (main or peer). A run ends
     /// only when one was actually started, so a bare title update cannot clear
     /// the app's busy/steer state.
@@ -2513,24 +2519,36 @@ impl Core {
             .session_cwd(session_id)
             .unwrap_or_else(|| self.resolve_cwd(session_id));
         let key = session_id.to_string();
-        self.store_for(session_id).clear();
-        // This is a FULL rebuild: the store was just cleared, so the replay must
-        // be APPLIED. A previous live load can leave `suppress_replay` armed
-        // (open a fresh cache → suppress), and without this reset the resync's
-        // rows would be dropped and the transcript left empty/partial.
+        // This is a FULL rebuild: the store is cleared and re-supplied, so the
+        // replay must be APPLIED. A previous live load can leave its suppression
+        // armed (open a fresh cache → suppress), and without this reset the
+        // resync's rows would be dropped and the transcript left empty.
         owner.reset_replay_gates();
-        self.inner
-            .state
-            .lock()
-            .replaying
-            .insert(session_id.to_string());
         self.emit_status(ConnectionStatus::Syncing);
         let core = self.clone();
         crate::roam::runtime().spawn(async move {
-            let params = crate::session::session_load_params(&owner.wire_id(&key), &cwd, None);
-            match crate::session::request(owner.as_ref(), "session/load", params).await {
+            // The SAME lifecycle an open uses: the store's load slot (so a resync
+            // can never append its rows beside an open's half-finished replay —
+            // that interleaving is what put the first turn's tool runs at the
+            // bottom of a reopened chat), a silent ingest, and ONE repaint at the
+            // end instead of streaming the whole history onto the UI.
+            let store = core.store_for(&key);
+            let plan = crate::session::PaintPlan {
+                suppress: false,
+                merge: false,
+                items: None, // clear: this is a full rebuild, not a cache paint
+            };
+            match crate::session::load_with_plan(
+                owner.as_ref(),
+                &core,
+                &store,
+                &key,
+                &cwd,
+                &plan,
+            )
+            .await
+            {
                 Ok(reply) => {
-                    core.inner.state.lock().replaying.remove(&key);
                     let options = crate::session::parse_config_options(&reply);
                     core.on_config_reply(options);
                     core.emit_status(ConnectionStatus::Ready);
@@ -2541,7 +2559,6 @@ impl Core {
                     }
                 }
                 Err(error) => {
-                    core.inner.state.lock().replaying.remove(&key);
                     core.emit_status(ConnectionStatus::Error {
                         message: format!("resync failed: {error}"),
                     });
@@ -2716,27 +2733,32 @@ impl crate::session::DispatchHost for Core {
             self.inner.listener.on_permission_request(request);
         }
     }
-    fn begin_replay(&self, key: &str) {
-        self.inner.state.lock().replaying.insert(key.to_string());
+    fn begin_replay(&self, key: &str, suppress: bool) {
+        let mut state = self.inner.state.lock();
+        state.replaying.insert(key.to_string());
+        if suppress {
+            state.suppressing.insert(key.to_string());
+        } else {
+            state.suppressing.remove(key);
+        }
     }
     fn end_replay(&self, key: &str) {
-        self.inner.state.lock().replaying.remove(key);
+        let mut state = self.inner.state.lock();
+        state.replaying.remove(key);
+        state.suppressing.remove(key);
     }
     fn replaying(&self, key: &str) -> bool {
         self.inner.state.lock().replaying.contains(key)
     }
     /// May a chunk for `key` land in its store right now?
     ///
-    /// The main connection suppresses content ONLY while it is replay-ing that
-    /// one session in (the store is held and painted once at the end). Asking
-    /// the connection-wide flag without comparing the key dropped a PEER's
-    /// chunks whenever the main wire happened to be in that window — a chat on
-    /// another transport went silent for a main-connection reason.
+    /// Only while a load planned from a CURRENT cache is replaying that one
+    /// session (the store is held and painted once at the end, so the tail the
+    /// server sends is by definition already on screen). The window is per
+    /// session, so it can never drop another chat's chunks — a chat on a peer
+    /// went silent when the main connection happened to be in that window.
     fn accepts_chat(&self, key: &str) -> bool {
-        let held = self.inner.conn.lock().clone().and_then(|conn| {
-            conn.suppresses_replay().then(|| conn.display_key()).flatten()
-        });
-        crate::session::chat_accepted(held.as_deref(), key)
+        !self.inner.state.lock().suppressing.contains(key)
     }
     fn background(&self, key: &str) {
         self.inner.hub.mark_new(key);
@@ -2966,6 +2988,36 @@ mod tests {
         assert!(
             core.turn_in_flight(other),
             "a drop on one session must not release another chat's turn"
+        );
+    }
+
+    #[test]
+    fn a_suppressed_replay_gags_only_its_own_sessions_rows() {
+        // The suppression window belongs to ONE session: the load was planned
+        // from a cache that is already current, so the tail the server replays
+        // is a second copy of rows on screen. Treating it as connection-wide
+        // dropped another chat's chunks for this chat's reason (a roam peer went
+        // silent whenever the main connection happened to be in that window),
+        // and having no window at all on the peer appended the last turn again
+        // on every fresh-cache open.
+        use crate::session::DispatchHost;
+        let (core, _) = core();
+        let mine = "roam:Phaethon:20261026_1";
+        let theirs = "20261026_9";
+        assert!(core.accepts_chat(mine), "an idle session always accepts");
+        core.begin_replay(mine, true);
+        assert!(!core.accepts_chat(mine), "a current-cache load discards its rows");
+        assert!(core.accepts_chat(theirs), "another chat must keep streaming");
+        assert!(
+            core.accepts_chat("roam:Phaethon:20261026_2"),
+            "the same transport, another chat: unrelated"
+        );
+        core.end_replay(mine);
+        assert!(core.accepts_chat(mine), "the window closes with the load");
+        core.begin_replay(mine, false);
+        assert!(
+            core.accepts_chat(mine),
+            "a merge (or a full replay) must land its rows"
         );
     }
 }

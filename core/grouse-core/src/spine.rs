@@ -459,23 +459,6 @@ impl Conn {
         self.inner.suppress_replay.store(suppress, Ordering::SeqCst);
     }
 
-    /// A fresh-cache open is dropping replayed rows; the shared dispatch must
-    /// not ingest them into the store at all.
-    /// The display key (`roam:<label>:<id>` / `<id>`) of the session this
-    /// connection is currently loading or bound to — what a chunk's key is
-    /// compared against.
-    pub(crate) fn display_key(&self) -> Option<String> {
-        let id = self.inner.session_id.lock().clone()?;
-        Some(crate::session::display_id(
-            self.inner.label.as_deref(),
-            &id,
-        ))
-    }
-
-    pub(crate) fn suppresses_replay(&self) -> bool {
-        self.inner.suppress_replay.load(Ordering::SeqCst)
-    }
-
     pub(crate) fn set_merge_replay(&self, merge: bool) {
         self.inner.merge_replay.store(merge, Ordering::SeqCst);
     }
@@ -694,7 +677,6 @@ impl Conn {
                 // may still lag it, and a fresh cache is already current.
                 let persist_stamp = !self.inner.suppress_replay.load(Ordering::SeqCst)
                     && self.inner.merge_replay.load(Ordering::SeqCst);
-                self.inner.host.begin_replay(&replay_key);
                 // Set the open-session id BEFORE the load request: the server
                 // may stream replay chunks ahead of the reply (the spine's own
                 // gateway test does), and the session-membership gate must not

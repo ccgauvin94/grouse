@@ -248,6 +248,10 @@ impl Bubble {
                 detail: r.spec.clone(),
                 status: r.status.clone(),
                 thought: r.thought.clone(),
+                // Every row carries its own position: a chart or app promoted out
+                // of a run is emitted on its own, and a missing `seq` sorted it to
+                // the TOP of the client's list (the row landed above the question).
+                seq: r.seq,
                 ..empty_item()
             },
             Bubble::McpApp(r) => Item {
@@ -258,6 +262,7 @@ impl Bubble {
                 status: r.status.clone(),
                 app_key: r.app_key.clone(),
                 thought: r.thought.clone(),
+                seq: r.seq,
                 ..empty_item()
             },
         }
@@ -736,6 +741,19 @@ pub struct TranscriptStore {
     /// just released) the state lock when it emits, and re-locking there would
     /// deadlock the runtime thread.
     hold: std::sync::atomic::AtomicBool,
+    /// ONE `session/load` at a time per session.
+    ///
+    /// A replay APPENDS to whatever the store holds (only the merge paint
+    /// truncates), so two loads of the same session running at once land their
+    /// rows in ARRIVAL order — the second one's rows after the first one's,
+    /// whatever part of the conversation each is at. Measured on a roam chat: a
+    /// resync's full replay overlapped the open's bounded-tail replay, so the
+    /// store came out as `[cached tail][the conversation again from its first
+    /// turn]` and the newest window painted the first turn's tool runs at the
+    /// BOTTOM of the chat. The transport cannot prevent that on its own (the
+    /// peer's command loop serialises opens, but a resync is spawned onto the
+    /// runtime), so the exclusion lives here, where every load must pass.
+    load_gate: tokio::sync::Mutex<()>,
 }
 
 impl TranscriptStore {
@@ -743,6 +761,7 @@ impl TranscriptStore {
         Self {
             listener,
             hold: std::sync::atomic::AtomicBool::new(false),
+            load_gate: tokio::sync::Mutex::new(()),
             state: Mutex::new(State {
                 bubbles: Vec::new(),
                 stream_idx: None,
@@ -1550,6 +1569,21 @@ impl TranscriptStore {
     /// rows still land in the store, the cache and the window.
     pub fn hold_emissions(&self, hold: bool) {
         self.hold.store(hold, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Claim this session's single load slot. Held for the WHOLE `session/load`
+    /// (paint, silent ingest, merge, repaint), so a second load — an open racing
+    /// a resync — waits instead of appending its rows beside the first one's
+    /// (see [`TranscriptStore::load_gate`]). Drop the guard to release.
+    pub(crate) async fn begin_load(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.load_gate.lock().await
+    }
+
+    /// Non-blocking form of [`Self::begin_load`], for callers that must not
+    /// wait (tests, and a diagnostic that would rather skip than queue).
+    #[cfg(test)]
+    pub(crate) fn try_begin_load(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        self.load_gate.try_lock().ok()
     }
 
     /// End a held replay with ONE windowed paint — `Reset` + the newest
@@ -2668,6 +2702,46 @@ mod tests {
         // a hole.
         store.append_chunk("agent", "new", Some("z9"), false);
         assert!(store.end_merge(), "no overlap => a full reload is owed");
+    }
+
+    #[test]
+    fn a_second_load_waits_for_the_first() {
+        // Two loads of one session may not run at once: a replay APPENDS, so the
+        // second one's rows would land after the first one's whatever part of the
+        // conversation each was at. Measured on a roam chat: a resync's full
+        // replay overlapped the open's tail replay, and the store came out
+        // `[cached tail][the conversation again from its first turn]` — the
+        // newest window then painted the FIRST turn's tool runs at the bottom.
+        let (l, _i_evts) = listener();
+        let store = Arc::new(TranscriptStore::new(l));
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let first = store.clone();
+        rt.spawn(async move {
+            let _slot = first.begin_load().await;
+            held_tx.send(()).expect("held");
+            // Hold the slot until the test says so, without blocking the worker.
+            let _ = tokio::task::spawn_blocking(move || release_rx.recv()).await;
+        });
+        held_rx.recv().expect("first load took the slot");
+
+        assert!(
+            store.try_begin_load().is_none(),
+            "a second load must not start while one is in flight"
+        );
+        release_tx.send(()).expect("release");
+
+        // Once the first load finishes, the slot is free again.
+        let mut freed = false;
+        for _ in 0..100 {
+            if store.try_begin_load().is_some() {
+                freed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(freed, "the load slot must be released when the load ends");
     }
 
     #[test]

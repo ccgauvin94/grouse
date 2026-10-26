@@ -17,6 +17,31 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed
 
+- **A reopened chat showed an older turn's tool runs at the END of the chat.**
+  Two loads of one session could run at once. A replay *appends* to whatever the
+  store holds, so the second one's rows landed after the first one's, whatever
+  part of the conversation each was at: the remote-change resync (`session/load`
+  again, spawned onto the runtime) cleared the store and queued its FULL replay
+  while the open's bounded-tail replay was still in flight — the open then
+  painted the sliver that had landed, and the resync's rows streamed in live from
+  the FIRST turn, so the newest rows on screen were the beginning of the
+  conversation. Reproduced against a real session: after the race the store held
+  `[the open's tail][the conversation again from its first prompt]` and the
+  client's last row was a mid-conversation turn. Three changes, one per layer:
+  the store now has a per-session load slot (`TranscriptStore::begin_load`), held
+  for the whole paint-ingest-repaint span, so no second load can start mid-flight;
+  the resync goes through the same shared lifecycle as an open
+  (`session::load_with_plan`) instead of clearing the store and requesting a
+  bare load — so it also holds its rows and repaints ONCE instead of replaying
+  1300 messages onto the UI; and the "discard replayed rows" window a
+  current-cache open uses is now one per-session decision in the core
+  (`DispatchHost::begin_replay(key, suppress)` → `accepts_chat`) instead of a flag
+  on the main connection with the peer hardcoding "accept everything" — which had
+  made every peer open with a current cache append a SECOND copy of the last turn
+  (measured: +64 rows per open).
+- **A chart or MCP-app row could jump to the top of the chat.** Those two item
+  projections never carried `seq`, so the row was emitted at position 0 and an
+  ordered client put it above the question, not where the call happened.
 - **A roam chat's recent prompts appeared twice after reopening: inline and
   again at the bottom.** Two causes, both in the reopen path. First, the peer
   wrote its own copy of the `session/load` replay lifecycle and had lost two
