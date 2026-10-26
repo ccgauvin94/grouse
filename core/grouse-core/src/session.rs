@@ -828,6 +828,38 @@ mod tests {
     }
 
     #[test]
+    fn a_session_info_update_declares_one_of_three_run_states() {
+        // goose's `activeRunId` is three-state and the last two must not be
+        // conflated: a generated session-name update says NOTHING about runs,
+        // while `null` is the server stating the run is over (the end-of-turn
+        // signal a client still receives when the prompt response is lost).
+        use agent_client_protocol::schema::v1::{Meta, SessionInfoUpdate};
+
+        fn meta(value: serde_json::Value) -> Meta {
+            value.as_object().cloned().expect("meta")
+        }
+
+        let live = SessionInfoUpdate::new().meta(meta(json!({ "goose": { "activeRunId": "run-9" } })));
+        assert_eq!(declared_run_state(&live).as_deref(), Some("run-9"));
+
+        let ended =
+            SessionInfoUpdate::new().meta(meta(json!({ "goose": { "activeRunId": null } })));
+        assert_eq!(
+            declared_run_state(&ended).as_deref(),
+            Some(""),
+            "an explicit null is an end, not silence"
+        );
+
+        let name_only =
+            SessionInfoUpdate::new().title("Grouse").meta(meta(json!({ "messageCount": 12 })));
+        assert_eq!(
+            declared_run_state(&name_only),
+            None,
+            "a title update must not be read as a run end"
+        );
+    }
+
+    #[test]
     fn ordinary_tool_notifications_are_not_mistaken_for_subagent_steps() {
         use agent_client_protocol::schema::v1::{
             ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
@@ -1106,6 +1138,10 @@ pub(crate) trait DispatchHost: Send + Sync {
     fn touched(&self, key: String, title: String, updated_at: String);
     /// Run start (non-empty id) or end (empty id).
     fn active_run(&self, key: String, run_id: String);
+    /// The wire carrying `key`'s turn is gone, so nothing on it can ever end
+    /// that turn. Ending it is the transport's call, not a timeout's: only the
+    /// connection knows the reply it was waiting for can no longer arrive.
+    fn turn_lost(&self, key: &str);
     /// A config snapshot (only while `key` is displayed).
     fn config(&self, key: &str, options: Vec<ConfigOption>);
     fn usage(&self, key: &str, used: i64, size: i64, cost: f64, currency: String);
@@ -1188,6 +1224,11 @@ impl DispatchHost for PrefixHost {
             host.active_run(key, run_id);
         }
     }
+    fn turn_lost(&self, key: &str) {
+        if let Some(host) = self.host() {
+            host.turn_lost(key);
+        }
+    }
     fn config(&self, key: &str, options: Vec<ConfigOption>) {
         if let Some(host) = self.host() {
             host.config(key, options);
@@ -1265,6 +1306,26 @@ impl DispatchHost for PrefixHost {
             .map(|host| host.take_summarizer_reply(key))
             .unwrap_or_default()
     }
+}
+
+/// What a `session_info_update` declares about its session's run, in goose's
+/// three states:
+///
+/// * `Some(id)` — a run is live; its id is the steer key.
+/// * `Some("")` — goose EXPLICITLY says no run is live (`activeRunId: null`).
+///   This is the client's earliest authoritative end-of-turn, emitted before
+///   goose answers `session/prompt`.
+/// * `None` — the update says nothing about runs. The generated session-name
+///   update carries only `title`/`messageCount` with no `goose` key and can
+///   land mid-turn, so it must never be read as an end.
+pub(crate) fn declared_run_state(
+    info: &agent_client_protocol::schema::v1::SessionInfoUpdate,
+) -> Option<String> {
+    info.meta
+        .as_ref()
+        .and_then(|meta| meta.get("goose"))
+        .and_then(|goose| goose.get("activeRunId"))
+        .map(|value| value.as_str().unwrap_or_default().to_string())
 }
 
 /// May a chunk for `key` land in its store while `suppressing_key` is mid-replay?
@@ -1366,20 +1427,24 @@ pub(crate) fn dispatch(
             host.usage(&key, usage.used as i64, usage.size as i64, amount, currency);
         }
         SessionUpdate::SessionInfoUpdate(info) => {
-            // A present `activeRunId` starts a turn; an absent one ENDS one only
-            // if a run was actually live (a bare title update must not clear the
-            // app's busy/steer state).
-            let run_id = info
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.get("goose"))
-                .and_then(|goose| goose.get("activeRunId"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            host.active_run(key.clone(), run_id.clone());
-            if !run_id.is_empty() {
-                host.end_replay(&key);
+            // `activeRunId` is three-state, and the difference between the last
+            // two states is load-bearing:
+            //
+            //   "run_x"  — a run started (steer becomes available).
+            //   null     — goose SAYS the run is over. This is the earliest
+            //              authoritative end-of-turn the client ever gets: goose
+            //              emits it before it answers `session/prompt`, so a lost
+            //              or late response no longer strands the turn.
+            //   absent   — says nothing about runs at all. The generated
+            //              session-name update carries only `title`/`messageCount`
+            //              with no `goose` key, and it can land mid-turn; reading
+            //              it as "no run" used to clear the steer affordance in
+            //              the middle of a live run.
+            if let Some(run_id) = declared_run_state(&info) {
+                host.active_run(key.clone(), run_id.clone());
+                if !run_id.is_empty() {
+                    host.end_replay(&key);
+                }
             }
             let title = info
                 .title

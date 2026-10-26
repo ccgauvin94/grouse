@@ -1261,6 +1261,17 @@ impl Core {
         self.active_session_id().is_some()
     }
 
+    /// Whether a turn is still outstanding for `session_id` — the core's
+    /// authoritative view of the wire, as opposed to a client's own "I sent
+    /// something and have not seen the end" flag.
+    ///
+    /// A UI uses it to reconcile a turn it believes is running but which the
+    /// core has already closed (a lost `on_run_ended`): sending behind a dead
+    /// turn parks the message in a queue nothing will ever drain.
+    pub fn turn_in_flight(&self, session_id: String) -> bool {
+        self.inner.state.lock().in_flight.contains(&session_id)
+    }
+
     /// The bound session of the active chat (the roam peer's, when one owns
     /// the chat).
     pub fn active_session_id(&self) -> Option<String> {
@@ -2041,17 +2052,46 @@ impl Core {
                 ("error".to_string(), false)
             }
         };
-        self.store_for(key).run_ended(&stop);
+        if !self.finish_turn(key, &stop, clean) {
+            // Another end signal closed this turn first (goose's run-end
+            // notification, or the wire dying). The prompt reply still moves
+            // the server's own stamp, so re-baseline it — but do not end a
+            // NEWER turn that may have started in the meantime.
+            self.refresh_stamp(key, true);
+        }
+    }
+
+    /// End `key`'s turn if one is live; returns whether it was.
+    ///
+    /// goose sends TWO independent "this run is over" signals — the
+    /// `activeRunId: null` `session_info_update`, emitted *before* it answers
+    /// `session/prompt`, and then the response itself. Either one is
+    /// sufficient, and whichever arrives first does the work: on roam, the
+    /// response was observed failing to arrive at all while the rest of the
+    /// stream stayed healthy, which left the app showing "thinking" (and its
+    /// composer queued) until the user pressed Stop.
+    ///
+    /// Callers must treat `false` as "nothing to do", never as "retry": the
+    /// peer in flight is a different turn's.
+    fn finish_turn(&self, key: &str, stop: &str, clean: bool) -> bool {
         {
             let mut state = self.inner.state.lock();
-            state.in_flight.remove(key);
+            if !state.in_flight.remove(key) {
+                return false;
+            }
             if clean {
                 state.incomplete.remove(key);
             } else {
                 state.incomplete.insert(key.to_string());
             }
         }
+        // Persist BEFORE announcing: the store is a settled snapshot at this
+        // instant, and the client's RunEnded handler may immediately start a
+        // queued follow-up (whose prompt re-marks this chat in flight and would
+        // make an otherwise-clean cache look truncated).
+        self.store_for(key).seal_turn();
         self.save_cache_for(key);
+        self.store_for(key).announce_run_ended(stop);
         // Re-baseline the resync stamp from the server after OUR OWN turn. The
         // server also emits a run-end `session_info_update`, and its debounced
         // probe otherwise sees a moved (updatedAt, messageCount) against the
@@ -2061,6 +2101,7 @@ impl Core {
         // no-op while a genuine remote change still differs and resyncs.
         self.refresh_stamp(key, true);
         self.flush_pending();
+        true
     }
 
     /// Drain pending intents. Turns are concurrent PER SESSION, so this starts
@@ -2618,8 +2659,15 @@ impl crate::session::DispatchHost for Core {
     }
     fn active_run(&self, key: String, run_id: String) {
         if run_id.is_empty() {
-            if self.inner.state.lock().active_runs.remove(&key).is_some() {
-                self.inner.listener.on_active_run(key, String::new());
+            // goose emits this BEFORE it answers `session/prompt`, so it is the
+            // earliest authoritative "this run is over" a client ever sees —
+            // and the only one that still arrives when the response is lost.
+            // The run-end is claimed once (`active_runs` held a live id), so a
+            // bare title update cannot end anything.
+            let was_live = self.inner.state.lock().active_runs.remove(&key).is_some();
+            if was_live {
+                self.inner.listener.on_active_run(key.clone(), String::new());
+                self.finish_turn(&key, "ended", true);
             }
         } else {
             self.inner
@@ -2629,6 +2677,12 @@ impl crate::session::DispatchHost for Core {
                 .insert(key.clone(), run_id.clone());
             self.inner.listener.on_active_run(key, run_id);
         }
+    }
+    fn turn_lost(&self, key: &str) {
+        // The wire that owned this turn is gone: nothing can end it any more,
+        // so end it here. `finish_turn` is a no-op when no turn was live, which
+        // is the common case (an idle link dropping).
+        self.finish_turn(key, "error", false);
     }
     fn config(&self, key: &str, options: Vec<ConfigOption>) {
         if self.inner.hub.is_displayed(key) {
@@ -2738,4 +2792,169 @@ fn default_cache_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(|home| PathBuf::from(home).join(".local/share/grouse"))
         .unwrap_or_else(|| PathBuf::from(".").join("grouse-cache"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    /// Records only the events these tests assert on.
+    struct Events(StdMutex<Vec<String>>);
+
+    impl Events {
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+        fn run_ends(&self) -> Vec<String> {
+            self.lines()
+                .into_iter()
+                .filter(|line| line.starts_with("run_ended "))
+                .collect()
+        }
+        fn push(&self, line: String) {
+            self.0.lock().unwrap().push(line);
+        }
+    }
+
+    impl CoreListener for Events {
+        fn on_status(&self, _: ConnectionStatus) {}
+        fn on_sessions(&self, _: Vec<SessionSummary>) {}
+        fn on_item(&self, _: TranscriptOp) {}
+        fn on_usage(&self, _: i64, _: i64, _: f64, _: String) {}
+        fn on_run_ended(&self, session: String, stop: String) {
+            self.push(format!("run_ended {session} {stop}"));
+        }
+        fn on_speak(&self, _: String) {}
+        fn on_config(&self, _: Vec<ConfigOption>) {}
+        fn on_permission_request(&self, _: PermissionRequest) {}
+        fn on_session_touched(&self, _: String, _: String, _: String) {}
+        fn on_projects(&self, _: Vec<ProjectSummary>) {}
+        fn on_roam_peer_status(&self, _: String, _: String) {}
+        fn on_roam_sessions(&self, _: String, _: Vec<SessionSummary>) {}
+        fn on_peer_new_session(&self, _: String, _: String) {}
+        fn on_active_run(&self, session: String, run: String) {
+            self.push(format!("active_run {session} {run}"));
+        }
+        fn on_commands(&self, _: Vec<String>) {}
+        fn on_session_open_failed(&self, _: String, _: String) {}
+    }
+
+    fn core() -> (Arc<Core>, Arc<Events>) {
+        let events = Arc::new(Events(StdMutex::new(Vec::new())));
+        let listener: Arc<dyn CoreListener> = events.clone();
+        let dir = std::env::temp_dir().join(format!(
+            "grouse-core-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let core = Core::new(Box::new(ArcListener(listener)), dir.to_string_lossy().to_string());
+        (core, events)
+    }
+
+    /// `Core::new` takes `Box<dyn CoreListener>`; this lets a test keep its own
+    /// handle on the same recorder.
+    struct ArcListener(Arc<dyn CoreListener>);
+
+    impl CoreListener for ArcListener {
+        fn on_status(&self, status: ConnectionStatus) {
+            self.0.on_status(status);
+        }
+        fn on_sessions(&self, sessions: Vec<SessionSummary>) {
+            self.0.on_sessions(sessions);
+        }
+        fn on_item(&self, op: TranscriptOp) {
+            self.0.on_item(op);
+        }
+        fn on_usage(&self, used: i64, size: i64, cost: f64, currency: String) {
+            self.0.on_usage(used, size, cost, currency);
+        }
+        fn on_run_ended(&self, session_id: String, stop_reason: String) {
+            self.0.on_run_ended(session_id, stop_reason);
+        }
+        fn on_speak(&self, text: String) {
+            self.0.on_speak(text);
+        }
+        fn on_config(&self, options: Vec<ConfigOption>) {
+            self.0.on_config(options);
+        }
+        fn on_permission_request(&self, request: PermissionRequest) {
+            self.0.on_permission_request(request);
+        }
+        fn on_session_touched(&self, session_id: String, title: String, updated_at: String) {
+            self.0.on_session_touched(session_id, title, updated_at);
+        }
+        fn on_projects(&self, projects: Vec<ProjectSummary>) {
+            self.0.on_projects(projects);
+        }
+        fn on_roam_peer_status(&self, label: String, status: String) {
+            self.0.on_roam_peer_status(label, status);
+        }
+        fn on_roam_sessions(&self, label: String, sessions: Vec<SessionSummary>) {
+            self.0.on_roam_sessions(label, sessions);
+        }
+        fn on_peer_new_session(&self, label: String, session_id: String) {
+            self.0.on_peer_new_session(label, session_id);
+        }
+        fn on_active_run(&self, session_id: String, run_id: String) {
+            self.0.on_active_run(session_id, run_id);
+        }
+        fn on_commands(&self, commands: Vec<String>) {
+            self.0.on_commands(commands);
+        }
+        fn on_session_open_failed(&self, session_id: String, message: String) {
+            self.0.on_session_open_failed(session_id, message);
+        }
+    }
+
+    #[test]
+    fn the_run_end_notification_ends_the_turn_exactly_once() {
+        // goose declares the run over BEFORE it answers `session/prompt`, and on
+        // roam the response was measured failing to arrive at all while the rest
+        // of the stream stayed healthy. Ending the turn on the notification is
+        // what keeps that from leaving the app "thinking" until its user hits
+        // Stop; the late response must then be a no-op (not a second end, and not
+        // an end imposed on a newer turn).
+        let (core, events) = core();
+        let key = "roam:Phaethon:s1".to_string();
+        core.inner.hub.display(&key);
+        core.inner.state.lock().in_flight.insert(key.clone());
+
+        crate::session::DispatchHost::active_run(&*core, key.clone(), "run-9".to_string());
+        crate::session::DispatchHost::active_run(&*core, key.clone(), String::new());
+
+        assert_eq!(events.run_ends(), vec![format!("run_ended {key} ended")]);
+        assert!(!core.turn_in_flight(key.clone()));
+        assert!(
+            !core.finish_turn(&key, "end_turn", true),
+            "the response cannot end a turn the notification already closed"
+        );
+        assert_eq!(events.run_ends().len(), 1);
+
+        // A later bare title update must clear nothing: no run was live.
+        crate::session::DispatchHost::active_run(&*core, key.clone(), String::new());
+        assert_eq!(events.run_ends().len(), 1);
+    }
+
+    #[test]
+    fn a_lost_wire_ends_its_turn_and_leaves_other_chats_alone() {
+        let (core, events) = core();
+        let lost = "roam:Phaethon:s1".to_string();
+        let other = "roam:Phaethon:s2".to_string();
+        core.inner.hub.display(&lost);
+        {
+            let mut state = core.inner.state.lock();
+            state.in_flight.insert(lost.clone());
+            state.in_flight.insert(other.clone());
+        }
+
+        crate::session::DispatchHost::turn_lost(&*core, &lost);
+
+        assert_eq!(events.run_ends(), vec![format!("run_ended {lost} error")]);
+        assert!(!core.turn_in_flight(lost));
+        assert!(
+            core.turn_in_flight(other),
+            "a drop on one session must not release another chat's turn"
+        );
+    }
 }

@@ -1530,8 +1530,18 @@ class ConnectionManager private constructor(context: Context) {
                 turnInFlight = true
                 turnInFlightSession = targetSid
                 io { unstable.steer(text, run) }
-            } else {
+            } else if (core.turnInFlight(targetSid)) {
                 enqueue(PendingSend(text, images, files, targetSid))
+            } else {
+                // We believe a turn is running, the server reports no live run id, AND the
+                // core has already closed its turn: nothing is coming to drain the queue, so
+                // queueing here would park this message until the user pressed Stop (it just
+                // did that to the previous send). Release the stale turn and send now.
+                inFlight.remove(targetSid)
+                turnInFlight = true
+                turnInFlightSession = targetSid
+                inFlight.add(targetSid)
+                sendPromptBlocks(text, images, files, expect = targetSid)
             }
         } else {
             // Not live / not ready (initial connect or silent reconnect window): queue and

@@ -15,6 +15,25 @@ All notable changes to Grouse are recorded here. The format is based on
   instead of showing it idle; a prompt queued in a background chat starts when
   that chat's turn ends, even while another chat is on screen.
 
+### Fixed
+
+- **A roam turn could stay "thinking" until Stop was pressed.** A turn ended
+  only on its `session/prompt` response, so when that response reached the app
+  late or not at all the chat stayed busy and its composer queued every later
+  send behind a turn nothing could finish. goose's `activeRunId: null`
+  notification — which it emits *before* the response — is now a first-class
+  end-of-turn signal, and whichever of the two arrives first ends the turn once
+  (a late second signal is a no-op, not a second end). A dropped roam link also
+  ends the turn it was carrying, instead of leaving the core believing that chat
+  is still busy forever.
+- **A generated session name no longer reads as "the run ended".** The
+  session-name update carries only `title`/`messageCount`; reading its missing
+  `activeRunId` as null cleared the steer key in the middle of a live run.
+  `activeRunId` is now parsed three-state (absent / null / id).
+- **Android: a send could park behind a dead turn.** When the app believed a
+  turn was running, no run id was known, and the core had already closed it, the
+  message was queued for a `RunEnded` that never came. It is now sent.
+
 ## [0.2.22] - 2026-10-23
 
 ### Added

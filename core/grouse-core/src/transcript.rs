@@ -1280,6 +1280,15 @@ impl TranscriptStore {
     /// `Upsert` (the streaming deltas never carried a completion) so a client
     /// renders the markdown once, then end the turn on the stream.
     pub fn run_ended(&self, stop_reason: &str) {
+        self.seal_turn();
+        self.announce_run_ended(stop_reason);
+    }
+
+    /// Close the turn's streamed row and flush its speech — the MUTATING half
+    /// of [`Self::run_ended`], split out so a caller can persist a settled
+    /// snapshot between the two (a cache written before the seal would keep an
+    /// unsealed thought). Emits the row's final `Upsert` and any sentences.
+    pub fn seal_turn(&self) {
         let (op, speak) = {
             let mut st = self.state.lock();
             // Thinking that led nowhere must not frame the NEXT turn's tools.
@@ -1297,6 +1306,11 @@ impl TranscriptStore {
         for sentence in speak {
             self.listener.on_speak(sentence);
         }
+    }
+
+    /// Tell the client the turn is over (fires `on_run_ended` with this
+    /// store's session id). The non-mutating half of [`Self::run_ended`].
+    pub fn announce_run_ended(&self, stop_reason: &str) {
         let session_id = self.state.lock().session_id.clone();
         self.listener
             .on_run_ended(session_id, stop_reason.to_string());

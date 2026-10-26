@@ -997,6 +997,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_transcript(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_turn_in_flight(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_unarchive_session(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_window(
@@ -1243,6 +1245,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_transcript(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_grouse_core_fn_method_core_turn_in_flight(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_grouse_core_fn_method_core_unarchive_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_window(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1555,6 +1559,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_transcript() and 0xFFFF) != 63821) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_core_turn_in_flight() and 0xFFFF) != 57575) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_unarchive_session() and 0xFFFF) != 51838) {
@@ -2493,6 +2500,17 @@ public interface CoreInterface {
     fun `transcript`(): List<Message>
     
     /**
+     * Whether a turn is still outstanding for `session_id` — the core's
+     * authoritative view of the wire, as opposed to a client's own "I sent
+     * something and have not seen the end" flag.
+     *
+     * A UI uses it to reconcile a turn it believes is running but which the
+     * core has already closed (a lost `on_run_ended`): sending behind a dead
+     * turn parks the message in a queue nothing will ever drain.
+     */
+    fun `turnInFlight`(`sessionId`: kotlin.String): kotlin.Boolean
+    
+    /**
      * Restore an archived session; re-lists.
      */
     fun `unarchiveSession`(`sessionId`: kotlin.String)
@@ -3207,6 +3225,29 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     UniffiLib.uniffi_grouse_core_fn_method_core_transcript(
         it,
         _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Whether a turn is still outstanding for `session_id` — the core's
+     * authoritative view of the wire, as opposed to a client's own "I sent
+     * something and have not seen the end" flag.
+     *
+     * A UI uses it to reconcile a turn it believes is running but which the
+     * core has already closed (a lost `on_run_ended`): sending behind a dead
+     * turn parks the message in a queue nothing will ever drain.
+     */override fun `turnInFlight`(`sessionId`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_turn_in_flight(
+        it,
+        
+        FfiConverterString.lower(`sessionId`),_status)
 }
     }
     )

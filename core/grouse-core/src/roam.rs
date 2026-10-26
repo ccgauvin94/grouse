@@ -1198,6 +1198,11 @@ impl RoamPeer {
                 // The host's run map is authoritative (it only emits the end
                 // when a run was live) and the replay is over with the link.
                 self.host.active_run(key.clone(), String::new());
+                // The prompt reply died with the link, so this is the only thing
+                // that can end the turn now: whoever owns the store must release
+                // it, or the app keeps drawing "thinking" and queues every later
+                // send behind a turn that can never finish.
+                self.host.turn_lost(&key);
                 self.host.end_replay(&key);
             }
             return;
@@ -1557,6 +1562,12 @@ mod tests {
             if !run_id.is_empty() {
                 self.replaying.lock().remove(&key);
             }
+        }
+        fn turn_lost(&self, key: &str) {
+            self.recorder
+                .events
+                .lock()
+                .push(format!("turn_lost {key}"));
         }
         fn config(&self, key: &str, options: Vec<ConfigOption>) {
             if self.hub.is_displayed(key) {
