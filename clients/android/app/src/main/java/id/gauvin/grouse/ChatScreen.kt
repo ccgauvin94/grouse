@@ -656,13 +656,16 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             // text until the turn finishes (skips the per-token Markdown re-parse).
                             itemsIndexed(grouped, key = { _, item -> item.firstId }) { i, item ->
                                 when (item) {
-                                    is ChatItem.Tools -> ToolChipGroup(item.items)
+                                    // `live` is what lets a running step's chip pulse: it is this
+                                    // CHAT's turn, and a chip in a finished chat must not animate.
+                                    is ChatItem.Tools -> ToolChipGroup(item.items, live = cm.busy.value)
                                     is ChatItem.Msg -> {
                                         val pinned = item.m.role == "mcpapp" &&
                                             item.m.appKey.isNotEmpty() && item.m.appKey == pins
                                         MessageBubble(
                                             item.m,
                                             streaming = i == 0 && cm.busy.value && item.m.role == "assistant",
+                                            live = cm.busy.value,
                                             // Each message carries its own stats now, so an older reply
                                             // long-presses to ITS numbers rather than the latest turn's.
                                             usage = item.m.usage,

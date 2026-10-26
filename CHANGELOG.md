@@ -28,6 +28,12 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Added
 
+- **A running step's chip pulses.** While a step is actually working its label
+  ticks `…` (and the collapsed run shows a spinner instead of the wrench), so a
+  live chip reads as "Looking up the game time…" and settles the instant it
+  finishes. It animates only while *this chat's* turn is in flight: a replayed
+  row whose completion the server never re-sent keeps `in_progress` forever, and a
+  chip pulsing in a finished chat would claim work that is not happening.
 - **Concurrent turns, one per chat.** A reply can stream in a roam chat while
   another runs on a different peer or on the main connection: in-flight state is
   keyed per session, each chat keeps its own queue, and a completion clears only

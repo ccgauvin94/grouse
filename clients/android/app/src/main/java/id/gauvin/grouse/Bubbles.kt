@@ -11,6 +11,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
@@ -113,13 +118,14 @@ fun MessageBubble(
     streaming: Boolean = false,
     usage: AcpEvent.MessageUsage? = null,
     pinned: Boolean = false,
+    live: Boolean = false,
     onPin: (() -> Unit)? = null,
     onUnpin: (() -> Unit)? = null,
 ) {
     when (m.role) {
         "user" -> UserBubble(m)
         "thought" -> ThoughtBubble(m.text)
-        "tool" -> ToolChip(m)
+        "tool" -> ToolChip(m, live = live)
         "error" -> ErrorBubble(m.text)
         "chart" -> ChartView(m.text)
         "mcpapp" -> McpAppView(m, pinned, onPin, onUnpin)
@@ -602,6 +608,25 @@ internal fun groupChatItems(messages: List<ChatMessage>): List<ChatItem> {
     return out
 }
 
+/** A trailing "." → ".." → "..." that ticks while a step is RUNNING, so a live chip
+ *  reads as "Looking up the game time…". It animates only while this chat's turn is
+ *  live: a replayed row whose completion the server never re-sent keeps
+ *  `in_progress` forever, and a chip pulsing in a finished chat would claim work
+ *  that is not happening. */
+@Composable
+private fun liveDots(live: Boolean): String {
+    if (!live) return ""
+    val pulse = rememberInfiniteTransition(label = "step-pulse")
+    // A float ramp wrapped to 1..3 dots: the typed Int overload is not available
+    // on this Compose version's InfiniteTransition.
+    val ramp by pulse.animateFloat(
+        initialValue = 0f, targetValue = 3f,
+        animationSpec = infiniteRepeatable(tween(durationMillis = 900, easing = LinearEasing)),
+        label = "step-dots",
+    )
+    return ".".repeat(1 + (ramp.toInt() % 3))
+}
+
 /** ACP tool titles look like "shell · ls -laR /some/long/path". Split into a short badge label
  *  and the (often long) detail, so a collapsed group header can show just the label. */
 private fun splitToolTitle(title: String): Pair<String, String> {
@@ -615,7 +640,7 @@ private fun splitToolTitle(title: String): Pair<String, String> {
  *  draw on. Tap to expand into the step: each call preceded by the thinking the core absorbed
  *  for it, oldest first. */
 @Composable
-internal fun ToolChipGroup(items: List<ChatMessage>) {
+internal fun ToolChipGroup(items: List<ChatMessage>, live: Boolean = false) {
     var expanded by remember { mutableStateOf(false) }
     val names = items.map { splitToolTitle(it.text).first }.distinct()
     // The label rides on the first row: the core anchors a run on its first call.
@@ -623,6 +648,9 @@ internal fun ToolChipGroup(items: List<ChatMessage>) {
     val label = summary.ifBlank {
         if (names.size == 1) "${items.size}× ${names[0]}" else "${items.size} tool calls"
     }
+    // The step is still working while any of its calls is: same pulse the single
+    // call shows, so a multi-call step does not look finished between calls.
+    val running = live && items.any { it.status == "in_progress" }
     Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
         Surface(
             color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
@@ -637,10 +665,15 @@ internal fun ToolChipGroup(items: List<ChatMessage>) {
                     tint = MaterialTheme.colorScheme.outline
                 )
                 Spacer(Modifier.width(2.dp))
-                Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(13.dp),
-                    tint = MaterialTheme.colorScheme.primary)
+                if (running) {
+                    CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.5.dp)
+                } else {
+                    Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(13.dp),
+                        tint = MaterialTheme.colorScheme.primary)
+                }
                 Spacer(Modifier.width(8.dp))
-                Text(label.replace('_', ' '), style = MaterialTheme.typography.labelLarge)
+                Text(label.replace('_', ' ') + liveDots(running),
+                    style = MaterialTheme.typography.labelLarge)
             }
         }
         AnimatedVisibility(expanded) {
@@ -664,7 +697,7 @@ internal fun ToolChipGroup(items: List<ChatMessage>) {
  *  collapsed by default (matches ThoughtBubble's pattern) so a wall of tool calls stays scannable.
  *  `showThought` is off inside a run: the run already prints each call's thinking above it. */
 @Composable
-private fun ToolChip(m: ChatMessage, showThought: Boolean = true) {
+private fun ToolChip(m: ChatMessage, showThought: Boolean = true, live: Boolean = false) {
     val title = m.text; val detail = m.detail
     var expanded by remember { mutableStateOf(false) }
     val (name, inlineDetail) = splitToolTitle(title)
@@ -692,7 +725,8 @@ private fun ToolChip(m: ChatMessage, showThought: Boolean = true) {
                         modifier = Modifier.size(13.dp), tint = MaterialTheme.colorScheme.primary)
                 }
                 Spacer(Modifier.width(8.dp))
-                Text(label, style = MaterialTheme.typography.labelLarge)
+                Text(label + liveDots(live && m.status == "in_progress"),
+                    style = MaterialTheme.typography.labelLarge)
                 if (inlineDetail.isNotBlank()) {
                     Spacer(Modifier.width(8.dp))
                     Text(inlineDetail, style = MaterialTheme.typography.labelMedium,
