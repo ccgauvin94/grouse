@@ -107,6 +107,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.NavController
 import com.halilibo.richtext.markdown.Markdown
 import com.halilibo.richtext.ui.material3.RichText
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -642,7 +643,14 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         // bottom), then messages newest→oldest upward. Bottom is always index 0, so
                         // "open at bottom", "jump to bottom", and streaming-stays-pinned are trivial.
                         LazyColumn(state = listState, reverseLayout = true, modifier = Modifier.fillMaxSize()) {
-                            if (cm.busy.value) item { TypingIndicator() }
+                            if (cm.busy.value) item {
+                                // The readout only fills in when the turn has gone
+                                // quiet (see ConnectionManager.turnDiag).
+                                val diag by produceState("", cm.busy.value) {
+                                    while (true) { value = cm.turnDiag(); delay(1000) }
+                                }
+                                TypingIndicator(diag)
+                            }
                             // Consecutive tool calls collapse into one dropdown (goose often fires a run of
                             // 5-10 shell/read calls back to back — a wall of individual chips otherwise).
                             // Grouped on the forward list so adjacency is chronological, then reversed for

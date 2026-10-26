@@ -816,11 +816,12 @@ private fun ErrorBubble(text: String) {
 }
 
 @Composable
-internal fun TypingIndicator() {
+internal fun TypingIndicator(diag: String = "") {
     // Text-only: the spinner read as a stuck progress bar and the user wanted
     // the thinking message alone while a turn runs. The loading indicator is
     // reserved for opening a session and waiting for its replay.
-    Text(stringResource(R.string.grouse_is_thinking) + liveDots(true),
+    // `diag` is the stuck-turn readout: empty while the turn is ticking along.
+    Text(stringResource(R.string.grouse_is_thinking) + liveDots(true) + diag,
         style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.outline,
         modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))

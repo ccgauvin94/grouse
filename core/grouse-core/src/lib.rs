@@ -515,19 +515,14 @@ enum PendingIntent {
     SetConfig(String, String),
 }
 
-/// The steps of a running turn that are CLOSED and not yet model-labelled.
+/// The steps of a running turn that do not carry a model label yet, oldest first.
 ///
-/// The last run is the step in flight, so it is excluded; everything before it
-/// has finished and can be labelled while the turn continues. `labeled` holds the
-/// steps already rewritten this turn.
-pub(crate) fn closed_unlabeled_steps(
-    turn_runs: &[String],
-    labeled: &HashSet<String>,
-) -> Vec<String> {
-    let Some((_, closed)) = turn_runs.split_last() else {
-        return Vec::new();
-    };
-    closed
+/// This INCLUDES the newest step: a step's chip appears when its call lands, and
+/// by then the thinking that opened it is complete, so there is nothing to wait
+/// for — leaving it out meant the chip the reader is actually looking at kept its
+/// raw first line of thinking for the rest of the turn.
+pub(crate) fn unlabeled_steps(turn_runs: &[String], labeled: &HashSet<String>) -> Vec<String> {
+    turn_runs
         .iter()
         .filter(|id| !labeled.contains(*id))
         .cloned()
@@ -1935,9 +1930,13 @@ impl Core {
             return;
         }
         let store = self.store_for(&key);
+        let last_run = run_ids.last().cloned();
         let runs: Vec<(String, String, Vec<String>)> = run_ids
             .into_iter()
-            .filter(|id| !already.contains(id))
+            // A step labelled mid-turn was labelled from the calls it had THEN;
+            // the last one may have gained calls since, so it is rewritten once
+            // more now that the turn is closed. The rest are done.
+            .filter(|id| Some(id) == last_run.as_ref() || !already.contains(id))
             // One step per thinking burst means a long loop is many labels; a
             // turn with an unusually long loop is capped so the request stays a
             // short one. Steps past the cap keep their provisional label (the
@@ -2000,7 +1999,7 @@ impl Core {
             return;
         };
         let store = self.store_for(&key);
-        let runs: Vec<(String, String, Vec<String>)> = closed_unlabeled_steps(&ids, &labeled)
+        let runs: Vec<(String, String, Vec<String>)> = unlabeled_steps(&ids, &labeled)
             .into_iter()
             .filter_map(|id| {
                 store
@@ -3126,22 +3125,19 @@ mod tests {
     }
 
     #[test]
-    fn only_closed_unlabelled_steps_are_summarised_mid_turn() {
+    fn every_unlabelled_step_is_summarised_mid_turn() {
         // The last run is the step still in flight: labelling it mid-turn would
         // summarise half a step. Steps already rewritten are skipped, so a pass
         // never re-asks for work it has done.
         let ids: Vec<String> = ["t1", "t2", "t3"].iter().map(|s| s.to_string()).collect();
         assert_eq!(
-            closed_unlabeled_steps(&ids, &HashSet::new()),
-            vec!["t1".to_string(), "t2".to_string()]
+            unlabeled_steps(&ids, &HashSet::new()),
+            vec!["t1".to_string(), "t2".to_string(), "t3".to_string()],
+            "the newest step is labelled too: its thinking is already complete"
         );
-        let labeled: HashSet<String> = ["t1".to_string()].into_iter().collect();
-        assert_eq!(
-            closed_unlabeled_steps(&ids, &labeled),
-            vec!["t2".to_string()]
-        );
-        assert!(closed_unlabeled_steps(&["only".to_string()], &HashSet::new()).is_empty());
-        assert!(closed_unlabeled_steps(&[], &HashSet::new()).is_empty());
+        let labeled: HashSet<String> = ["t1".to_string(), "t3".to_string()].into_iter().collect();
+        assert_eq!(unlabeled_steps(&ids, &labeled), vec!["t2".to_string()]);
+        assert!(unlabeled_steps(&[], &HashSet::new()).is_empty());
     }
 
     #[test]

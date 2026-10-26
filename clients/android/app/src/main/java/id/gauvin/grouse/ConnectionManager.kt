@@ -155,6 +155,29 @@ class ConnectionManager private constructor(context: Context) {
     private val inFlight = mutableSetOf<String>()
     private val activeRunIds = mutableMapOf<String, String>()
 
+    /** When the core last SAID anything about a turn (run id, run end, any item).
+     *  Backs the stuck-turn readout: a chat that has been "working" with nothing
+     *  arriving for a long time is the state the user reports, and the two causes
+     *  look different — a live run id means goose still owns a run (something in
+     *  the turn is hung), no run id means goose already closed it and the end
+     *  signal never reached us. */
+    @Volatile private var lastCoreEventAt = 0L
+    private fun noteCoreEvent() { lastCoreEventAt = android.os.SystemClock.elapsedRealtime() }
+
+    /** One line of turn state for a turn that has gone quiet, or "" when it is
+     *  ticking along normally (or nothing is running). Shown next to the typing
+     *  indicator, so a screenshot of a stuck turn answers "whose fault is it?". */
+    fun turnDiag(): String {
+        if (!busy.value) return ""
+        val quiet = if (lastCoreEventAt == 0L) 0L
+            else (android.os.SystemClock.elapsedRealtime() - lastCoreEventAt) / 1000
+        if (quiet < 20) return ""
+        val run = activeRunIds[currentSession.value] ?: activeRunId
+        val runTag = run?.take(8)?.ifEmpty { null } ?: "none"
+        val wire = if (turnInFlight) "wire-busy" else "wire-idle"
+        return " · run $runTag · $wire · quiet ${quiet}s"
+    }
+
     /** The chat being opened becomes the one whose turn state the UI shows. */
     private fun resetTurnRouting(sessionId: String? = currentSession.value) {
         activeRunId = sessionId?.let { activeRunIds[it] }
@@ -2047,6 +2070,7 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     private fun onCoreItem(op: TranscriptOp) {
+        noteCoreEvent()
         when (op) {
             is TranscriptOp.Reset -> {
                 messages.clear()
@@ -2247,6 +2271,7 @@ class ConnectionManager private constructor(context: Context) {
 
 
     private fun onRunEnded(sessionId: String, stopReason: String) {
+        noteCoreEvent()
         // Every completion clears ITS chat; only the chat on screen owns the
         // busy/compacting/run-id state the UI draws.
         inFlight.remove(sessionId)
@@ -2462,6 +2487,7 @@ class ConnectionManager private constructor(context: Context) {
     @Volatile private var activeRunId: String? = null
     val activeRunIdState = mutableStateOf<String?>(null)
     private fun onCoreActiveRun(sessionId: String, runId: String) {
+        noteCoreEvent()
         // Run ids are per session: keep them all so switching back to a running
         // chat restores steer/busy, and a completion for a background chat never
         // touches the chat on screen.

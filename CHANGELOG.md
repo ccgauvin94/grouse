@@ -8,6 +8,18 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Changed
 
+- **The newest chip is labelled too, instead of waiting for the next step.** A
+  step's chip appears when its call lands, and by then the thinking that opened it
+  is finished — so it was never actually "still being thought". It is now
+  labelled like every other step, which means the chip under the reader's eye
+  stops showing a raw first line of thinking. The turn's last step is rewritten
+  once more when the turn ends, since a run can gain calls after its first label.
+- **A turn that has gone quiet says why.** After 20 s with nothing arriving while
+  a chat is "working", the typing line gains `· run <id|none> · wire-busy|idle ·
+  quiet <n>s`. That is the whole diagnosis: a live run id means goose still owns
+  a run (something in the turn is hung), no run id means goose already closed it
+  and the end signal never reached the client.
+
 - **A tool run is now one chip per step, labelled with what it set out to do.**
   A turn used to collapse its whole loop into one chip carrying a paraphrase of
   the model's first thought ("The user is asking what time the Yankees ga…"), with
