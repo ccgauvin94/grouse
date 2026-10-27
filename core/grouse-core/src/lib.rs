@@ -2828,11 +2828,22 @@ impl crate::session::DispatchHost for Core {
                 self.finish_turn(&key, "ended", true);
             }
         } else {
-            self.inner
-                .state
-                .lock()
-                .active_runs
-                .insert(key.clone(), run_id.clone());
+            {
+                let mut state = self.inner.state.lock();
+                state.active_runs.insert(key.clone(), run_id.clone());
+                // A run id is a turn in flight, whoever started it. Without this
+                // the CORE would not know the turn exists, and the end-of-turn
+                // signal — `activeRunId: null`, or the prompt's response — would
+                // find nothing to release: `finish_turn` returns early and emits
+                // no `run_ended`, so the app that adopted the run (it marks the
+                // chat busy the moment it sees an id) stays "working" until its
+                // user presses Stop. Measured on a roam chat after a link drop:
+                // the turn was released by `turn_lost`, goose re-announced the
+                // still-running run on reconnect, and the reply landed with the
+                // chat stuck on `Queue message…`.
+                state.in_flight.insert(key.clone());
+                state.incomplete.insert(key.clone());
+            }
             self.inner.listener.on_active_run(key, run_id);
         }
     }
@@ -3100,6 +3111,32 @@ mod tests {
         // A later bare title update must clear nothing: no run was live.
         crate::session::DispatchHost::active_run(&*core, key.clone(), String::new());
         assert_eq!(events.run_ends().len(), 1);
+    }
+
+    #[test]
+    fn a_run_adopted_after_a_reconnect_still_ends_its_turn() {
+        // The turn was started before the link dropped, so the core's own send is
+        // gone (`turn_lost` released it). On reconnect goose re-announces the
+        // still-running run, and the app marks that chat busy the moment it sees
+        // an id — so the CORE must count it as a turn too, or nothing emits
+        // `run_ended` when it finishes and the chat stays "working" until Stop.
+        let (core, events) = core();
+        let key = "roam:Phaethon:20261026_1".to_string();
+        core.inner.hub.display(&key);
+
+        crate::session::DispatchHost::turn_lost(&*core, &key); // nothing to release
+        crate::session::DispatchHost::active_run(&*core, key.clone(), "run-7".to_string());
+        assert!(
+            core.turn_in_flight(key.clone()),
+            "an announced run is a turn in flight, even with no local send"
+        );
+
+        crate::session::DispatchHost::active_run(&*core, key.clone(), String::new());
+        assert_eq!(
+            events.run_ends(),
+            vec![format!("run_ended {key} ended")],
+            "the adopted turn must be released like any other"
+        );
     }
 
     #[test]

@@ -2070,9 +2070,9 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     private fun onCoreItem(op: TranscriptOp) {
-        noteCoreEvent()
         when (op) {
             is TranscriptOp.Reset -> {
+                noteCoreEvent()
                 messages.clear()
                 coreKeyToAppId.clear()
                 olderPending.clear()
@@ -2089,15 +2089,31 @@ class ConnectionManager private constructor(context: Context) {
                 // consecutive "tool" rows itself and each call keeps a stable
                 // tool_call_id key.
                 val rows = itemRows(op.item)
+                // Not every Upsert is progress: the step summarizer rewrites chip
+                // labels while the turn runs, and the tool lifecycle repeats the
+                // same row. Counting those kept a genuinely stuck turn reading
+                // "quiet 0s", which is exactly the reading this readout exists to
+                // give (see turnDiag).
+                val progress = rows.any { (key, bubble) ->
+                    val idx = rowIndexOf(key)
+                    idx < 0 || messages[idx].let {
+                        it.text != bubble.text || it.output != bubble.output ||
+                            it.steps != bubble.steps || it.status != bubble.status ||
+                            it.role != bubble.role
+                    }
+                }
+                if (progress) noteCoreEvent()
                 if (loadingOlder) olderPending.addAll(rows)
                 else rows.forEach { (key, bubble) -> upsertBubble(key, bubble) }
-                if (replayActive.value) replayProgress.value++
+                if (progress && replayActive.value) replayProgress.value++
             }
             is TranscriptOp.AppendText -> {
+                noteCoreEvent()
                 val idx = rowIndexOf(op.id)
                 if (idx >= 0) messages[idx] = messages[idx].copy(text = messages[idx].text + op.chunk)
             }
             is TranscriptOp.AppendOutput -> {
+                noteCoreEvent()
                 val idx = rowIndexOf(op.id)
                 if (idx >= 0) messages[idx] = messages[idx].let {
                     // Live output appends (capped); the finalizing Upsert replaces.

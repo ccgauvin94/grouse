@@ -70,6 +70,21 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed
 
+- **A turn adopted after a reconnect could never end, so the chat sat on
+  "working…" until Stop.** When the link dropped mid-turn the core released the
+  turn (no reply could ever arrive) — correct — but `in_flight` was emptied with
+  it. If goose re-announced the *still-running* run on reconnect, the app marked
+  that chat busy again on the run id while the CORE no longer knew the turn
+  existed, so `finish_turn` found nothing to release when the run ended and
+  emitted no `run_ended`. The reply rendered in full, the composer said "Queue
+  message…", and only Stop broke out. An announced run id now counts as a turn in
+  flight, so the end signal releases it. Pinned by
+  `a_run_adopted_after_a_reconnect_still_ends_its_turn` (verified to fail without
+  the fix).
+- **The quiet readout no longer lies.** A chip's label rewrite is not progress:
+  counting those Upserts kept a stuck turn reading `quiet 0s`. Only rows whose
+  text, output, steps, status or role actually changed reset the timer.
+
 - **A reopened chat showed an older turn's tool runs at the END of the chat.**
   Two loads of one session could run at once. A replay *appends* to whatever the
   store holds, so the second one's rows landed after the first one's, whatever
