@@ -70,6 +70,20 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed
 
+- **A turn that nothing can finish is now released by the core.** Both end-of-turn
+  signals can be lost — `activeRunId: null` is a notification, the `session/prompt`
+  reply is a response — and the measured stuck state was exactly that:
+  `run none · wire-busy · quiet 173s`, the answer fully rendered and the chat still
+  saying "working…" until Stop. The core now watches its own turns: a turn that is
+  in flight, has **no live run reported by goose**, is not replaying, and whose
+  transcript has not changed for 60 s is ended (`stop = timeout`, marked
+  incomplete so the cache cannot claim to be current). The live-run gate is what
+  keeps it honest — goose announces a run id for every run it actually has, so its
+  absence means nothing on the server is going to speak again; a long silent tool
+  keeps its run id and is never killed. Pinned by
+  `a_silent_turn_with_no_live_run_is_released_and_nothing_else_is` and
+  `idle_for_grows_until_the_store_changes`.
+
 - **A turn adopted after a reconnect could never end, so the chat sat on
   "working…" until Stop.** When the link dropped mid-turn the core released the
   turn (no reply could ever arrive) — correct — but `in_flight` was emptied with

@@ -601,6 +601,16 @@ impl State {
     }
 }
 
+/// Monotonic milliseconds since the process's first call — a clock that cannot
+/// go backwards or jump with the wall clock, which is all an idle timer needs.
+fn now_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
 /// Does this bubble belong to `id` (its message id for text, its tool_call_id
 /// for the tool-ish bubbles)? Used to anchor a replay merge.
 fn bubble_owns(b: &Bubble, id: &str) -> bool {
@@ -741,6 +751,10 @@ pub struct TranscriptStore {
     /// just released) the state lock when it emits, and re-locking there would
     /// deadlock the runtime thread.
     hold: std::sync::atomic::AtomicBool,
+    /// When this store last CHANGED (monotonic ms since the process's start).
+    /// The turn watchdog reads it: a chat whose transcript has not moved and whose
+    /// run the server no longer reports is a turn nothing can ever finish.
+    last_change_ms: std::sync::atomic::AtomicU64,
     /// ONE `session/load` at a time per session.
     ///
     /// A replay APPENDS to whatever the store holds (only the merge paint
@@ -761,6 +775,7 @@ impl TranscriptStore {
         Self {
             listener,
             hold: std::sync::atomic::AtomicBool::new(false),
+            last_change_ms: std::sync::atomic::AtomicU64::new(now_ms()),
             load_gate: tokio::sync::Mutex::new(()),
             state: Mutex::new(State {
                 bubbles: Vec::new(),
@@ -1571,6 +1586,8 @@ impl TranscriptStore {
     }
 
     fn emit_ops(&self, ops: Vec<TranscriptOp>) {
+        self.last_change_ms
+            .store(now_ms(), std::sync::atomic::Ordering::SeqCst);
         // While a replay is being ingested the rows update this store and stay
         // OFF the wire: painting each one as it arrives is what made a reload
         // walk the history from the top (grouse#18). The release emits one
@@ -1587,6 +1604,16 @@ impl TranscriptStore {
     /// rows still land in the store, the cache and the window.
     pub fn hold_emissions(&self, hold: bool) {
         self.hold.store(hold, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// How long since anything in this transcript changed. The turn watchdog's
+    /// measure of "quiet": readings, labels and re-delivered rows all reset it,
+    /// so a genuinely working turn never looks idle.
+    pub fn idle_for(&self) -> std::time::Duration {
+        let last = self
+            .last_change_ms
+            .load(std::sync::atomic::Ordering::SeqCst);
+        std::time::Duration::from_millis(now_ms().saturating_sub(last))
     }
 
     /// Claim this session's single load slot. Held for the WHOLE `session/load`
@@ -2720,6 +2747,21 @@ mod tests {
         // a hole.
         store.append_chunk("agent", "new", Some("z9"), false);
         assert!(store.end_merge(), "no overlap => a full reload is owed");
+    }
+
+    #[test]
+    fn idle_for_grows_until_the_store_changes() {
+        let (l, _i_evts) = listener();
+        let store = TranscriptStore::new(l);
+        let first = store.idle_for();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(store.idle_for() >= first, "an untouched store only gets older");
+        store.append_chunk("agent", "a token", Some("m1"), false);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(
+            store.idle_for() < std::time::Duration::from_millis(30),
+            "a row resets the idle clock"
+        );
     }
 
     #[test]

@@ -529,6 +529,28 @@ pub(crate) fn unlabeled_steps(turn_runs: &[String], labeled: &HashSet<String>) -
         .collect()
 }
 
+/// How long a turn may sit silent with NO live run before the core releases it.
+///
+/// Both end-of-turn signals can be lost: `activeRunId: null` is a notification and
+/// the `session/prompt` reply is a response, and a turn whose reply died with a
+/// dropped stream looked exactly like this — the answer rendered, the run was
+/// gone, and the chat said "working…" until the user pressed Stop (measured: `run
+/// none · quiet 173s`). A live run id is the gate that keeps this honest: goose
+/// announces one for every run it actually has, so its absence means nothing on
+/// the server is going to speak again.
+const TURN_SILENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const TURN_WATCHDOG_STEP: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Is this turn dead? Pure so the rule is testable without waiting a minute.
+pub(crate) fn turn_is_dead(
+    in_flight: bool,
+    has_live_run: bool,
+    replaying: bool,
+    idle: std::time::Duration,
+) -> bool {
+    in_flight && !has_live_run && !replaying && idle >= TURN_SILENCE_TIMEOUT
+}
+
 /// How many of a turn's steps the end-of-turn summarizer labels. A step is one
 /// thinking burst plus the calls it ran, so a long loop is many steps; past this
 /// the rest keep their provisional label instead of queueing a huge request.
@@ -1897,6 +1919,7 @@ impl Core {
             // as a settled copy.
             state.incomplete.insert(session_id.clone());
         }
+        self.spawn_turn_watchdog(session_id.clone());
         let summary_owner = owner.clone();
         crate::roam::runtime().spawn(async move {
             let result = owner.request("session/prompt", params).await;
@@ -1905,6 +1928,42 @@ impl Core {
             // after the reply and on a hidden session on the SAME connection,
             // so it costs the user no latency.
             core.spawn_run_summaries(summary_owner, summary_key);
+        });
+    }
+
+    /// Release a turn nothing can finish (see [`TURN_SILENCE_TIMEOUT`]).
+    ///
+    /// Self-terminating: it exits as soon as the turn ends by any other route, and
+    /// it never touches a turn goose still reports a live run for.
+    fn spawn_turn_watchdog(&self, key: String) {
+        let core = self.clone();
+        crate::roam::runtime().spawn(async move {
+            loop {
+                tokio::time::sleep(TURN_WATCHDOG_STEP).await;
+                let (in_flight, has_run, replaying) = {
+                    let state = core.inner.state.lock();
+                    (
+                        state.in_flight.contains(&key),
+                        state.active_runs.contains_key(&key),
+                        state.replaying.contains(&key),
+                    )
+                };
+                if !in_flight {
+                    return; // the turn ended the normal way
+                }
+                let idle = core.store_for(&key).idle_for();
+                if turn_is_dead(in_flight, has_run, replaying, idle) {
+                    eprintln!(
+                        "grouse-core: releasing a silent turn for {key} \
+                         (no live run, nothing for {}s)",
+                        idle.as_secs()
+                    );
+                    // `clean = false`: the rows are not known to be final, so the
+                    // cache is written unstamped and the next open re-reviews them.
+                    core.finish_turn(&key, "timeout", false);
+                    return;
+                }
+            }
         });
     }
 
@@ -3111,6 +3170,26 @@ mod tests {
         // A later bare title update must clear nothing: no run was live.
         crate::session::DispatchHost::active_run(&*core, key.clone(), String::new());
         assert_eq!(events.run_ends().len(), 1);
+    }
+
+    #[test]
+    fn a_silent_turn_with_no_live_run_is_released_and_nothing_else_is() {
+        use std::time::Duration;
+        let long = TURN_SILENCE_TIMEOUT + Duration::from_secs(1);
+        assert!(turn_is_dead(true, false, false, long), "the measured stuck state");
+        assert!(
+            !turn_is_dead(true, true, false, long),
+            "goose still reports a run: something inside the turn is working"
+        );
+        assert!(!turn_is_dead(false, false, false, long), "no turn to release");
+        assert!(
+            !turn_is_dead(true, false, true, long),
+            "a replay is progressing, not stuck"
+        );
+        assert!(
+            !turn_is_dead(true, false, false, TURN_SILENCE_TIMEOUT - Duration::from_secs(1)),
+            "a turn that has only just gone quiet must not be killed"
+        );
     }
 
     #[test]
