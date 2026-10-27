@@ -110,6 +110,8 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_window);
     RESOLVE(grouse_load_older);
     RESOLVE(grouse_config);
+    RESOLVE(grouse_turn_log);
+    RESOLVE(grouse_turn_diag);
     RESOLVE(grouse_roam_connect);
     RESOLVE(grouse_roam_disconnect);
     RESOLVE(grouse_roam_open_session);
@@ -158,7 +160,7 @@ bool CoreBridge::resolve()
     // The listener table's layout and the symbol signatures are the contract.
     // An older core (or a stale GROUSE_CORE) is refused before any callback can
     // be invoked with the wrong arity.
-    static constexpr unsigned kExpectedAbiVersion = 2;
+    static constexpr unsigned kExpectedAbiVersion = 3;
     if (!a.grouse_abi_version) {
         qWarning() << "CoreBridge: core library predates the ABI version symbol; refusing it";
         return false;
@@ -177,7 +179,8 @@ bool CoreBridge::resolve()
         && check(a.grouse_string_free) && check(a.grouse_connect)
         && check(a.grouse_send_prompt) && check(a.grouse_new_session)
         && check(a.grouse_open_session) && check(a.grouse_list_sessions)
-        && check(a.grouse_status) && check(a.grouse_ready);
+        && check(a.grouse_status) && check(a.grouse_ready)
+        && check(a.grouse_turn_log) && check(a.grouse_turn_diag);
     if (!ok) {
         qWarning() << "CoreBridge: core library is missing required grouse_* symbols";
         return false;

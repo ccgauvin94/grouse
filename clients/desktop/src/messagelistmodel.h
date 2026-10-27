@@ -40,6 +40,7 @@ public:
         SummaryRole,       // "summary"  — a tool run's one-line label (issue #13)
         StepThoughtRole,   // "stepThought" — the thinking a tool run absorbed; shown
                            //              when the chip opens
+        StepsRole,         // "steps"    — a delegate's subagent tool calls [{name,detail}]
         ExpandedRole,      // "expanded" — per-row UI state kept in the model so it
                            //              survives delegate recycling (thinking bubble)
     };

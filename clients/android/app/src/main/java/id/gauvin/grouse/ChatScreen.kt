@@ -163,7 +163,11 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     val ctx = LocalContext.current
     var showSchedule by remember { mutableStateOf(false) }
     var showContextDetail by remember { mutableStateOf(false) }
-    var showTurnLog by remember { mutableStateOf(false) }    // Assistant health from last-briefing recency (briefings run hourly 7 AM–10 PM). Green = fresh,
+    var showTurnLog by remember { mutableStateOf(false) }
+    // Debug diagnostics (Settings → Experimental, default OFF): the turn log and the
+    // live turn-state readout both expose internal state rather than conversation.
+    val debugTools = cm.store.debugTools
+    // Assistant health from last-briefing recency (briefings run hourly 7 AM–10 PM). Green = fresh,
     // yellow = late, red = stale/never. Overnight the gap grows to ~9h and that's still healthy.
     val lastBriefing = cm.store.lastBriefingAt
     val briefingAgo = if (lastBriefing > 0)
@@ -380,7 +384,7 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
         dismissButton = { TextButton(onClick = { showVisionWarn = false }) { Text(stringResource(R.string.cancel)) } },
     )
 
-    if (showTurnLog) {
+    if (showTurnLog && debugTools) {
         TurnLogDialog(cm) { showTurnLog = false }
     }
 
@@ -441,8 +445,12 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             .clickable(enabled = !online) { cm.connectSaved() }
                             // Long-press the title for the core's turn log: the one
                             // place the client can show WHY a chat thinks it is busy.
-                            .pointerInput(Unit) {
-                                detectTapGestures(onLongPress = { showTurnLog = true })
+                            .pointerInput(debugTools) {
+                                // Long-press is the debug gesture only; with the switch
+                                // off the title is just the reconnect tap it always was.
+                                if (debugTools) {
+                                    detectTapGestures(onLongPress = { showTurnLog = true })
+                                }
                             }) {
                         Surface(color = dot, shape = RoundedCornerShape(50), modifier = Modifier.size(10.dp)) {}
                         Spacer(Modifier.width(8.dp))
@@ -656,10 +664,10 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         LazyColumn(state = listState, reverseLayout = true, modifier = Modifier.fillMaxSize()) {
                             if (cm.busy.value) item {
                                 // The readout only fills in when the turn has gone
-                                // quiet (see ConnectionManager.turnDiag).
-                                val diag by produceState("", cm.busy.value) {
-                                    while (true) { value = cm.turnDiag(); delay(1000) }
-                                }
+                                // quiet (see ConnectionManager.turnDiag). Gated with the
+                                // rest of the debug surface: with the switch off nothing
+                                // polls and the indicator is the plain typing dots.
+                                val diag = if (debugTools) turnStateReadout(cm) else ""
                                 TypingIndicator(diag)
                             }
                             // Consecutive tool calls collapse into one dropdown (goose often fires a run of
@@ -1407,15 +1415,32 @@ private fun prettyOption(raw: String) = when (raw) {
 
 // ---- Sessions ---------------------------------------------------------------
 
+/** The live turn-state line under the typing indicator, re-read once a second while a
+ *  turn is in flight. Its own composable so the polling loop can be skipped entirely
+ *  when Developer diagnostics is off — a `produceState` cannot skip itself. */
+@Composable
+private fun turnStateReadout(cm: ConnectionManager): String {
+    val diag by produceState("", cm.busy.value) {
+        while (true) { value = cm.turnDiag(); delay(1000) }
+    }
+    return diag
+}
+
 /** The core's turn-lifecycle log: prompt sent, run start/end, the reply, and every
  *  finish decision (including the ones that were IGNORED because nothing was in
  *  flight). Long-press the chat title to open it. */
 @Composable
 private fun TurnLogDialog(cm: ConnectionManager, onDismiss: () -> Unit) {
     val log = remember { cm.turnLog().ifBlank { "(no turn events yet)" } }
+    val clip = LocalClipboardManager.current
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.close)) } },
+        // Copy rather than screenshot: a stuck turn needs the whole log pasted
+        // somewhere it can be read, not a crop of a scrollable dialog.
+        dismissButton = {
+            TextButton(onClick = { clip.setText(AnnotatedString(log)) }) { Text("Copy") }
+        },
         title = { Text("Turn log") },
         text = {
             Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {

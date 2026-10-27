@@ -46,7 +46,7 @@ use crate::{
 /// The desktop refuses a library whose value it does not expect — a mismatch is
 /// a callback called with the wrong arity (a garbage pointer), not a compile
 /// error, so it must be caught at load time.
-pub const GROUSE_ABI_VERSION: u32 = 2;
+pub const GROUSE_ABI_VERSION: u32 = 3;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
@@ -816,6 +816,27 @@ pub extern "C" fn grouse_active_session_id(h: *mut c_void) -> *mut c_char {
             .unwrap_or(std::ptr::null_mut())
     }))
     .unwrap_or(std::ptr::null_mut())
+}
+
+/// The core's turn log (see `Core::turn_log`): one plain-text line per
+/// lifecycle event, panics last. Debug output, not a record — the UI must gate
+/// it behind an explicit switch (both clients default it OFF), because it is
+/// unescaped internal state and says nothing a normal user should read.
+#[no_mangle]
+pub extern "C" fn grouse_turn_log(h: *mut c_void) -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| c_str(&handle(h).core.turn_log())))
+        .unwrap_or(std::ptr::null_mut())
+}
+
+/// One chat's turn state for a UI that has gone quiet (`Core::turn_diag`):
+/// whose turn is live, the run id, and how long the wire has been idle.
+#[no_mangle]
+pub extern "C" fn grouse_turn_diag(h: *mut c_void, session_id: *const c_char) -> *mut c_char {
+    let Some(sid) = (unsafe { c_param(session_id) }) else {
+        return std::ptr::null_mut();
+    };
+    catch_unwind(AssertUnwindSafe(|| c_str(&handle(h).core.turn_diag(sid.to_owned()))))
+        .unwrap_or(std::ptr::null_mut())
 }
 
 #[no_mangle]

@@ -366,6 +366,15 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                 }
                 SettingCaption("Labels each run of tool calls with a short line written by the " +
                     "model, instead of a bare call count.")
+                // Debug surface: the core's turn log (long-press the chat title) and the
+                // live turn state under the typing indicator. Both show internal state
+                // rather than conversation, so they are opt-in and off by default.
+                var debugTools by remember { mutableStateOf(cm.store.debugTools) }
+                SettingsSwitchRow("Developer diagnostics", debugTools) { on ->
+                    debugTools = on; cm.setDebugTools(on)
+                }
+                SettingCaption("Long-press the chat title for the core's turn log, and show " +
+                    "turn state while a reply is being generated.")
             }
 
             Spacer(Modifier.height(24.dp))

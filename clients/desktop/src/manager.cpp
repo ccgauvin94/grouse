@@ -94,6 +94,7 @@ bool Manager::autoConnectEnabled() const { return m_store.value("auto_connect", 
 bool Manager::notificationsEnabled() const { return m_store.value("notify_events", true).toBool(); }
 bool Manager::configuredProvidersOnly() const { return m_store.value("configured_providers_only", true).toBool(); }
 bool Manager::runSummaries() const { return m_store.value("run_summaries", true).toBool(); }
+bool Manager::debugTools() const { return m_store.value("debug_tools", false).toBool(); }
 QString Manager::workingDir() const { return m_store.value("cwd", "").toString(); }
 bool Manager::roamEnabled() const { return m_store.value("roam_enabled", false).toBool(); }
 
@@ -131,13 +132,34 @@ void Manager::setRunSummaries(bool v)
     syncRunSummariesToCore();
 }
 
+void Manager::setDebugTools(bool v)
+{
+    m_store.setValue("debug_tools", v);
+    emit settingsChanged();
+}
+
+QString Manager::turnLog() const
+{
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_turn_log)
+        return QString();
+    return m_bridge->takeString(m_bridge->api().grouse_turn_log(m_bridge->handle()));
+}
+
+QString Manager::turnDiag(const QString &sessionId) const
+{
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_turn_diag)
+        return QString();
+    const QByteArray sid = sessionId.toUtf8();
+    return m_bridge->takeString(
+        m_bridge->api().grouse_turn_diag(m_bridge->handle(), sid.constData()));
+}
+
 void Manager::syncRunSummariesToCore()
 {
     if (!m_bridge || !m_bridge->isAvailable())
         return;
     m_bridge->api().grouse_set_run_summaries(m_bridge->handle(), runSummaries() ? 1 : 0);
 }
-
 void Manager::setWorkingDir(const QString &v)
 {
     m_store.setValue("cwd", v.trimmed().remove(QRegularExpression(QStringLiteral("/+$"))));
@@ -712,18 +734,15 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
                                  {"name", QFileInfo(b.value("resource").toMap()
                                                     .value("uri").toString()).fileName()}};
     }
-    if (!blocks.isEmpty()) {
-        QVariantMap userRow;
-        userRow["id"] = QString();
-        userRow["role"] = QStringLiteral("user");
-        userRow["text"] = text;
-        userRow["html"] = markdownToHtml(text);
-        if (!shown.isEmpty())
-            userRow["images"] = shown;
-        m_messageModel->append(userRow);
-        m_currentIndex = m_messageModel->count() - 1;
-        requestMessagesUpdate();
-    }
+    // The core echoes the prompt into the transcript itself (`spawn_prompt`) —
+    // including an attachment-only prompt, which it records as a `user` item
+    // carrying an attachment COUNT. So this client keeps NO row of its own: it
+    // queues the thumbnails keyed by the prompt text and `rowFromItem` matches
+    // them back onto the row the core emits. Echoing here as well put the
+    // question in the transcript twice (the copy at the bottom of a reopened
+    // chat), which is exactly what the count-based match exists to prevent.
+    if (!blocks.isEmpty() && !shown.isEmpty())
+        m_pendingAttachments[text].append(shown);
     const bool sameChatBusy = m_prompting && m_promptingSessionId == m_currentSessionId;
     if (ready && !sameChatBusy) {
         m_prompting = true;
@@ -1937,8 +1956,157 @@ void Manager::coreOnExport(const QString &data)
     onExportResult(data);
 }
 
-void Manager::coreOnRecipeParams(const QString &) {}
-void Manager::coreOnElicitation(const QString &) {}
+void Manager::coreOnRecipeParams(const QString &parameters)
+{
+    // A recipe started with declared parameters (via `_meta.recipeId`) cannot
+    // run until they are supplied. The core PARKED the request, so dropping it
+    // here (what the empty stub did) left the turn hanging until the server
+    // timed it out — the form is not optional.
+    QVariantList fields;
+    for (const auto &el : parseArr(parameters)) {
+        const QJsonObject o = el.toObject();
+        const QString key = o.value("key").toString();
+        if (key.isEmpty())
+            continue;
+        QVariantList options;
+        for (const auto &opt : o.value("options").toArray()) {
+            const QString v = opt.toString();
+            options << QVariantMap{{"value", v}, {"label", v}};
+        }
+        // The form model has no `default` slot, so it rides in the description:
+        // visible and copyable, but it cannot prefill.
+        QString desc = o.value("description").toString();
+        const QString def = o.value("default").toString();
+        if (!def.isEmpty())
+            desc = desc.isEmpty() ? QStringLiteral("default: %1").arg(def)
+                                  : QStringLiteral("%1 (default: %2)").arg(desc, def);
+        fields << QVariantMap{
+            {"name", key},
+            {"type", o.value("input_type").toString(QStringLiteral("string"))},
+            {"title", key},
+            {"description", desc},
+            {"options", options},
+            {"required", o.value("requirement").toString() == QLatin1String("required")},
+        };
+    }
+    QVariantMap form;
+    form["title"] = QStringLiteral("Recipe parameters");
+    form["message"] = QStringLiteral("This recipe needs values before it can start.");
+    form["recipeParams"] = true;
+    form["fields"] = fields;
+    queueForm(form);
+}
+
+void Manager::coreOnElicitation(const QString &schema)
+{
+    // elicitation/create, form mode: a tool wants structured input mid-turn.
+    // Same shape as Android's ElicitationSheet — booleans, choices, typed text.
+    const QJsonObject o = parseObj(schema);
+    const QJsonObject props = o.value("properties").toObject();
+    QSet<QString> required;
+    for (const auto &r : o.value("required").toArray())
+        required.insert(r.toString());
+    QVariantList fields;
+    for (auto it = props.begin(); it != props.end(); ++it) {
+        const QJsonObject f = it.value().toObject();
+        QVariantList options;
+        // Single-select arrives either as untagged `enum` values or as titled
+        // `oneOf` [{const, title}] options; both collapse to {value, label}.
+        for (const auto &el : f.value("oneOf").toArray()) {
+            const QJsonObject eo = el.toObject();
+            const QString v = eo.value("const").toString();
+            if (!v.isEmpty())
+                options << QVariantMap{{"value", v},
+                                       {"label", eo.value("title").toString(v)}};
+        }
+        if (options.isEmpty())
+            for (const auto &el : f.value("enum").toArray()) {
+                const QString v = el.toString();
+                options << QVariantMap{{"value", v}, {"label", v}};
+            }
+        fields << QVariantMap{
+            {"name", it.key()},
+            {"type", f.value("type").toString(QStringLiteral("string"))},
+            {"title", f.value("title").toString(it.key())},
+            {"description", f.value("description").toString()},
+            {"options", options},
+            {"required", required.contains(it.key())},
+        };
+    }
+    QVariantMap form;
+    form["title"] = o.value("title").toString(QStringLiteral("Input requested"));
+    form["message"] = o.value("description").toString();
+    form["recipeParams"] = false;
+    form["fields"] = fields;
+    queueForm(form);
+}
+
+void Manager::queueForm(const QVariantMap &form)
+{
+    // One parked responder per family in the core (spine::answer_request takes a
+    // single responder), so a second request of the same family REPLACES the
+    // queued one: the earlier responder was already dropped server-side and
+    // answering it would answer nothing.
+    const bool recipe = form.value("recipeParams").toBool();
+    for (int i = m_forms.size() - 1; i >= 0; --i)
+        if (m_forms.at(i).toMap().value("recipeParams").toBool() == recipe)
+            m_forms.removeAt(i);
+    m_forms << form;
+    emit pendingFormChanged();
+}
+
+QVariant Manager::pendingForm() const
+{
+    return m_forms.isEmpty() ? QVariantMap{} : m_forms.first();
+}
+
+void Manager::answerForm(const QVariantMap &values, const QString &action)
+{
+    if (m_forms.isEmpty())
+        return;
+    const QVariantMap form = m_forms.takeFirst().toMap();
+    emit pendingFormChanged();
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const bool accepted = action == QLatin1String("accept");
+    if (form.value("recipeParams").toBool()) {
+        // recipe/request-params takes {action:"submit"|"cancel", values:{k:string}}:
+        // every value is a STRING there (the server type is HashMap<String,String>)
+        // and there is no decline — a refusal is a cancel.
+        QJsonObject vals;
+        if (accepted)
+            for (auto it = values.begin(); it != values.end(); ++it)
+                vals.insert(it.key(), it.value().toString());
+        const QByteArray js = QJsonDocument(vals).toJson(QJsonDocument::Compact);
+        m_bridge->api().grouse_unstable_respond_recipe_params(
+            m_bridge->handle(),
+            (accepted ? QStringLiteral("submit") : QStringLiteral("cancel")).toUtf8().constData(),
+            js.constData());
+        return;
+    }
+    // elicitation/create: accept carries the typed content object, decline and
+    // cancel carry none.
+    QJsonObject content;
+    if (accepted) {
+        for (auto it = values.begin(); it != values.end(); ++it) {
+            const QVariant v = it.value();
+            switch (v.typeId()) {
+            case QMetaType::Bool: content.insert(it.key(), v.toBool()); break;
+            case QMetaType::Int:
+            case QMetaType::LongLong: content.insert(it.key(), v.toLongLong()); break;
+            case QMetaType::Double: content.insert(it.key(), v.toDouble()); break;
+            default: content.insert(it.key(), v.toString()); break;
+            }
+        }
+    }
+    const QByteArray js = accepted
+        ? QJsonDocument(content).toJson(QJsonDocument::Compact) : QByteArray();
+    const QString act = accepted ? QStringLiteral("accept")
+        : action == QLatin1String("cancel") ? QStringLiteral("cancel")
+                                            : QStringLiteral("decline");
+    m_bridge->api().grouse_unstable_respond_elicitation(
+        m_bridge->handle(), act.toUtf8().constData(), js.constData());
+}
 
 void Manager::coreOnCompactionStatus(const QString &message)
 {
@@ -2175,6 +2343,24 @@ void ensureRowHtml(QVariantMap &row)
 // that are not items (usage and run-ended).
 // ---------------------------------------------------------------------------
 
+QVariantList Manager::attachmentsForItem(const QString &id, const QString &text, int count)
+{
+    if (count <= 0)
+        return {};
+    if (m_attachmentsByRow.contains(id))
+        return m_attachmentsByRow.value(id);
+    auto it = m_pendingAttachments.find(text);
+    if (it == m_pendingAttachments.end() || it->isEmpty())
+        return {};
+    const QVariantList images = it->takeFirst();
+    if (it->isEmpty())
+        m_pendingAttachments.erase(it);
+    m_attachmentsByRow.insert(id, images);
+    if (m_attachmentsByRow.size() > 512)
+        m_attachmentsByRow.erase(m_attachmentsByRow.begin());
+    return images;
+}
+
 QVariantMap Manager::rowFromItem(const QJsonObject &item)
 {
     const QString kind = item.value(QStringLiteral("kind")).toString();
@@ -2183,6 +2369,20 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
     const QString detail = item.value(QStringLiteral("detail")).toString();
     const QString output = item.value(QStringLiteral("output")).toString();
     const QString status = item.value(QStringLiteral("status")).toString();
+    // The core's transcript position: the model inserts by it, not by arrival
+    // (docs/TRANSCRIPT_MODEL.md). Every row carries its own.
+    const int seq = item.value(QStringLiteral("seq")).toInt();
+    // A delegate row carries what its SUBAGENT actually did — goose keeps child
+    // sessions off ACP and forwards their tool calls onto this row instead.
+    auto stepsOf = [](const QJsonArray &arr) {
+        QVariantList out;
+        for (const QJsonValue &sv : arr) {
+            const QJsonObject s = sv.toObject();
+            out << QVariantMap{{"name", s.value(QStringLiteral("name")).toString()},
+                               {"detail", s.value(QStringLiteral("detail")).toString()}};
+        }
+        return out;
+    };
     // A tool run carries the model's own framing of it (issue #13): the thinking
     // that preceded the run, absorbed by the core, and the one-line label drawn
     // from it. Both are empty for a run with nothing to draw on, and the chip
@@ -2194,7 +2394,9 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
         return QVariantMap{{"id", id}, {"role", "tool"}, {"text", ""}, {"html", ""},
                            {"title", text}, {"detail", detail}, {"output", output},
                            {"status", status}, {"toolCallId", id},
-                           {"summary", summary}, {"stepThought", stepThought}};
+                           {"summary", summary}, {"stepThought", stepThought},
+                           {"steps", stepsOf(item.value(QStringLiteral("steps")).toArray())},
+                           {"seq", seq}};
     }
     if (kind == QLatin1String("ToolGroup")) {
         QVariantList calls;
@@ -2205,16 +2407,18 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
                                  {"output", c.value("output").toString()},
                                  {"status", c.value("status").toString()},
                                  {"thought", c.value("thought").toString()},
-                                 {"toolCallId", c.value("id").toString()}};
+                                 {"toolCallId", c.value("id").toString()},
+                                 {"steps", stepsOf(c.value("steps").toArray())}};
         }
         return QVariantMap{{"id", id}, {"role", "toolgroup"}, {"text", ""},
                            {"html", ""}, {"calls", calls}, {"status", status},
-                           {"summary", summary}, {"stepThought", stepThought}};
+                           {"summary", summary}, {"stepThought", stepThought},
+                           {"seq", seq}};
     }
     if (kind == QLatin1String("Chart")) {
         return QVariantMap{{"id", id}, {"role", "chart"}, {"text", ""},
                            {"title", text}, {"chartData", detail},
-                           {"toolCallId", id}, {"status", status}};
+                           {"toolCallId", id}, {"status", status}, {"seq", seq}};
     }
     if (kind == QLatin1String("McpApp")) {
         const QString appKey = item.value(QStringLiteral("app_key")).toString();
@@ -2234,16 +2438,26 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
         return QVariantMap{{"id", id}, {"role", "mcpapp"}, {"text", ""},
                            {"title", text}, {"detail", detail}, {"appKey", appKey},
                            {"appHtml", m_appHtml.value(appKey)},
-                           {"toolCallId", id}, {"status", status}};
+                           {"toolCallId", id}, {"status", status}, {"seq", seq}};
     }
     const QString role = kind == QLatin1String("User")     ? QStringLiteral("user")
                          : kind == QLatin1String("Thought") ? QStringLiteral("thought")
                          : kind == QLatin1String("Error")   ? QStringLiteral("error")
                                                             : QStringLiteral("agent");
     QVariantMap row{{"id", id}, {"role", role}, {"text", text}, {"output", output},
-                    {"html", QString()}};
+                    {"html", QString()}, {"seq", seq}};
     if (role == QLatin1String("thought"))
         row["thought"] = true;
+    // The core owns the prompt row and carries only an attachment COUNT (the
+    // item model has no image field), so the pixels we sent are matched back
+    // here — gated on the count, because a later text-only prompt can repeat an
+    // earlier attachment prompt's text and must not inherit its thumbnails.
+    if (role == QLatin1String("user")) {
+        const auto images = attachmentsForItem(id, text,
+                                               item.value(QStringLiteral("attachments")).toInt());
+        if (!images.isEmpty())
+            row["images"] = images;
+    }
     ensureRowHtml(row);
     return row;
 }

@@ -651,6 +651,38 @@ pub struct Core {
     inner: Arc<CoreInner>,
 }
 
+/// Panic messages seen by this process, for the turn log.
+///
+/// A panic inside a spawned task unwinds that task and nothing else: the runtime
+/// keeps serving, the socket stays up, and the only casualty is whatever that
+/// task was going to tell the client. A turn whose finish died half-way is
+/// therefore indistinguishable from a turn whose end signal was lost — which is
+/// the exact question the turn log exists to answer, so the panic itself has to
+/// be in it. Its own lock, never the state lock: a panic while the state mutex is
+/// held must not try to take it again.
+fn panics() -> &'static std::sync::Mutex<Vec<String>> {
+    static PANICS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    &PANICS
+}
+
+/// Record panic messages for [`Core::turn_log`]. Installed once, chained in front
+/// of whatever hook was there (so the platform's own logging still happens).
+pub(crate) fn install_panic_log() {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if let Ok(mut log) = panics().lock() {
+                if log.len() >= 20 {
+                    log.remove(0);
+                }
+                log.push(info.to_string());
+            }
+            previous(info);
+        }));
+    });
+}
+
 #[uniffi::export]
 impl Core {
     /// Construct the core. The UI supplies its `CacheDir` (CONTRACT §7.4):
@@ -660,6 +692,7 @@ impl Core {
     /// UI must pass a real absolute dir (context.filesDir).
     #[uniffi::constructor]
     pub fn new(listener: Box<dyn CoreListener>, cache_dir: String) -> Arc<Self> {
+        install_panic_log();
         let listener: Arc<dyn CoreListener> = Arc::from(listener);
         // One hub for every session, main or roam. The display gate lives in
         // the hub, so a background chat can accumulate without painting.
@@ -1336,8 +1369,17 @@ impl Core {
     /// The turn lifecycle log, oldest first (see [`CoreState::turn_log`]).
     /// Rendered by the client when a chat will not stop saying "working".
     pub fn turn_log(&self) -> String {
-        let state = self.inner.state.lock();
-        state.turn_log.iter().cloned().collect::<Vec<_>>().join("\n")
+        let mut out: Vec<String> = {
+            let state = self.inner.state.lock();
+            state.turn_log.iter().cloned().collect()
+        };
+        // Panics last, so they read as the consequence of the lines above them.
+        if let Ok(log) = panics().lock() {
+            for line in log.iter() {
+                out.push(format!("  PANIC  {line}"));
+            }
+        }
+        out.join("\n")
     }
 
     pub fn turn_diag(&self, session_id: String) -> String {

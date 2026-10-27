@@ -939,6 +939,18 @@ Controls.ApplicationWindow {
             permissionDialog.appTitle = Mgr.permissionTitle()
             permissionDialog.open()
         }
+        // A form the server is parked on (elicitation or recipe parameters).
+        // Opened from here, not from a binding, so an ALREADY-OPEN form is not
+        // re-opened when a second request of the other family arrives.
+        function onPendingFormChanged() {
+            if (Mgr.pendingForm && Mgr.pendingForm.fields !== undefined
+                    && Mgr.pendingForm.fields.length >= 0
+                    && Object.keys(Mgr.pendingForm).length > 0) {
+                if (!formDialog.opened) formDialog.open()
+            } else if (formDialog.opened) {
+                formDialog.close()
+            }
+        }
         // Roam is opt-in; if it is switched off while its pane is showing, fall
         // back to Main rather than leave an orphaned hidden tab selected.
         function onRoamEnabledChanged() {
@@ -960,6 +972,7 @@ Controls.ApplicationWindow {
     SettingsDialog {
         id: settingsDialog
         onOpenGlobalTools: globalExtensionsDialog.open()
+        onOpenTurnLog: if (Mgr.debugTools) turnLogDialog.open()
     }
 
     SkillsDialog {
@@ -1271,6 +1284,14 @@ Controls.ApplicationWindow {
 
     PermissionDialog {
         id: permissionDialog
+    }
+
+    FormDialog {
+        id: formDialog
+    }
+
+    TurnLogDialog {
+        id: turnLogDialog
     }
 
     onClosing: {

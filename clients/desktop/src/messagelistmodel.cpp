@@ -37,6 +37,7 @@ QHash<int, QByteArray> MessageListModel::roleNames() const
         {CallsRole, "calls"},
         {SummaryRole, "summary"},
         {StepThoughtRole, "stepThought"},
+        {StepsRole, "steps"},
         {ExpandedRole, "expanded"},
     };
 }
@@ -65,6 +66,7 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
     case CallsRole: return m.value("calls");
     case SummaryRole: return m.value("summary");
     case StepThoughtRole: return m.value("stepThought");
+    case StepsRole: return m.value("steps");
     // Keyed by ROW index, not the "id" value: text bubbles carry string message
     // ids ("" for live ones), so an id.toInt() key collapsed every thought
     // bubble onto one shared entry.
@@ -142,7 +144,29 @@ void MessageListModel::upsert(const QString &id, const QVariantMap &row)
         updateDeferred(existing, row);
         return;
     }
-    append(row);
+    // Position comes from the core's `seq`, never from arrival: a prompt echo can
+    // land after the reply it prompted, and a page of replayed rows drains in
+    // after newer ones. `seq == 0` is a legitimate position (the first row after
+    // a repaint), so the rule is purely ordinal — insert before the first row
+    // that outranks this one. A row with no `seq` (a local echo or error banner)
+    // reads as 0 and therefore stays wherever it already is.
+    const int seq = row.value(QStringLiteral("seq"), 0).toInt();
+    int at = m_rows.size();
+    for (int i = 0; i < m_rows.size(); ++i) {
+        if (m_rows.at(i).value(QStringLiteral("seq"), 0).toInt() > seq) {
+            at = i;
+            break;
+        }
+    }
+    if (at >= m_rows.size()) {
+        append(row);
+        return;
+    }
+    beginInsertRows(QModelIndex(), at, at);
+    m_rows.insert(at, row);
+    endInsertRows();
+    reindex();   // every row after the insertion point shifted right
+    emit countChanged();
 }
 
 void MessageListModel::removeById(const QString &id)

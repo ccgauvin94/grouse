@@ -6,6 +6,49 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **The desktop no longer prints the user's own message twice (0.2.38).** A send
+  that carried attachments made `dispatchSend` append a user row of its own, and
+  the core then echoed the prompt's row as it always does: two bubbles, one with
+  thumbnails and one without. The echo is the only row now — the desktop instead
+  queues its thumbnails against the prompt text and hands them to the core's row
+  the first time an item asks for them with a non-zero attachment count, which is
+  exactly how Android already did it. Matching on the count is what keeps a later
+  text-only prompt with identical text from inheriting the pictures.
+- **The desktop inserts by sequence, not by arrival (0.2.38).** `MessageListModel`
+  appended every new item, so any row that the core delivered out of order — a
+  replay's tail, a prefill's later seq — landed at the bottom of the chat instead
+  of where it belongs. Insertion now walks to the first row whose `seq` outranks
+  the new one and inserts before it, and appends only when nothing does. `seq` 0
+  is a real position (a turn's first prompt), so the test is `>`, exactly as
+  Android's `upsertBubble` does it.
+- **A finished turn no longer leaves the chat stuck on "working" (0.2.37).** The
+  core announced the run end correctly the whole time — the turn log showed
+  `stage: announced` — and the app dropped it on its own main-thread hop: the
+  listener override posted `main.post { onRunEnded(...) }`, which resolves to the
+  override itself (same signature, nearer implicit receiver), so one core event
+  re-posted forever instead of ever reaching `ConnectionManager.onRunEnded`. The
+  reply rendered, but `busy` stayed true: the composer kept saying "working"/Stop,
+  and because `activeRunId` had been cleared by the run-end notification, the next
+  send went out as a new prompt instead of a steer. Every other callback already
+  dodged this (`onCoreItem`, `onCoreActiveRun`, or an explicit
+  `this@ConnectionManager.` — the same class of bug fixed for
+  `onRoamPeerStatus`'s 744k-re-delivery storm); `onRunEnded` was the one left
+  unqualified. It now posts to `onCoreRunEnded`, matching the convention, and logs
+  `ffi: runEnded …` synchronously on the callback thread so a lost callback is
+  distinguishable from a lost event.
+
+### Added
+
+- **The turn log can be copied, and it survives the dialog.** The stuck-turn
+  readout was a 40-line ring buffer behind a scrollable dialog, which meant the
+  one line that mattered could be off-screen and the only way to read it was a
+  screenshot. The app-side log now keeps 200 lines, mirrors every line to logcat
+  under the `GrouseTurn` tag, and appends to `files/turn.log` in app-private
+  storage (pulled with `adb shell run-as id.gauvin.grouse cat files/turn.log`).
+  The dialog gained a **Copy** button.
+
 ### Changed
 
 - **The newest chip is labelled too, instead of waiting for the next step.** A
@@ -40,6 +83,35 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Added
 
+- **The desktop can answer the two structured requests it used to drop (0.2.38).** A recipe
+  that declares parameters, and an MCP tool that asks a question
+  (`elicitation/create`), both park a responder on the server side and the turn
+  waits on it — so a client with no form for them did not merely lose a feature,
+  it hung the run until the request timed out. Both families now land in one
+  `FormDialog`: booleans as checkboxes, `enum`/`oneOf` schemas as a ComboBox
+  (with `valueRole`, or `currentValue` hands back the model item), everything
+  else as a text field, with `required` gating submit. Recipe parameters answer
+  as strings with submit|cancel — a decline is a cancel there — while an
+  elicitation sends typed values with accept|decline|cancel. Every exit answers
+  the request, including Escape and the window close, because a dropped request
+  is a hung turn rather than a dismissed dialog. The core parks one responder
+  per family, so a second request of the same family replaces the first queued
+  form instead of stacking behind a request the server already abandoned.
+- **A delegate's own tool calls are visible (0.2.38).** A `delegate` call carries the
+  sub-agent's calls, which both clients were dropping on the floor: the chip
+  said "4 tool calls" and nothing showed what they were. The item already
+  carries them (`steps`), so the desktop now has a `steps` role, a *n* steps
+  line on the chip header, and a `name · detail` list inside the open chip —
+  the same rows Android renders.
+- **Debug diagnostics are a switch on both clients, off by default (0.2.38).** The turn
+  log and the live turn-state readout show internal state rather than
+  conversation, so they now sit behind Settings → *Developer diagnostics*
+  (Android: Experimental). Off, the chat title's long-press does nothing and the
+  typing indicator has no polling behind it — the readout's `produceState` loop
+  runs only while the switch is on. The core keeps the log either way; the flag
+  is pure UI, stored per client (`debug_tools`), so turning it on does not
+  change what the core does. The desktop's copy of the log is a dialog with
+  Copy/Reload and the same live turn-state line.
 - **Steps are labelled while the turn runs, not only when it ends.** A step's
   chip used to keep the provisional label (the thinking's first line) until the
   whole turn finished, which is most of what a reader actually sees. Now the

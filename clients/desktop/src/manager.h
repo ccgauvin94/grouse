@@ -61,6 +61,12 @@ class Manager : public QObject
     /** Rewrite each tool run's label with a short model-written line (issue #13).
      *  Costs one small inference per turn, on a hidden session. */
     Q_PROPERTY(bool runSummaries READ runSummaries WRITE setRunSummaries NOTIFY settingsChanged)
+    /** Developer diagnostics: the core's turn log and per-chat turn state.
+     *  DEFAULT OFF. The log is unescaped internal state (thread ids, wire
+     *  stages, panic text) that means nothing to a normal user, so it is
+     *  reachable only behind this switch — the Android client gates the same
+     *  surface the same way. */
+    Q_PROPERTY(bool debugTools READ debugTools WRITE setDebugTools NOTIFY settingsChanged)
     Q_PROPERTY(QString workingDir READ workingDir WRITE setWorkingDir NOTIFY settingsChanged)
     /** Roam (iroh peer transport) is opt-in: its sidebar tab and stored peers
      *  stay dormant until the user enables it in Settings. */
@@ -98,6 +104,13 @@ class Manager : public QObject
     Q_PROPERTY(QVariant serverConfig READ serverConfig NOTIFY serverConfigChanged)
     Q_PROPERTY(QVariant supportedModels READ supportedModels NOTIFY supportedModelsChanged)
     Q_PROPERTY(QVariant skills READ skills NOTIFY skillsChanged)
+    /** A pending structured-input form (MCP elicitation, ACP form mode, or a
+     *  recipe's declared parameters) — an EMPTY map when nothing is waiting.
+     *  Keys: title, message, recipeParams (bool), fields (list of
+     *  {name,type,title,description,options:[{value,label}],required}).
+     *  Answer it with answerForm(); the dialog cannot be dismissed without an
+     *  answer, because a parked server request would hang the turn. */
+    Q_PROPERTY(QVariant pendingForm READ pendingForm NOTIFY pendingFormChanged)
 
 public:
     /// Compiled-in QtWebEngine availability (main() sets it before the QML
@@ -115,6 +128,7 @@ public:
     bool configuredProvidersOnly() const;
     QStringList configuredProviders() const { return m_configuredProviders; }
     bool runSummaries() const;
+    bool debugTools() const;
     QString workingDir() const;
     bool roamEnabled() const;
     void setHost(const QString &v);
@@ -125,6 +139,7 @@ public:
     void setNotificationsEnabled(bool v);
     void setConfiguredProvidersOnly(bool v);
     void setRunSummaries(bool v);
+    void setDebugTools(bool v);
     void setWorkingDir(const QString &v);
     void setRoamEnabled(bool v);
     /** Push the stored run-summary preference into the core (it defaults ON, so
@@ -298,6 +313,13 @@ public:
     Q_INVOKABLE QString pushParse(const QString &raw) const;
     Q_INVOKABLE QString pushDecide(const QString &envelopeJson,
                                    const QString &contextJson) const;
+    // --- debug surface (behind `debugTools`, default OFF) ---------------------
+    /** The core's turn log: one line per lifecycle event, newest last, panics
+     *  appended. Plain text — display it verbatim, never as HTML. */
+    Q_INVOKABLE QString turnLog() const;
+    /** One chat's turn state for a UI that has gone quiet: whose turn is live,
+     *  the run id, and how long the wire has been idle. */
+    Q_INVOKABLE QString turnDiag(const QString &sessionId) const;
     Q_INVOKABLE void readServerConfig(const QString &key);
     Q_INVOKABLE void refreshSupportedModels(const QString &providerId);
     Q_INVOKABLE QString permissionToolCallId() const { return m_permToolCallId; }
@@ -349,6 +371,14 @@ public:
     QVariant serverConfig() const { return m_serverConfig; }
     QVariant supportedModels() const { return m_supportedModels; }
     QVariant skills() const { return m_skills; }
+
+    // ---- structured input (elicitations + recipe parameters) ------------------
+    QVariant pendingForm() const;
+    /** Answer the pending form. `values` maps field name → value (a bool for a
+     *  boolean field, a number for number/integer, a string otherwise).
+     *  `action` is "accept"/"decline"/"cancel" — a recipe's parameters only
+     *  understand submit/cancel, so decline is sent as cancel there. */
+    Q_INVOKABLE void answerForm(const QVariantMap &values, const QString &action);
 
     // ---- CoreBridge event entry points ---------------------------------------
     // Invoked (on the main thread) by the CoreBridge listener table. They are
@@ -427,7 +457,8 @@ signals:
     void skillsChanged();
     /** Result of testConnection(): reachability + secret-key auth + ACP handshake. */
     void connectionTested(bool ok, const QString &message);
-
+    /** The pending structured-input form arrived, changed, or was answered. */
+    void pendingFormChanged();
 private:
     void setStatus(const QString &s);
     void setOnline(bool o);
@@ -449,6 +480,10 @@ private:
     qint64 m_announcedTurnAtMs = 0;
     void onSessionTouched(const QString &sid, const QString &title, const QString &updatedAt);
     void onAppResource(const QString &appKey, const QString &html);
+    /** The attachments for a user item, gated by the core's count: a text-only
+     *  prompt can share its text with an earlier attachment prompt and must not
+     *  inherit its pixels. */
+    QVariantList attachmentsForItem(const QString &id, const QString &text, int count);
     /// One rich item (docs/TRANSCRIPT_MODEL.md) as a model row. Kinds become the
     /// delegate's roles; a text row's html is computed once, when the core's
     /// finalizing Upsert arrives.
@@ -477,6 +512,8 @@ private:
     void onSupportedModels(const QString &providerId, const QStringList &models);
     void onExportResult(const QString &data);
     void onCompactionStatus(const QString &message);
+    /** Queue a parsed structured-input form (one per family; see queueForm). */
+    void queueForm(const QVariantMap &form);
     void onMessageUsage(const QVariantMap &usage);
     void onCommands(const QStringList &commands);
     void onModeChanged(const QString &modeId);
@@ -630,11 +667,22 @@ private:
     QVariantMap m_serverConfig;             // global config.yaml values (providers)
     QVariantList m_supportedModels;
     QVariantList m_skills;
+    // Pending structured-input forms, oldest first. The core parks ONE request
+    // per family (spine::answer_request takes a single responder), so a second
+    // request of the same family REPLACES the queued one — the old responder was
+    // already dropped server-side and answering it would answer nothing.
+    QVariantList m_forms;
     QString m_pendingExportPath;            // where to write the next session/export reply
     QString m_itemOldestId;                 // item-window cursor (docs/TRANSCRIPT_MODEL.md)
     bool m_itemHasOlder = false;
     QList<QVariantMap> m_olderPending;      // older items collected during a loadOlder
     bool m_loadingOlder = false;
+    // The core owns the prompt row and carries an attachment COUNT only, so the
+    // pixels this client sent wait here keyed by prompt text until that row
+    // arrives (a queue: two prompts can share text). Not persisted — a reload
+    // replays text only, which is why thumbnails vanish on reopen.
+    QHash<QString, QVariantList> m_pendingAttachments;
+    QHash<QString, QVariantList> m_attachmentsByRow;   // item id -> its thumbnails
 
     // pending permission request
     QString m_permToolCallId;

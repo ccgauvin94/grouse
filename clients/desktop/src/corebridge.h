@@ -81,6 +81,10 @@ public:
         char *(*grouse_window)(void *h);
         void (*grouse_load_older)(void *h, unsigned int count);
         char *(*grouse_config)(void *h);
+        // debug surface: the core's turn log + a chat's turn state. Plain text,
+        // behind the UI's debug switch (both clients default it OFF).
+        char *(*grouse_turn_log)(void *h);
+        char *(*grouse_turn_diag)(void *h, const char *session_id);
         // roam
         void (*grouse_roam_connect)(void *h, const char *card, const char *label);
         void (*grouse_roam_disconnect)(void *h, const char *label);

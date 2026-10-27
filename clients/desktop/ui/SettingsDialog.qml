@@ -14,6 +14,7 @@ Controls.Dialog {
     closePolicy: Controls.Popup.CloseOnEscape
 
     signal openGlobalTools()
+    signal openTurnLog()
 
     Component.onCompleted: reload()
     function reload() {
@@ -28,6 +29,7 @@ Controls.Dialog {
         pushBox.checked = Push.enabled
         roamBox.checked = Mgr.roamEnabled
         runSummariesBox.checked = Mgr.runSummaries
+        debugBox.checked = Mgr.debugTools
         dialog.testMessage = ""
     }
     onOpened: reload()
@@ -43,6 +45,7 @@ Controls.Dialog {
         Mgr.configuredProvidersOnly = configuredOnlyBox.checked
         Mgr.roamEnabled = roamBox.checked
         Mgr.runSummaries = runSummariesBox.checked
+        Mgr.debugTools = debugBox.checked
     }
     onClosed: commit()
 
@@ -195,6 +198,27 @@ Controls.Dialog {
                 id: runSummariesBox
                 text: qsTr("Summarize tool runs with the model")
                 Kirigami.FormData.label: qsTr("Tool runs:")
+            }
+            // Debug surface: the core's turn log (and the live turn state under the
+            // working indicator). Both show internal state rather than conversation,
+            // so they are opt-in and off by default.
+            Controls.CheckBox {
+                id: debugBox
+                text: qsTr("Developer diagnostics")
+                Kirigami.FormData.label: qsTr("Debug:")
+            }
+            Controls.Button {
+                text: qsTr("Turn log…")
+                icon.name: "view-list-text"
+                enabled: debugBox.checked
+                Kirigami.FormData.label: ""
+                onClicked: {
+                    // Commit first (the log dialog reads Mgr.debugTools) and close
+                    // this one, so two modals are not stacked on each other.
+                    dialog.commit()
+                    dialog.close()
+                    dialog.openTurnLog()
+                }
             }
 
             Kirigami.Separator {

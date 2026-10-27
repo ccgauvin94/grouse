@@ -232,9 +232,17 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("run_summaries", true)
         set(v) = cfg.edit().putBoolean("run_summaries", v).apply()
 
+    /** Developer diagnostics: the turn log (long-press the chat title) and the
+     *  idle-turn readout beside the typing dots. Off by default — the log is
+     *  unescaped internal state (wire stages, run ids, panic text) that means
+     *  nothing to a normal user. The desktop exposes the same surface behind the
+     *  same switch. */
+    var debugTools: Boolean
+        get() = cfg.getBoolean("debug_tools", false)
+        set(v) = cfg.edit().putBoolean("debug_tools", v).apply()
+
     /** Which goose dictation provider push-to-talk transcribes with. "openai" is the
-     *  provider repointed at the box's own STT server; the enum is goose's, not ours. */
-    var dictationProvider: String
+     *  provider repointed at the box's own STT server; the enum is goose's, not ours. */    var dictationProvider: String
         get() = cfg.getString("dictation_provider", "openai") ?: "openai"
         set(v) = cfg.edit().putString("dictation_provider", v).apply()
     /** Models the user has confirmed DO accept images, by sending anyway past the warning.

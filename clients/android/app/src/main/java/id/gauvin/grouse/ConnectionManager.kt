@@ -187,9 +187,24 @@ class ConnectionManager private constructor(context: Context) {
      *  from either side alone. */
     private val appTurnLog = ArrayDeque<String>()
     private fun noteApp(line: String) {
-        if (appTurnLog.size >= 40) appTurnLog.removeFirst()
+        if (appTurnLog.size >= 200) appTurnLog.removeFirst()
         appTurnLog.addLast(line)
+        // The dialog is a 200-line ring buffer read off a screenshot; a stuck turn
+        // needs the WHOLE sequence, and the failing line is exactly the one that
+        // scrolls off. Logcat and an app-private file both survive the dialog.
+        runCatching { android.util.Log.i("GrouseTurn", line) }
+        runCatching {
+            val f = java.io.File(appContext.filesDir, "turn.log")
+            if (f.length() > 200_000) {
+                val keep = f.readText().takeLast(100_000)
+                f.writeText(keep)
+            }
+            f.appendText(line + "\n")
+        }
     }
+
+    /** Absolute path of the app-private turn log (pull with `adb shell run-as`). */
+    fun turnLogPath(): String = java.io.File(appContext.filesDir, "turn.log").absolutePath
 
     /** The core's turn-lifecycle log plus the app's own view of the same events. */
     fun turnLog(): String = buildString {
@@ -279,7 +294,13 @@ class ConnectionManager private constructor(context: Context) {
             main.post { usage.value = AcpEvent.Usage(used.toInt(), size.toInt(), cost, currency) }
         }
         override fun onRunEnded(sessionId: String, stopReason: String) {
-            main.post { onRunEnded(sessionId, stopReason) }
+            // FFI-boundary probe: logged SYNCHRONOUSLY on the callback thread so a
+            // dropped `main.post` (or a lost callback) is distinguishable from a
+            // dropped event at the core. `onCoreRunEnded` — NOT `onRunEnded`: the
+            // same name as this override made the posted lambda resolve to itself
+            // (the shared `onCore*` convention exists for exactly this reason).
+            noteApp("ffi: runEnded $sessionId stop=$stopReason")
+            main.post { onCoreRunEnded(sessionId, stopReason) }
         }
         // Sanitized, sentence-sized speakable text (docs/TRANSCRIPT_MODEL.md) — one
         // TTS utterance per chunk, played in order as it arrives. Speech belongs to
@@ -796,6 +817,10 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Toggle the model-written run labels (issue #13): store it and push it to the core. */
     fun setRunSummaries(v: Boolean) { store.runSummaries = v; core.setRunSummaries(v) }
+
+    /** Debug diagnostics: the core/app turn log and the live turn-state readout. Purely
+     *  client-side (the core always keeps the log), so this only flips the UI gate. */
+    fun setDebugTools(v: Boolean) { store.debugTools = v }
 
     // The unstable shim's intents are SYNCHRONOUS RPCs (round-trip the server on the
     // calling thread) — unlike the core's own async intents. Calling them on the main
@@ -2316,7 +2341,7 @@ class ConnectionManager private constructor(context: Context) {
 
 
 
-    private fun onRunEnded(sessionId: String, stopReason: String) {
+    private fun onCoreRunEnded(sessionId: String, stopReason: String) {
         noteCoreEvent()
         noteApp("app: runEnded $sessionId stop=$stopReason shown=${sessionId == currentSession.value} current=${currentSession.value}")
         // Every completion clears ITS chat; only the chat on screen owns the

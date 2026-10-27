@@ -84,6 +84,8 @@ qt_add_resources(grouse-desktop "app"
         ui/ConnectDialog.qml
         ui/SettingsDialog.qml
         ui/PermissionDialog.qml
+        ui/FormDialog.qml
+        ui/TurnLogDialog.qml
         ui/GlobalExtensionsDialog.qml
         ui/RecipesDialog.qml
         ui/SkillsDialog.qml

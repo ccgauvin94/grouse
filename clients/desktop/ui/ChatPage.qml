@@ -11,6 +11,18 @@ Kirigami.Page {
     // Emitted when the user clicks the tools pill; main.qml owns the slide-out panel.
     signal toolsOpenRequested()
 
+    // Debug: the core's turn state beside the working indicator, so a turn that
+    // looks stuck says whose fault it is (Android parity). Polled only while the
+    // debug switch is on — it is internal state, not chat.
+    property string turnDiagText: ""
+    Timer {
+        interval: 1000
+        repeat: true
+        running: Mgr.debugTools && Mgr.prompting
+        onTriggered: page.turnDiagText = Mgr.turnDiag(Mgr.currentSessionId)
+        onRunningChanged: if (!running) page.turnDiagText = ""
+    }
+
     function findOption(id) {
         for (var i = 0; i < Mgr.config.length; i++) {
             if (Mgr.config[i].id === id) return Mgr.config[i]
@@ -610,7 +622,18 @@ Kirigami.Page {
                                 running: Mgr.prompting
                             }
                             Controls.Label {
-                                text: qsTr("Grouse is working…")
+                                text: {
+                                    const base = qsTr("Grouse is working…")
+                                    // Debug readout rides on the same label rather than a
+                                    // second row, which would shift the bubble's height
+                                    // every second while a turn streams.
+                                    const diag = (Mgr.debugTools && page.turnDiagText.length > 0)
+                                                 ? "  ·  " + page.turnDiagText : ""
+                                    return base + diag
+                                }
+                                // PlainText: the diag carries tool/model-supplied text and
+                                // AutoText would parse it as markup.
+                                textFormat: Text.PlainText
                                 opacity: 0.8
                             }
                         }
@@ -638,6 +661,10 @@ Kirigami.Page {
                 readonly property string messageAppHtml: model.appHtml ? String(model.appHtml) : ""
                 readonly property string messageAppKey: model.appKey ? String(model.appKey) : ""
                 readonly property var messageCalls: model.calls ? model.calls : []
+                // A delegate's child activity (the SUBAGENT's own tool calls): the
+                // server keeps subagent sessions off ACP and forwards these onto the
+                // delegate row, so this IS the child's visible work.
+                readonly property var messageSteps: model.steps ? model.steps : []
                 // A tool run's framing (issue #13): the one-line label and the
                 // thinking the core absorbed into it.
                 readonly property string messageSummary: model.summary ? model.summary : ""
@@ -981,6 +1008,15 @@ Kirigami.Page {
                                 Layout.fillWidth: true
                             }
                             Controls.Label {
+                                visible: mdel.messageSteps.length > 0
+                                text: mdel.messageSteps.length + " " + qsTr("steps")
+                                textFormat: Text.PlainText
+                                color: Kirigami.Theme.disabledTextColor
+                                font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
+                                renderType: Text.NativeRendering
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            Controls.Label {
                                 id: statusLabel
                                 text: mdel.statusText()
                                 textFormat: Text.PlainText
@@ -1007,6 +1043,41 @@ Kirigami.Page {
                             wrapMode: Text.Wrap
                             opacity: 0.8
                             bottomPadding: mdel.pad
+                        }
+                        // What the SUBAGENT did under this call (a delegate): goose
+                        // keeps the child session off ACP and forwards its tool calls
+                        // here, so this list is the delegate's visible work.
+                        Column {
+                            visible: mdel.toolOpen && mdel.messageSteps.length > 0
+                            width: parent.width
+                            bottomPadding: mdel.pad
+                            Controls.Label {
+                                text: qsTr("subagent")
+                                textFormat: Text.PlainText
+                                color: Kirigami.Theme.highlightColor
+                                font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
+                            }
+                            Repeater {
+                                model: mdel.messageSteps
+                                delegate: Row {
+                                    width: parent.width
+                                    spacing: Kirigami.Units.smallSpacing
+                                    Controls.Label {
+                                        text: "· " + String(modelData.name || "").replace(/_/g, " ")
+                                        textFormat: Text.PlainText
+                                        font.weight: Font.DemiBold
+                                    }
+                                    Controls.Label {
+                                        text: modelData.detail || ""
+                                        textFormat: Text.PlainText
+                                        elide: Text.ElideRight
+                                        width: Math.max(0, parent.width - parent.children[0].implicitWidth
+                                                        - parent.spacing)
+                                        font.family: "monospace"
+                                        color: Kirigami.Theme.disabledTextColor
+                                    }
+                                }
+                            }
                         }
                         Controls.Label {
                             visible: mdel.toolOpen && mdel.messageOutput.length > 0
@@ -1128,6 +1199,32 @@ Kirigami.Page {
                                         wrapMode: Text.Wrap
                                         font.family: "monospace"
                                         color: Kirigami.Theme.disabledTextColor
+                                    }
+                                    // A delegate inside the run carries its child's
+                                    // work (goose forwards subagent tool calls onto
+                                    // the parent row; child sessions are not on ACP).
+                                    Repeater {
+                                        model: modelData.steps ? modelData.steps : []
+                                        delegate: Row {
+                                            width: parent.width
+                                            spacing: Kirigami.Units.smallSpacing
+                                            Controls.Label {
+                                                text: "· " + String(modelData.name || "").replace(/_/g, " ")
+                                                textFormat: Text.PlainText
+                                                opacity: 0.75
+                                            }
+                                            Controls.Label {
+                                                text: modelData.detail || ""
+                                                textFormat: Text.PlainText
+                                                elide: Text.ElideRight
+                                                width: Math.max(0, parent.width
+                                                                - parent.children[0].implicitWidth
+                                                                - parent.spacing)
+                                                font.family: "monospace"
+                                                font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.85))
+                                                color: Kirigami.Theme.disabledTextColor
+                                            }
+                                        }
                                     }
                                 }
                             }
