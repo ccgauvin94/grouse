@@ -997,7 +997,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_transcript(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_turn_diag(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_turn_in_flight(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_core_turn_log(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_unarchive_session(
     ): Int
@@ -1245,8 +1249,12 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_transcript(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_grouse_core_fn_method_core_turn_diag(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_turn_in_flight(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_grouse_core_fn_method_core_turn_log(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_unarchive_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_window(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1561,7 +1569,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_transcript() and 0xFFFF) != 63821) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_grouse_core_checksum_method_core_turn_diag() and 0xFFFF) != 30256) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_grouse_core_checksum_method_core_turn_in_flight() and 0xFFFF) != 57575) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_core_turn_log() and 0xFFFF) != 16475) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_unarchive_session() and 0xFFFF) != 51838) {
@@ -2499,6 +2513,8 @@ public interface CoreInterface {
      */
     fun `transcript`(): List<Message>
     
+    fun `turnDiag`(`sessionId`: kotlin.String): kotlin.String
+    
     /**
      * Whether a turn is still outstanding for `session_id` — the core's
      * authoritative view of the wire, as opposed to a client's own "I sent
@@ -2509,6 +2525,20 @@ public interface CoreInterface {
      * turn parks the message in a queue nothing will ever drain.
      */
     fun `turnInFlight`(`sessionId`: kotlin.String): kotlin.Boolean
+    
+    /**
+     * One line of turn state, for a chat that is (or looks) stuck.
+     *
+     * The core owns this answer — it holds the turn, the run id goose announced,
+     * and the idle clock — so a client never has to infer it
+     * from the rows it happens to have received. Empty when no turn is in flight.
+     *
+     * `run none` with a growing idle time is the signature to look for: goose owns
+     * no run, so nothing on the server is going to speak about this turn again.
+     * The turn lifecycle log, oldest first (see [`CoreState::turn_log`]).
+     * Rendered by the client when a chat will not stop saying "working".
+     */
+    fun `turnLog`(): kotlin.String
     
     /**
      * Restore an archived session; re-lists.
@@ -3231,6 +3261,20 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     }
     
 
+    override fun `turnDiag`(`sessionId`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_turn_diag(
+        it,
+        
+        FfiConverterString.lower(`sessionId`),_status)
+}
+    }
+    )
+    }
+    
+
     
     /**
      * Whether a turn is still outstanding for `session_id` — the core's
@@ -3248,6 +3292,31 @@ open class Core: Disposable, AutoCloseable, CoreInterface
         it,
         
         FfiConverterString.lower(`sessionId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * One line of turn state, for a chat that is (or looks) stuck.
+     *
+     * The core owns this answer — it holds the turn, the run id goose announced,
+     * and the idle clock — so a client never has to infer it
+     * from the rows it happens to have received. Empty when no turn is in flight.
+     *
+     * `run none` with a growing idle time is the signature to look for: goose owns
+     * no run, so nothing on the server is going to speak about this turn again.
+     * The turn lifecycle log, oldest first (see [`CoreState::turn_log`]).
+     * Rendered by the client when a chat will not stop saying "working".
+     */override fun `turnLog`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_turn_log(
+        it,
+        _status)
 }
     }
     )

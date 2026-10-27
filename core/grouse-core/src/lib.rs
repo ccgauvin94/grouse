@@ -529,28 +529,6 @@ pub(crate) fn unlabeled_steps(turn_runs: &[String], labeled: &HashSet<String>) -
         .collect()
 }
 
-/// How long a turn may sit silent with NO live run before the core releases it.
-///
-/// Both end-of-turn signals can be lost: `activeRunId: null` is a notification and
-/// the `session/prompt` reply is a response, and a turn whose reply died with a
-/// dropped stream looked exactly like this — the answer rendered, the run was
-/// gone, and the chat said "working…" until the user pressed Stop (measured: `run
-/// none · quiet 173s`). A live run id is the gate that keeps this honest: goose
-/// announces one for every run it actually has, so its absence means nothing on
-/// the server is going to speak again.
-const TURN_SILENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-const TURN_WATCHDOG_STEP: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Is this turn dead? Pure so the rule is testable without waiting a minute.
-pub(crate) fn turn_is_dead(
-    in_flight: bool,
-    has_live_run: bool,
-    replaying: bool,
-    idle: std::time::Duration,
-) -> bool {
-    in_flight && !has_live_run && !replaying && idle >= TURN_SILENCE_TIMEOUT
-}
-
 /// How many of a turn's steps the end-of-turn summarizer labels. A step is one
 /// thinking burst plus the calls it ran, so a long loop is many steps; past this
 /// the rest keep their provisional label instead of queueing a huge request.
@@ -620,6 +598,11 @@ struct CoreState {
     /// Each session's plain tool runs for the turn in flight, oldest first.
     /// The end-of-turn summarizer drains this; shared by every transport.
     turn_runs: HashMap<String, Vec<String>>,
+    /// The last few turn-lifecycle events, for a chat that will not stop saying
+    /// "working". A turn ends where nothing else can observe it (a notification
+    /// and a response, either of which can be lost), so when it goes wrong the
+    /// client cannot tell which arrived: this records the decisions themselves.
+    turn_log: std::collections::VecDeque<String>,
     /// Runs of the current turn that already carry a MODEL-written label. A
     /// closed step is labelled while the turn runs, so without this every later
     /// pass would re-ask for the steps before it. Cleared when the turn ends.
@@ -1342,6 +1325,47 @@ impl Core {
         self.inner.state.lock().in_flight.contains(&session_id)
     }
 
+    /// One line of turn state, for a chat that is (or looks) stuck.
+    ///
+    /// The core owns this answer — it holds the turn, the run id goose announced,
+    /// and the idle clock — so a client never has to infer it
+    /// from the rows it happens to have received. Empty when no turn is in flight.
+    ///
+    /// `run none` with a growing idle time is the signature to look for: goose owns
+    /// no run, so nothing on the server is going to speak about this turn again.
+    /// The turn lifecycle log, oldest first (see [`CoreState::turn_log`]).
+    /// Rendered by the client when a chat will not stop saying "working".
+    pub fn turn_log(&self) -> String {
+        let state = self.inner.state.lock();
+        state.turn_log.iter().cloned().collect::<Vec<_>>().join("\n")
+    }
+
+    pub fn turn_diag(&self, session_id: String) -> String {
+        let (in_flight, run, replaying) = {
+            let state = self.inner.state.lock();
+            (
+                state.in_flight.contains(&session_id),
+                state.active_runs.get(&session_id).cloned(),
+                state.replaying.contains(&session_id),
+            )
+        };
+        if !in_flight {
+            return String::new();
+        }
+        let store = self.store_for(&session_id);
+        let idle = store.idle_for().as_secs();
+        let run = match run {
+            Some(id) if !id.is_empty() => id.chars().take(8).collect::<String>(),
+            _ => "none".to_string(),
+        };
+        format!(
+            "run {run} · idle {idle}s · {} items · {}{}",
+            store.rich_transcript().len(),
+            if replaying { "replaying" } else { "live" },
+            if run == "none" { " · no server run" } else { " · server run live" },
+        )
+    }
+
     /// The bound session of the active chat (the roam peer's, when one owns
     /// the chat).
     pub fn active_session_id(&self) -> Option<String> {
@@ -1919,51 +1943,19 @@ impl Core {
             // as a settled copy.
             state.incomplete.insert(session_id.clone());
         }
-        self.spawn_turn_watchdog(session_id.clone());
+        self.note(format!("send {session_id} wire={}", owner.wire_id(&session_id)));
         let summary_owner = owner.clone();
         crate::roam::runtime().spawn(async move {
             let result = owner.request("session/prompt", params).await;
+            core.note(match &result {
+                Ok(_) => format!("reply {key} ok"),
+                Err(error) => format!("reply {key} ERR {error}"),
+            });
             core.on_turn_ended(&key, result);
             // The turn is over: rewrite its tool runs' labels (issue #13),
             // after the reply and on a hidden session on the SAME connection,
             // so it costs the user no latency.
             core.spawn_run_summaries(summary_owner, summary_key);
-        });
-    }
-
-    /// Release a turn nothing can finish (see [`TURN_SILENCE_TIMEOUT`]).
-    ///
-    /// Self-terminating: it exits as soon as the turn ends by any other route, and
-    /// it never touches a turn goose still reports a live run for.
-    fn spawn_turn_watchdog(&self, key: String) {
-        let core = self.clone();
-        crate::roam::runtime().spawn(async move {
-            loop {
-                tokio::time::sleep(TURN_WATCHDOG_STEP).await;
-                let (in_flight, has_run, replaying) = {
-                    let state = core.inner.state.lock();
-                    (
-                        state.in_flight.contains(&key),
-                        state.active_runs.contains_key(&key),
-                        state.replaying.contains(&key),
-                    )
-                };
-                if !in_flight {
-                    return; // the turn ended the normal way
-                }
-                let idle = core.store_for(&key).idle_for();
-                if turn_is_dead(in_flight, has_run, replaying, idle) {
-                    eprintln!(
-                        "grouse-core: releasing a silent turn for {key} \
-                         (no live run, nothing for {}s)",
-                        idle.as_secs()
-                    );
-                    // `clean = false`: the rows are not known to be final, so the
-                    // cache is written unstamped and the next open re-reviews them.
-                    core.finish_turn(&key, "timeout", false);
-                    return;
-                }
-            }
         });
     }
 
@@ -2267,6 +2259,20 @@ impl Core {
         }
     }
 
+    /// One line in the turn log (see [`CoreState::turn_log`]).
+    fn note(&self, line: impl AsRef<str>) {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let ms = START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis();
+        let mut state = self.inner.state.lock();
+        if state.turn_log.len() >= 80 {
+            state.turn_log.pop_front();
+        }
+        state.turn_log.push_back(format!("{ms:>7}ms  {}", line.as_ref()));
+    }
+
     /// End `key`'s turn if one is live; returns whether it was.
     ///
     /// goose sends TWO independent "this run is over" signals — the
@@ -2280,21 +2286,35 @@ impl Core {
     /// Callers must treat `false` as "nothing to do", never as "retry": the
     /// peer in flight is a different turn's.
     fn finish_turn(&self, key: &str, stop: &str, clean: bool) -> bool {
-        {
+        let ignored = {
             let mut state = self.inner.state.lock();
             if !state.in_flight.remove(key) {
-                return false;
-            }
-            if clean {
-                state.incomplete.remove(key);
+                // The turn was already released (or never registered): whatever
+                // ended it now cannot tell the client, which is exactly the state
+                // that leaves a chat saying "working". Recorded with the keys,
+                // because a key that never matched is the other way this breaks.
+                Some(format!(
+                    "in_flight={:?} runs={:?}",
+                    state.in_flight, state.active_runs
+                ))
             } else {
-                state.incomplete.insert(key.to_string());
+                if clean {
+                    state.incomplete.remove(key);
+                } else {
+                    state.incomplete.insert(key.to_string());
+                }
+                None
             }
+        };
+        if let Some(detail) = ignored {
+            self.note(format!("finish {key} stop={stop} IGNORED (no turn in flight) {detail}"));
+            return false;
         }
         // Persist BEFORE announcing: the store is a settled snapshot at this
         // instant, and the client's RunEnded handler may immediately start a
         // queued follow-up (whose prompt re-marks this chat in flight and would
         // make an otherwise-clean cache look truncated).
+        self.note(format!("finish {key} stop={stop} clean={clean} -> run_ended"));
         self.store_for(key).seal_turn();
         self.save_cache_for(key);
         self.store_for(key).announce_run_ended(stop);
@@ -2876,6 +2896,7 @@ impl crate::session::DispatchHost for Core {
     }
     fn active_run(&self, key: String, run_id: String) {
         if run_id.is_empty() {
+            self.note(format!("run-end notification {key}"));
             // goose emits this BEFORE it answers `session/prompt`, so it is the
             // earliest authoritative "this run is over" a client ever sees —
             // and the only one that still arrives when the response is lost.
@@ -2903,10 +2924,12 @@ impl crate::session::DispatchHost for Core {
                 state.in_flight.insert(key.clone());
                 state.incomplete.insert(key.clone());
             }
+            self.note(format!("run-start {key} run={run_id}"));
             self.inner.listener.on_active_run(key, run_id);
         }
     }
     fn turn_lost(&self, key: &str) {
+        self.note(format!("turn-lost {key}"));
         // The wire that owned this turn is gone: nothing can end it any more,
         // so end it here. `finish_turn` is a no-op when no turn was live, which
         // is the common case (an idle link dropping).
@@ -3170,26 +3193,6 @@ mod tests {
         // A later bare title update must clear nothing: no run was live.
         crate::session::DispatchHost::active_run(&*core, key.clone(), String::new());
         assert_eq!(events.run_ends().len(), 1);
-    }
-
-    #[test]
-    fn a_silent_turn_with_no_live_run_is_released_and_nothing_else_is() {
-        use std::time::Duration;
-        let long = TURN_SILENCE_TIMEOUT + Duration::from_secs(1);
-        assert!(turn_is_dead(true, false, false, long), "the measured stuck state");
-        assert!(
-            !turn_is_dead(true, true, false, long),
-            "goose still reports a run: something inside the turn is working"
-        );
-        assert!(!turn_is_dead(false, false, false, long), "no turn to release");
-        assert!(
-            !turn_is_dead(true, false, true, long),
-            "a replay is progressing, not stuck"
-        );
-        assert!(
-            !turn_is_dead(true, false, false, TURN_SILENCE_TIMEOUT - Duration::from_secs(1)),
-            "a turn that has only just gone quiet must not be killed"
-        );
     }
 
     #[test]

@@ -169,14 +169,27 @@ class ConnectionManager private constructor(context: Context) {
      *  indicator, so a screenshot of a stuck turn answers "whose fault is it?". */
     fun turnDiag(): String {
         if (!busy.value) return ""
-        val quiet = if (lastCoreEventAt == 0L) 0L
-            else (android.os.SystemClock.elapsedRealtime() - lastCoreEventAt) / 1000
-        if (quiet < 20) return ""
-        val run = activeRunIds[currentSession.value] ?: activeRunId
-        val runTag = run?.take(8)?.ifEmpty { null } ?: "none"
-        val wire = if (turnInFlight) "wire-busy" else "wire-idle"
-        return " · run $runTag · $wire · quiet ${quiet}s"
+        val sid = currentSession.value ?: return ""
+        // Ask the CORE: it holds the turn, the run id goose announced and the idle
+        // clock the watchdog acts on. An app-side guess said "quiet 0s" whenever
+        // any row twitched, which hid the very state this is for.
+        val core = runCatching { core.turnDiag(sid) }.getOrNull().orEmpty()
+        if (core.isEmpty()) {
+            // Not (or no longer) a core turn: say so rather than nothing.
+            return " · no core turn · quiet ${quietSecs()}s"
+        }
+        return " · $core"
     }
+
+    /** The core's turn-lifecycle log (prompt sent, run start/end, reply, and every
+     *  finish decision). The client cannot see which of the two end-of-turn
+     *  signals arrived, so a chat that will not stop saying "working" is
+     *  diagnosed from this rather than guessed at. */
+    fun turnLog(): String = runCatching { core.turnLog() }.getOrNull().orEmpty()
+
+    private fun quietSecs(): Long =
+        if (lastCoreEventAt == 0L) 0L
+        else (android.os.SystemClock.elapsedRealtime() - lastCoreEventAt) / 1000
 
     /** The chat being opened becomes the one whose turn state the UI shows. */
     private fun resetTurnRouting(sessionId: String? = currentSession.value) {

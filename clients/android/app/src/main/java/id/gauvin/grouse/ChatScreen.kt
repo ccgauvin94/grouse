@@ -40,6 +40,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
@@ -161,7 +162,8 @@ private fun LevelBar(level: Float) {
 fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     val ctx = LocalContext.current
     var showSchedule by remember { mutableStateOf(false) }
-    var showContextDetail by remember { mutableStateOf(false) }    // Assistant health from last-briefing recency (briefings run hourly 7 AM–10 PM). Green = fresh,
+    var showContextDetail by remember { mutableStateOf(false) }
+    var showTurnLog by remember { mutableStateOf(false) }    // Assistant health from last-briefing recency (briefings run hourly 7 AM–10 PM). Green = fresh,
     // yellow = late, red = stale/never. Overnight the gap grows to ~9h and that's still healthy.
     val lastBriefing = cm.store.lastBriefingAt
     val briefingAgo = if (lastBriefing > 0)
@@ -378,6 +380,10 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
         dismissButton = { TextButton(onClick = { showVisionWarn = false }) { Text(stringResource(R.string.cancel)) } },
     )
 
+    if (showTurnLog) {
+        TurnLogDialog(cm) { showTurnLog = false }
+    }
+
     if (showSchedule) AlertDialog(
         onDismissRequest = { showSchedule = false },
         confirmButton = { TextButton(onClick = { showSchedule = false }) { Text(stringResource(R.string.close)) } },
@@ -432,7 +438,12 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         // fillMaxWidth lets the weight spacer push the donut to the
                         // far right of the title row.
                         modifier = Modifier.fillMaxWidth()
-                            .clickable(enabled = !online) { cm.connectSaved() }) {
+                            .clickable(enabled = !online) { cm.connectSaved() }
+                            // Long-press the title for the core's turn log: the one
+                            // place the client can show WHY a chat thinks it is busy.
+                            .pointerInput(Unit) {
+                                detectTapGestures(onLongPress = { showTurnLog = true })
+                            }) {
                         Surface(color = dot, shape = RoundedCornerShape(50), modifier = Modifier.size(10.dp)) {}
                         Spacer(Modifier.width(8.dp))
                         // Single line + ellipsis: this Row shares the app bar with up to 3 action
@@ -1395,3 +1406,22 @@ private fun prettyOption(raw: String) = when (raw) {
 }
 
 // ---- Sessions ---------------------------------------------------------------
+
+/** The core's turn-lifecycle log: prompt sent, run start/end, the reply, and every
+ *  finish decision (including the ones that were IGNORED because nothing was in
+ *  flight). Long-press the chat title to open it. */
+@Composable
+private fun TurnLogDialog(cm: ConnectionManager, onDismiss: () -> Unit) {
+    val log = remember { cm.turnLog().ifBlank { "(no turn events yet)" } }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.close)) } },
+        title = { Text("Turn log") },
+        text = {
+            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                Text(log, style = MaterialTheme.typography.bodySmall.copy(
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace))
+            }
+        },
+    )
+}
