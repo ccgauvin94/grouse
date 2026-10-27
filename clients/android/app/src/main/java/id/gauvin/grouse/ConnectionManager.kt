@@ -181,11 +181,26 @@ class ConnectionManager private constructor(context: Context) {
         return " · $core"
     }
 
-    /** The core's turn-lifecycle log (prompt sent, run start/end, reply, and every
-     *  finish decision). The client cannot see which of the two end-of-turn
-     *  signals arrived, so a chat that will not stop saying "working" is
-     *  diagnosed from this rather than guessed at. */
-    fun turnLog(): String = runCatching { core.turnLog() }.getOrNull().orEmpty()
+    /** App-side turn events, shown under the core's log: the core says what IT
+     *  decided, this says what the UI did with it. A run-end the core emitted but
+     *  the app ignored (an id that did not match the chat on screen) is invisible
+     *  from either side alone. */
+    private val appTurnLog = ArrayDeque<String>()
+    private fun noteApp(line: String) {
+        if (appTurnLog.size >= 40) appTurnLog.removeFirst()
+        appTurnLog.addLast(line)
+    }
+
+    /** The core's turn-lifecycle log plus the app's own view of the same events. */
+    fun turnLog(): String = buildString {
+        append(runCatching { core.turnLog() }.getOrNull().orEmpty())
+        append("\n-- app --\n")
+        append("currentSession=").append(currentSession.value).append('\n')
+        append("roamPeer=").append(currentRoamPeer).append(" turnInFlight=")
+        append(turnInFlight).append(" owner=").append(turnInFlightSession).append('\n')
+        append("busy=").append(busy.value).append('\n')
+        for (line in appTurnLog) { append(line).append('\n') }
+    }
 
     private fun quietSecs(): Long =
         if (lastCoreEventAt == 0L) 0L
@@ -1225,6 +1240,7 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     fun openSession(sessionId: String, knownKind: SessionKind? = null) {
+        noteApp("app: openSession $sessionId (was ${currentSession.value})")
         // Cancel any deferred "open the assistant thread" -- the user has since picked a specific
         // session and that choice wins.
         pendingOpenAssistant = false
@@ -1591,6 +1607,7 @@ class ConnectionManager private constructor(context: Context) {
     /** Build a Prompt and hand it to the core. The core rejects a send whose `expect` session
      *  mismatches its bound session — silently, so the mismatch is surfaced here instead. */
     private fun sendPromptBlocks(text: String, images: List<ImageBlock>, files: List<FileBlock> = emptyList(), expect: String?) {
+        noteApp("app: send expect=$expect current=${currentSession.value}")
         val blocks = mutableListOf<PromptBlock>()
         if (text.isNotBlank()) blocks.add(PromptBlock.Text(text))
         images.forEach { img -> blocks.add(PromptBlock.Image(img.mimeType, img.dataB64)) }
@@ -2301,6 +2318,7 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun onRunEnded(sessionId: String, stopReason: String) {
         noteCoreEvent()
+        noteApp("app: runEnded $sessionId stop=$stopReason shown=${sessionId == currentSession.value} current=${currentSession.value}")
         // Every completion clears ITS chat; only the chat on screen owns the
         // busy/compacting/run-id state the UI draws.
         inFlight.remove(sessionId)
@@ -2517,6 +2535,7 @@ class ConnectionManager private constructor(context: Context) {
     val activeRunIdState = mutableStateOf<String?>(null)
     private fun onCoreActiveRun(sessionId: String, runId: String) {
         noteCoreEvent()
+        noteApp("app: activeRun $sessionId run=${runId.take(8)} shown=${sessionId == currentSession.value}")
         // Run ids are per session: keep them all so switching back to a running
         // chat restores steer/busy, and a completion for a background chat never
         // touches the chat on screen.
