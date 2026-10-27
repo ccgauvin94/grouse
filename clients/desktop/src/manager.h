@@ -681,7 +681,7 @@ private:
     // pixels this client sent wait here keyed by prompt text until that row
     // arrives (a queue: two prompts can share text). Not persisted — a reload
     // replays text only, which is why thumbnails vanish on reopen.
-    QHash<QString, QVariantList> m_pendingAttachments;
+    QHash<QString, QList<QVariantList>> m_pendingAttachments;
     QHash<QString, QVariantList> m_attachmentsByRow;   // item id -> its thumbnails
 
     // pending permission request
