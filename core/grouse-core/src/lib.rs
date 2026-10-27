@@ -2315,9 +2315,22 @@ impl Core {
         // queued follow-up (whose prompt re-marks this chat in flight and would
         // make an otherwise-clean cache look truncated).
         self.note(format!("finish {key} stop={stop} clean={clean} -> run_ended"));
+        // Each stage is named in the log: a turn that ends on the wire but never
+        // reaches the client has to be pinpointed to the step that stopped, not
+        // guessed at (a task that panics here is otherwise silent).
+        self.note("  stage: sealing");
         self.store_for(key).seal_turn();
+        self.note("  stage: sealed");
         self.save_cache_for(key);
-        self.store_for(key).announce_run_ended(stop);
+        self.note("  stage: cached");
+        let announced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.store_for(key).announce_run_ended(stop);
+        }));
+        if announced.is_err() {
+            self.note("  stage: announce PANICKED");
+        } else {
+            self.note("  stage: announced");
+        }
         // Re-baseline the resync stamp from the server after OUR OWN turn. The
         // server also emits a run-end `session_info_update`, and its debounced
         // probe otherwise sees a moved (updatedAt, messageCount) against the
