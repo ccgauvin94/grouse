@@ -38,7 +38,11 @@ Controls.Dialog {
 
             delegate: Column {
                 id: edel
-                width: ListView.view.width
+                // The vertical ScrollBar overlays the viewport, so a row laid out to
+                // the full view width puts its trailing type tag ("mcp", "platform",
+                // "built in") underneath the bar and it reads as clipped. Reserve the
+                // bar's width, the same way the chat bubbles do.
+                width: ListView.view.width - Kirigami.Units.gridUnit * 1.5
                 spacing: 2
                 property bool expanded: false
                 readonly property string eName: modelData.name

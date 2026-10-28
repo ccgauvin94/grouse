@@ -475,12 +475,18 @@ Controls.Dialog {
 
                 // --- Schedule (cron picker, twin of Android's CronEditor) ------
                 Controls.Label { text: qsTr("Schedule"); font.weight: Font.DemiBold }
-                RowLayout {
+                // A Flow, not a RowLayout: these pickers have fixed widths that sum
+                // to ~620px while the detail pane is ~500, so every one after the
+                // first two sat outside the pane — which is what pushed a horizontal
+                // scrollbar onto the whole detail area and clipped the dialog's right
+                // edge (the Save buttons and the model combos with it). Wrapping
+                // keeps every picker reachable at any dialog width.
+                Flow {
                     Layout.fillWidth: true
                     spacing: Kirigami.Units.smallSpacing
                     Controls.ComboBox {
                         id: cronKindCombo
-                        Layout.preferredWidth: 110
+                        width: 110
                         model: [qsTr("Hourly"), qsTr("Daily"), qsTr("Weekly"), qsTr("Custom")]
                         onActivated: {
                             const k = dialog.cronKinds[currentIndex]
@@ -493,7 +499,7 @@ Controls.Dialog {
                     Controls.ComboBox {
                         id: minCombo
                         visible: dialog.cronSpec.kind !== "custom"
-                        Layout.preferredWidth: 84
+                        width: 84
                         model: Array.from({ length: 12 }, (_, i) => dialog.pad2(i * 5))
                         Controls.ToolTip.visible: hovered
                         Controls.ToolTip.text: qsTr("Minute")
@@ -502,7 +508,7 @@ Controls.Dialog {
                     Controls.ComboBox {
                         id: hourCombo
                         visible: dialog.cronSpec.kind === "daily" || dialog.cronSpec.kind === "weekly"
-                        Layout.preferredWidth: 84
+                        width: 84
                         model: Array.from({ length: 24 }, (_, i) => dialog.pad2(i))
                         Controls.ToolTip.visible: hovered
                         Controls.ToolTip.text: qsTr("Hour")
@@ -511,7 +517,7 @@ Controls.Dialog {
                     Controls.ComboBox {
                         id: fromHourCombo
                         visible: dialog.cronSpec.kind === "hourly"
-                        Layout.preferredWidth: 120
+                        width: 120
                         model: Array.from({ length: 24 }, (_, i) => qsTr("from %1").arg(dialog.pad2(i)))
                         onActivated: dialog.setSpec({ fromHour: currentIndex,
                                                      toHour: Math.max(currentIndex, dialog.cronSpec.toHour) })
@@ -519,7 +525,7 @@ Controls.Dialog {
                     Controls.ComboBox {
                         id: toHourCombo
                         visible: dialog.cronSpec.kind === "hourly"
-                        Layout.preferredWidth: 120
+                        width: 120
                         model: Array.from({ length: 24 }, (_, i) => qsTr("to %1").arg(dialog.pad2(i)))
                         onActivated: dialog.setSpec({ toHour: currentIndex,
                                                      fromHour: Math.min(currentIndex, dialog.cronSpec.fromHour) })
@@ -527,13 +533,12 @@ Controls.Dialog {
                     Controls.ComboBox {
                         id: dowCombo
                         visible: dialog.cronSpec.kind === "weekly"
-                        Layout.preferredWidth: 100
+                        width: 100
                         model: dialog.cronDays
                         Controls.ToolTip.visible: hovered
                         Controls.ToolTip.text: qsTr("Day")
                         onActivated: dialog.setSpec({ dow: dialog.cronDays[currentIndex] })
                     }
-                    Item { Layout.fillWidth: true }
                 }
                 Controls.TextField {
                     id: customField
@@ -590,8 +595,11 @@ Controls.Dialog {
                     spacing: Kirigami.Units.smallSpacing
                     Controls.ComboBox {
                         id: providerCombo
-                        Layout.preferredWidth: 190
-                        Layout.maximumWidth: 240
+                        // Shares the pane instead of claiming a fixed 190px: with a
+                        // 240px model combo beside it the row was wider than the
+                        // detail pane, which clipped the Save button at the dialog edge.
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: Kirigami.Units.gridUnit * 6
                         textRole: "name"
                         // currentValue returns the model ITEM unless a valueRole
                         // is set (the [object V4ReferenceObject] config bug).
@@ -602,15 +610,14 @@ Controls.Dialog {
                     }
                     Controls.ComboBox {
                         id: modelCombo
-                        Layout.preferredWidth: 240
-                        Layout.maximumWidth: 320
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: Kirigami.Units.gridUnit * 8
                         textRole: "name"
                         valueRole: "value"
                         Controls.ToolTip.visible: hovered
                         Controls.ToolTip.text: qsTr("Model pinned to this recipe")
                         onActivated: dialog.selDraftModel = currentValue
                     }
-                    Item { Layout.fillWidth: true }
                     Controls.Button {
                         text: qsTr("Save")
                         enabled: dialog.selDraftModel !== dialog.selOrigModel
