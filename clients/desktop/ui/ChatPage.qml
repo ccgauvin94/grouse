@@ -256,6 +256,11 @@ Kirigami.Page {
         if (scrollSession.length > 0 && list.contentHeight > 0)
             scrollMem[scrollSession] = list.contentY
         scrollSession = Mgr.currentSessionId
+        // Rebuild the provider/model pickers for the chat being opened. They were only
+        // ever rebuilt on a config/providers event, so after a switch they kept showing
+        // the PREVIOUS chat's picks until (and unless) this one's config arrived — and
+        // the strip's visibility reads those lists.
+        page.rebuildSelectors()
         pendingRestore = false
         pendingFirstScroll = false
         scrollApplyAttempts = 0
@@ -1953,7 +1958,11 @@ Kirigami.Page {
                 RowLayout {
                     id: providerStrip
                     Layout.fillWidth: true
-                    visible: Mgr.online
+                    // Gated on the SESSION's own options, not on the main wire: a roam
+                    // chat carries its provider/model options over its peer connection,
+                    // so `Mgr.online` (the main WebSocket) hid the whole bar there even
+                    // though the chat had a working model.
+                    visible: page.providerChoices.length > 0 || page.modelChoices.length > 0
                     spacing: Kirigami.Units.smallSpacing
 
                     Controls.ComboBox {

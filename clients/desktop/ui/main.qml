@@ -139,7 +139,10 @@ Controls.ApplicationWindow {
                     // single delegate branches on model.header and nest depth.
                     delegate: Item {
                         id: del
-                        width: ListView.view.width
+                        // The vertical ScrollBar overlays the viewport, so a row at the
+                        // full width puts its elided tail (and any trailing badge) under
+                        // the bar. Reserve the bar's width, like the dialogs and bubbles.
+                        width: ListView.view.width - Kirigami.Units.gridUnit
                         readonly property bool isHeader: header
                         readonly property bool isProject: isHeader && String(section).startsWith("proj:")
                         readonly property bool isPeer: isHeader && String(section).startsWith("peer:")
@@ -474,7 +477,7 @@ Controls.ApplicationWindow {
                             // Endpoint header rows + session rows (drop-down).
                             delegate: Item {
                                 id: rdel
-                                width: ListView.view.width
+                                width: ListView.view.width - Kirigami.Units.gridUnit
                                 readonly property bool isHeader: rowType === "header"
                                 readonly property int rowHeight: isHeader
                                     ? Math.max(34, roamHeader.implicitHeight + Kirigami.Units.smallSpacing)
@@ -647,7 +650,22 @@ Controls.ApplicationWindow {
                                     anchors.fill: parent
                                     visible: !rdel.isHeader
                                     hoverEnabled: true
-                                    onClicked: Mgr.openRoamSession(label, sessionId, cwd)
+                                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                    onClicked: (e) => {
+                                        // Right-click reuses the sidebar's session menu: it is
+                                        // already roam-aware (it hides "Move to project…" for
+                                        // `roam:` ids) and the core routes session mutations to
+                                        // the owning peer, so rename/archive/delete work on a
+                                        // peer's chat without a second menu to keep in step.
+                                        if (e.button === Qt.RightButton) {
+                                            sessionMenu.targetSessionId = sessionId
+                                            sessionMenu.targetTitle = title
+                                            const pos = rmouse.mapToItem(root.contentItem, e.x, e.y)
+                                            sessionMenu.popup(pos.x, pos.y)
+                                            return
+                                        }
+                                        Mgr.openRoamSession(label, sessionId, cwd)
+                                    }
                                 }
                             }
                             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
@@ -855,7 +873,7 @@ Controls.ApplicationWindow {
                 // column then stack naturally instead of overlapping.
                 delegate: Column {
                     id: tdel
-                    width: ListView.view.width
+                    width: ListView.view.width - Kirigami.Units.gridUnit
                     spacing: 2
                     property bool expanded: false
                     readonly property string gName: modelData.name

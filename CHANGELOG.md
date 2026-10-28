@@ -67,6 +67,16 @@ All notable changes to Grouse are recorded here. The format is based on
   a display label (a CLI-detected entry and its API twin). An exact duplicate is
   dropped; a shared label with different values keeps both, the later one carrying
   its id so it is distinguishable.
+- **A roam chat's sidebar had no rename/edit menu, and its model bar could vanish.**
+  The roam rows' `MouseArea` counted only `Qt.LeftButton`, so right-click did
+  nothing there — rename/archive/export/delete were reachable for main-wire chats
+  only. Right-click now opens the same `sessionMenu` (already roam-aware: it hides
+  "Move to project…" for `roam:` ids, and the core routes session mutations to the
+  owning peer). The provider/model strip was gated on `Mgr.online` — the MAIN
+  WebSocket's state — so a peer chat hid its model picker whenever the main wire was
+  down, even with a working model over roam; it now gates on the session's own
+  options. The pickers also rebuild on a session switch, which previously left the
+  outgoing chat's provider/model on screen until that chat's config arrived.
 - **The form dialog's fields never initialised.** `function reset()` collided with
   Qt 6's `Dialog` `reset` signal, so QML rejected it as an invalid override and the
   pass that filled in defaults never ran: booleans did not start `false`, enum
