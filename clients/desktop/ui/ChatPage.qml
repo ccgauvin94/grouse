@@ -198,6 +198,8 @@ Kirigami.Page {
     property bool pendingRestore: false
     property bool pendingFirstScroll: false
     property int scrollApplyAttempts: 0
+    // Bounded re-pin counter for the open-at-newest loop (see pinToEnd).
+    property int pinAttempts: 0
     // The CORE owns the transcript window (docs/TRANSCRIPT_MODEL.md): it paints
     // the newest items and, on `Mgr.loadOlder()`, emits older ones to prepend.
     // `olderAnchorIndex` is the top visible row captured before a prepend, so
@@ -248,6 +250,7 @@ Kirigami.Page {
         pendingRestore = false
         pendingFirstScroll = false
         scrollApplyAttempts = 0
+        pinAttempts = 0
         if (scrollSession.length === 0)
             return
         if (scrollSession in scrollMem) {
@@ -275,6 +278,24 @@ Kirigami.Page {
         Mgr.loadOlder(40)
     }
 
+    /// Re-pin the view to the newest message until the list really reports it is at the
+    /// end. One positionViewAtEnd() is not enough: delegates are realized and measured
+    /// lazily (and recycled), so contentHeight keeps growing AFTER the jump and the chat
+    /// opened a few messages short of the bottom. Bounded so a layout that never settles
+    /// cannot spin here — and pendingFirstScroll is always cleared on the way out, since
+    /// it also gates scroll-back (maybeLoadOlder).
+    function pinToEnd(attempts) {
+        if (list.atYEnd || attempts <= 0) {
+            page.pinAttempts = 0
+            page.pendingFirstScroll = false
+            return
+        }
+        Qt.callLater(function() {
+            list.positionViewAtEnd()
+            page.pinToEnd(attempts - 1)
+        })
+    }
+
     function applySessionScroll() {
         if (!pendingFirstScroll && !pendingRestore)
             return
@@ -298,8 +319,8 @@ Kirigami.Page {
             }
             page.scrollApplyAttempts = 0
             if (page.pendingFirstScroll) {
-                page.pendingFirstScroll = false
                 list.positionViewAtEnd()
+                page.pinToEnd(24)
             } else if (page.pendingRestore) {
                 page.pendingRestore = false
                 const y = page.scrollMem[page.scrollSession]
@@ -584,11 +605,18 @@ Kirigami.Page {
             onContentHeightChanged: page.applySessionScroll()
             onHeightChanged: page.applySessionScroll()
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-            // Keep every delegate realized (a transcript is capped at 2000
-            // bubbles in the core): with the default 100px cache the scrollbar
-            // height jumped mid-drag as offscreen delegates were destroyed and
-            // remeasured to 0.
-            cacheBuffer: 20000
+            // A bounded cache with recycling, not "keep everything realized".
+            // The model only ever holds the core's 60-item window, but every
+            // scroll-up prepends another 40 (CLIENT_WINDOW / load_older), so a
+            // long read grew the live set without limit — and each row
+            // instantiates all four bubble variants. 20000px kept every one of
+            // them alive and repolished for the life of the session. 2000px
+            // still leaves ~2 screens of slack in each direction, which is what
+            // kept the scrollbar from collapsing as delegates died mid-drag,
+            // and reuseItems recycles the ones that do leave the window instead
+            // of tearing them down and rebuilding them on the way back.
+            cacheBuffer: 2000
+            reuseItems: true
 
             // The waiting bubble is an INLINE footer row: it participates in
             // contentHeight, so positionViewAtEnd reveals the last message and
@@ -703,7 +731,11 @@ Kirigami.Page {
                 readonly property real agentBubbleW: Math.min(mdel.maxW, 720)
                 readonly property int truncOutput: 4000   // perf/scroll cap for tool output
 
-                property bool toolOpen: false
+                // Tool chips start collapsed. The open state lives in the
+                // message model (ExpandedRole) — keyed by a stable row uid —
+                // so it survives both scrolling away and the row being
+                // recycled under reuseItems.
+                readonly property bool toolOpen: !!model.expanded
                 // Thoughts start collapsed, even mid-turn; the open state lives
                 // in the message model (ExpandedRole) so it survives scrolling.
                 readonly property bool thoughtOpen: !!model.expanded
@@ -1093,10 +1125,10 @@ Kirigami.Page {
                             flat: true
                             text: qsTr("Hide raw details")
                             height: Kirigami.Units.gridUnit * 1.25
-                            onClicked: mdel.toolOpen = false
+                            onClicked: Mgr.messageModel.toggleExpanded(index)
                         }
                     }
-                    TapHandler { onTapped: mdel.toolOpen = !mdel.toolOpen }
+                    TapHandler { onTapped: Mgr.messageModel.toggleExpanded(index) }
                 }
 
                 // Consecutive tool calls share one compact activity chip. Expanding
@@ -1230,7 +1262,7 @@ Kirigami.Page {
                             }
                         }
                     }
-                    TapHandler { onTapped: mdel.toolOpen = !mdel.toolOpen }
+                    TapHandler { onTapped: Mgr.messageModel.toggleExpanded(index) }
                 }
 
                 // ---------------- chart bubble ----------------
@@ -1419,7 +1451,7 @@ Kirigami.Page {
 
                     TapHandler {
                         enabled: !mcpAppChip.inlineShow && !mcpAppChip.pinned
-                        onTapped: mdel.toolOpen = !mdel.toolOpen
+                        onTapped: Mgr.messageModel.toggleExpanded(index)
                     }
                 }
 
@@ -1484,12 +1516,17 @@ Kirigami.Page {
         }
 
             // One-click jump back to the bottom when the user has scrolled up
-            // more than a viewport's worth of content.
+            // more than a viewport's worth of content. atYEnd is the Flickable's
+            // own verdict and is the authority here: with recycled delegates a
+            // pooled row's height is an average estimate, so re-deriving "is
+            // there content below" from contentHeight minus contentY could claim
+            // overflow while the list sat at its end (arrow showing with nowhere
+            // left to scroll).
             Controls.Button {
                 id: jumpToBottomButton
                 icon.name: "go-down"
                 display: Controls.AbstractButton.IconOnly
-                visible: list.contentHeight - list.contentY - list.height > list.height
+                visible: !list.atYEnd && (list.contentHeight - list.contentY) > list.height * 2
                 z: 2
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom

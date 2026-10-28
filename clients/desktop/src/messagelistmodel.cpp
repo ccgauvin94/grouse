@@ -67,10 +67,13 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
     case SummaryRole: return m.value("summary");
     case StepThoughtRole: return m.value("stepThought");
     case StepsRole: return m.value("steps");
-    // Keyed by ROW index, not the "id" value: text bubbles carry string message
-    // ids ("" for live ones), so an id.toInt() key collapsed every thought
-    // bubble onto one shared entry.
-    case ExpandedRole: return m_expanded.value(index.row(), false);
+    // Keyed by a per-row uid, not by the row index and not by the item id: the
+    // index is not stable (a load-older prepend, a seq-ordered insert or a
+    // removal shifts every row around it, with no dataChanged for the rows that
+    // inherited the state), and text bubbles carry string message ids ("" for
+    // live ones), so an id.toInt() key collapsed every thought bubble onto one
+    // shared entry.
+    case ExpandedRole: return m_expanded.value(uidAt(index.row()), false);
     default: return {};
     }
 }
@@ -88,6 +91,7 @@ void MessageListModel::clear()
         return;
     beginResetModel();
     m_rows.clear();
+    m_uids.clear();
     m_rowById.clear();
     m_dirtyRows.clear();
     m_expanded.clear();
@@ -101,6 +105,7 @@ void MessageListModel::append(const QVariantMap &message)
     const int at = m_rows.size();
     beginInsertRows(QModelIndex(), at, at);
     m_rows << message;
+    m_uids << m_nextUid++;
     const QString id = message.value(QStringLiteral("id")).toString();
     if (!id.isEmpty())
         m_rowById.insert(id, at);
@@ -115,8 +120,10 @@ void MessageListModel::prepend(const QList<QVariantMap> &messages)
     // Present the rows oldest-first at the front: prepending the tail first
     // leaves `messages` in order.
     beginInsertRows(QModelIndex(), 0, messages.size() - 1);
-    for (int i = messages.size() - 1; i >= 0; --i)
+    for (int i = messages.size() - 1; i >= 0; --i) {
         m_rows.prepend(messages.at(i));
+        m_uids.prepend(m_nextUid++);
+    }
     endInsertRows();
     reindex();   // every existing row shifted right
     emit countChanged();
@@ -164,6 +171,7 @@ void MessageListModel::upsert(const QString &id, const QVariantMap &row)
     }
     beginInsertRows(QModelIndex(), at, at);
     m_rows.insert(at, row);
+    m_uids.insert(at, m_nextUid++);
     endInsertRows();
     reindex();   // every row after the insertion point shifted right
     emit countChanged();
@@ -176,6 +184,7 @@ void MessageListModel::removeById(const QString &id)
         return;
     beginRemoveRows(QModelIndex(), i, i);
     m_rows.removeAt(i);
+    m_uids.removeAt(i);
     endRemoveRows();
     reindex();
     emit countChanged();
@@ -208,7 +217,8 @@ void MessageListModel::toggleExpanded(int row)
 {
     if (row < 0 || row >= m_rows.size())
         return;
-    m_expanded[row] = !m_expanded.value(row, false);
+    const quint64 uid = uidAt(row);
+    m_expanded[uid] = !m_expanded.value(uid, false);
     const QModelIndex idx = index(row);
     emit dataChanged(idx, idx, {ExpandedRole});
 }

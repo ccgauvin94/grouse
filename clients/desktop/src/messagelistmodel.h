@@ -42,7 +42,8 @@ public:
                            //              when the chip opens
         StepsRole,         // "steps"    — a delegate's subagent tool calls [{name,detail}]
         ExpandedRole,      // "expanded" — per-row UI state kept in the model so it
-                           //              survives delegate recycling (thinking bubble)
+                           //              survives delegate recycling AND the row
+                           //              shifting (thinking bubble, tool chip)
     };
 
     explicit MessageListModel(QObject *parent = nullptr);
@@ -74,7 +75,9 @@ public:
     void appendOutput(const QString &id, const QString &chunk);
     /** Replace row `index`'s data and notify QML of every role. */
     void update(int index, const QVariantMap &message);
-    /** Flip a row's ExpandedRole (thinking bubble open/closed). Keyed by row index. */
+    /** Flip a row's ExpandedRole (thinking bubble / tool chip open-closed). Takes
+     *  a row index but stores by the row's stable uid, so the state follows the
+     *  message when a load-older prepend shifts it down. */
     Q_INVOKABLE void toggleExpanded(int row);
     /**
      * Like update(), but the dataChanged notification is deferred and coalesced
@@ -95,9 +98,20 @@ private:
 
     void reindex();
 
+    /** Stable identity of a row, or 0 when the index is out of range. */
+    quint64 uidAt(int row) const
+    {
+        return (row >= 0 && row < m_uids.size()) ? m_uids.at(row) : 0;
+    }
+
     QList<QVariantMap> m_rows;
+    // Parallel to m_rows. A row's *index* moves whenever rows are inserted or
+    // removed around it, so per-row UI state is keyed by this uid instead;
+    // starting at 1 keeps 0 free as the "no such row" value.
+    QList<quint64> m_uids;
+    quint64 m_nextUid = 1;
     QHash<QString, int> m_rowById;   // item id -> row index (non-empty ids only)
     QList<int> m_dirtyRows;
-    QHash<int, bool> m_expanded;   // row id -> user-expanded (thinking bubble)
+    QHash<quint64, bool> m_expanded;   // row uid -> user-expanded (thinking bubble)
     QTimer *m_deferTimer = nullptr;
 };

@@ -20,6 +20,8 @@ private slots:
     void clearDuringPendingDeferredIsSafe();
     void rowAndRowsAccessors();
     void expandedStartsCollapsedAndToggles();
+    void expandedFollowsTheMessageAcrossPrepend();
+    void expandedFollowsTheMessageAcrossInsertAndRemove();
 };
 
 QVariantMap message(int id, const QString &role, const QString &text)
@@ -43,7 +45,19 @@ void TstMessageListModel::roleNamesAreExplicit()
     QVERIFY2(names.key("summary") != 0, "summary role");
     QVERIFY2(names.key("stepThought") != 0, "stepThought role");
     QVERIFY2(names.key("expanded") != 0, "expanded role");
-    QCOMPARE(names.size(), 19);
+    // The rest of the set, named rather than counted: a numeric pin on the
+    // total (it used to be 19) said nothing about WHICH name was missing and
+    // went stale the moment a role was added.
+    QVERIFY2(names.key("id") != 0, "id role");
+    QVERIFY2(names.key("title") != 0, "title role");
+    QVERIFY2(names.key("detail") != 0, "detail role");
+    QVERIFY2(names.key("output") != 0, "output role");
+    QVERIFY2(names.key("status") != 0, "status role");
+    QVERIFY2(names.key("images") != 0, "images role");
+    QVERIFY2(names.key("usage") != 0, "usage role");
+    QVERIFY2(names.key("appHtml") != 0, "appHtml role");
+    QVERIFY2(names.key("appKey") != 0, "appKey role");
+    QVERIFY2(names.key("steps") != 0, "steps role");
 }
 
 void TstMessageListModel::appendGrowsAndSignals()
@@ -140,6 +154,52 @@ void TstMessageListModel::expandedStartsCollapsedAndToggles()
     model.toggleExpanded(0);
     model.clear();
     model.append(message(7, QStringLiteral("thought"), QStringLiteral("hmm")));
+    QCOMPARE(model.data(model.index(0), MessageListModel::ExpandedRole).toBool(), false);
+}
+
+void TstMessageListModel::expandedFollowsTheMessageAcrossPrepend()
+{
+    MessageListModel model;
+    model.append(message(10, QStringLiteral("thought"), QStringLiteral("first")));
+    model.append(message(11, QStringLiteral("thought"), QStringLiteral("second")));
+    model.toggleExpanded(1);   // open the SECOND bubble
+    QCOMPARE(model.data(model.index(1), MessageListModel::ExpandedRole).toBool(), true);
+
+    // A load-older batch always arrives at the front. The open state must travel
+    // with its message: keying it by row index left it on row 1, so a different
+    // bubble came back expanded after every scroll-up (and nothing re-notified
+    // the rows that had inherited it).
+    QList<QVariantMap> older;
+    for (int i = 1; i <= 3; ++i)
+        older << message(100 + i, QStringLiteral("thought"), QStringLiteral("older"));
+    model.prepend(older);
+
+    QCOMPARE(model.rowCount(), 5);
+    QCOMPARE(model.row(4).value("id").toInt(), 11);   // the open one, now shifted down
+    QCOMPARE(model.data(model.index(4), MessageListModel::ExpandedRole).toBool(), true);
+    for (int i = 0; i < 4; ++i)
+        QCOMPARE(model.data(model.index(i), MessageListModel::ExpandedRole).toBool(), false);
+}
+
+void TstMessageListModel::expandedFollowsTheMessageAcrossInsertAndRemove()
+{
+    MessageListModel model;
+    model.append({{"id", "a"}, {"role", "thought"}, {"seq", 10}});
+    model.append({{"id", "b"}, {"role", "thought"}, {"seq", 20}});
+    model.toggleExpanded(1);   // open "b"
+
+    // A row that outranks "b" is inserted before it from `seq`, not appended:
+    // the open state stays with "b" (now row 2) rather than with row 1.
+    model.upsert("c", {{"id", "c"}, {"role", "thought"}, {"seq", 15}});
+    QCOMPARE(model.rowCount(), 3);
+    QCOMPARE(model.row(2).value("id").toString(), QStringLiteral("b"));
+    QCOMPARE(model.data(model.index(2), MessageListModel::ExpandedRole).toBool(), true);
+    QCOMPARE(model.data(model.index(1), MessageListModel::ExpandedRole).toBool(), false);
+
+    // Removing a neighbour shifts "b" back up; the state comes with it.
+    model.removeById("c");
+    QCOMPARE(model.row(1).value("id").toString(), QStringLiteral("b"));
+    QCOMPARE(model.data(model.index(1), MessageListModel::ExpandedRole).toBool(), true);
     QCOMPARE(model.data(model.index(0), MessageListModel::ExpandedRole).toBool(), false);
 }
 
