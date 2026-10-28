@@ -463,7 +463,13 @@ Controls.ApplicationWindow {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             clip: true
-                            spacing: Kirigami.Units.smallSpacing
+                            // No ListView spacing: the gap between rows is drawn
+                            // INSIDE each delegate instead (the painted rect is
+                            // inset, the hit target is not). Spacing belongs to no
+                            // delegate, so an inter-row gap was dead to hover and
+                            // clicks — hovering the bottom edge of a session did
+                            // nothing, and the pointer had to sit slightly above it.
+                            spacing: 0
                             model: Mgr.roamModel
                             // Endpoint header rows + session rows (drop-down).
                             delegate: Item {
@@ -479,6 +485,12 @@ Controls.ApplicationWindow {
                                     id: roamHeader
                                     visible: rdel.isHeader
                                     anchors.fill: parent
+                                    // The row owns the full delegate box (hover/click);
+                                    // only the painted pill is inset, which is what
+                                    // keeps a visual gap between rows now that the
+                                    // ListView has no spacing of its own.
+                                    anchors.topMargin: Kirigami.Units.smallSpacing / 2
+                                    anchors.bottomMargin: Kirigami.Units.smallSpacing / 2
                                     radius: Kirigami.Units.smallSpacing
                                     // Never an opaque background: a broken binding
                                     // here once left the header solid white. Keep the
@@ -590,16 +602,13 @@ Controls.ApplicationWindow {
                                     id: rrow
                                     visible: !rdel.isHeader
                                     anchors.fill: parent
+                                    // Painted pill inset; the hit target below is not.
+                                    anchors.topMargin: Kirigami.Units.smallSpacing / 2
+                                    anchors.bottomMargin: Kirigami.Units.smallSpacing / 2
                                     radius: Kirigami.Units.smallSpacing
                                     color: rmouse.containsMouse
                                         ? Kirigami.Theme.highlightColor : "transparent"
                                     opacity: rmouse.containsMouse ? 0.2 : 1
-                                    MouseArea {
-                                        id: rmouse
-                                        anchors.fill: parent
-                                        hoverEnabled: true
-                                        onClicked: Mgr.openRoamSession(label, sessionId, cwd)
-                                    }
                                     Column {
                                         id: rcol
                                         anchors.left: parent.left
@@ -628,6 +637,17 @@ Controls.ApplicationWindow {
                                             renderType: Text.NativeRendering
                                         }
                                     }
+                                }
+                                // The hit target is the WHOLE delegate box, not the
+                                // inset pill: the thin band either side of the pill
+                                // used to belong to no row, so pointing at the bottom
+                                // edge of a session highlighted (or opened) nothing.
+                                MouseArea {
+                                    id: rmouse
+                                    anchors.fill: parent
+                                    visible: !rdel.isHeader
+                                    hoverEnabled: true
+                                    onClicked: Mgr.openRoamSession(label, sessionId, cwd)
                                 }
                             }
                             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }

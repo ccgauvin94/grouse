@@ -14,6 +14,7 @@ private slots:
     void sessionRolesCarryCwd();
     void removePeerClearsRows();
     void statusUpdatesByIdentity();
+    void everyDeclaredRoleIsValidForBothRowTypes();
 };
 
 QVariant rowValue(const RoamListModel &m, int row, int role)
@@ -91,6 +92,38 @@ void TstRoamListModel::statusUpdatesByIdentity()
     m.setPeerStatus(QStringLiteral("ws"), QStringLiteral("error: boom"), false);
     QVERIFY(!rowValue(m, 0, RoamListModel::ConnectedRole).toBool());
     QCOMPARE(rowValue(m, 0, RoamListModel::StatusRole).toString(), QStringLiteral("error: boom"));
+}
+
+/**
+ * The delegate is ONE Item hosting BOTH the header and the session layout, and a hidden
+ * branch still evaluates its bindings — so a role returning an invalid QVariant makes QML
+ * warn "Unable to assign [undefined] to <type>" once per row (61 of them per launch, which
+ * buried real binding failures). Every declared role must answer for every row type; this
+ * is the guardrail for the next role someone adds.
+ */
+void TstRoamListModel::everyDeclaredRoleIsValidForBothRowTypes()
+{
+    RoamListModel m;
+    m.addPeer(QStringLiteral("ws"));
+    m.setPeerSessions(QStringLiteral("ws"), QVariantList{
+        QVariantMap{{"sessionId", "s1"}, {"title", "Chat one"}, {"cwd", "/srv/a"}},
+    });
+    m.togglePeer(QStringLiteral("ws"));   // header row at 0, session row at 1
+    QCOMPARE(m.rowCount(), 2);
+
+    const QHash<int, QByteArray> roles = m.roleNames();
+    QVERIFY2(roles.size() >= 10, "the role map is populated");
+
+    for (int row = 0; row < m.rowCount(); ++row) {
+        for (auto it = roles.cbegin(); it != roles.cend(); ++it) {
+            const QVariant v = m.data(m.index(row, 0), it.key());
+            QVERIFY2(v.isValid(),
+                     qPrintable(QStringLiteral("row %1 (%2) returned an invalid QVariant for role '%3'")
+                                    .arg(row)
+                                    .arg(rowValue(m, row, RoamListModel::RowTypeRole).toString())
+                                    .arg(QString::fromUtf8(it.value()))));
+        }
+    }
 }
 
 QTEST_GUILESS_MAIN(TstRoamListModel)
