@@ -180,7 +180,20 @@ QString Manager::currentSessionTitle() const
 {
     if (!m_currentSessionTitle.isEmpty())
         return m_currentSessionTitle;
-    return m_currentSessionId.isEmpty() ? QStringLiteral("New Chat") : m_currentSessionId;
+    if (m_currentSessionId.isEmpty())
+        return QStringLiteral("New Chat");
+    // A roam display id is an internal handle (`roam:<peer>:<id>`), not a name:
+    // an untitled peer chat reads as peer + its own session id rather than
+    // dumping the transport namespace into the window title and header.
+    static const QString roamPrefix = QStringLiteral("roam:");
+    if (m_currentSessionId.startsWith(roamPrefix)) {
+        const QString rest = m_currentSessionId.mid(roamPrefix.size());
+        const int sep = rest.lastIndexOf(QLatin1Char(':'));
+        if (sep > 0)
+            return rest.left(sep) + QStringLiteral(" · ") + rest.mid(sep + 1);
+        return rest;
+    }
+    return m_currentSessionId;
 }
 
 QObject *Manager::sessionsModel() const { return m_sessionsModel; }
@@ -412,7 +425,9 @@ void Manager::openRoamSession(const QString &label, const QString &sessionId, co
     emit landingChanged();
     m_currentSessionId = sessionId;
     restoreTurnState(sessionId);
-    m_currentSessionTitle.clear();
+    // A peer's chat carries its human title only in the peer's session list, so
+    // the window shows that instead of the transport handle it opened by.
+    m_currentSessionTitle = m_roamTitles.value(sessionId);
     m_tools.clear();
     m_extDefs.clear();
     m_sessionExts.clear();
@@ -1902,6 +1917,13 @@ void Manager::coreOnRoamSessions(const QString &label, const QString &json)
         m["title"] = o.value("title").toString();
         m["updatedAt"] = o.value("updated_at").toString();
         m["lastMessageAt"] = o.value("updated_at").toString();
+        // Remember the title: a peer's session/list is the ONLY channel that
+        // carries one (this side has no session/info for a peer), and
+        // openRoamSession() needs it to label the window.
+        const QString roamSid = m.value("sessionId").toString();
+        const QString roamTitle = m.value("title").toString();
+        if (!roamSid.isEmpty() && !roamTitle.isEmpty())
+            m_roamTitles.insert(roamSid, roamTitle);
         // The roam card shows the snippet, falling back to "N msg" — carry
         // both. This handler used to drop them, so every roam card read
         // "0 msg" no matter what the peer's session/list carried.
@@ -1914,6 +1936,13 @@ void Manager::coreOnRoamSessions(const QString &label, const QString &json)
         sessions << m;
     }
     m_roamModel->setPeerSessions(label, sessions);
+    // The open chat's own title can arrive late (the peer titles a session after
+    // its first turn) or change on a rename — follow it while it is on screen.
+    const QString current = m_roamTitles.value(m_currentSessionId);
+    if (!current.isEmpty() && current != m_currentSessionTitle) {
+        m_currentSessionTitle = current;
+        emit currentSessionChanged();
+    }
 }
 
 void Manager::coreOnPeerNewSession(const QString &label, const QString &sid)
@@ -2275,19 +2304,52 @@ void Manager::refreshProviders()
 QVariantList Manager::filterProviders(const QVariantList &choices, const QStringList &configured,
                                       bool configuredOnly, const QString &current)
 {
-    if (!configuredOnly || configured.isEmpty())
-        return choices;
     QVariantList keep;
-    for (const QVariant &choice : choices) {
-        const QString value = choice.toMap().value(QStringLiteral("value")).toString();
-        // `current` is kept unconditionally: a disabled/off-catalog pick still has to
-        // show in its own combo, or it looks like the app switched provider by itself.
-        if (value == current || configured.contains(value))
-            keep.append(choice);
+    if (!configuredOnly || configured.isEmpty()) {
+        keep = choices;
+    } else {
+        for (const QVariant &choice : choices) {
+            const QString value = choice.toMap().value(QStringLiteral("value")).toString();
+            // `current` is kept unconditionally: a disabled/off-catalog pick still has to
+            // show in its own combo, or it looks like the app switched provider by itself.
+            if (value == current || configured.contains(value))
+                keep.append(choice);
+        }
+        // Never hand back an empty model: a stale inventory that matches nothing (or an
+        // all-unconfigured server) degrades to the full list instead of a blank combo.
+        if (keep.isEmpty())
+            keep = choices;
     }
-    // Never hand back an empty model: a stale inventory that matches nothing (or an
-    // all-unconfigured server) degrades to the full list instead of a blank combo.
-    return keep.isEmpty() ? choices : keep;
+    // Two choices can carry the SAME display label. An exact (name, value) pair is
+    // nothing but a duplicate — it picks the same provider twice — so it is dropped;
+    // a shared label with DIFFERENT values (a CLI-detected entry beside its API
+    // twin) keeps both, because dropping either would make one unreachable, and the
+    // later ones carry their id so they can be told apart.
+    QVariantList unique;
+    QHash<QString, int> labelAt;
+    for (const QVariant &choice : keep) {
+        QVariantMap entry = choice.toMap();
+        const QString label = entry.value(QStringLiteral("name")).toString();
+        if (label.isEmpty()) {
+            unique.append(entry);
+            continue;
+        }
+        const QString value = entry.value(QStringLiteral("value")).toString();
+        const QString exactKey = label + QLatin1Char('\n') + value;
+        if (labelAt.contains(exactKey))
+            continue;   // same label AND same value: a true duplicate
+        if (labelAt.contains(label)) {
+            entry[QStringLiteral("name")] = value.isEmpty()
+                                                ? label
+                                                : label + QStringLiteral(" (") + value + QLatin1Char(')');
+            labelAt.insert(label + QLatin1Char('\n') + value, unique.size());
+        } else {
+            labelAt.insert(label, unique.size());
+            labelAt.insert(exactKey, unique.size());
+        }
+        unique.append(entry);
+    }
+    return unique;
 }
 
 QVariantList Manager::filterConfiguredProviders(const QVariantList &choices, const QString &current) const
@@ -2497,6 +2559,16 @@ void Manager::coreOnItem(const QString &json)
             m_itemHasOlder = hasOlder;
             emit itemWindowChanged();
         }
+        // A Window is the core's "this session's window is painted" marker, and the
+        // only event that reports a SUCCESSFUL open (a failure arrives as
+        // on_session_open_failed). The status below is set locally when a chat opens,
+        // and nothing cleared it for a roam chat — the main wire only gets cleared by
+        // the connection-level Ready, which a peer open never emits — so "loading…"
+        // sat in the header and the composer for good.
+        if (m_status == QStringLiteral("loading…")
+            || m_status == QStringLiteral("reloading…")
+            || m_status == QStringLiteral("reloading from the start…"))
+            setStatus(QStringLiteral("ready"));
         return;
     }
     if (root.contains(QStringLiteral("Upsert"))) {

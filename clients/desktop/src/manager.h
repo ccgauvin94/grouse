@@ -576,6 +576,11 @@ private:
 
     QVariantList m_sessions;
     QVariantList m_projects;
+    /// Roam session id -> the title the peer's session/list carries. The peer
+    /// list is the ONLY place a roam session's human title arrives (there is no
+    /// session/info for a peer on this side), so opening a chat reads it from
+    /// here instead of leaving the raw `roam:<peer>:<id>` handle on screen.
+    QHash<QString, QString> m_roamTitles;
     QVariantList m_recipes;
     QVariantList m_schedules;
     QVariantList m_config;    /// Tool names active in the current session (`extension__tool`, per-conversation).

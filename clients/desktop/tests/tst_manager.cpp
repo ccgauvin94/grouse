@@ -34,6 +34,9 @@ private slots:
     void openFailureIsVisibleInStatus();
     void configuredProviderFilter();
     void configuredProvidersParse();
+    void roamTitleComesFromThePeerList();
+    void providerChoicesDisambiguateDuplicateLabels();
+    void roamOpenClearsTheLoadingStatus();
 };
 
 /**
@@ -308,6 +311,101 @@ void TstManager::bridgeLoadsWhenCorePresent()
     QVERIFY(bridge != nullptr);
     if (bridge->isAvailable())
         QVERIFY(bridge->handle() != nullptr);
+}
+
+void TstManager::roamTitleComesFromThePeerList()
+{
+    Manager mgr;
+    // A peer's session list is the only place a roam chat's human title arrives;
+    // opening by id used to leave the raw transport handle (`roam:peer:id`) in
+    // the window title and the chat header.
+    mgr.coreOnRoamSessions(QStringLiteral("Phaethon"),
+        QStringLiteral(R"([{"id":"roam:Phaethon:20261024_2","title":"Home Assistant"}])"));
+    mgr.openRoamSession(QStringLiteral("Phaethon"),
+                        QStringLiteral("roam:Phaethon:20261024_2"), QString());
+    QCOMPARE(mgr.currentSessionTitle(), QStringLiteral("Home Assistant"));
+
+    // An untitled peer chat still never shows the namespace.
+    mgr.openRoamSession(QStringLiteral("Phaethon"),
+                        QStringLiteral("roam:Phaethon:20261024_9"), QString());
+    QCOMPARE(mgr.currentSessionTitle(), QStringLiteral("Phaethon · 20261024_9"));
+
+    // A title that arrives after the chat is open (the peer names a session
+    // once it has a turn) updates the title in place.
+    mgr.openRoamSession(QStringLiteral("Phaethon"),
+                        QStringLiteral("roam:Phaethon:20261024_2"), QString());
+    QCOMPARE(mgr.currentSessionTitle(), QStringLiteral("Home Assistant"));
+    mgr.coreOnRoamSessions(QStringLiteral("Phaethon"),
+        QStringLiteral(R"([{"id":"roam:Phaethon:20261024_2","title":"TV + network"}])"));
+    QCOMPARE(mgr.currentSessionTitle(), QStringLiteral("TV + network"));
+
+    // A main-wire session is unaffected: its id is already the title fallback.
+    mgr.openSession(QStringLiteral("s1"));
+    QCOMPARE(mgr.currentSessionTitle(), QStringLiteral("s1"));
+}
+
+void TstManager::providerChoicesDisambiguateDuplicateLabels()
+{
+    // Two providers can carry the same display label (a CLI-detected entry and its
+    // API twin both read "OpenCode Go"): the picker listed it twice with nothing to
+    // tell them apart, and simply dropping one would make it unreachable.
+    const QVariantList choices{
+        QVariantMap{{"value", "opencode-go"}, {"name", "OpenCode Go"}},
+        QVariantMap{{"value", "opencode-go-cli"}, {"name", "OpenCode Go"}},
+        QVariantMap{{"value", "opencode-zen"}, {"name", "OpenCode Zen"}},
+    };
+    const QVariantList kept = Manager::filterProviders(choices, QStringList(), false, QString());
+    QCOMPARE(kept.size(), 3);
+    QCOMPARE(kept.at(0).toMap().value("name").toString(), QStringLiteral("OpenCode Go"));
+    QCOMPARE(kept.at(1).toMap().value("name").toString(),
+             QStringLiteral("OpenCode Go (opencode-go-cli)"));
+    QCOMPARE(kept.at(2).toMap().value("name").toString(), QStringLiteral("OpenCode Zen"));
+
+    // An exact duplicate (same label AND value) picks the same provider twice, so it
+    // is dropped; the same label with a different value keeps both, the later one
+    // carrying its id so they can be told apart.
+    const QVariantList withExactDuplicate{
+        QVariantMap{{"value", "opencode-go"}, {"name", "OpenCode Go"}},
+        QVariantMap{{"value", "opencode-go"}, {"name", "OpenCode Go"}},
+        QVariantMap{{"value", "opencode-go-cli"}, {"name", "OpenCode Go"}},
+    };
+    const QVariantList deduped = Manager::filterProviders(
+        withExactDuplicate, QStringList(), false, QString());
+    QCOMPARE(deduped.size(), 2);
+    QCOMPARE(deduped.at(0).toMap().value("name").toString(), QStringLiteral("OpenCode Go"));
+    QCOMPARE(deduped.at(1).toMap().value("name").toString(),
+             QStringLiteral("OpenCode Go (opencode-go-cli)"));
+
+    // The configured-only filter still keeps the current pick visible, and a
+    // disabled/off-catalog current value is not silently dropped.
+    const QVariantList filtered = Manager::filterProviders(
+        choices, QStringList{QStringLiteral("opencode-zen")}, true, QStringLiteral("opencode-go"));
+    QCOMPARE(filtered.size(), 2);
+}
+
+void TstManager::roamOpenClearsTheLoadingStatus()
+{
+    Manager mgr;
+    QSignalSpy spy(&mgr, &Manager::statusChanged);
+    mgr.openRoamSession(QStringLiteral("Phaethon"),
+                        QStringLiteral("roam:Phaethon:20261024_2"), QString());
+    QCOMPARE(mgr.status(), QStringLiteral("loading…"));
+
+    // A peer's open is only confirmed by the painted window: a SUCCESSFUL open raises
+    // no other event, so without this the status stayed "loading…" forever (it showed
+    // under the chat name and in the composer).
+    mgr.coreOnItem(QStringLiteral(R"({"Window":{"oldest_id":"m1","has_older":true}})"));
+    QCOMPARE(mgr.status(), QStringLiteral("ready"));
+
+    // A later Window (a load-older batch) must not disturb a status that says
+    // something meaningful — here, the visible failure a rejected open reports.
+    mgr.coreOnSessionOpenFailed(QStringLiteral("sess-gone"),
+                                QStringLiteral("session/load failed: stale"));
+    const QString failure = mgr.status();
+    QVERIFY2(failure.contains(QStringLiteral("stale")), qPrintable(failure));
+    mgr.coreOnItem(QStringLiteral(R"({"Window":{"oldest_id":"m0","has_older":false}})"));
+    QCOMPARE(mgr.status(), failure);
+    Q_UNUSED(spy);
 }
 
 QTEST_MAIN(TstManager)
