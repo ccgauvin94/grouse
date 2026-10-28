@@ -94,6 +94,10 @@ class Manager : public QObject
     Q_PROPERTY(bool landingPage READ landingPage NOTIFY landingChanged)
     // --- chat parity state (mirrors the Android client's ConnectionManager) ---
     Q_PROPERTY(int queuedCount READ queuedCount NOTIFY queuedChanged)
+    /** THIS chat's parked messages, oldest first: [{id, text, attachments}]. The
+     *  composer renders one card per entry, with a Steer button that promotes the
+     *  message into the running turn. */
+    Q_PROPERTY(QVariant queuedSends READ queuedSends NOTIFY queuedChanged)
     /** The running turn's run id for THIS session (the steer key), empty when
      *  no turn is live or the live run belongs to another session. */
     Q_PROPERTY(QString activeRunId READ activeRunId NOTIFY activeRunIdChanged)
@@ -362,7 +366,16 @@ public:
     /// as `on_item` Upserts + a refreshed `Window`; there is no client buffer.
     Q_INVOKABLE void loadOlder(int count);
 
-    int queuedCount() const { return m_pendingQueue.size(); }
+    /** The displayed chat's parked-message count (NOT every chat's: the queue is
+     *  per-chat, and a card for another conversation's message would be a lie). */
+    int queuedCount() const;
+    /** The same queue as records, for the composer's queued cards. */
+    QVariant queuedSends() const;
+    /** Promote one parked message into the running turn ("steer"). Text only —
+     *  a steer carries no blocks, so an attachment keeps waiting. */
+    Q_INVOKABLE void steerQueued(int id);
+    /** Drop one parked message without sending it. */
+    Q_INVOKABLE void cancelQueued(int id);
     QString activeRunId() const { return m_activeRunId; }
     bool compacting() const { return m_compacting; }
     int contextUsed() const { return m_contextUsed; }
@@ -522,7 +535,10 @@ private:
     QString formatUsage(const QVariantMap &usage) const;
 
     // queued-send / steering
-    struct PendingSend { QString text; QVariantList images; };
+    /// A message that must wait: for the running turn to end, or for a session bound.
+    /// `sessionId` is the chat it was TYPED in — draining it into whatever chat happens
+    /// to be on screen is how a reply once streamed into the wrong conversation.
+    struct PendingSend { QString text; QVariantList images; QString sessionId; int id = 0; };
     void dispatchSend(const QString &text, const QVariantList &blocks);
     void enqueue(const PendingSend &p);
     void flushQueue();
@@ -665,6 +681,8 @@ private:
 
     // chat parity state
     QList<PendingSend> m_pendingQueue;      // sends that must wait for the current turn / a session
+    /// Source of PendingSend::id (assigned in enqueue), so the QML cards can name one.
+    int m_sendSeq = 0;
     QString m_activeRunId;                  // live run id from session_info_update (steering)
     bool m_compacting = false;
     int m_contextUsed = 0, m_contextSize = 0;

@@ -170,10 +170,14 @@ Kirigami.Page {
     property var effortChoices: []
     property int effortIndex: -1
 
-    // Android parity: with a live run id for THIS session, the next message
-    // steers the running turn instead of queueing behind it. Steering carries
-    // text only, so a message with attachments queues either way.
+    // A steer needs a live run id on the wire — that is what the server
+    // validates against — so it is only offered while this chat's turn runs.
+    // Steering carries text only, so a queued message with an attachment can
+    // never be promoted; it keeps waiting instead.
     readonly property bool canSteer: Mgr.prompting && Mgr.activeRunId.length > 0
+    // Queued-card ids that have already been shown, so a republish of the queue does not
+    // replay the slide for cards that are already on screen (see the repeater delegate).
+    property var queuedSeen: ({})
 
     property string hintText: Mgr.online ? "" : qsTr("Choose a session on the left, or start a new chat, then enter a message below.")
 
@@ -188,6 +192,13 @@ Kirigami.Page {
         if (s.startsWith("connecting") || s.startsWith("connected")) return qsTr("Connecting…")
         if (s === "loading…") return qsTr("Loading chat…")
         return ""
+    }
+    // Why a parked message has not gone out yet — the same three cases Android
+    // shows, so the two clients never disagree about what "queued" means.
+    function queuedNote(attachments) {
+        if (!Mgr.online) return qsTr("not connected — sends when it reconnects")
+        if (attachments > 0) return qsTr("with attachment — sends when this turn ends")
+        return qsTr("sends when this turn ends")
     }
 
     // Per-conversation scroll memory (sessionId -> contentY): lets a user leave
@@ -1689,23 +1700,135 @@ Kirigami.Page {
             }
         }
 
-        // Non-blocking queue indicator while the current turn still runs.
-        Controls.Label {
-            id: queuedChip
+        // Parked messages: one card each, sliding up above the input bar. A send while a
+        // turn runs PARKS — it does not steer — because a steer REDIRECTS the reply being
+        // written, which has to be this card's button and not a side effect of send.
+        Column {
+            id: queuedArea
             Layout.fillWidth: true
-            visible: Mgr.queuedCount > 0
-            leftPadding: Kirigami.Units.largeSpacing
-            topPadding: Kirigami.Units.smallSpacing
-            text: page.canSteer
-                  ? qsTr("%1 queued — will steer into current turn").arg(Mgr.queuedCount)
-                  : Mgr.wireUpForCurrentChat
-                    ? qsTr("%1 queued — will send when this turn finishes").arg(Mgr.queuedCount)
-                    // No wire: that turn can never finish, so promising it would be a lie.
-                    // Saying "not connected" is what tells the user the message is
-                    // waiting on the connection, not on the agent (Android parity).
-                    : qsTr("%1 queued — not connected; will send when it reconnects").arg(Mgr.queuedCount)
-            opacity: 0.8
-            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
+            Layout.leftMargin: Kirigami.Units.largeSpacing
+            Layout.rightMargin: Kirigami.Units.largeSpacing
+            Layout.topMargin: Kirigami.Units.smallSpacing
+            spacing: Kirigami.Units.smallSpacing
+            visible: queuedRepeater.count > 0
+            Behavior on implicitHeight { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+
+            Repeater {
+                id: queuedRepeater
+                model: Mgr.queuedSends
+                // Ids only ever move forward, so the seen-set can be dropped whole once
+                // nothing is queued (it exists purely to suppress a repeat slide).
+                onCountChanged: if (count === 0) page.queuedSeen = ({})
+                delegate: Item {
+                    id: queuedSlot
+                    width: queuedArea.width
+                    height: queuedCard.height
+
+                    Rectangle {
+                        id: queuedCard
+                        width: parent.width
+                        height: queuedCardRow.implicitHeight + Kirigami.Units.smallSpacing
+                        radius: Kirigami.Units.smallSpacing
+                        color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                                       Kirigami.Theme.textColor.b, 0.06)
+                        border.color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                                              Kirigami.Theme.textColor.b, 0.16)
+                        opacity: 0
+                        // A translate (not y) so the slide never disturbs the Column's
+                        // own layout slot — the card moves, the space is already there.
+                        transform: Translate { id: queuedSlide; y: 0 }
+                        // A Repeater rebuilds EVERY delegate whenever the model is
+                        // republished — i.e. on any queue change — so only a genuinely new
+                        // card may slide; the ones already on screen settle in place.
+                        Component.onCompleted: {
+                            if (page.queuedSeen[modelData.id]) {
+                                queuedCard.opacity = 1
+                            } else {
+                                page.queuedSeen[modelData.id] = true
+                                queuedEnter.start()
+                            }
+                        }
+
+                        ParallelAnimation {
+                            id: queuedEnter
+                            NumberAnimation {
+                                target: queuedCard; property: "opacity"
+                                from: 0; to: 1; duration: 140
+                            }
+                            NumberAnimation {
+                                target: queuedSlide; property: "y"
+                                from: queuedCard.height; to: 0
+                                duration: 220; easing.type: Easing.OutCubic
+                            }
+                        }
+
+                        RowLayout {
+                            id: queuedCardRow
+                            anchors.fill: parent
+                            anchors.margins: Kirigami.Units.smallSpacing
+                            spacing: Kirigami.Units.smallSpacing
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+
+                                Controls.Label {
+                                    Layout.fillWidth: true
+                                    text: modelData.text.length > 0 ? modelData.text : qsTr("Attachment")
+                                    wrapMode: Text.Wrap
+                                    maximumLineCount: 2
+                                    elide: Text.ElideRight
+                                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.95
+                                }
+                                RowLayout {
+                                    spacing: Kirigami.Units.smallSpacing
+                                    Rectangle {
+                                        radius: height / 2
+                                        color: Qt.rgba(Kirigami.Theme.highlightColor.r,
+                                                       Kirigami.Theme.highlightColor.g,
+                                                       Kirigami.Theme.highlightColor.b, 0.18)
+                                        implicitWidth: queuedTag.implicitWidth + Kirigami.Units.smallSpacing * 1.5
+                                        implicitHeight: queuedTag.implicitHeight + 2
+                                        Controls.Label {
+                                            id: queuedTag
+                                            anchors.centerIn: parent
+                                            text: qsTr("Queued")
+                                            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.75
+                                        }
+                                    }
+                                    Controls.Label {
+                                        text: page.queuedNote(modelData.attachments)
+                                        opacity: 0.7
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8
+                                    }
+                                }
+                            }
+
+                            Controls.Button {
+                                text: qsTr("Steer")
+                                // A steer carries text only, so a message with an
+                                // attachment can never be promoted — it keeps waiting
+                                // rather than losing its file silently.
+                                enabled: page.canSteer && modelData.attachments <= 0
+                                onClicked: Mgr.steerQueued(modelData.id)
+                                ToolTip.visible: hovered
+                                ToolTip.text: modelData.attachments > 0
+                                              ? qsTr("A steer carries text only — this message keeps its attachment and waits for the turn to end.")
+                                              : qsTr("Redirect the running turn: it answers this instead")
+                            }
+                            Controls.Button {
+                                text: "✕"
+                                flat: true
+                                onClicked: Mgr.cancelQueued(modelData.id)
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("Discard this queued message")
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // input bar. Buttons and the text entry share one height so the bar
@@ -1786,8 +1909,7 @@ Kirigami.Page {
                     Layout.fillHeight: true
                     Layout.minimumWidth: 120
                     placeholderText: Mgr.prompting
-                                     ? (page.canSteer ? qsTr("Steer the running turn…")
-                                                      : qsTr("Queue a message…"))
+                                     ? qsTr("Queue a message…")
                                      : qsTr("Message Goose…")
                     wrapMode: TextEdit.Wrap
                     focus: true

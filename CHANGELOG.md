@@ -96,6 +96,23 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Added
 
+- **A message sent mid-turn now parks as a card above the composer, on both
+  clients (0.2.39).** Sending while a reply streams used to steer the running
+  turn silently (desktop) or park invisibly behind a "1 queued" count (both).
+  A steer REDIRECTS the reply being written — the agent drops what it was saying
+  and answers the new message instead — so it can no longer be a side effect of
+  pressing send. The message now slides up as a card with a **Queued** label and
+  the reason it is waiting (`sends when this turn ends`, `with attachment — …`,
+  `not connected — sends when it reconnects`), plus **Steer** to promote it into
+  the live turn and **✕** to discard it. Steering is offered only while this
+  chat owns a live run id (the key the server validates against) and only for a
+  text-only message: a steer carries no blocks, so one with an attachment keeps
+  waiting rather than losing the file. The queue is also per chat on the desktop
+  now — it used to be one global FIFO cleared whenever a chat was opened or
+  started, which meant a prompt parked in chat A could be delivered into chat B,
+  and switching chats silently threw away input. Draining, counting, and Stop's
+  discard all name the on-screen chat, matching Android.
+
 - **The turn log can be copied, and it survives the dialog.** The stuck-turn
   readout was a 40-line ring buffer behind a scrollable dialog, which meant the
   one line that mattered could be off-screen and the only way to read it was a

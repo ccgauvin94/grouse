@@ -419,12 +419,13 @@ void Manager::restoreRoamPeers()
 void Manager::openRoamSession(const QString &label, const QString &sessionId, const QString &cwd)
 {
     m_activePeerLabel = label;
-    m_pendingQueue.clear();
-    emit queuedChanged();
+    // A parked message belongs to the chat it was typed in, so opening another chat must
+    // not discard it — the same per-chat queue Android keeps. Only Stop drops one.
     m_landing = false;
     emit landingChanged();
     m_currentSessionId = sessionId;
     restoreTurnState(sessionId);
+    emit queuedChanged();   // the queue view is per-chat: republish for the chat we opened
     // A peer's chat carries its human title only in the peer's session list, so
     // the window shows that instead of the transport handle it opened by.
     m_currentSessionTitle = m_roamTitles.value(sessionId);
@@ -451,7 +452,6 @@ void Manager::openRoamSession(const QString &label, const QString &sessionId, co
 void Manager::newRoamSession(const QString &label)
 {
     m_activePeerLabel = label;
-    m_pendingQueue.clear();
     emit queuedChanged();
     m_landing = false;
     emit landingChanged();
@@ -480,7 +480,6 @@ void Manager::newRoamSession(const QString &label)
 void Manager::newRoamSessionIn(const QString &label, const QString &cwd)
 {
     m_activePeerLabel = label;
-    m_pendingQueue.clear();
     emit queuedChanged();
     m_landing = false;
     emit landingChanged();
@@ -591,12 +590,14 @@ void Manager::testConnection()
 void Manager::openSession(const QString &sessionId)
 {
     m_activePeerLabel.clear();
-    m_pendingQueue.clear();
-    emit queuedChanged();
+    // Parking is per chat: a message queued in the chat we are leaving keeps waiting for
+    // ITS turn to end (flushQueue only drains the on-screen chat's), so a switch cannot
+    // silently lose input. Stop is what discards it.
     m_landing = false;
     emit landingChanged();
     m_currentSessionId = sessionId;
     restoreTurnState(sessionId);
+    emit queuedChanged();   // the queue view is per-chat: republish for the chat we opened
     m_currentSessionTitle.clear();
     for (const auto &v : m_sessions) {
         const QVariantMap s = v.toMap();
@@ -660,7 +661,6 @@ void Manager::refreshSessionWith(int full)
 void Manager::newChat()
 {
     m_activePeerLabel.clear();
-    m_pendingQueue.clear();
     emit queuedChanged();
     m_landing = false;
     emit landingChanged();
@@ -749,17 +749,13 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
                                  {"name", QFileInfo(b.value("resource").toMap()
                                                     .value("uri").toString()).fileName()}};
     }
-    // The core echoes the prompt into the transcript itself (`spawn_prompt`) —
-    // including an attachment-only prompt, which it records as a `user` item
-    // carrying an attachment COUNT. So this client keeps NO row of its own: it
-    // queues the thumbnails keyed by the prompt text and `rowFromItem` matches
-    // them back onto the row the core emits. Echoing here as well put the
-    // question in the transcript twice (the copy at the bottom of a reopened
-    // chat), which is exactly what the count-based match exists to prevent.
-    if (!blocks.isEmpty() && !shown.isEmpty())
-        m_pendingAttachments[text].append(shown);
     const bool sameChatBusy = m_prompting && m_promptingSessionId == m_currentSessionId;
     if (ready && !sameChatBusy) {
+        // Thumbnails are matched back onto the row the core echoes, so they are queued
+        // only at the moment the prompt actually goes out — queueing them earlier put a
+        // second copy in the map every time a parked send was drained.
+        if (!blocks.isEmpty() && !shown.isEmpty())
+            m_pendingAttachments[text].append(shown);
         m_prompting = true;
         m_promptingSessionId = m_currentSessionId;
         if (!m_currentSessionId.isEmpty())
@@ -774,21 +770,12 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
             onError(QString::fromUtf8(err), false);
             m_bridge->api().grouse_string_free(err);
         }
-    } else if (ready && sameChatBusy && !m_activeRunId.isEmpty() && shown.isEmpty()) {
-        // STEER (Android parity): the turn already running on THIS session is
-        // redirected by this message instead of queueing behind it. m_activeRunId
-        // is only ever set for the current session, so a run on another session
-        // can't be steered from here. Text only — steering carries no blocks, so
-        // a message with attachments queues rather than silently dropping them.
-        // The server validates expected_run_id: a run that ended between typing
-        // and sending fails loudly instead of starting a stray second turn.
-        const QByteArray t = text.toUtf8();
-        const QByteArray r = m_activeRunId.toUtf8();
-        m_bridge->api().grouse_unstable_steer(m_bridge->handle(), t.constData(), r.constData());
     } else {
-        // Not ready, or a turn is running without a steer key: queue (the core
-        // flushes the prompt queue itself; this app-level queue only waits for
-        // ready()).
+        // A turn is running on THIS chat (or there is no session bound yet): the message
+        // is PARKED, never steered. A steer REDIRECTS the reply being written, so it has
+        // to be the user's explicit choice — the Steer button on the queued card
+        // (steerQueued) — and not a side effect of pressing send while a reply streams
+        // (Android parity). flushQueue sends it when the turn ends.
         enqueue({text, blocks});
         if (!ready && !secretKey().isEmpty())
             connectToServer();
@@ -838,8 +825,74 @@ void Manager::setActiveRunId(const QString &runId)
 
 void Manager::enqueue(const PendingSend &p)
 {
-    m_pendingQueue << p;
+    PendingSend q = p;
+    q.id = ++m_sendSeq;
+    q.sessionId = m_currentSessionId;   // the chat it was TYPED in
+    m_pendingQueue << q;
     emit queuedChanged();
+}
+
+int Manager::queuedCount() const
+{
+    int n = 0;
+    for (const PendingSend &p : m_pendingQueue) {
+        if (p.sessionId.isEmpty() || p.sessionId == m_currentSessionId)
+            ++n;
+    }
+    return n;
+}
+
+QVariant Manager::queuedSends() const
+{
+    QVariantList out;
+    for (const PendingSend &p : m_pendingQueue) {
+        // An empty sessionId is a send typed before any chat was bound; it belongs to
+        // whichever chat is on screen (flushQueue adopts it), so show it here.
+        if (!p.sessionId.isEmpty() && p.sessionId != m_currentSessionId)
+            continue;
+        out << QVariantMap{{"id", p.id},
+                           {"text", p.text},
+                           {"attachments", p.images.size()}};
+    }
+    return out;
+}
+
+void Manager::steerQueued(int id)
+{
+    if (!m_bridge || !m_bridge->isAvailable() || m_activeRunId.isEmpty())
+        return;
+    for (int i = 0; i < m_pendingQueue.size(); ++i) {
+        const PendingSend &p = m_pendingQueue.at(i);
+        if (p.id != id || (!p.sessionId.isEmpty() && p.sessionId != m_currentSessionId))
+            continue;
+        // A steer carries text only. Sending the text and dropping the images would lose
+        // input silently, so an attachment-carrying message keeps waiting instead.
+        if (p.text.trimmed().isEmpty() || !p.images.isEmpty())
+            return;
+        const QString text = p.text;
+        m_pendingQueue.removeAt(i);
+        emit queuedChanged();
+        m_prompting = true;
+        m_promptingSessionId = m_currentSessionId;
+        if (!m_currentSessionId.isEmpty())
+            m_inFlight.insert(m_currentSessionId);
+        emit promptingChanged();
+        const QByteArray t = text.toUtf8();
+        const QByteArray r = m_activeRunId.toUtf8();
+        m_bridge->api().grouse_unstable_steer(m_bridge->handle(), t.constData(), r.constData());
+        return;
+    }
+}
+
+void Manager::cancelQueued(int id)
+{
+    for (int i = 0; i < m_pendingQueue.size(); ++i) {
+        if (m_pendingQueue.at(i).id != id)
+            continue;
+        m_pendingQueue.removeAt(i);
+        emit queuedChanged();
+        return;
+    }
 }
 
 void Manager::restoreTurnState(const QString &sessionId)
@@ -858,7 +911,20 @@ void Manager::flushQueue()
     if (m_pendingQueue.isEmpty()
         || (m_prompting && m_promptingSessionId == m_currentSessionId))
         return;
-    const PendingSend p = m_pendingQueue.takeFirst();
+    // Drain only a message meant for the chat ON SCREEN. Taking the head regardless sent a
+    // prompt parked in chat A into chat B after a switch (Android fixed this the same way);
+    // an entry with no session yet adopts this one, which is where it goes anyway.
+    int idx = -1;
+    for (int i = 0; i < m_pendingQueue.size(); ++i) {
+        const QString &sid = m_pendingQueue.at(i).sessionId;
+        if (sid.isEmpty() || sid == m_currentSessionId) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0)
+        return;
+    const PendingSend p = m_pendingQueue.takeAt(idx);
     emit queuedChanged();
     dispatchSend(p.text, p.images);
 }
@@ -972,8 +1038,15 @@ QVariantList Manager::buildAttachmentBlocks(const QVariantList &paths)
 
 void Manager::cancelTurn()
 {
-    m_pendingQueue.clear();
-    emit queuedChanged();
+    // Stop means stop HERE: discarding another chat's parked message because you stopped
+    // this one throws away input the user never cancelled (Android parity).
+    const int before = m_pendingQueue.size();
+    for (int i = m_pendingQueue.size() - 1; i >= 0; --i) {
+        if (m_pendingQueue.at(i).sessionId == m_currentSessionId)
+            m_pendingQueue.removeAt(i);
+    }
+    if (m_pendingQueue.size() != before)
+        emit queuedChanged();
     if (m_bridge && m_bridge->isAvailable())
         m_bridge->api().grouse_cancel(m_bridge->handle());
 }
@@ -1951,6 +2024,7 @@ void Manager::coreOnPeerNewSession(const QString &label, const QString &sid)
     if (label == m_activePeerLabel) {
         m_currentSessionId = sid;
         restoreTurnState(sid);
+        emit queuedChanged();
         m_currentSessionTitle.clear();
         emit currentSessionChanged();
     emit pinnedAppsChanged();

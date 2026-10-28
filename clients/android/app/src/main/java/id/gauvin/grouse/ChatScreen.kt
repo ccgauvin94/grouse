@@ -18,6 +18,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
@@ -811,21 +813,27 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                     }
                 }
 
-                // A queued message's bubble is identical to a sent one, so without this there is no way
-                // to tell "waiting its turn" from "silently dropped".
-                if (cm.queuedCount.value > 0) {
-                    // Say WHY it is waiting. "will send when this turn finishes" is a lie when
-                    // there is no wire — that turn can never finish — which is how a user came
-                    // to believe their stop messages had been delivered (2026-09-16).
-                    val willSteer = cm.activeRunIdState.value != null && cm.busy.value
-                    Text(when {
-                            willSteer -> "${cm.queuedCount.value} queued — will steer into current turn"
-                            !cm.wireUpForCurrentChat ->
-                                "${cm.queuedCount.value} queued — not connected; will send when it reconnects"
-                            else -> "${cm.queuedCount.value} queued — will send when this turn finishes"
-                        },
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 4.dp, top = 2.dp))
+                // A parked message is a CARD above the composer, not a count: the text stays
+                // visible with a "Queued" label, and the user can promote it into the running
+                // turn (steer) or drop it. Sending mid-turn parks by default — a steer
+                // REDIRECTS the reply being written, so it is always a deliberate tap.
+                val queuedSends = cm.queuedSends.value
+                if (queuedSends.isNotEmpty()) {
+                    val steerable = cm.busy.value && cm.activeRunIdState.value != null
+                    val offline = !cm.wireUpForCurrentChat
+                    Column(Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                        queuedSends.forEach { q ->
+                            key(q.id) {
+                                QueuedSendCard(
+                                    q = q,
+                                    canSteer = steerable && q.attachments == 0,
+                                    offline = offline,
+                                    onSteer = { cm.steerQueued(q.id) },
+                                    onCancel = { cm.cancelQueued(q.id) },
+                                )
+                            }
+                        }
+                    }
                 }
 
                 // Composer modelled on Claude's: ONE rounded, outlined container holding the text
@@ -848,8 +856,10 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                         Box(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
                             if (input.isEmpty()) {
                                 Text(
+                                    // Mid-turn a send PARKS the message; promoting it into the
+                                    // running turn is the queue card's Steer button, so the
+                                    // placeholder must not promise a steer.
                                     when {
-                                        cm.busy.value && cm.activeRunIdState.value != null -> "Steer current turn…"
                                         cm.busy.value -> "Queue message…"
                                         else -> "Message Grouse…"
                                     },
@@ -983,7 +993,6 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                                     if (canSend) Icons.Filled.ArrowUpward else Icons.Filled.Stop,
                                     contentDescription = when {
                                         canSend -> when {
-                                            cm.busy.value && cm.activeRunIdState.value != null -> "steer"
                                             cm.busy.value -> "queue"
                                             else -> "send"
                                         }
@@ -997,6 +1006,97 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                 }
             }
             PinnedDock(cm, session, pins, pinCount, showPinned) { showPinned = it }
+        }
+    }
+}
+
+/**
+ * One parked message, sitting above the composer. It slides up into place, so the queue reads
+ * as "these are waiting behind the reply on screen" rather than as a number.
+ *
+ * Two ways out, deliberately: promote it into the running turn (steer — only while a live run
+ * id exists and the message is text-only, because a steer carries no blocks) or drop it. The
+ * steer is a REDIRECT of the answer being written, so it is never what pressing send does.
+ */
+@Composable
+private fun QueuedSendCard(
+    q: ConnectionManager.QueuedSend,
+    canSteer: Boolean,
+    offline: Boolean,
+    onSteer: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    // AnimatedVisibility does not animate its INITIAL state, so mount hidden and flip in the
+    // same frame — that is what makes the card slide up instead of popping in.
+    val reveal = remember { MutableTransitionState(false).apply { targetState = true } }
+    AnimatedVisibility(
+        visibleState = reveal,
+        enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+        exit = shrinkVertically() + fadeOut(),
+    ) {
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+        ) {
+            Row(
+                Modifier.padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        q.text.ifBlank { "Attachment" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                        ) {
+                            Text(
+                                "Queued",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            )
+                        }
+                        // Say WHY it is waiting. "will send when this turn finishes" is a lie
+                        // when there is no wire — that turn can never finish — which is how a
+                        // user came to believe their stop messages had been delivered.
+                        val note = when {
+                            offline -> "not connected — sends when it reconnects"
+                            q.attachments > 0 -> "with attachment — sends when this turn ends"
+                            else -> "sends when this turn ends"
+                        }
+                        Text(
+                            " · " + note,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                TextButton(
+                    onClick = onSteer,
+                    enabled = canSteer,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                ) {
+                    Text("Steer", style = MaterialTheme.typography.labelLarge)
+                }
+                IconButton(onClick = onCancel, modifier = Modifier.size(34.dp)) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "discard queued message",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         }
     }
 }

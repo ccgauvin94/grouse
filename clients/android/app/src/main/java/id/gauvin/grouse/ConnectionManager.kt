@@ -100,33 +100,54 @@ class ConnectionManager private constructor(context: Context) {
         val images: List<ImageBlock>,
         val files: List<FileBlock> = emptyList(),
         val sessionId: String?,
+        val id: Long = 0L,
     )
     private val pendingSends = ArrayDeque<PendingSend>()
+    /** Source of `PendingSend.id`. Assigned in enqueue() so nothing else has to thread one. */
+    private var sendSeq = 0L
 
-    /** How many prompts are waiting behind the running turn. Drives the "N queued" chip -- without
-     *  it a queued message is indistinguishable from a dropped one, since its bubble looks exactly
-     *  like a sent one. Mutate the deque ONLY through enqueue/dequeueFor/clearQueueFor so
-     *  this can't drift. */
+    /** One parked message, as the composer's queue cards show it. A bare count could not
+     *  tell two queued messages apart, and promoting one into the running turn needs an
+     *  identity to name it by. */
+    data class QueuedSend(
+        val id: Long,
+        val text: String,
+        val attachments: Int,
+    )
+
+    /** THIS chat's parked messages, oldest first (what the cards above the composer render). */
+    val queuedSends = mutableStateOf<List<QueuedSend>>(emptyList())
+
+    /** How many prompts are waiting behind the running turn. Mutate the deque ONLY through
+     *  enqueue/dequeueFor/clearQueueFor so this can't drift. */
     val queuedCount = mutableStateOf(0)
     /** Depth for ONE chat. The "N queued" chip describes the conversation on screen, so prompts
      *  parked for a different chat are neither counted nor drained here. */
     private fun queuedFor(sessionId: String?): Int = pendingSends.count { it.sessionId == sessionId }
-    private fun refreshQueuedCount() { queuedCount.value = queuedFor(currentSession.value) }
-    private fun enqueue(p: PendingSend) { pendingSends.add(p); refreshQueuedCount() }
+    /** Republish both views of ONE chat's queue: the count and the cards. */
+    private fun publishQueue(sessionId: String? = currentSession.value) {
+        queuedCount.value = queuedFor(sessionId)
+        queuedSends.value = pendingSends.filter { it.sessionId == sessionId }
+            .map { QueuedSend(it.id, it.text, it.images.size + it.files.size) }
+    }
+    private fun enqueue(p: PendingSend) {
+        pendingSends.add(p.copy(id = ++sendSeq))
+        publishQueue()
+    }
     /** Pop the oldest prompt belonging to `sessionId`, leaving other chats' entries queued in
      *  order. `null` matches the no-session case (a send typed before any chat was bound). */
     private fun dequeueFor(sessionId: String?): PendingSend? {
         val i = pendingSends.indexOfFirst { it.sessionId == sessionId }
         if (i < 0) return null
         val p = pendingSends.removeAt(i)
-        refreshQueuedCount()
+        publishQueue()
         return p
     }
     /** Drop one chat's parked prompts (Stop). Other chats' queues are untouched -- discarding
      *  them because you hit Stop in a different conversation loses input you never cancelled. */
     private fun clearQueueFor(sessionId: String?) {
         pendingSends.removeAll { it.sessionId == sessionId }
-        refreshQueuedCount()
+        publishQueue()
     }
     /** Re-key prompts typed before any chat was bound onto the session that just became
      *  ready. They carry `sessionId == null`, which matches no real chat, so every drain
@@ -137,7 +158,7 @@ class ConnectionManager private constructor(context: Context) {
         val orphans = pendingSends.filter { it.sessionId == null }
         pendingSends.removeAll { it.sessionId == null }
         orphans.forEach { pendingSends.add(it.copy(sessionId = sessionId)) }
-        refreshQueuedCount()
+        publishQueue()
     }
     // True between sendPrompt and RunEnded — or, reconciled, while the server reports a
     // live run id for the on-screen session (an adopted turn: started here before a
@@ -231,9 +252,9 @@ class ConnectionManager private constructor(context: Context) {
         // `compacting` is a transient hint for the chat on screen; a switch
         // clears it and the server's status re-arms it if still relevant.
         compacting.value = false
-        // The chip describes THIS chat's queue, and the queue is per-chat. Use
-        // the session being opened (currentSession is still the old one here).
-        queuedCount.value = queuedFor(sessionId)
+        // The chip and the queue cards describe THIS chat's queue, and the queue is
+        // per-chat. Use the session being opened (currentSession is still the old one here).
+        publishQueue(sessionId)
     }
 
     /** A new wire cannot deliver the old turns' RunEnded: drop every turn. */
@@ -1597,17 +1618,13 @@ class ConnectionManager private constructor(context: Context) {
                 sendPromptBlocks(text, images, files, expect = targetSid)
                 return
             }
-            // Same session's turn is running. Steer into it when the core surfaced the
-            // run id (the server validates expected_run_id, so a run that ended between
-            // typing and sending fails loudly instead of starting a stray turn); otherwise
-            // queue for RunEnded — a second sendPrompt would interleave in the transcript
-            // and the reply would be attributed to the wrong question.
-            val run = activeRunId
-            if (run != null) {
-                turnInFlight = true
-                turnInFlightSession = targetSid
-                io { unstable.steer(text, run) }
-            } else if (core.turnInFlight(targetSid)) {
+            // Same session's turn is running. The message is PARKED, not steered: a steer
+            // REDIRECTS the answer being written, so it has to be the user's explicit choice
+            // — the "Steer" button on the queued card (steerQueued) — never a side effect of
+            // pressing send while a reply streams. A queued prompt is delivered when this
+            // turn ends; an attachment-carrying one can only ever be delivered that way
+            // (a steer carries text only).
+            if (core.turnInFlight(targetSid) || activeRunId != null) {
                 enqueue(PendingSend(text, images, files, targetSid))
             } else {
                 // We believe a turn is running, the server reports no live run id, AND the
@@ -1658,6 +1675,42 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Send once connected — used by notification replies, which may arrive disconnected. */
     fun sendWhenReady(text: String) = send(text)
+
+    /**
+     * Promote one parked message into the running turn ("steer"). This REDIRECTS the reply
+     * being written — the agent stops what it was saying and answers this instead — which is
+     * why it is a deliberate tap on a queued card rather than what send does mid-turn.
+     *
+     * Text only: a steer carries no blocks, so a message with attachments keeps waiting for
+     * the turn to end rather than silently losing its images. Silently dropping input is the
+     * one outcome this queue exists to prevent.
+     */
+    fun steerQueued(id: Long) {
+        val sid = currentSession.value ?: return
+        val run = activeRunId ?: return
+        val i = pendingSends.indexOfFirst { it.id == id && it.sessionId == sid }
+        if (i < 0) return
+        val p = pendingSends[i]
+        if (p.text.isBlank() || p.images.isNotEmpty() || p.files.isNotEmpty()) return
+        pendingSends.removeAt(i)
+        publishQueue(sid)
+        noteApp("app: steer queued #$id (run $run)")
+        // A steer IS this chat's turn continuing: mark it in flight rather than busy-only, or
+        // the turn-end bookkeeping below would treat the reply as belonging to no one.
+        inFlight.add(sid)
+        turnInFlight = true
+        turnInFlightSession = sid
+        busy.value = true
+        io { unstable.steer(p.text, run) }
+    }
+
+    /** Drop one parked message without sending it (the card's ✕). */
+    fun cancelQueued(id: Long) {
+        val i = pendingSends.indexOfFirst { it.id == id }
+        if (i < 0) return
+        pendingSends.removeAt(i)
+        publishQueue()
+    }
 
     fun setForeground(fg: Boolean) {
         appForeground = fg
