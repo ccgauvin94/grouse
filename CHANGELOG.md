@@ -8,6 +8,14 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Changed
 
+- **The APK that GitHub CI publishes is now signed with the release key.** The
+  workflow built the debug variant and let it fall back to the runner's throwaway
+  debug keystore, which GitHub regenerates on every run — so the artifact could not
+  install over an installed release-signed build (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`,
+  same code, different signer) and no two CI builds upgraded each other either. It
+  now configures the same keystore the release workflow uses, and a verification step
+  compares the APK's certificate against the keystore's and **fails the build** if
+  they differ, so a silent fallback cannot ship.
 - **The desktop transcript no longer keeps every bubble alive for the life of a
   chat.** `cacheBuffer` was 20000px ("keep every delegate realized", which
   stabilised the scrollbar) while each scroll-back prepends another 40 rows from

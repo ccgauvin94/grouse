@@ -57,6 +57,14 @@ android {
     }
 
     buildTypes {
+        // CI's android.yml builds the DEBUG variant as the sideload artifact (fast, unminified,
+        // no R8). Left alone it lands on the runner's throwaway debug keystore, which changes
+        // every run — so the APK cannot install over a release-signed app
+        // (INSTALL_FAILED_UPDATE_INCOMPATIBLE) even though it is the same code, and no two CI
+        // builds upgrade each other either. Sign it with the release key when one is configured.
+        debug {
+            if (hasReleaseSigning) signingConfig = signingConfigs.getByName("release")
+        }
         release {
             // R8 shrink + obfuscate; the app's reflection surface (uniffi/JNA,
             // Tink) is covered by proguard-rules.pro.

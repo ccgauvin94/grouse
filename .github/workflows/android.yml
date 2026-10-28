@@ -1,5 +1,19 @@
 # Android APK build.
 #
+# The artifact is a SIDELOAD build of the debug variant (fast, unminified, no R8). It used to
+# be signed with the runner's throwaway debug key, which GitHub regenerates on every run — so
+# the APK could not install over a release-signed app (INSTALL_FAILED_UPDATE_INCOMPATIBLE),
+# and no two CI builds upgraded each other either. It is now signed with the SAME key the
+# release workflow uses, so any build here installs straight over what is on the phone.
+#
+# Signing, in preference order (mirrors release.yml):
+#   1. GROUSE_KEYSTORE_BASE64 + GROUSE_STORE_PASSWORD / GROUSE_KEY_ALIAS /
+#      GROUSE_KEY_PASSWORD — the real release key.
+#   2. GROUSE_DEBUG_KEYSTORE_B64 — a PERSISTED debug key (sideload-only, but build-to-build
+#      upgradeable).
+#   3. Neither available (e.g. a PR from a fork, which gets no secrets): the runner's one-off
+#      debug key, with a warning. Fine for a compile check, useless for a sideload.
+#
 # Version pinning (X-7): every GitHub Action below is pinned to a major tag
 # (e.g. @v4). Major-tag pins are the accepted level here — they get compatible
 # patch updates automatically while still being a coarse lock. For stricter
@@ -33,9 +47,67 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # The keystore is a file; carry it as base64 and materialize it where the gradle
+      # build's GROUSE_KEYSTORE path expects it. Shell guards keep this a no-op when the
+      # secret is unset — secrets are not reliable in `if:` (a fork PR has none at all).
+      - name: Configure signing
+        env:
+          RELEASE_KEYSTORE_B64: ${{ secrets.GROUSE_KEYSTORE_BASE64 }}
+          DEBUG_KEYSTORE_B64: ${{ secrets.GROUSE_DEBUG_KEYSTORE_B64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.GROUSE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.GROUSE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.GROUSE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${RELEASE_KEYSTORE_B64:-}" ]; then
+            KEYSTORE_PATH="$RUNNER_TEMP/grouse-release.jks"
+            printf '%s' "$RELEASE_KEYSTORE_B64" | base64 -d > "$KEYSTORE_PATH"
+            {
+              echo "GROUSE_KEYSTORE=$KEYSTORE_PATH"
+              echo "GROUSE_STORE_PASSWORD=$RELEASE_STORE_PASSWORD"
+              echo "GROUSE_KEY_ALIAS=$RELEASE_KEY_ALIAS"
+              echo "GROUSE_KEY_PASSWORD=$RELEASE_KEY_PASSWORD"
+            } >> "$GITHUB_ENV"
+            echo "::notice::Signing with the release keystore."
+          elif [ -n "${DEBUG_KEYSTORE_B64:-}" ]; then
+            KEYSTORE_PATH="$RUNNER_TEMP/grouse-debug.jks"
+            printf '%s' "$DEBUG_KEYSTORE_B64" | base64 -d > "$KEYSTORE_PATH"
+            {
+              echo "GROUSE_KEYSTORE=$KEYSTORE_PATH"
+              echo "GROUSE_STORE_PASSWORD=android"
+              echo "GROUSE_KEY_ALIAS=androiddebugkey"
+              echo "GROUSE_KEY_PASSWORD=android"
+            } >> "$GITHUB_ENV"
+            echo "::warning::Signing with the persisted DEBUG keystore — sideload-only."
+          else
+            echo "::warning::No keystore secret available; this APK uses the runner's throwaway debug key and will not install over a released app."
+          fi
+
       - name: Build debug APK
         run: ./gradlew --no-daemon assembleDebug
         working-directory: clients/android
+
+      # Prove which key signed it instead of assuming the config took: a silent fallback to
+      # the runner's key is exactly the failure this workflow exists to stop.
+      - name: Verify the APK's signer
+        run: |
+          set -euo pipefail
+          APK=$(ls clients/android/app/build/outputs/apk/debug/*.apk | head -1)
+          BT=$(ls -d "${ANDROID_SDK_ROOT:-$ANDROID_HOME}"/build-tools/* | sort -V | tail -1)
+          "$BT/apksigner" verify --print-certs "$APK" | sed -n '1,3p'
+          if [ -n "${GROUSE_KEYSTORE:-}" ]; then
+            WANT=$(keytool -list -v -keystore "$GROUSE_KEYSTORE" \
+                     -storepass "$GROUSE_STORE_PASSWORD" -alias "$GROUSE_KEY_ALIAS" \
+                   | sed -n 's/^[[:space:]]*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')
+            GOT=$("$BT/apksigner" verify --print-certs "$APK" \
+                   | sed -n 's/.*SHA-256 digest: //p')
+            echo "keystore: $WANT"
+            echo "apk:      $GOT"
+            if [ "$WANT" != "$GOT" ]; then
+              echo "::error::The APK is not signed by the configured keystore."
+              exit 1
+            fi
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
