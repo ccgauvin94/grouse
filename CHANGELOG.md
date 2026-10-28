@@ -6,8 +6,63 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- **The desktop transcript no longer keeps every bubble alive for the life of a
+  chat.** `cacheBuffer` was 20000px ("keep every delegate realized", which
+  stabilised the scrollbar) while each scroll-back prepends another 40 rows from
+  the core's 60-item window — so a long read grew the live set without bound, and
+  every row had already paid for all four bubble variants (user, agent, tool chip,
+  tool group) because they share one delegate. The cache is bounded and rows are
+  recycled, which is what made scrolling smooth again. Per-row UI state (thinking
+  bubbles, tool chips) moved into the model and is keyed by a stable row uid
+  rather than the row index, so it survives both scrolling away and being recycled.
+
 ### Fixed
 
+- **A chat opens at its newest message, on both clients.** Both snapped once, then
+  let the transcript paint over the top of that jump: rows are realized lazily (and
+  recycled) on the desktop, and Android inserts each batch at the head of a
+  `reverseLayout` list, so in both cases the view drifted up and left the reader a
+  few messages short of the end. The desktop now re-pins until the list reports
+  `atYEnd`; Android snaps until the transcript stops growing, or the reader takes
+  over. Neither client tracks unread state, so every open is "newest".
+- **Expansion stayed on the wrong message after a scroll-back.** `MessageListModel`
+  keyed per-row UI state (a thinking bubble's open state) by row index while
+  `prepend()` shifted every row and never remapped it: open a bubble, scroll up
+  once, and a different bubble came back expanded, with no `dataChanged` for the
+  rows that had inherited it. Keyed by a per-row uid now, remapped by construction.
+- **A roam chat showed the transport handle instead of its title.** `roam:<peer>:<id>`
+  is an internal namespace; the human title lives only in the peer's session list,
+  so the open now seeds from it and the list keeps an on-screen title in sync (a
+  peer names a chat after its first turn, or renames it later). An untitled chat
+  reads `peer · id`, never the namespace.
+- **A roam chat said "loading…" forever.** The status is set locally on open and
+  only the connection-level `Ready` cleared it — which a peer open never emits. The
+  core's `Window` op marks the painted transcript and is the only event a
+  *successful* open raises, so it settles the status now (and the same latent hole
+  on the main wire: a second chat opened in the same connection).
+- **The bottom of a roam session row was dead to hover and clicks.** The gap came
+  from `ListView.spacing`, which belongs to no delegate: use `spacing: 0`, draw the
+  gap inside the row, and let the hit target cover the whole row.
+- **The desktop logged 61 "Unable to assign [undefined]" warnings per launch.** The
+  roam delegate is one `Item` hosting both row layouts and a hidden branch still
+  evaluates its bindings, so every role has to answer for every row type; the
+  session map's own lookups are coerced too (a peer may not carry a key). A
+  guardrail test now asserts every declared role is valid for both row types.
+- **The Tools and Recipes dialogs clipped their right edge.** Tools put its trailing
+  type tag under the overlay scrollbar (now reserved, like the chat bubbles); Recipes
+  had six fixed-width cron pickers summing to ~620px in a ~500px pane, which pushed
+  a horizontal scrollbar onto the whole detail area — they wrap now — and its
+  provider/model row claimed fixed widths that cut off the Save button.
+- **A provider could be listed twice in the model picker.** Two providers can share
+  a display label (a CLI-detected entry and its API twin). An exact duplicate is
+  dropped; a shared label with different values keeps both, the later one carrying
+  its id so it is distinguishable.
+- **The form dialog's fields never initialised.** `function reset()` collided with
+  Qt 6's `Dialog` `reset` signal, so QML rejected it as an invalid override and the
+  pass that filled in defaults never ran: booleans did not start `false`, enum
+  pickers did not pre-select, and a server-parked form opened blank.
 - **The desktop no longer prints the user's own message twice (0.2.38).** A send
   that carried attachments made `dispatchSend` append a user row of its own, and
   the core then echoed the prompt's row as it always does: two bubbles, one with

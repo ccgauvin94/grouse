@@ -343,8 +343,12 @@ exactly like a main one instead of replaying its whole history over the wire.
   model cannot flood the UI thread with ops; the final Upsert is exact.
 - The core never re-emits the whole window for a single change; one edit is one
   op.
-- The clients realize only what is on screen (desktop `ListView`, Android
-  `LazyColumn`); there is no `cacheBuffer: 20000` equivalent.
+- The clients realize only what is on screen (desktop `ListView` with a bounded
+  `cacheBuffer` and `reuseItems`, Android `LazyColumn`). The desktop used to keep
+  every delegate realized to stabilise `contentHeight`; each `load_older` batch
+  prepends 40 rows, so that grew the live set for the life of a session. Rows are
+  recycled instead, and the view re-pins itself until the list reports `atYEnd`
+  (the heights of pooled rows are estimates, not measurements).
 
 ## Client shape
 
