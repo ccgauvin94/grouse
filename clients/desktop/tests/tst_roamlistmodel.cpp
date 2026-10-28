@@ -105,8 +105,12 @@ void TstRoamListModel::everyDeclaredRoleIsValidForBothRowTypes()
 {
     RoamListModel m;
     m.addPeer(QStringLiteral("ws"));
+    // Deliberately SPARSE: only the id and title. A peer's payload may omit snippet,
+    // messageCount or cwd entirely, and raw s.value() would then hand QML an invalid
+    // QVariant — the invariant has to hold for a minimal row, not just a fully
+    // populated one that would satisfy it by accident.
     m.setPeerSessions(QStringLiteral("ws"), QVariantList{
-        QVariantMap{{"sessionId", "s1"}, {"title", "Chat one"}, {"cwd", "/srv/a"}},
+        QVariantMap{{"sessionId", "s1"}, {"title", "Chat one"}},
     });
     m.togglePeer(QStringLiteral("ws"));   // header row at 0, session row at 1
     QCOMPARE(m.rowCount(), 2);

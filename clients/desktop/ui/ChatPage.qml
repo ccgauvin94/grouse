@@ -198,8 +198,6 @@ Kirigami.Page {
     property bool pendingRestore: false
     property bool pendingFirstScroll: false
     property int scrollApplyAttempts: 0
-    // Bounded re-pin counter for the open-at-newest loop (see pinToEnd).
-    property int pinAttempts: 0
     // The CORE owns the transcript window (docs/TRANSCRIPT_MODEL.md): it paints
     // the newest items and, on `Mgr.loadOlder()`, emits older ones to prepend.
     // `olderAnchorIndex` is the top visible row captured before a prepend, so
@@ -250,7 +248,6 @@ Kirigami.Page {
         pendingRestore = false
         pendingFirstScroll = false
         scrollApplyAttempts = 0
-        pinAttempts = 0
         if (scrollSession.length === 0)
             return
         if (scrollSession in scrollMem) {
@@ -286,7 +283,6 @@ Kirigami.Page {
     /// it also gates scroll-back (maybeLoadOlder).
     function pinToEnd(attempts) {
         if (list.atYEnd || attempts <= 0) {
-            page.pinAttempts = 0
             page.pendingFirstScroll = false
             return
         }
