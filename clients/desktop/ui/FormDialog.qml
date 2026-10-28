@@ -26,7 +26,11 @@ Controls.Dialog {
     // moment the user edits (the footgun documented in AGENTS.md).
     property var values: ({})
 
-    function reset() {
+    // NOT `reset`: Qt 6's Dialog carries a `reset` signal, so declaring a function
+    // with that name is an invalid override and QML drops the whole declaration —
+    // which left `values` empty, so booleans never started false and enums never
+    // pre-selected their first option.
+    function resetValues() {
         values = ({})
         for (var i = 0; i < fields.length; i++) {
             var f = fields[i]
@@ -83,7 +87,7 @@ Controls.Dialog {
     width: 520
     height: Math.min(620, 200 + formColumn.implicitHeight)
 
-    onOpened: reset()
+    onOpened: resetValues()
     // Every path out of the dialog answers the parked request: an abandoned
     // responder would leave the turn blocked on the server.
     onClosed: if (Mgr.pendingForm && Object.keys(Mgr.pendingForm).length > 0
@@ -94,7 +98,7 @@ Controls.Dialog {
         spacing: Kirigami.Units.smallSpacing
 
         Controls.Label {
-            visible: dialog.form && dialog.form.message
+            visible: !!(dialog.form && dialog.form.message)
             text: dialog.form && dialog.form.message ? dialog.form.message : ""
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
