@@ -303,13 +303,25 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
         snapshotFlow { cm.messages.size to (cm.messages.lastOrNull()?.text?.length ?: 0) }
             .collect { if (atBottom) listState.scrollToItem(0) }
     }
-    // Opening/switching a session: snap to the bottom (index 0). reverseLayout keeps it pinned
-    // as history replays in.
-    LaunchedEffect(cm.currentSession.value) { listState.scrollToItem(0) }
-    // A replay swapped in a genuinely different transcript: go to the bottom. Identical
-    // Rebuilds never touch `messages`, so the reading position survives untouched and this
-    // never fires for them.
-    LaunchedEffect(cm.replayDoneTick.value) { listState.scrollToItem(0) }
+    // Opening/switching a session, or swapping in a genuinely different transcript after a
+    // replay, must land on the NEWEST message (index 0 with reverseLayout) and STAY there
+    // while the history paints. A single scrollToItem(0) is not enough: rows arrive in
+    // batches, every insert at index 0 pushes the anchored row uplist, and the reader ended
+    // up a few messages short of the bottom. The loop exits as soon as the transcript stops
+    // growing, or the moment the reader takes over. (Identical Rebuilds never touch
+    // `messages`, so a plain re-render still preserves the reading position.)
+    LaunchedEffect(cm.currentSession.value, cm.replayDoneTick.value) {
+        var lastSize = -1
+        var stableTicks = 0
+        while (stableTicks < 3) {
+            listState.scrollToItem(0)
+            delay(32)
+            val size = cm.messages.size
+            stableTicks = if (size == lastSize) stableTicks + 1 else 0
+            lastSize = size
+            if (!atBottom) break
+        }
+    }
 
     cm.elicitations.firstOrNull()?.let { e ->
         ElicitationSheet(e,

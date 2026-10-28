@@ -22,7 +22,7 @@ android {
         // installer reports success while the old APK stays in place, so fixes appear not to
         // work and get re-debugged from scratch. versionName carries the date for the same
         // reason: so "which build is this?" is answerable from the About/app-info screen.
-        versionCode = 134
+        versionCode = 135
         // A release tag may override the display name (`-Pgrouse.versionName=…`,
         // set by .github/workflows/release.yml); local builds keep the committed
         // value. versionCode stays committed: it MUST be bumped by hand before
