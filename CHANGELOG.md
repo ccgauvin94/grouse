@@ -66,6 +66,15 @@ All notable changes to Grouse are recorded here. The format is based on
   bubbles, tool chips) moved into the model and is keyed by a stable row uid
   rather than the row index, so it survives both scrolling away and being recycled.
 
+### Added
+
+- **Tap an inline chat image to expand it.** Attached images in a user
+  bubble open fullscreen on tap: Android launches a fullscreen dialog
+  (black backdrop, tap anywhere to close), and the desktop opens a modal
+  overlay over the window (click or Escape to close). The inline thumbnail
+  is unchanged; this just keeps the pixels available at full size in both
+  clients.
+
 ### Fixed
 
 - **User images were flattened to `[image]` in the transcript on replay.**

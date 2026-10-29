@@ -459,6 +459,9 @@ private fun Modifier.copyOnTap(text: String): Modifier {
 
 @Composable
 private fun UserBubble(m: ChatMessage) {
+    // Tap-to-expand: which image (by base64 payload) is fullscreen right now, if any.
+    var zoomed by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
+    if (zoomed != null) FullscreenImage(zoomed!!) { zoomed = null }
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.End) {
         Surface(
             color = MaterialTheme.colorScheme.primaryContainer,
@@ -482,8 +485,14 @@ private fun UserBubble(m: ChatMessage) {
                     if (bmp != null) Image(
                         bitmap = bmp, contentDescription = "attached image",
                         contentScale = ContentScale.Fit,
+                        // Tap expands to fullscreen. `clickable` consumes the gesture so the
+                        // bubble's copyOnTap does not also fire a "Copied" toast.
                         modifier = Modifier.padding(bottom = if (m.text.isNotBlank()) 6.dp else 0.dp)
-                            .heightIn(max = 220.dp).clip(RoundedCornerShape(10.dp)))
+                            .heightIn(max = 220.dp).clip(RoundedCornerShape(10.dp))
+                            .clickable(
+                                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                                indication = null,
+                            ) { zoomed = img.dataB64 })
                 }
                 if (m.text.isNotBlank())
                     Box(Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) {
@@ -491,6 +500,37 @@ private fun UserBubble(m: ChatMessage) {
                         SelectionContainer { Markdownish(m.text) }
                     }
             }
+        }
+    }
+}
+
+/** Fullscreen tap-to-expand view of an attached image; tap anywhere (or back) to dismiss. */
+@Composable
+private fun FullscreenImage(b64: String, onDismiss: () -> Unit) {
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        val bmp by androidx.compose.runtime.produceState<androidx.compose.ui.graphics.ImageBitmap?>(
+            imageDecodeCache[b64], b64
+        ) {
+            if (value == null) {
+                value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                    cachedDecodeImage(b64)
+                }
+            }
+        }
+        Box(Modifier.fillMaxSize().background(Color.Black)
+            .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                indication = null) { onDismiss() },
+            contentAlignment = Alignment.Center) {
+            bmp?.let {
+                Image(bitmap = it, contentDescription = "expanded image",
+                    contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+            }
+            Text("Tap to close", color = Color.White.copy(alpha = 0.5f),
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp))
         }
     }
 }

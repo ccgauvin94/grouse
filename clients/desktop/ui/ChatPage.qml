@@ -1009,12 +1009,21 @@ Kirigami.Page {
                                     width: parent.width
                                     height: modelData.image ? 140 : fileChip.implicitHeight
                                     Image {
+                                        id: imgThumb
                                         visible: modelData.image
                                         anchors.left: parent.left
                                         source: modelData.url
                                         width: Math.min(140, implicitWidth)
                                         height: 140
                                         fillMode: Image.PreserveAspectFit
+                                    }
+                                    MouseArea {
+                                        anchors.fill: imgThumb
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            imageViewer.image = modelData.url
+                                            imageViewer.open()
+                                        }
                                     }
                                     Rectangle {
                                         id: fileChip
@@ -2220,6 +2229,46 @@ Kirigami.Page {
                     }
                 }
             }
+        }
+    }
+
+    // Fullscreen viewer for an inline chat image (tap-to-expand). Parented to
+    // Overlay so it covers the window rather than the bubble; a click or
+    // Escape dismisses it.
+    Controls.Popup {
+        id: imageViewer
+        property string image: ""
+        parent: Overlay.overlay
+        width: parent ? parent.width : 0
+        height: parent ? parent.height : 0
+        modal: true
+        closePolicy: Controls.Popup.CloseOnEscape
+
+        background: Rectangle { color: Qt.rgba(0, 0, 0, 0.92) }
+
+        contentItem: Item {
+            Image {
+                id: viewerImage
+                anchors.fill: parent
+                fillMode: Image.PreserveAspectFit
+                source: imageViewer.image
+                asynchronous: true
+            }
+            Shortcut {
+                sequence: "Escape"
+                enabled: imageViewer.visible
+                onActivated: imageViewer.close()
+            }
+            Controls.Label {
+                visible: viewerImage.status === Image.Ready
+                text: qsTr("Click anywhere to close")
+                anchors.bottom: parent.bottom
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.margins: Kirigami.Units.largeSpacing
+                color: Kirigami.Theme.highlightedTextColor
+                opacity: 0.7
+            }
+            MouseArea { anchors.fill: parent; onClicked: imageViewer.close() }
         }
     }
 
