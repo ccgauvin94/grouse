@@ -95,8 +95,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.NavController
-import com.halilibo.richtext.markdown.Markdown
-import com.halilibo.richtext.ui.material3.RichText
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -285,7 +283,7 @@ fun SkillScreen(cm: ConnectionManager, nav: NavController, name: String) {
                 Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                     SelectionContainer {
                         Box(Modifier.padding(12.dp)) {
-                            RichText { Markdown(body) }
+                            Markdownish(body)
                         }
                     }
                 }

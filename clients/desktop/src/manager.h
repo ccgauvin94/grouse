@@ -207,6 +207,14 @@ public:
     Q_INVOKABLE bool onRoamSession() const { return !m_activePeerLabel.isEmpty(); }
     /** Copy text to the system clipboard (QML has no OS clipboard access). */
     Q_INVOKABLE void copyToClipboard(const QString &s);
+    /** Syntax-highlight a fenced code block into RichText HTML. The delegate
+     *  supplies the theme colors (Theme.semantic.*.code in GrouseTheme.qml):
+     *  the highlighter runs in C++, where the palette does not reach. */
+    Q_INVOKABLE QString highlightCode(const QString &code, const QString &lang,
+                                      const QString &keywordColor,
+                                      const QString &stringColor,
+                                      const QString &commentColor,
+                                      const QString &numberColor);
     Q_INVOKABLE void setActiveTab(const QString &tab);
     /** Sidebar model for the Roam tab (endpoint headers + sessions). */
     QObject *roamModel() const;

@@ -69,7 +69,8 @@ QtObject {
             danger: "#FB4934",
             chatUser: { fill: "#CDEDA3", text: "#102000" },
             chatAgent: { fill: "#FAF7F0", text: "#282828" },
-            status: { online: "#3DDC84", connecting: "#F5A623", offline: "#FB4934" }
+            status: { online: "#3DDC84", connecting: "#F5A623", offline: "#FB4934" },
+            code: { keyword: "#B16286", string: "#689D6A", comment: "#928374", number: "#B57614" }
         },
         dark: {
             background: "#282828",
@@ -83,7 +84,8 @@ QtObject {
             danger: "#FB4934",
             chatUser: { fill: "#354E16", text: "#CDEDA3" },
             chatAgent: { fill: "#282828", text: "#EBDBB2" },
-            status: { online: "#3DDC84", connecting: "#F5A623", offline: "#FB4934" }
+            status: { online: "#3DDC84", connecting: "#F5A623", offline: "#FB4934" },
+            code: { keyword: "#D3869B", string: "#8EC07C", comment: "#928374", number: "#D8A657" }
         }
     })
 }

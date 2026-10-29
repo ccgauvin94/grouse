@@ -569,6 +569,16 @@ void Manager::copyToClipboard(const QString &s)
     QGuiApplication::clipboard()->setText(s);
 }
 
+QString Manager::highlightCode(const QString &code, const QString &lang,
+                               const QString &keywordColor,
+                               const QString &stringColor,
+                               const QString &commentColor,
+                               const QString &numberColor)
+{
+    return ::highlightCode(code, lang, keywordColor, stringColor, commentColor,
+                           numberColor);
+}
+
 QObject *Manager::roamModel() const { return m_roamModel; }
 
 void Manager::testConnection()
@@ -2467,8 +2477,21 @@ void ensureRowHtml(QVariantMap &row)
     const QString text = row.value("text").toString();
     if (role == QLatin1String("error"))
         row["html"] = QStringLiteral("<div>") + text + QStringLiteral("</div>");
-    else
-        row["html"] = markdownToHtml(text);
+    else {
+        // Fenced code becomes blocks: the bubble delegate renders each code
+        // chunk in its own horizontal scroller (RichText wraps everything, so
+        // a long line squeezed the whole bubble into a third of its width).
+        // Plain messages keep the single-document html path unchanged.
+        const QVariantList blocks = markdownBlocks(text);
+        bool hasCode = false;
+        for (const QVariant &b : blocks)
+            if (b.toMap().value("type").toString() == QLatin1String("code"))
+                hasCode = true;
+        if (hasCode)
+            row["blocks"] = blocks;
+        else
+            row["html"] = markdownToHtml(text);
+    }
 }
 } // namespace
 

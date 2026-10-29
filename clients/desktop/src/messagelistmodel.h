@@ -25,6 +25,10 @@ public:
         RoleRole,          // "role"
         TextRole,          // "text"
         HtmlRole,          // "html"
+        BlocksRole,        // "blocks" — markdownBlocks() output when the text
+                           //              has fenced code; the delegate renders
+                           //              each chunk separately (html prose /
+                           //              code in its own horizontal scroller)
         ThoughtRole,       // "thought"
         TitleRole,         // "title"
         DetailRole,        // "detail"

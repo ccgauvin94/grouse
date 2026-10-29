@@ -106,6 +106,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.NavController
 import com.halilibo.richtext.markdown.Markdown
+import com.halilibo.richtext.ui.CodeBlockStyle
+import com.halilibo.richtext.ui.RichTextStyle
 import com.halilibo.richtext.ui.material3.RichText
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
@@ -402,8 +404,28 @@ try {
 """.trimIndent()
 
 @Composable
-private fun Markdownish(text: String) {
-    RichText(modifier = Modifier.fillMaxWidth()) { Markdown(text) }
+internal fun Markdownish(text: String) {
+    // Fenced blocks are split out before the library sees the text: 0.20.0's
+    // Markdown has no code-block renderer slot, so per-token colouring cannot be
+    // threaded through it (CodeBlockStyle colours the block as one run). Everything
+    // outside the fences — images, tables, lists — still renders via the library.
+    // wordWrap=false also makes the library's own indented code blocks flick
+    // horizontally like the fenced ones.
+    val style = RichTextStyle(codeBlockStyle = CodeBlockStyle(wordWrap = false))
+    val segments = remember(text) { splitFencedCode(text) }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        for (seg in segments) {
+            when (seg) {
+                // Plain text while a turn streams (the caller decides), so this split
+                // runs once per finalized message, not per token.
+                is Segment.Code -> HighlightedCodeBlock(seg.code, seg.tag)
+                is Segment.Text ->
+                    RichText(modifier = Modifier.fillMaxWidth(), style = style) {
+                        Markdown(seg.text)
+                    }
+            }
+        }
+    }
 }
 
 /** Runs [onTap] on a short tap only; a long press is left to the inner SelectionContainer

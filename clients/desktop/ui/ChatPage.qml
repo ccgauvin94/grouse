@@ -11,6 +11,116 @@ Kirigami.Page {
     // Emitted when the user clicks the tools pill; main.qml owns the slide-out panel.
     signal toolsOpenRequested()
 
+    // A fenced code block inside a message row. A RichText TextEdit wraps
+    // everything, so a long line disappeared under a scrollless bubble: the
+    // chunk flicks horizontally here instead, and `pre` keeps the whitespace
+    // (or every indent inside RichText would collapse). The highlight colors
+    // come from Theme.semantic.*.code, chosen for the current color scheme,
+    // because the C++ highlighter cannot see the palette.
+    component CodeFence: Rectangle {
+        id: fence
+        property string lang: ""
+        property string code: ""
+        color: Kirigami.Theme.view
+        border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
+                                                    : Kirigami.Theme.disabledTextColor
+        radius: Theme.radius.sm
+        clip: true
+        // Bounds the pane: long chunks scroll instead of stretching bubbles
+        // into a page of their own.
+        implicitHeight: Math.min(scroller.contentHeight + Theme.spacing.s2, 400)
+        Flickable {
+            id: scroller
+            anchors.fill: parent
+            // Horizontal is the reason this component exists; vertical appears
+            // for the 400.dp-capped tall chunks.
+            ScrollBar.horizontal: Controls.ScrollBar {}
+            ScrollBar.vertical: Controls.ScrollBar {}
+            contentWidth: codeText.contentWidth + Theme.spacing.s4
+            contentHeight: codeText.contentHeight
+            TextEdit {
+                id: codeText
+                text: Mgr.highlightCode(fence.code, fence.lang,
+                                        page.highlightPalette().keyword,
+                                        page.highlightPalette().string,
+                                        page.highlightPalette().comment,
+                                        page.highlightPalette().number)
+                textFormat: Text.RichText
+                font.family: "monospace"
+                font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82)
+                x: Theme.spacing.s2
+                width: Math.max(scroller.width - Theme.spacing.s4, contentWidth)
+                wrapMode: TextEdit.NoWrap
+                readOnly: true
+                selectByMouse: true
+                persistentSelection: true
+                cursorVisible: false
+                color: Kirigami.Theme.textColor
+                selectionColor: Kirigami.Theme.highlightColor
+                selectedTextColor: Kirigami.Theme.highlightedTextColor
+                renderType: Text.NativeRendering
+            }
+        }
+    }
+
+    // The palette half of the highlighter (tokens.json semantic.code; the
+    // C++ side only accepts colors from a call). Read per render because the
+    // scheme can follow the system while the app is open.
+    function highlightPalette() {
+        return Kirigami.Theme.colorScheme === Kirigami.Theme.Dark
+            ? Theme.semantic.dark.code
+            : Theme.semantic.light.code
+    }
+
+    // The blocks form of a finalized message that carries fenced code: prose
+    // chunks stay RichText TextEdits shaped like the surrounding bubble, code
+    // chunks become CodeFence panes. Empty `blocks` keeps the row on the
+    // single-document RichText path, which is almost every message.
+    component BlocksColumn: Column {
+        id: blocksRoot
+        property var blocks: []
+        property bool userStyle: false // color the prose like the user bubble
+        readonly property TextEdit editable: chunks.count > 0
+            ? chunks.itemAt(0).item : null
+        width: parent ? parent.width : 0
+        Repeater {
+            id: chunks
+            model: blocksRoot.blocks
+            Loader {
+                width: blocksRoot.width
+                sourceComponent: modelData.type === "code" ? codeComp : proseComp
+                Component {
+                    id: codeComp
+                    CodeFence {
+                        width: blocksRoot.width
+                        lang: modelData.lang
+                        code: modelData.code
+                    }
+                }
+                Component {
+                    id: proseComp
+                    TextEdit {
+                        text: modelData.html
+                        textFormat: Text.RichText
+                        width: blocksRoot.width
+                        wrapMode: TextEdit.Wrap
+                        readOnly: true
+                        selectByMouse: true
+                        persistentSelection: true
+                        cursorVisible: false
+                        color: blocksRoot.userStyle
+                               ? Kirigami.Theme.highlightedTextColor
+                               : Kirigami.Theme.textColor
+                        selectionColor: Kirigami.Theme.highlightColor
+                        selectedTextColor: Kirigami.Theme.highlightedTextColor
+                        renderType: Text.NativeRendering
+                        onLinkActivated: Qt.openUrlExternally(link)
+                    }
+                }
+            }
+        }
+    }
+
     // Debug: the core's turn state beside the working indicator, so a turn that
     // looks stuck says whose fault it is (Android parity). Polled only while the
     // debug switch is on — it is internal state, not chat.
@@ -794,7 +904,20 @@ Kirigami.Page {
                      : errorBanner.implicitHeight
 
                 // The selectable bubble text under the cursor (user or agent).
-                readonly property var msgEdit: mdel.isUser ? userText : agentText
+                // When the message rendered as blocks (fenced code), the target
+                // is the blocks column's one editable — with several chunks the
+                // selection lives in whichever has focus, not a single bubble.
+                readonly property bool hasBlocks:
+                    (mdel.isUser || mdel.isAgent) && mdel.blocks.length > 0
+
+                // The selectable bubble text under the cursor (user or agent).
+                // When the message rendered as blocks (fenced code), the
+                // editable lives in the blocks column (its first prose chunk;
+                // the code panes select independently). The menu's
+                // select-all/copy targets switch away from the flat bubble.
+                readonly property var msgEdit: mdel.hasBlocks
+                    ? (mdel.isUser ? userBlocks.editable : agentBlocks.editable)
+                    : (mdel.isUser ? userText : agentText)
 
                 // Right-click menu for the bubble text. Copy takes the selection when
                 // there is one, else the whole message.
@@ -897,10 +1020,13 @@ Kirigami.Page {
                             }
                         }
                         // A TextEdit (not a Label) so the text is selectable; right-click
-                        // opens the copy menu.
+                        // opens the copy menu. A message with fenced code renders as a
+                        // BlocksColumn instead — the two are siblings so the bubble
+                        // Column lays out whichever is visible.
                         TextEdit {
                             id: userText
                             text: mdel.messageHtml || mdel.messageText
+                            visible: !mdel.hasBlocks
                             // PlainText until the row is finalized: with RichText, Qt
                             // re-parses + reshapes the WHOLE accumulated message on every
                             // streamed chunk (quadratic). html is empty while a turn
@@ -922,8 +1048,20 @@ Kirigami.Page {
                                 onTapped: msgMenu.popup()
                             }
                         }
+                        // The split render of a message that carries fenced code:
+                        // prose chunks + CodeFence panes, laid out by the same bubble
+                        // Column as the flat TextEdit above.
+                        BlocksColumn {
+                            id: userBlocks
+                            visible: mdel.hasBlocks
+                            width: mdel.userBubbleW - mdel.pad * 2
+                            blocks: mdel.blocks
+                            userStyle: true
+                        }
                     }
                 }
+
+                // ---------------- agent bubble (left) ----------------
 
                 // ---------------- agent bubble (left) ----------------
                 Rectangle {
@@ -959,6 +1097,7 @@ Kirigami.Page {
                         TextEdit {
                             id: agentText
                             text: mdel.messageHtml || mdel.messageText
+                            visible: !mdel.hasBlocks
                             // PlainText while streaming (see the user bubble note above);
                             // RichText once finalize has rendered the markdown to html.
                             textFormat: mdel.messageHtml.length > 0 ? Text.RichText : Text.PlainText
@@ -1003,9 +1142,29 @@ Kirigami.Page {
                                 }
                             }
                         }
+                        // The split render, agent side. Tapping the proseChunk opens
+                        // the stats popup exactly as the flat bubble does, so a message
+                        // with code behaves the same as one without.
+                        BlocksColumn {
+                            id: agentBlocks
+                            visible: mdel.hasBlocks
+                            width: mdel.agentBubbleW - mdel.pad * 2
+                            blocks: mdel.blocks
+                            TapHandler {
+                                acceptedButtons: Qt.LeftButton
+                                onTapped: (tap) => {
+                                    statsPopup.x = tap.position.x + 8
+                                    statsPopup.y = tap.position.y + 8
+                                    statsPopup.open()
+                                }
+                            }
+                            TapHandler {
+                                acceptedButtons: Qt.RightButton
+                                onTapped: msgMenu.popup()
+                            }
+                        }
                     }
                 }
-
                 // ---------------- tool chip ----------------
                 Rectangle {
                     id: toolChip

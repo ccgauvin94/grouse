@@ -23,6 +23,7 @@ QHash<int, QByteArray> MessageListModel::roleNames() const
         {RoleRole, "role"},
         {TextRole, "text"},
         {HtmlRole, "html"},
+        {BlocksRole, "blocks"},
         {ThoughtRole, "thought"},
         {TitleRole, "title"},
         {DetailRole, "detail"},
@@ -52,7 +53,7 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
     case RoleRole: return m.value("role");
     case TextRole: return m.value("text");
     case HtmlRole: return m.value("html");
-    case ThoughtRole: return m.value("thought");
+    case BlocksRole: return m.value("blocks");
     case TitleRole: return m.value("title");
     case DetailRole: return m.value("detail");
     case OutputRole: return m.value("output");
