@@ -8,6 +8,13 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Changed
 
+- **The parked-message card reads like a card, not a clipped row.** Its text shared a
+  `RowLayout` with the Steer/✕ buttons, so it never got the card's width and broke off
+  mid-sentence under them, and the card's height came from a row whose implicit height
+  lagged the wrap. It is three bands now: a "Queued" badge with the note
+  ("sends when this turn ends", or the attachment caveat) and a proper close button
+  across the top, the message at full width with up to three lines, and Steer
+  right-aligned below out of the reading path.
 - **The APK that GitHub CI publishes is now signed with the release key.** The
   workflow built the debug variant and let it fall back to the runner's throwaway
   debug keystore, which GitHub regenerates on every run — so the artifact could not

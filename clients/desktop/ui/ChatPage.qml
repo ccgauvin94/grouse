@@ -1736,8 +1736,10 @@ Kirigami.Page {
                     Rectangle {
                         id: queuedCard
                         width: parent.width
-                        height: queuedCardRow.implicitHeight + Kirigami.Units.smallSpacing
-                        radius: Kirigami.Units.smallSpacing
+                        // Height follows the column, whose own implicit height already
+                        // accounts for the wrapped text at this width and the margins.
+                        height: queuedCol.implicitHeight + Kirigami.Units.smallSpacing * 4
+                        radius: Kirigami.Units.smallSpacing * 1.5
                         color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
                                        Kirigami.Theme.textColor.b, 0.06)
                         border.color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
@@ -1771,68 +1773,83 @@ Kirigami.Page {
                             }
                         }
 
-                        RowLayout {
-                            id: queuedCardRow
+                        // Three bands, not one row: the message gets the card's full
+                        // width (it used to share a RowLayout with the buttons, which is
+                        // why it broke off mid-sentence under the Steer button), the
+                        // header says what the card IS, and the actions sit out of the
+                        // reading path.
+                        ColumnLayout {
+                            id: queuedCol
                             anchors.fill: parent
-                            anchors.margins: Kirigami.Units.smallSpacing
+                            anchors.margins: Kirigami.Units.smallSpacing * 2
                             spacing: Kirigami.Units.smallSpacing
 
-                            ColumnLayout {
+                            RowLayout {
                                 Layout.fillWidth: true
-                                spacing: 2
+                                spacing: Kirigami.Units.smallSpacing
 
+                                Rectangle {
+                                    radius: height / 2
+                                    color: Qt.rgba(Kirigami.Theme.highlightColor.r,
+                                                   Kirigami.Theme.highlightColor.g,
+                                                   Kirigami.Theme.highlightColor.b, 0.18)
+                                    implicitWidth: queuedTag.implicitWidth + Kirigami.Units.smallSpacing * 2
+                                    implicitHeight: queuedTag.implicitHeight + Kirigami.Units.smallSpacing * 0.5
+                                    Controls.Label {
+                                        id: queuedTag
+                                        anchors.centerIn: parent
+                                        text: qsTr("Queued")
+                                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8
+                                        font.bold: true
+                                    }
+                                }
                                 Controls.Label {
                                     Layout.fillWidth: true
-                                    text: modelData.text.length > 0 ? modelData.text : qsTr("Attachment")
-                                    wrapMode: Text.Wrap
-                                    maximumLineCount: 2
+                                    text: page.queuedNote(modelData.attachments)
+                                    opacity: 0.7
                                     elide: Text.ElideRight
-                                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.95
+                                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
                                 }
-                                RowLayout {
-                                    spacing: Kirigami.Units.smallSpacing
-                                    Rectangle {
-                                        radius: height / 2
-                                        color: Qt.rgba(Kirigami.Theme.highlightColor.r,
-                                                       Kirigami.Theme.highlightColor.g,
-                                                       Kirigami.Theme.highlightColor.b, 0.18)
-                                        implicitWidth: queuedTag.implicitWidth + Kirigami.Units.smallSpacing * 1.5
-                                        implicitHeight: queuedTag.implicitHeight + 2
-                                        Controls.Label {
-                                            id: queuedTag
-                                            anchors.centerIn: parent
-                                            text: qsTr("Queued")
-                                            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.75
-                                        }
-                                    }
-                                    Controls.Label {
-                                        text: page.queuedNote(modelData.attachments)
-                                        opacity: 0.7
-                                        elide: Text.ElideRight
-                                        Layout.fillWidth: true
-                                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8
-                                    }
+                                Controls.ToolButton {
+                                    icon.name: "window-close"
+                                    display: Controls.AbstractButton.IconOnly
+                                    implicitWidth: Kirigami.Units.gridUnit * 1.5
+                                    implicitHeight: Kirigami.Units.gridUnit * 1.5
+                                    onClicked: Mgr.cancelQueued(modelData.id)
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: qsTr("Discard this queued message")
                                 }
                             }
 
-                            Controls.Button {
-                                text: qsTr("Steer")
-                                // A steer carries text only, so a message with an
-                                // attachment can never be promoted — it keeps waiting
-                                // rather than losing its file silently.
-                                enabled: page.canSteer && modelData.attachments <= 0
-                                onClicked: Mgr.steerQueued(modelData.id)
-                                ToolTip.visible: hovered
-                                ToolTip.text: modelData.attachments > 0
-                                              ? qsTr("A steer carries text only — this message keeps its attachment and waits for the turn to end.")
-                                              : qsTr("Redirect the running turn: it answers this instead")
+                            Controls.Label {
+                                Layout.fillWidth: true
+                                text: modelData.text.length > 0 ? modelData.text : qsTr("Attachment")
+                                textFormat: Text.PlainText
+                                wrapMode: Text.Wrap
+                                // Three lines, then an ellipsis: enough to recognise the
+                                // message without the card pushing the composer down.
+                                maximumLineCount: 3
+                                elide: Text.ElideRight
                             }
-                            Controls.Button {
-                                text: "✕"
-                                flat: true
-                                onClicked: Mgr.cancelQueued(modelData.id)
-                                ToolTip.visible: hovered
-                                ToolTip.text: qsTr("Discard this queued message")
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Kirigami.Units.smallSpacing
+                                Item { Layout.fillWidth: true }
+                                Controls.Button {
+                                    text: qsTr("Steer")
+                                    icon.name: "media-playback-start"
+                                    display: Controls.AbstractButton.TextBesideIcon
+                                    // A steer carries text only, so a message with an
+                                    // attachment can never be promoted — it keeps waiting
+                                    // rather than losing its file silently.
+                                    enabled: page.canSteer && modelData.attachments <= 0
+                                    onClicked: Mgr.steerQueued(modelData.id)
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: modelData.attachments > 0
+                                                  ? qsTr("A steer carries text only — this message keeps its attachment and waits for the turn to end.")
+                                                  : qsTr("Redirect the running turn: it answers this instead")
+                                }
                             }
                         }
                     }
