@@ -435,6 +435,10 @@ class ConnectionManager private constructor(context: Context) {
     val tasksError = mutableStateOf<String?>(null)
     /** A refresh is outstanding (spinner on the tab's refresh affordance). */
     val tasksLoading = mutableStateOf(false)
+    /** One-shot composer text for the NEXT chat to open (My Day's "discuss this item"
+     *  hands over `About item <id>: ` so the assistant can look the item up). Consumed
+     *  by ChatScreen on entry, never persisted: it is a handoff, not a draft store. */
+    val pendingDraft = mutableStateOf<String?>(null)
 
     /** Goose projects, refreshed alongside the session list. A project is a named source with an
      *  id, not a directory -- so filing a chat no longer decides where its tools run, and the

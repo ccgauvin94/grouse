@@ -29,6 +29,25 @@ All notable changes to Grouse are recorded here. The format is based on
   surface yet). No push for task state: the core refreshes on tab open, on the
   refresh affordance, and after every action.
 
+### Fixed
+
+- **My Day read "briefed never" (red dot) on any device that had not received a
+  briefing push since install.** The status dot was driven by `lastBriefingAt`,
+  which the PUSH path stamps — so a fresh install, or one with push off, showed a
+  dead assistant over a healthy one. It now takes whichever is newer of that
+  stamp and the Assistant thread's own `updatedAt` (briefings append to the
+  thread; nothing else moves it while the assistant is idle), and when neither is
+  known it shows **no dot and no claim**: an unknown age is not a stale one.
+- **Due dates rendered as raw ISO.** `due_at` is usually a bare date
+  (`2026-07-05`), which `relativeTime` cannot parse, so rows read "due
+  2026-07-05". A dedicated `dueLabel` says what a reader needs instead —
+  "overdue 16w", "overdue 8d", "due today", "due in 3d".
+- **Tapping an item now discusses THAT item.** It opens the assistant thread with
+  `About item <id> (<title>): ` already in the composer instead of an empty chat:
+  the id is the handle that lets the assistant call `state_items`/`state_close`
+  on the item on screen rather than guessing. A one-shot `pendingDraft` carries
+  it in and is consumed on entry, so it never resurfaces on a later visit.
+
 ### Changed
 
 - **Code blocks have a copy button.** A small icon sits at each fenced

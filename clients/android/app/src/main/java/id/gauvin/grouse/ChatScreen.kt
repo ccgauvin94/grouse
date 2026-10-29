@@ -183,6 +183,15 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     var hintDismissed by remember { mutableStateOf(cm.store.assistantHintSeen) }
     // rememberSaveable so a rotation/dark-mode recreate doesn't wipe the typed draft.
     var input by rememberSaveable { mutableStateOf("") }
+    // A handoff from My Day ("discuss this item") arrives as a prefilled line, not a sent
+    // prompt: the assistant needs the item id in the conversation, the user needs to finish
+    // the sentence. One-shot — consumed on entry so it cannot resurface on a later visit.
+    LaunchedEffect(Unit) {
+        cm.pendingDraft.value?.let { pending ->
+            cm.pendingDraft.value = null
+            if (input.isBlank()) input = pending
+        }
+    }
     // Hoisted to ConnectionManager so picked images survive recreation (see draftAttachments).
     val attachments = cm.draftAttachments
     val listState = rememberLazyListState()

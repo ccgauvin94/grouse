@@ -142,9 +142,12 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                     onOpen = {
                         // Discuss in the ASSISTANT thread, not a per-task one: assistant-state's
                         // beliefs and attention are global, so a task thread would talk to a
-                        // model with no context about any of it.
+                        // model with no context about any of it. The item id rides along in the
+                        // opening line — that is what lets the assistant call `state_items` /
+                        // `state_close` on THIS item instead of guessing which one you mean.
+                        cm.pendingDraft.value = "About item ${t.id} (${t.title.take(80)}): "
+                        cm.openAssistant()
                         nav.navigate("chat") {
-                            cm.openAssistant()
                             launchSingleTop = true
                             popUpTo("chat") { inclusive = true }
                         }
@@ -202,37 +205,49 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
  *  one-line composer so a thought does not need a navigation to be written down. */
 @Composable
 private fun AssistantCard(cm: ConnectionManager, draft: String, onChange: (String) -> Unit, onSend: (String) -> Unit) {
+    val thread = cm.sessions.value.firstOrNull { it.sessionId == cm.assistantSessionId() }
     // Briefing health, same rule as the chat header: green while the hourly job is keeping
     // up, amber when it is late, red when it has stopped. Overnight the gap is expected.
-    val lastBriefing = cm.store.lastBriefingAt
+    //
+    // The push stamp (`lastBriefingAt`) only exists once a briefing push has ARRIVED — on a
+    // device that has never had one it reads 0, which painted a red dot and "briefed never"
+    // over a perfectly healthy assistant. The thread's own `updatedAt` is the honest
+    // fallback (briefings append to it, and nothing else moves it while you are idle), so
+    // take whichever is newer and say NOTHING when neither is known.
+    val threadStamp = thread?.updatedEpoch() ?: 0L
+    val lastBriefing = maxOf(cm.store.lastBriefingAt, threadStamp)
     val ageMin = if (lastBriefing > 0) (System.currentTimeMillis() - lastBriefing) / 60000 else Long.MAX_VALUE
     val activeHrs = java.time.ZonedDateTime.now().hour in 7..22
     val dot = when {
-        lastBriefing > 0 && ageMin <= (if (activeHrs) 90 else 12 * 60) -> MaterialTheme.statusColors.online
-        lastBriefing > 0 && ageMin <= (if (activeHrs) 180 else 15 * 60) -> MaterialTheme.statusColors.connecting
+        lastBriefing <= 0 -> null
+        ageMin <= (if (activeHrs) 90 else 12 * 60) -> MaterialTheme.statusColors.online
+        ageMin <= (if (activeHrs) 180 else 15 * 60) -> MaterialTheme.statusColors.connecting
         else -> MaterialTheme.colorScheme.error
     }
-    val lastSeen = if (lastBriefing > 0) relativeTime(Instant.ofEpochMilli(lastBriefing).toString()) else "never"
+    val lastSeen = if (lastBriefing > 0) relativeTime(Instant.ofEpochMilli(lastBriefing).toString()) else ""
     // The thread's own last line, when the session list knows it: the drawer already
     // carries session/list's snippet, so the card needs no extra round trip.
-    val snippet = cm.sessions.value.firstOrNull { it.sessionId == cm.assistantSessionId() }?.snippet.orEmpty()
+    val snippet = thread?.snippet.orEmpty()
 
     Card(shape = RoundedCornerShape(16.dp)) {
         Column(Modifier.fillMaxWidth().padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box {
                     Icon(Icons.Filled.Psychology, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Surface(
-                        color = dot,
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier.size(8.dp).align(Alignment.TopEnd),
-                    ) {}
+                    // No stamp, no dot: an unknown age is not the same as a stale one.
+                    dot?.let {
+                        Surface(
+                            color = it,
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier.size(8.dp).align(Alignment.TopEnd),
+                        ) {}
+                    }
                 }
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text("Assistant", style = MaterialTheme.typography.titleSmall)
                     Text(
-                        "always on · briefed $lastSeen",
+                        if (lastSeen.isBlank()) "always on" else "always on · briefed $lastSeen",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.outline,
                     )
@@ -297,7 +312,7 @@ private fun EmptyRow(text: String) {
 private fun TaskRow(t: TaskItem, onDone: () -> Unit, onDrop: () -> Unit, onSnooze: () -> Unit, onOpen: () -> Unit) {
     val meta = listOfNotNull(
         t.threadTitle.ifBlank { t.threadSlug }.takeIf { it.isNotBlank() },
-        t.dueAt.takeIf { it.isNotBlank() }?.let { "due ${relativeTime(it)}" },
+        dueLabel(t.dueAt).takeIf { it.isNotBlank() },
         t.kind.takeIf { it.isNotBlank() && it != "commitment" },
     ).joinToString(" · ")
     Card(shape = RoundedCornerShape(12.dp), onClick = onOpen) {
@@ -323,6 +338,28 @@ private fun TaskRow(t: TaskItem, onDone: () -> Unit, onDrop: () -> Unit, onSnooz
                 TextButton(onClick = onDrop, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Not real") }
             }
         }
+    }
+}
+
+/** `due_at` arrives as a bare date ("2026-07-05") or a naive datetime ("2026-10-15T15:30").
+ *  `relativeTime` parses neither, so it printed the raw string; what a reader needs is
+ *  whether it is overdue and by how much. Past days dominate this list, hence "overdue". */
+private fun dueLabel(iso: String): String {
+    if (iso.isBlank()) return ""
+    val date = runCatching {
+        runCatching { java.time.LocalDate.parse(iso.take(10)) }
+            .recoverCatching { java.time.OffsetDateTime.parse(iso).toLocalDate() }
+            .recoverCatching { java.time.LocalDateTime.parse(iso).toLocalDate() }
+            .getOrThrow()
+    }.getOrNull() ?: return "due ${iso.take(10)}"
+    val days = java.time.temporal.ChronoUnit.DAYS.between(date, java.time.LocalDate.now())
+    return when {
+        days <= -14 -> "overdue ${-days / 7}w"
+        days < 0 -> "overdue ${-days}d"
+        days == 0L -> "due today"
+        days == 1L -> "due tomorrow"
+        days <= 30 -> "due in ${days}d"
+        else -> "due ${date.month.getDisplayName(java.time.format.TextStyle.SHORT, java.util.Locale.getDefault())} ${date.dayOfMonth}"
     }
 }
 
