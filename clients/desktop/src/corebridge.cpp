@@ -160,7 +160,7 @@ bool CoreBridge::resolve()
     // The listener table's layout and the symbol signatures are the contract.
     // An older core (or a stale GROUSE_CORE) is refused before any callback can
     // be invoked with the wrong arity.
-    static constexpr unsigned kExpectedAbiVersion = 3;
+    static constexpr unsigned kExpectedAbiVersion = 4;
     if (!a.grouse_abi_version) {
         qWarning() << "CoreBridge: core library predates the ABI version symbol; refusing it";
         return false;
@@ -291,6 +291,9 @@ static void cb_on_compaction_status(void *u, const char *json) { const QString s
 static void cb_on_message_usage(void *u, std::uint64_t a, std::uint64_t b, std::uint64_t c, double d) {
     marshal(u, nullptr, [a, b, c, d](Manager *m) { m->coreOnMessageUsage(a, b, c, d); });
 }
+static void cb_on_unstable_usage(void *u, std::int64_t used, std::int64_t size, double cost) {
+    marshal(u, nullptr, [used, size, cost](Manager *m) { m->coreOnUsage(used, size, cost, QStringLiteral("USD")); });
+}
 static void cb_on_app_resource(void *u, const char *a, const char *b) {
     const QString sa = copyStr(a); const QString sb = copyStr(b);
     marshal(u, nullptr, [=](Manager *m) { m->coreOnAppResource(sa, sb); });
@@ -355,6 +358,7 @@ void CoreBridge::installListener()
         cb_on_elicitation,
         cb_on_compaction_status,
         cb_on_message_usage,
+        cb_on_unstable_usage,
         cb_on_app_resource,
         cb_on_recipes,
         cb_on_schedules,

@@ -252,6 +252,7 @@ class ConnectionManager private constructor(context: Context) {
         // `compacting` is a transient hint for the chat on screen; a switch
         // clears it and the server's status re-arms it if still relevant.
         compacting.value = false
+        compactionStatus.value = ""
         // The chip and the queue cards describe THIS chat's queue, and the queue is
         // per-chat. Use the session being opened (currentSession is still the old one here).
         publishQueue(sessionId)
@@ -265,6 +266,7 @@ class ConnectionManager private constructor(context: Context) {
         turnInFlightSession = null
         busy.value = false
         compacting.value = false
+        compactionStatus.value = ""
         activeRunId = null
         activeRunIdState.value = null
     }
@@ -306,8 +308,7 @@ class ConnectionManager private constructor(context: Context) {
     // The core owns the socket, reconnect/backoff, the transcript, and the caches. `unstable`
     // is the _goose/unstable/* shim (recipes, schedules, skills, extensions, tools, config).
     private val core = Core(object : CoreListener {
-        override fun onStatus(status: ConnectionStatus) { main.post { onCoreStatus(status) } }
-        override fun onSessions(sessions: List<SessionSummary>) { main.post { onCoreSessions(sessions) } }
+        override fun onStatus(status: ConnectionStatus) { main.post { onCoreStatus(status) } }        override fun onSessions(sessions: List<SessionSummary>) { main.post { onCoreSessions(sessions) } }
         // The rich item stream (docs/TRANSCRIPT_MODEL.md): the only transcript
         // channel.
         override fun onItem(op: TranscriptOp) { main.post { onCoreItem(op) } }
@@ -374,6 +375,12 @@ class ConnectionManager private constructor(context: Context) {
         override fun onRecipeParams(parameters: String) { main.post { this@ConnectionManager.onRecipeParams(parameters) } }
         override fun onElicitation(schema: String) { main.post { this@ConnectionManager.onElicitation(schema) } }
         override fun onCompactionStatus(message: String) { main.post { this@ConnectionManager.onCompactionStatus(message) } }
+        // Context-window usage over the unstable channel (usage_update): roam only
+        // transports these notifications, so this is what keeps the context bar live
+        // on a roam peer. The core already gates to the displayed session.
+        override fun onUsage(used: Long, size: Long, cost: Double) {
+            main.post { usage.value = AcpEvent.Usage(used.toInt(), size.toInt(), cost, "USD") }
+        }
         override fun onMessageUsage(outputTokens: ULong, elapsedMs: ULong, timeToFirstTokenMs: ULong, cost: Double) {
             main.post { this@ConnectionManager.onMessageUsage(outputTokens, elapsedMs, timeToFirstTokenMs, cost) }
         }
@@ -558,12 +565,21 @@ class ConnectionManager private constructor(context: Context) {
     // months ago still rendered -- "Media" outlived its sessions, its directory and its server
     // entry purely because this list remembered it. cm.projects is now the only source.
     val currentSession = mutableStateOf<String?>(null)   // id of the session on screen (for the Assistant binding)
+
+    /** The title of the chat on screen — what the app bar should say instead of "Grouse".
+     *  Null when the session id is unset or not (yet) in the loaded list. */
+    val currentChatTitle: String?
+        get() = currentSession.value?.let { id -> sessions.value.firstOrNull { it.sessionId == id }?.title }
+
     val busy = mutableStateOf(false)
     val usage = mutableStateOf<AcpEvent.Usage?>(null)   // context window used/size + cost
     // True while compaction (manual /compact or server-triggered auto-compact) is running. The
     // protocol only ever sends discrete text status lines, never a numeric percentage, so this
-    // drives an INDETERMINATE indicator, not a real progress fraction.
+    // drives an INDETERMINATE indicator, not a real progress fraction. `compactionStatus` is the
+    // goose line that armed it ("Exceeded auto-compact threshold of 70%...", "goose is
+    // compacting the conversation...") so the UI can repeat it verbatim; empty when idle.
     val compacting = mutableStateOf(false)
+    val compactionStatus = mutableStateOf("")
     val commands = mutableStateOf<List<String>>(emptyList())
     val permissions = mutableStateListOf<AcpEvent.Permission>()   // pending approvals, oldest first
     val elicitations = mutableStateListOf<AcpEvent.Elicitation>() // pending input forms, oldest first
@@ -1929,6 +1945,7 @@ class ConnectionManager private constructor(context: Context) {
     fun compact() {
         busy.value = true
         compacting.value = true   // client-initiated: don't wait for the server's own status echo
+        compactionStatus.value = "Compacting…"
         sendPromptBlocks("/compact", emptyList(), expect = currentSession.value)
     }
 
@@ -1974,6 +1991,13 @@ class ConnectionManager private constructor(context: Context) {
     // ---------------------------------------------------------------------------
 
     private fun onCoreStatus(st: ConnectionStatus) {
+        if (st is ConnectionStatus.Alert) {
+            // Advisory (failed control RPC, e.g. a roam provider pick the peer
+            // refused): the connection is fine, so it must NOT land in the
+            // status line the offline dot reads — a toast is the whole surface.
+            android.widget.Toast.makeText(appContext, st.message, android.widget.Toast.LENGTH_LONG).show()
+            return
+        }
         when (st) {
             ConnectionStatus.Ready -> onCoreReady()
             ConnectionStatus.Connecting -> {
@@ -2404,6 +2428,7 @@ class ConnectionManager private constructor(context: Context) {
         val shown = sessionId == currentSession.value
         if (shown) {
             compacting.value = false
+            compactionStatus.value = ""
             // The turn is over: a filler still waiting has nothing left to cover.
             main.removeCallbacks(thinkingFiller)
             turnInFlight = false
@@ -2783,13 +2808,26 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     private fun onCompactionStatus(message: String) {
-        // Substring match on goose's own status copy: both start and end lines are type
-        // Notice, so "notice vs progress" can't gate the indicator -- the text itself is
-        // the only stable signal. If a future goose upgrade rewords these, this just stops
+        // The core gates these to the DISPLAYED session (the unstable dispatch
+        // drops notifications whose sessionId is not what is on screen), so a
+        // scheduled run compacting in the background can no longer light the
+        // spinner here. Still keep the text-level gates tight: only arm on the
+        // phrases goose actually uses for the RUNNING compaction, clear on its
+        // terminators, and trust the run-ended backstop below for everything
+        // else. If a future goose upgrade rewords these, this just stops
         // firing (fails safe: no spinner, never a wrong one).
         val m = message.lowercase()
-        if (m.contains("compact")) compacting.value = true
-        if (m.contains("complete") || m.contains("error")) compacting.value = false
+        val arming = m.contains("compacting") ||
+            (m.contains("compaction") && (m.endsWith("...") || m.endsWith("…")))
+        val done = m.contains("complete") || m.contains("error") ||
+            m.contains("failed") || m.contains("cleared")
+        if (arming && !done) {
+            compacting.value = true
+            compactionStatus.value = message
+        } else if (done) {
+            compacting.value = false
+            compactionStatus.value = ""
+        }
     }
 
     private fun onMessageUsage(outputTokens: ULong, elapsedMs: ULong, timeToFirstTokenMs: ULong, cost: Double) {

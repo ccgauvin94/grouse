@@ -151,7 +151,7 @@ cache paint in place.
 
 ### 3.3 State getters (snapshots the UI may read)
 
-- `status(): ConnectionStatus` — `Disconnected | Connecting | Ready | Syncing | Error(String)`
+- `status(): ConnectionStatus` — `Disconnected | Connecting | Ready | Syncing | Error(String)`. `Alert(String)` is the advisory variant: a one-off control-path failure (e.g. a `session/set_config_option` the peer refused, emitted when a provider/model pick never lands) delivered with the connection otherwise untouched — clients surface it as text only and must NOT treat it as the wire being down.
 - `ready(): bool`
 - `active_session_id(): Option<String>`
 - `sessions(): Vec<SessionSummary>` — carries the full session metadata the
@@ -375,8 +375,15 @@ the UI prompted only where a human decision is needed:
 - `elicitation/create` (form mode) → `on_elicitation` + `respond_elicitation`
   (this is Android-only today; carried so the contract is complete).
 
-Custom notifications (gated on `customNotifications`): `status_message` →
-`on_compaction_status`; `message_usage` → `on_message_usage`.
+Custom notifications (gated on `customNotifications`) — each starts with a
+session gate: a notification carrying a `sessionId` that is not the displayed
+chat is dropped (goose's own scheduled runs status/compact constantly; without
+the gate they painted "compacting" and other sessions' numbers onto the idle
+client): `status_message` → `on_compaction_status`; `usage_update` →
+`on_usage(used, size, cost)`; `message_usage` → `on_message_usage`.
+`usage_update` is the context-window opposite number of the standard ACP
+`UsageUpdate`, and — because roam only transports custom notifications — the
+thing that keeps a roam session's context bar live at all.
 
 > **Raw-JSON listeners (deliberate, documented here).** The unstable shim's
 > list families deliver their payloads to the UI **verbatim as JSON strings**

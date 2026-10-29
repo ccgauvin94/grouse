@@ -46,7 +46,7 @@ use crate::{
 /// The desktop refuses a library whose value it does not expect — a mismatch is
 /// a callback called with the wrong arity (a garbage pointer), not a compile
 /// error, so it must be caught at load time.
-pub const GROUSE_ABI_VERSION: u32 = 3;
+pub const GROUSE_ABI_VERSION: u32 = 4;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
@@ -189,6 +189,10 @@ pub struct GrouseCoreListener {
     pub on_compaction_status: Option<extern "C" fn(*mut c_void, *const c_char)>,
     pub on_message_usage:
         Option<extern "C" fn(*mut c_void, u64, u64, u64, f64)>,
+    /// Unstable `usage_update` — the context-window usage that keeps the bar
+    /// live on roam-as-custom-notifications + the desktop. Same shape as the
+    /// stable `on_usage` minus the currency (USD, `f64` only).
+    pub on_unstable_usage: Option<extern "C" fn(*mut c_void, i64, i64, f64)>,
     pub on_app_resource: Option<extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
     pub on_recipes: Option<extern "C" fn(*mut c_void, *const c_char)>,
     pub on_schedules: Option<extern "C" fn(*mut c_void, *const c_char)>,
@@ -499,6 +503,14 @@ impl GrouseUnstableListener for CoreCallbackForwarder {
     }
     fn on_compaction_status(&self, message: String) {
         unsafe { cb_str1(table_fn!(self, on_compaction_status), self.user_data, &message) };
+    }
+    fn on_usage(&self, used: i64, size: i64, cost: f64) {
+        unsafe {
+            let table = &*self.table;
+            if let Some(f) = table.on_unstable_usage {
+                f(self.user_data, used, size, cost);
+            }
+        }
     }
     fn on_message_usage(&self, output_tokens: u64, elapsed_ms: u64, time_to_first_token_ms: u64, cost: f64) {
         unsafe {

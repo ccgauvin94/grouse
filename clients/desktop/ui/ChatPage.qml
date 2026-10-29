@@ -555,8 +555,10 @@ Kirigami.Page {
                 }
                 Controls.Label {
                     visible: Mgr.compacting
-                    text: qsTr("Compacting…")
+                    text: Mgr.compactionStatus ? Mgr.compactionStatus : qsTr("Compacting…")
                     opacity: 0.8
+                    elide: Text.ElideRight
+                    Layout.maximumWidth: contextRowLayout.width - 64
                 }
                 Controls.Label {
                     visible: !Mgr.compacting && Mgr.contextSize > 0

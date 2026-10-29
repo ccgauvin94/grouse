@@ -485,8 +485,8 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                                 cm.replayActive.value -> "Loading… ${cm.replayProgress.value}"
                                 cm.onAssistant && busy -> "Assistant · working…"
                                 cm.onAssistant -> "Assistant"
-                                online && busy -> "Grouse · working…"
-                                online -> "Grouse"
+                                online && busy -> "%s · working…".format(cm.currentChatTitle ?: "Grouse")
+                                online -> cm.currentChatTitle ?: "Grouse"
                                 cm.status.value.contains("connect", true) ||
                                     cm.status.value.contains("load", true) -> "Connecting…"
                                 else -> "Offline · tap to reconnect"
@@ -553,7 +553,12 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                                 modifier = Modifier.padding(start = 18.dp, top = 2.dp)) {
                                 LinearProgressIndicator(modifier = Modifier.width(40.dp).height(3.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text(stringResource(R.string.compacting), style = MaterialTheme.typography.labelSmall,
+                                // goose's own status line ("goose is compacting the
+                                // conversation...") when the server armed it; the local
+                                // placeholder only for a client-initiated /compact.
+                                Text(cm.compactionStatus.value.ifBlank { stringResource(R.string.compacting) },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 2, overflow = TextOverflow.Ellipsis,
                                     color = MaterialTheme.colorScheme.outline)
                             }
                         } else {

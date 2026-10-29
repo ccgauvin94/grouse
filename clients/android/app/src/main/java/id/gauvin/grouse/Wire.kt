@@ -110,7 +110,17 @@ internal fun SessionSummary.toInfo(): SessionInfo = SessionInfo(
  *  unreliable (recent sessions would mis-sort). Parse when possible; fall back to 0. */
 private fun chronoEpoch(ts: String): Long =
     try { java.time.OffsetDateTime.parse(ts).toInstant().toEpochMilli() }
-    catch (_: Exception) { try { java.time.Instant.parse(ts).toEpochMilli() } catch (_: Exception) { 0L } }
+    catch (_: Exception) { try { java.time.Instant.parse(ts).toEpochMilli() }
+    catch (_: Exception) { runCatching {
+        // Naive (no-offset) timestamps — the peer-side goose stamps sessions with the
+        // same RFC3339 shape, but never guess: without this fallback an unparseable
+        // value sorts as 0 and, fed through the "newest first" (epoch 0) + ascending-id
+        // tie-break, reads as "most recent chat at the bottom".
+        java.time.LocalDateTime.parse(ts).toInstant(java.time.ZoneOffset.UTC).toEpochMilli()
+        // Space-separated ("2026-10-28 21:04:00") is what a not-totally-RFC3339 server sends.
+    }.getOrElse { runCatching {
+        java.time.LocalDateTime.parse(ts.replace(' ', 'T')).toInstant(java.time.ZoneOffset.UTC).toEpochMilli()
+    }.getOrDefault(0L) } } }
 
 internal fun SessionInfo.updatedEpoch(): Long = chronoEpoch(updatedAt)
 

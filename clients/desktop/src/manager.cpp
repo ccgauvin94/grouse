@@ -1781,6 +1781,13 @@ void Manager::coreOnStatus(const QString &json)
         setStatus(QStringLiteral("connecting…"));
     } else if (s == QStringLiteral("\"Syncing\"") || s == QStringLiteral("Syncing")) {
         setStatus(QStringLiteral("syncing…"));
+    } else if (s.contains(QLatin1String("Alert"))) {
+        // Advisory failure on a control path (e.g. a set_config_option the
+        // peer refused): text in the status bar only — the connection did not
+        // go down, so the online state and turn wiring are untouched.
+        QString msg = parseObj(s).value(QLatin1String("Alert")).toObject().value(QStringLiteral("message")).toString();
+        if (!msg.isEmpty())
+            setStatus(msg);
     } else if (s == QStringLiteral("\"Disconnected\"") || s == QStringLiteral("Disconnected")) {
         setOnline(false);
         setStatus(QStringLiteral("not connected"));
@@ -2018,6 +2025,19 @@ void Manager::coreOnRoamSessions(const QString &label, const QString &json)
         m["peer"] = label;
         sessions << m;
     }
+    // Newest first. The core hands the peer's list over verbatim; without a
+    // sort here the card order is whatever the peer's session/list emitted.
+    // PHP-stable: sort by parsed updatedAt desc, falls back to the raw string
+    // when a timestamp does not parse (all-tie keeps the delivered order).
+    std::stable_sort(sessions.begin(), sessions.end(),
+        [](const QVariant &a, const QVariant &b) {
+            const auto ta = QDateTime::fromString(a.toMap().value("updatedAt").toString(), Qt::ISODate);
+            const auto tb = QDateTime::fromString(b.toMap().value("updatedAt").toString(), Qt::ISODate);
+            const quint64 ea = ta.isValid() ? ta.toMSecsSinceEpoch() : 0;
+            const quint64 eb = tb.isValid() ? tb.toMSecsSinceEpoch() : 0;
+            return ea > eb;
+        });
+    // Newest first (comment above the sort).
     m_roamModel->setPeerSessions(label, sessions);
     // The open chat's own title can arrive late (the peer titles a session after
     // its first turn) or change on a rename — follow it while it is on screen.
@@ -2723,6 +2743,7 @@ void Manager::coreOnRunEnded(const QString &sessionId, const QString &stopReason
     m_prompting = false;
     m_promptingSessionId.clear();
     m_compacting = false;
+    m_compactionStatus.clear();
     setActiveRunId(QString());
     emit promptingChanged();
     emit compactingChanged();
@@ -2950,11 +2971,28 @@ void Manager::onAppMessage(const QString &sessionId, const QString &text)
 }
 void Manager::onCompactionStatus(const QString &message)
 {
+    // Substring matching was far too greedy: ANY status line merely containing
+    // "compact" (a "Compaction complete" notice, or text that names another
+    // session's background run) armed the spinner, and the clear depended on
+    // the exact "complete"/"error" strings ever arriving. Only arm on the
+    // phrases goose actually uses for the RUNNING compaction — every one of
+    // them describes the act of compacting in the progressive — and clear on
+    // its terminators. Turn-end (coreOnRunEnded) clears it as the backstop.
     const QString m = message.toLower();
-    if (m.contains(QLatin1String("compact")))
+    const bool arming = m.contains(QLatin1String("compacting"))
+        || (m.contains(QLatin1String("compaction"))
+            && (m.endsWith(QLatin1String("...")) || m.endsWith(QLatin1String("…"))));
+    const bool done = m.contains(QLatin1String("complete"))
+        || m.contains(QLatin1String("error"))
+        || m.contains(QLatin1String("failed"))
+        || m.contains(QLatin1String("cleared"));
+    if (arming && !done) {
         m_compacting = true;
-    if (m.contains(QLatin1String("complete")) || m.contains(QLatin1String("error")))
+        m_compactionStatus = message;
+    } else if (done) {
         m_compacting = false;
+        m_compactionStatus.clear();
+    }
     emit compactingChanged();
 }
 

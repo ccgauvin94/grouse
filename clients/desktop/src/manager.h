@@ -102,6 +102,10 @@ class Manager : public QObject
      *  no turn is live or the live run belongs to another session. */
     Q_PROPERTY(QString activeRunId READ activeRunId NOTIFY activeRunIdChanged)
     Q_PROPERTY(bool compacting READ compacting NOTIFY compactingChanged)
+    /** The goose status line that ARMED the spinner ("Exceeded auto-compact
+     *  threshold of 70%...", "goose is compacting the conversation..."), or its
+     *  completion text. Empty when idle. */
+    Q_PROPERTY(QString compactionStatus READ compactionStatus NOTIFY compactingChanged)
     Q_PROPERTY(int contextUsed READ contextUsed NOTIFY contextChanged)
     Q_PROPERTY(int contextSize READ contextSize NOTIFY contextChanged)
     Q_PROPERTY(QVariant availableCommands READ availableCommands NOTIFY commandsChanged)
@@ -386,6 +390,7 @@ public:
     Q_INVOKABLE void cancelQueued(int id);
     QString activeRunId() const { return m_activeRunId; }
     bool compacting() const { return m_compacting; }
+    QString compactionStatus() const { return m_compactionStatus; }
     int contextUsed() const { return m_contextUsed; }
     int contextSize() const { return m_contextSize; }
     QVariant availableCommands() const { return m_availableCommands; }
@@ -693,6 +698,7 @@ private:
     int m_sendSeq = 0;
     QString m_activeRunId;                  // live run id from session_info_update (steering)
     bool m_compacting = false;
+    QString m_compactionStatus;
     int m_contextUsed = 0, m_contextSize = 0;
     QVariantList m_availableCommands;
     QVariantMap m_serverConfig;             // global config.yaml values (providers)

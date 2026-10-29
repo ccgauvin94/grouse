@@ -55,6 +55,7 @@ impl grouse_core::GrouseUnstableListener for UL {
     fn on_recipe_params(&self, _p: String) {}
     fn on_elicitation(&self, _s: String) {}
     fn on_compaction_status(&self, _m: String) {}
+    fn on_usage(&self, _u: i64, _s: i64, _c: f64) {}
     fn on_message_usage(&self, _o: u64, _e: u64, _t: u64, _c: f64) {}
     fn on_app_resource(&self, _k: String, _h: String) {}
     fn on_recipes(&self, _r: String) {}

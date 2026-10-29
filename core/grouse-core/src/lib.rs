@@ -96,6 +96,13 @@ pub enum ConnectionStatus {
     Error {
         message: String,
     },
+    /// An advisory one-off failure on a control path (e.g. a failed
+    /// `session/set_config_option`): the connection is FINE — the receiving
+    /// client should surface the message as text only, never flip its online
+    /// state (clients treat `Error` as "the wire is down").
+    Alert {
+        message: String,
+    },
 }
 
 /// A session list entry (CONTRACT §3.2/§3.3).
@@ -467,6 +474,12 @@ pub trait GrouseUnstableListener: Send + Sync {
     fn on_recipe_params(&self, parameters: String);
     fn on_elicitation(&self, schema: String);
     fn on_compaction_status(&self, message: String);
+    /// A context-window update that arrived over the unstable channel
+    /// (`usage_update`): used/limit tokens plus the accumulated session cost.
+    /// Roam transports ONLY these custom notifications, so this is how a roam
+    /// session's context bar stays live; the core already gates each callback
+    /// to the displayed session.
+    fn on_usage(&self, used: i64, size: i64, cost: f64);
     fn on_message_usage(
         &self,
         output_tokens: u64,
@@ -2263,6 +2276,16 @@ impl Core {
                 let options = crate::session::parse_config_options(&reply);
                 core.on_config_reply(options);
                 core.refresh_stamp(&key, false);
+            } else {
+                // A config pick that never lands cannot be silent: the toggle
+                // would just keep showing the old value and the user has no
+                // way to tell "slow" from "refused" (roam provider switching
+                // silently no-oped forever). Emit an advisory — NOT
+                // ConnectionStatus::Error — so the status line explains it
+                // while the connection stays up.
+                core.alert(format!(
+                    "{config_id} change didn't reach the session ({key})"
+                ));
             }
         });
     }
@@ -2846,6 +2869,18 @@ impl Core {
     fn open_failed_hook(&self) -> Arc<dyn Fn(String, String) + Send + Sync> {
         let core = self.clone();
         Arc::new(move |session_id, message| core.on_session_open_failed(session_id, message))
+    }
+
+    /// An advisory failure on a control path: text to the UI, nothing else. It
+    /// is deliberately NOT run through `emit_status` — the connection state is
+    /// not `Alert`, and storing it there would park reconnect/ready logic on a
+    /// variant nothing treats as a lifecycle state.
+    fn alert(&self, message: impl AsRef<str>) {
+        let message = message.as_ref().to_string();
+        self.note(format!("alert: {message}"));
+        self.inner
+            .listener
+            .on_status(ConnectionStatus::Alert { message });
     }
 
     fn ended_hook(&self, gen: u64) -> Arc<dyn Fn(Result<(), String>) + Send + Sync> {

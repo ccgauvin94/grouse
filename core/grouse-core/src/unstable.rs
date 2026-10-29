@@ -645,6 +645,22 @@ impl GrouseUnstable {
         if method != "_goose/unstable/session/update" {
             return;
         }
+        // `GooseSessionNotification` carries `sessionId` at the top level, and
+        // status/usage are per-session state. Without a gate, a status message
+        // from ANY session reached the listener: goose's own scheduled runs
+        // (briefings, housekeeping) compact constantly, so an idle client saw
+        // the "compacting" spinner light up with no user turn in flight.
+        // Gate everything on the DISPLAYED session; a sessionless payload
+        // (older servers) passes through untouched.
+        let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        if !session_id.is_empty() {
+            match spine::active_session() {
+                Some(active) if active == session_id => {}
+                // A status/usage update for a backgrounded session is
+                // meaningless to the screen it would color; drop it.
+                _ => return,
+            }
+        }
         let update = match params.get("update") {
             Some(Value::Object(_)) => params.get("update").expect("checked above"),
             _ => &params,
@@ -658,6 +674,19 @@ impl GrouseUnstable {
                     .unwrap_or_default();
                 if !message.is_empty() {
                     listener.on_compaction_status(message.to_string());
+                }
+            }
+            // The context-window update goose sends with every end-of-turn
+            // (opposite number of the standard ACP `UsageUpdate`). Roam only
+            // transports these custom notifications, so without this branch
+            // the context bar NEVER refreshed on a roam peer. The session gate
+            // above keeps other chats' numbers off the screen.
+            Some("usage_update") => {
+                let used = update.get("used").and_then(Value::as_u64).unwrap_or(0);
+                let limit = update.get("contextLimit").and_then(Value::as_u64).unwrap_or(0);
+                let cost = update.get("accumulatedCost").and_then(Value::as_f64).unwrap_or(0.0);
+                if used > 0 || limit > 0 {
+                    listener.on_usage(used as i64, limit as i64, cost);
                 }
             }
             Some("message_usage") => {
@@ -937,6 +966,7 @@ mod tests {
         RecipeParams(String),
         Elicitation(String),
         CompactionStatus(String),
+        Usage(i64, i64, f64),
         MessageUsage(u64, u64, u64, f64),
         AppResource(String, String),
         Recipes(String),
@@ -979,6 +1009,9 @@ mod tests {
         }
         fn on_compaction_status(&self, message: String) {
             self.events.lock().push(Ev::CompactionStatus(message));
+        }
+        fn on_usage(&self, used: i64, size: i64, cost: f64) {
+            self.events.lock().push(Ev::Usage(used, size, cost));
         }
         fn on_message_usage(&self, output_tokens: u64, elapsed_ms: u64, ttft: u64, cost: f64) {
             self.events
@@ -1891,6 +1924,58 @@ mod tests {
                 Ev::CompactionStatus("raw".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn goose_custom_notifications_are_session_gated_and_usage_is_bridged() {        let _guard = TEST_LOCK.lock();
+        let rec = Arc::new(RecordingListener::default());
+
+        // A session-keyed status arrives; the resolver names a DIFFERENT chat.
+        // Backgrounded/scheduled sessions (goose's own jobs compact constantly)
+        // must not paint "compacting" onto whatever the user is reading.
+        crate::spine::register_active_session_resolver(Arc::new(|| Some("s-on-screen".to_string())));
+        GrouseUnstable::dispatch_notification(
+            &rec,
+            "_goose/unstable/session/update",
+            json!({"sessionId": "s-bg", "update": {"sessionUpdate": "status_message",
+                   "status": {"message": "goose is compacting the conversation..."}}}),
+        );
+        assert!(rec.events().is_empty(), "backgrounded session: dropped");
+
+        // The displayed session: delivered — and the usage_update bridges to
+        // on_usage with the camelCase fields goose serializes.
+        GrouseUnstable::dispatch_notification(
+            &rec,
+            "_goose/unstable/session/update",
+            json!({"sessionId": "s-on-screen", "update": {"sessionUpdate": "usage_update",
+                   "used": 1234, "contextLimit": 100000, "accumulatedCost": 0.5}}),
+        );
+        GrouseUnstable::dispatch_notification(
+            &rec,
+            "_goose/unstable/session/update",
+            json!({"sessionId": "s-on-screen", "update": {"sessionUpdate": "status_message",
+                   "status": {"message": "goose is compacting the conversation..."}}}),
+        );
+        // Sessionless payloads (older servers) pass through untouched.
+        GrouseUnstable::dispatch_notification(
+            &rec,
+            "_goose/unstable/session/update",
+            json!({"update": {"sessionUpdate": "status_message",
+                   "status": {"message": "Exceeded auto-compact threshold of 70%. ..."}}}),
+        );
+
+        assert_eq!(
+            rec.events(),
+            vec![
+                Ev::Usage(1234, 100000, 0.5),
+                Ev::CompactionStatus("goose is compacting the conversation...".to_string()),
+                Ev::CompactionStatus("Exceeded auto-compact threshold of 70%. ...".to_string()),
+            ]
+        );
+
+        // Put the resolver back to neutral: the static is process-global and the
+        // resolver's steer tests read it (None = fall through to no session).
+        crate::spine::register_active_session_resolver(Arc::new(|| None::<String>));
     }
 
     #[test]

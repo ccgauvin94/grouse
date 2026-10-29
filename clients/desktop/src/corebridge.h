@@ -210,6 +210,7 @@ struct GrouseCoreListener {
     void (*on_elicitation)(void *, const char *);
     void (*on_compaction_status)(void *, const char *);
     void (*on_message_usage)(void *, std::uint64_t, std::uint64_t, std::uint64_t, double);
+    void (*on_unstable_usage)(void *, std::int64_t, std::int64_t, double);
     void (*on_app_resource)(void *, const char *, const char *);
     void (*on_recipes)(void *, const char *);
     void (*on_schedules)(void *, const char *);

@@ -8,6 +8,40 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Changed
 
+- **A failed `session/set_config_option` is now visible instead of silent.** A
+  provider/model/mode pick whose request never lands (peer refused, timed out,
+  peer dropped) previously just left the dropdown on its old value (the core
+  only updated state on `Ok`). The core now emits the new advisory
+  `ConnectionStatus::Alert(message)`: the Android app shows a toast, and the
+  desktop prints the message in the status bar — without flipping either
+  client's online/turn state (that is what `Error` means, and this isn't it).
+- **Roam chat lists sort newest-first everywhere.** Android already sorted the
+  Roam tab per peer by parsed `updatedAt`, but its parser gave up on timestamps
+  missing an offset (all tie at 0, and the ascending-id tie-break then reads
+  exactly as "most recent chat at the bottom"); it now also accepts naive
+  datetime shapes. The desktop applied NO sort at all to a peer's list
+  (`RoamListModel` took the core's JSON verbatim) — it now stable-sorts
+  newest-first as well.
+- **Compaction and context-window status are now keyed to the session on
+  screen.** The core's custom-notification dispatch (`status_message`,
+  `usage_update`, `message_usage`) drops any notification whose `sessionId` is
+  not the displayed chat: goose's own scheduled runs compact constantly, and
+  their status lines (and token numbers) were reaching whichever client window
+  happened to be idle — the root of the random "compacting" spinner. The
+  `usage_update` branch is NEW: before, the custom channel carried no
+  context-window data at all, so a roam session's context bar (which only
+  receives custom notifications) never refreshed. This is a listener-table ABI
+  change (the surface gained `on_usage`); bump `GROUSE_ABI_VERSION` to 4 and
+  mirror in `corebridge` — both done.
+- **Only the phrases goose uses for a RUNNING compaction arm the spinner**
+  (desktop + Android both matched any status text containing "compact"). The
+  arm strings are the three goose emits ("Exceeded auto-compact threshold of
+  N%", "goose is compacting the conversation...", "Context limit reached.
+  Compacting to continue conversation...") and the terminators are
+  complete/error/failed/cleared; the end of the turn clears it as a backstop,
+  and the desktop/Android now display goose's actual status line verbatim
+  instead of a static "Compacting…" placeholder.
+
 - **The APK that GitHub CI publishes is now signed with the release key.** The
   workflow built the debug variant and let it fall back to the runner's throwaway
   debug keystore, which GitHub regenerates on every run — so the artifact could not

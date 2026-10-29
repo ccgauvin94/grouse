@@ -576,6 +576,12 @@ impl RoamPeer {
             ConnectionStatus::Error { message } => ConnectionStatus::Error {
                 message: message.clone(),
             },
+            // Advisory statuses never live in a peer's stored state (only
+            // emit_status paths write lifecycle variants), so this arm is a
+            // defensive pass-through.
+            ConnectionStatus::Alert { message } => ConnectionStatus::Error {
+                message: message.clone(),
+            },
         }
     }
 
@@ -1433,6 +1439,9 @@ mod tests {
             ConnectionStatus::Ready => "Ready",
             ConnectionStatus::Syncing => "Syncing",
             ConnectionStatus::Error { .. } => "Error",
+            // Advisory: never a lifecycle state, but the arm keeps the match
+            // exhaustive and the recording listener from choking on one.
+            ConnectionStatus::Alert { .. } => "Alert",
         }
     }
 

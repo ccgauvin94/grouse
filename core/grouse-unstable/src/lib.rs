@@ -51,6 +51,9 @@ mod tests {
         fn on_compaction_status(&self, _message: String) {
             self.events.lock().push("on_compaction_status".into());
         }
+        fn on_usage(&self, _used: i64, _size: i64, _cost: f64) {
+            self.events.lock().push("on_usage".into());
+        }
         fn on_message_usage(&self, _o: u64, _e: u64, _t: u64, _c: f64) {
             self.events.lock().push("on_message_usage".into());
         }
