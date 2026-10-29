@@ -262,6 +262,19 @@ pub(crate) fn chunk_text(chunk: &agent_client_protocol::schema::v1::ContentChunk
     content_block_text(&chunk.content)
 }
 
+/// The chunk's image payload as a renderable data URI, if it IS an image.
+/// The base64 body rides the chunk, so these can be item pixels verbatim.
+pub(crate) fn content_image_uri(
+    block: &agent_client_protocol::schema::v1::ContentBlock,
+) -> Option<String> {
+    use agent_client_protocol::schema::v1::ContentBlock;
+    if let ContentBlock::Image(image) = block {
+        Some(format!("data:{};base64,{}", image.mime_type, image.data))
+    } else {
+        None
+    }
+}
+
 /// Map a wire `ToolCall` to the contract's `ToolCallKind` plus the tool's
 /// command detail.
 pub(crate) fn tool_call_kind(tc: &ToolCall) -> (ToolCallKind, String) {
@@ -1000,6 +1013,7 @@ mod tests {
             output: String::new(),
             seq: 0,
             attachments: 0,
+            images: Vec::new(),
             message_id: String::new(),
             status: String::new(),
             app_key: String::new(),
@@ -1469,22 +1483,46 @@ pub(crate) fn dispatch(
     match notif.update {
         SessionUpdate::UserMessageChunk(chunk) => {
             if host.accepts_chat(&key) {
-                let text = chunk_text(&chunk);
-                if !text.is_empty() {
-                    let mid = chunk.message_id.map(|id| id.to_string());
-                    store.append_chunk("user", &text, mid.as_deref(), false);
-                    content = true;
+                if let Some(uri) = content_image_uri(&chunk.content) {
+                    store.append_image(
+                        "user",
+                        &uri,
+                        chunk
+                            .message_id
+                            .as_ref()
+                            .map(|id| id.to_string())
+                            .as_deref(),
+                    );
+                } else {
+                    let text = chunk_text(&chunk);
+                    if !text.is_empty() {
+                        let mid = chunk.message_id.map(|id| id.to_string());
+                        store.append_chunk("user", &text, mid.as_deref(), false);
+                    }
                 }
+                content = true;
             }
         }
         SessionUpdate::AgentMessageChunk(chunk) => {
             if host.accepts_chat(&key) {
-                let text = chunk_text(&chunk);
-                if !text.is_empty() {
-                    let mid = chunk.message_id.map(|id| id.to_string());
-                    store.append_chunk("agent", &text, mid.as_deref(), false);
-                    content = true;
+                if let Some(uri) = content_image_uri(&chunk.content) {
+                    store.append_image(
+                        "agent",
+                        &uri,
+                        chunk
+                            .message_id
+                            .as_ref()
+                            .map(|id| id.to_string())
+                            .as_deref(),
+                    );
+                } else {
+                    let text = chunk_text(&chunk);
+                    if !text.is_empty() {
+                        let mid = chunk.message_id.map(|id| id.to_string());
+                        store.append_chunk("agent", &text, mid.as_deref(), false);
+                    }
                 }
+                content = true;
             }
         }
         SessionUpdate::AgentThoughtChunk(chunk) => {

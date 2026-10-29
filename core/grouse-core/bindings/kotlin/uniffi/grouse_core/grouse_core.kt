@@ -4695,6 +4695,16 @@ data class Item (
     var `attachments`: kotlin.UInt
     , 
     /**
+     * Images the row carries, as `data:<mime>;base64,<data>` URIs the client
+     * renders directly: the pixels goose REPLAYS (a prompt echo re-delivered
+     * by `session/load`) as `ContentBlock::Image` chunks. The core flattening
+     * these to the text "[image]" is what made every echoed image vanish into
+     * that placeholder on the next reload. A prompt we echoed locally carries
+     * them from send time; a replayed row accumulates them from its chunks.
+     */
+    var `images`: List<kotlin.String>
+    , 
+    /**
      * Text rows only: the SERVER's own id for this message (`message_id`),
      * empty when it sent none.
      *
@@ -4742,6 +4752,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.read(buf),
             FfiConverterSequenceTypeSubagentStep.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterSequenceString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterUInt.read(buf),
         )
@@ -4760,6 +4771,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.allocationSize(value.`summary`) +
             FfiConverterSequenceTypeSubagentStep.allocationSize(value.`steps`) +
             FfiConverterUInt.allocationSize(value.`attachments`) +
+            FfiConverterSequenceString.allocationSize(value.`images`) +
             FfiConverterString.allocationSize(value.`messageId`) +
             FfiConverterUInt.allocationSize(value.`seq`)
     )
@@ -4777,6 +4789,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.write(value.`summary`, buf)
             FfiConverterSequenceTypeSubagentStep.write(value.`steps`, buf)
             FfiConverterUInt.write(value.`attachments`, buf)
+            FfiConverterSequenceString.write(value.`images`, buf)
             FfiConverterString.write(value.`messageId`, buf)
             FfiConverterUInt.write(value.`seq`, buf)
     }

@@ -68,6 +68,16 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed
 
+- **User images were flattened to `[image]` in the transcript on replay.**
+  ACP is fine: goose sends the full base64 image in every `session/update`
+  chunk, live and on `session/load`. The core's own `content_block_text()`
+  collapsed every non-text ContentBlock into a placeholder, so anything that
+  re-opened or reloaded a chat lost the pixels. The core now carries images
+  natively: `Item.images` (data URIs, ABI 5) is filled at send time by the
+  echoed prompt and on replay by `append_image` (deduping into the adopted
+  echo row), and both clients render from it — the old text-matching pixel
+  queues remain harmless fallbacks.
+
 - **Roam chats lost all per-message stats (tok/s, TTFT, tokens) and
   compaction/context status.** The ABI-4 custom-notification gate above keys on
   the DISPLAYED session id, and a peer chat displays `roam:<label>:<raw>` — but

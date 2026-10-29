@@ -46,7 +46,7 @@ use crate::{
 /// The desktop refuses a library whose value it does not expect — a mismatch is
 /// a callback called with the wrong arity (a garbage pointer), not a compile
 /// error, so it must be caught at load time.
-pub const GROUSE_ABI_VERSION: u32 = 4;
+pub const GROUSE_ABI_VERSION: u32 = 5;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]

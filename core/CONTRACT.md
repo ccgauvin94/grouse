@@ -212,6 +212,7 @@ pub struct Item {
     summary: String,     // Tool/ToolGroup: the run's one-line label
     steps: Vec<SubagentStep>, // Tool: a delegate's child calls (bounded)
     attachments: u32,    // User: how many images/resources rode the prompt
+    images: Vec<String>, // image pixels as data URIs ("data:<mime>;base64,...")
     seq: u32,            // transcript position; clients insert by this
 }
 

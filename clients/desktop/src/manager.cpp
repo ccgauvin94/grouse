@@ -2627,15 +2627,24 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
                     {"html", QString()}, {"seq", seq}};
     if (role == QLatin1String("thought"))
         row["thought"] = true;
-    // The core owns the prompt row and carries only an attachment COUNT (the
-    // item model has no image field), so the pixels we sent are matched back
-    // here — gated on the count, because a later text-only prompt can repeat an
+    // The core carries the pixels now (Item::images, data URIs): the row
+    // itself is authoritative. The text-matching pixel queue
+    // (attachmentsForItem) is only the fallback for an older core library —
+    // gated on the count, because a later text-only prompt can repeat an
     // earlier attachment prompt's text and must not inherit its thumbnails.
     if (role == QLatin1String("user")) {
-        const auto images = attachmentsForItem(id, text,
-                                               item.value(QStringLiteral("attachments")).toInt());
-        if (!images.isEmpty())
+        const auto uris = item.value(QStringLiteral("images")).toArray();
+        QVariantList images;
+        if (!uris.isEmpty()) {
+            for (const auto &uri : uris)
+                images << QVariantMap{{"image", true}, {"url", uri.toString()}};
             row["images"] = images;
+        } else {
+            const auto queued = attachmentsForItem(
+                id, text, item.value(QStringLiteral("attachments")).toInt());
+            if (!queued.isEmpty())
+                row["images"] = queued;
+        }
     }
     ensureRowHtml(row);
     return row;

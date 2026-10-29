@@ -138,6 +138,9 @@ enum Bubble {
         seq: u32,
         /// User rows only: attachments that rode the prompt (see `Item::attachments`).
         attachments: u32,
+        /// Images the row carries as data URIs (see `Item::images`): a prompt's
+        /// own pixels from the send-time echo, or chunks the server replayed.
+        images: Vec<String>,
     },
     /// A lone plain tool call (collapses into a `ToolGroup` on the next call).
     /// The `String` is the run's one-line label (issue #13); the thinking rides
@@ -199,6 +202,7 @@ impl Bubble {
                 text,
                 seq,
                 attachments,
+                images,
                 ..
             } => Item {
                 id: uid.clone(),
@@ -212,6 +216,7 @@ impl Bubble {
                 text: text.clone(),
                 seq: *seq,
                 attachments: *attachments,
+                images: images.clone(),
                 ..empty_item()
             },
             Bubble::Tool(r, label) => Item {
@@ -285,6 +290,8 @@ fn empty_item() -> Item {
         steps: Vec::new(),
         seq: 0,
         attachments: 0,
+        images: Vec::new(),
+        
         message_id: String::new(),
     }
 }
@@ -684,6 +691,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
                 thought: matches!(it.kind, ItemKind::Thought),
                 seq: it.seq,
                 attachments: it.attachments,
+                images: it.images.clone(),
             })
         }
         ItemKind::Tool => Some(Bubble::Tool(
@@ -800,6 +808,7 @@ impl TranscriptStore {
     }
 
     /// Append a streamed text chunk. `role` ∈ user | agent | thought.
+    /// See [`Self::append_block`] for the accumulation rules.
     ///
     /// A new bubble starts when there is no current stream bubble, when the
     /// role changes, or when both the previous and the new chunk carry a
@@ -812,6 +821,42 @@ impl TranscriptStore {
     /// an old message can end up reading as the newest.
     ///
     pub fn append_chunk(&self, role: &str, text: &str, message_id: Option<&str>, thought: bool) {
+        self.append_block(role, Some(text), None, message_id, thought);
+    }
+
+    /// Append a streamed IMAGE chunk. goose re-delivers prompt images (and can
+    /// carry agent images) as `ContentBlock::Image` chunks — on the live
+    /// stream's echo and on every replay — with the full base64 payload on the
+    /// chunk. `image` is a renderable `data:<mime>;base64,<data>` URI.
+    ///
+    /// An image accumulates into the bubble the stream is already building
+    /// (its text chunk opened it) or opens one of its own when the prompt
+    /// carried no text. Images that ride a LOCALLY ECHOED prompt are deduped
+    /// into the adopted row: the echo already carries them from send time.
+    pub fn append_image(&self, role: &str, image: &str, message_id: Option<&str>) {
+        self.append_block(role, None, Some(image), message_id, false);
+    }
+
+    /// The shared accumulation rule behind `append_chunk` / `append_image`.
+    /// Exactly one of `text` / `image` is set.
+    ///
+    /// A new bubble starts when there is no current stream bubble, when the
+    /// role changes, or when both the previous and the new chunk carry a
+    /// non-empty message_id and they differ. Otherwise the chunk accumulates
+    /// into the current bubble (desktop `appendChunk` fresh check).
+    ///
+    /// Real content supersedes a provisional cache paint first (see
+    /// [`State::provisional`]): the replay APPENDS, so painted rows left in
+    /// place would be followed by replayed rows — not the server's order, and
+    /// an old message can end up reading as the newest.
+    fn append_block(
+        &self,
+        role: &str,
+        text: Option<&str>,
+        image: Option<&str>,
+        message_id: Option<&str>,
+        thought: bool,
+    ) {
         let (ops, speaks) = {
             let mut st = self.state.lock();
             st.anchor_merge(message_id.unwrap_or(""));
@@ -824,7 +869,8 @@ impl TranscriptStore {
             // A prompt we echoed locally, now named by the server: adopt that
             // row instead of appending a second copy of the question. Only an
             // exact text match counts, oldest first — the server names prompts
-            // in the order it received them.
+            // in the order it received them. An image-only prompt replays no
+            // text chunk at all, so its empty echo text matches `None`.
             if let Some(mid) = message_id.filter(|m| !m.is_empty()) {
                 if st.stream_msg_id != mid && role == "user" {
                     // A prompt the store ALREADY holds under this server id needs
@@ -833,7 +879,7 @@ impl TranscriptStore {
                     if let Some((echo_text, echo_uid)) = st.pending_echo.front().cloned() {
                         let at = st.bubbles.iter().position(|b| bubble_uid(b) == echo_uid);
                         match at {
-                            Some(idx) if echo_text == text => {
+                            Some(idx) if echo_text == text.unwrap_or("") => {
                                 st.pending_echo.pop_front();
                                 if let Bubble::Text { id, .. } = &mut st.bubbles[idx] {
                                     *id = mid.to_string();
@@ -841,6 +887,13 @@ impl TranscriptStore {
                                 st.stream_idx = Some(idx);
                                 st.stream_role = role.to_string();
                                 st.stream_msg_id = mid.to_string();
+                                if let Some(img) = image {
+                                    if let Bubble::Text { images, .. } = &mut st.bubbles[idx] {
+                                        if !images.iter().any(|u| u == img) {
+                                            images.push(img.to_string());
+                                        }
+                                    }
+                                }
                                 let item = st.bubbles[idx].item();
                                 drop(st);
                                 self.emit_ops(vec![TranscriptOp::Upsert { item }]);
@@ -873,7 +926,7 @@ impl TranscriptStore {
             // real intra-message spacing ("a" + "\n\n" + "b" must not become
             // "ab"). Leaving the stream anchor untouched lets the next real
             // chunk finalize the previous bubble as usual.
-            if fresh && text.trim().is_empty() {
+            if fresh && text.map(|t| t.trim().is_empty()).unwrap_or(false) {
                 return self.emit_ops(ops);
             }
 
@@ -895,10 +948,13 @@ impl TranscriptStore {
                     id: message_id.unwrap_or("").to_string(),
                     uid,
                     role: role.to_string(),
-                    text: text.to_string(),
+                    text: text.unwrap_or("").to_string(),
                     thought,
                     seq,
                     attachments: 0,
+                    images: image
+                        .map(|u| std::iter::once(u.to_string()).collect())
+                        .unwrap_or_default(),
                 });
                 let idx = st.bubbles.len() - 1;
                 st.stream_idx = Some(idx);
@@ -912,37 +968,50 @@ impl TranscriptStore {
                 if let Bubble::Text {
                     text: acc,
                     thought: t,
+                    images,
                     ..
                 } = &mut st.bubbles[idx]
                 {
-                    acc.push_str(text);
+                    if let Some(chunk) = text {
+                        acc.push_str(chunk);
+                    }
+                    if let Some(img) = image {
+                        if !images.iter().any(|u| u == img) {
+                            images.push(img.to_string());
+                        }
+                    }
                     *t = thought;
                 }
                 idx
             };
 
-            // A fresh bubble is an authoritative Upsert; an accumulated chunk is
-            // the O(chunk) delta.
+            // A fresh bubble is an authoritative Upsert; an accumulated TEXT
+            // chunk is the O(chunk) delta. An accumulated IMAGE changes
+            // structured content, so it must be the full row.
             let op = if fresh {
                 TranscriptOp::Upsert {
                     item: st.bubbles[idx].item(),
                 }
-            } else {
+            } else if let Some(chunk) = text {
                 match &st.bubbles[idx] {
                     Bubble::Text { uid, .. } => TranscriptOp::AppendText {
                         id: uid.clone(),
-                        chunk: text.to_string(),
+                        chunk: chunk.to_string(),
                     },
                     _ => TranscriptOp::Upsert {
                         item: st.bubbles[idx].item(),
                     },
+                }
+            } else {
+                TranscriptOp::Upsert {
+                    item: st.bubbles[idx].item(),
                 }
             };
             ops.push(op);
             // The assistant's *visible* text is what gets spoken; thoughts and
             // user text are not. Emitted after the lock is released.
             let speaks = if role == "agent" && !thought {
-                st.speak.push(text)
+                text.map(|t| st.speak.push(t)).unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -964,7 +1033,7 @@ impl TranscriptStore {
     /// message id), [`Self::append_chunk`] adopts this row instead of appending
     /// a duplicate. Closing the live stream is what makes the reply that
     /// follows its own row rather than an extension of the previous turn.
-    pub fn echo_prompt(&self, text: &str, attachments: u32) {
+    pub fn echo_prompt(&self, text: &str, attachments: u32, images: Vec<String>) {
         // An attachment-only prompt still needs its row; an empty prompt with
         // no attachments is the one case with nothing to show.
         if text.is_empty() && attachments == 0 {
@@ -996,6 +1065,7 @@ impl TranscriptStore {
                 thought: false,
                 seq,
                 attachments,
+                images: images.clone(),
             });
             let idx = st.bubbles.len() - 1;
             let uid = bubble_uid(&st.bubbles[idx]);
@@ -1931,6 +2001,8 @@ impl TranscriptStore {
                         thought: m.role == "thought",
                         seq,
                         attachments: 0,
+                        images: Vec::new(),
+                        
                     });
                 }
             }
@@ -2254,7 +2326,7 @@ mod tests {
         let (l, _i_evts) = listener();
         let store = TranscriptStore::new(l);
         store.append_chunk("agent", "an answer", Some("m1"), false);
-        store.echo_prompt("a question", 0);
+        store.echo_prompt("a question", 0, Vec::new());
         store.tool_call("shell", "{}", "t1", ToolCallKind::Plain);
 
         let seqs: Vec<u32> = store.rich_transcript().iter().map(|i| i.seq).collect();
@@ -2397,7 +2469,7 @@ mod tests {
     fn an_attachment_only_prompt_gets_a_row() {
         let (l, _i_evts) = listener();
         let store = TranscriptStore::new(l);
-        store.echo_prompt("", 2);
+        store.echo_prompt("", 2, Vec::new());
         let items = store.rich_transcript();
         assert_eq!(items.len(), 1, "{items:?}");
         assert_eq!(items[0].kind, ItemKind::User);
@@ -2852,6 +2924,7 @@ mod tests {
             steps: Vec::new(),
             seq: 0,
             attachments: 0,
+            images: Vec::new(),
             message_id: String::new(),
         }
     }
@@ -3090,6 +3163,7 @@ mod tests {
                 steps: Vec::new(),
                 seq: 0,
                 attachments: 0,
+                images: Vec::new(),
                 message_id: String::new(),
             },
             Item {
@@ -3106,6 +3180,7 @@ mod tests {
                 steps: Vec::new(),
                 seq: 0,
                 attachments: 0,
+                images: Vec::new(),
                 message_id: String::new(),
             },
             Item {
@@ -3118,6 +3193,7 @@ mod tests {
                 app_key: String::new(),
                 seq: 0,
                 attachments: 0,
+                images: Vec::new(),
                 message_id: String::new(),
                 calls: vec![
                     ToolCall {
@@ -3210,7 +3286,7 @@ mod tests {
         let (l, _evts) = listener();
         let store = TranscriptStore::new(l);
         store.set_session("roam:Phaethon:s1");
-        store.echo_prompt("huh. I can use the remote", 0);
+        store.echo_prompt("huh. I can use the remote", 0, Vec::new());
         store.tool_call("Bash", "ha state", "t7", ToolCallKind::Plain);
         store.append_chunk("agent", "It works because…", Some("m_a1"), false);
         store.run_ended("end_turn");
@@ -3677,7 +3753,7 @@ mod tests {
     fn an_echoed_prompt_is_adopted_when_the_server_names_it() {
         let (l, _) = listener();
         let store = TranscriptStore::new(l);
-        store.echo_prompt("what time is it", 0);
+        store.echo_prompt("what time is it", 0, Vec::new());
         assert_eq!(store.transcript().len(), 1);
 
         // goose never sends our own prompt live; a replay names it. The named
@@ -3703,8 +3779,8 @@ mod tests {
     fn two_echoed_prompts_are_two_rows() {
         let (l, _) = listener();
         let store = TranscriptStore::new(l);
-        store.echo_prompt("first", 0);
-        store.echo_prompt("second", 0);
+        store.echo_prompt("first", 0, Vec::new());
+        store.echo_prompt("second", 0, Vec::new());
         assert_eq!(store.transcript().len(), 2);
         // The oldest echo is adopted first (the server names prompts in order).
         store.append_chunk("user", "first", Some("m1"), false);
@@ -3716,7 +3792,7 @@ mod tests {
     fn a_cached_echo_is_adopted_after_a_paint() {
         let (l, _) = listener();
         let store = TranscriptStore::new(l);
-        store.echo_prompt("hello", 0);
+        store.echo_prompt("hello", 0, Vec::new());
         let items = store.rich_transcript();
 
         let (l, _) = listener();
@@ -3728,5 +3804,52 @@ mod tests {
         // projection now carries the server's message id.
         assert_eq!(reloaded.rich_transcript()[0].id, "@1");
         assert_eq!(reloaded.transcript()[0].id, "m9");
+    }
+
+    #[test]
+    fn replayed_image_chunks_join_the_open_bubble_instead_of_becoming_text() {
+        let (l, _) = listener();
+        let store = TranscriptStore::new(l);
+        // The prompt we sent with an image, echoed at send time.
+        store.echo_prompt(
+            "what is this",
+            1,
+            vec!["data:image/png;base64,AAA".to_string()],
+        );
+        // The server's replay re-delivers the text (which ADOPTS the echo row)
+        // then the image chunk with the full payload.
+        store.append_chunk("user", "what is this", Some("m1"), false);
+        store.append_image("user", "data:image/png;base64,AAA", Some("m1"));
+
+        let items = store.rich_transcript();
+        assert_eq!(items.len(), 1, "{items:?}");
+        // The already-carried pixel is deduped, not stacked a second time.
+        assert_eq!(items[0].images, vec!["data:image/png;base64,AAA"]);
+        assert_eq!(items[0].text, "what is this");
+        // A second, different image accumulates onto the same row.
+        store.append_image("user", "data:image/png;base64,BBB", Some("m1"));
+        assert_eq!(store.rich_transcript()[0].images.len(), 2);
+    }
+
+    #[test]
+    fn an_image_only_prompt_replays_as_a_real_image_row() {
+        let (l, _) = listener();
+        let store = TranscriptStore::new(l);
+        // attachment-only echo: empty text, a row nonetheless
+        store.echo_prompt("", 1, vec!["data:image/jpeg;base64,BBB".to_string()]);
+        // No text chunk comes back for it; the image chunk must adopt the echo
+        // row (echo text "" matches the missing text), not open a duplicate.
+        store.append_image("user", "data:image/jpeg;base64,BBB", Some("m2"));
+
+        let items = store.rich_transcript();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].images, vec!["data:image/jpeg;base64,BBB"]);
+        assert_eq!(items[0].text, "");
+
+        // And an agent image (a server-sent picture reply) gets its own row.
+        store.append_image("agent", "data:image/png;base64,CCC", Some("a1"));
+        let items = store.rich_transcript();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1].images, vec!["data:image/png;base64,CCC"]);
     }
 }

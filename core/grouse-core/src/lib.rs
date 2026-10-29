@@ -234,6 +234,14 @@ pub struct Item {
     /// second row for the same prompt, with a position from a different counter.
     #[serde(default)]
     pub attachments: u32,
+    /// Images the row carries, as `data:<mime>;base64,<data>` URIs the client
+    /// renders directly: the pixels goose REPLAYS (a prompt echo re-delivered
+    /// by `session/load`) as `ContentBlock::Image` chunks. The core flattening
+    /// these to the text "[image]" is what made every echoed image vanish into
+    /// that placeholder on the next reload. A prompt we echoed locally carries
+    /// them from send time; a replayed row accumulates them from its chunks.
+    #[serde(default)]
+    pub images: Vec<String>,
     /// Text rows only: the SERVER's own id for this message (`message_id`),
     /// empty when it sent none.
     ///
@@ -1978,14 +1986,15 @@ impl Core {
         // Local echo of the prompt. goose does NOT send a `user_message_chunk`
         // for a prompt WE sent: the prompt next crosses the wire in a later
         // `session/load` replay. The echo lands here, at the send, so exactly
-        // one row appears per prompt that reaches the wire. The item carries
-        // only an attachment COUNT (there is no image field); the client
-        // matches its own pixels to the row by that count. An attachment-only
+        // one row appears per prompt that reaches the wire. The item now
+        // carries the images themselves, so the row shows the pixels from send
+        // time without any client-side pixel matching. An attachment-only
         // prompt still gets a row, with an empty caption.
         let text = crate::prompt_text(&prompt);
         let attachments = crate::prompt_attachments(&prompt);
-        if text.is_some() || attachments > 0 {
-            store.echo_prompt(text.as_deref().unwrap_or(""), attachments);
+        let images = crate::prompt_image_uris(&prompt);
+        if text.is_some() || attachments > 0 || !images.is_empty() {
+            store.echo_prompt(text.as_deref().unwrap_or(""), attachments, images);
         }
         // A new turn's runs are a fresh worklist for the summarizer.
         self.inner.state.lock().turn_runs.remove(&session_id);
@@ -2970,6 +2979,24 @@ fn prompt_attachments(prompt: &Prompt) -> u32 {
         .iter()
         .filter(|b| !matches!(b, PromptBlock::Text { .. }))
         .count() as u32
+}
+
+/// The prompt's images as renderable data URIs (`data:<mime>;base64,<data>`).
+/// The echoed row carries the pixels itself now, so the client sidelines its
+/// own "match the pixels to the echoed row by text" queue entirely.
+fn prompt_image_uris(prompt: &Prompt) -> Vec<String> {
+    prompt
+        .blocks
+        .iter()
+        .filter_map(
+            |b| match b {
+                PromptBlock::Image { mime_type, data } => {
+                    Some(format!("data:{mime_type};base64,{data}"))
+                }
+                _ => None,
+            },
+        )
+        .collect()
 }
 
 /// The core is the dispatch host for the main connection: display ids are the

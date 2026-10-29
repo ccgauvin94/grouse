@@ -2382,16 +2382,28 @@ class ConnectionManager private constructor(context: Context) {
             summary = item.summary, stepThought = item.thought, stepId = item.id,
             steps = item.steps, seq = item.seq.toInt()))
         ItemKind.USER, ItemKind.THOUGHT, ItemKind.ERROR, ItemKind.AGENT -> {
-            val att = attachmentsFor(item)
+            // The core carries the pixels now (Item::images, data URIs): the
+            // row itself is authoritative, and the text-matching pixel queue
+            // below is only the fallback for an older core library.
+            val coreImages = dataUriBlocks(item.images)
+            val att = if (coreImages.isEmpty()) attachmentsFor(item) else null
             listOf(item.id to ChatMessage(
                 itemRole(item.kind), item.text, id = appIdFor(item.id),
-                images = att?.first ?: emptyList(),
+                images = coreImages.ifEmpty { att?.first ?: emptyList() },
                 files = att?.second ?: emptyList(),
                 // EVERY row carries its position. Omitting it here left all
                 // text at seq 0, which the ordered insert then placed ABOVE the
                 // first tool row — the transcript read as nothing but tool calls.
                 seq = item.seq.toInt()))
         }
+    }
+
+    /** `data:<mime>;base64,<payload>` → ImageBlock (the core's Item::images). */
+    private fun dataUriBlocks(uris: List<String>): List<ImageBlock> = uris.mapNotNull { uri ->
+        Regex("data:([^;]+);base64,(.*)", RegexOption.DOT_MATCHES_ALL)
+            .matchEntire(uri.trim())
+            ?.destructured
+            ?.let { ImageBlock(it.component1(), it.component2()) }
     }
 
     /** Fetch an MCP-App template once per key; the bubble renders as a plain tool

@@ -333,6 +333,7 @@ mod tests {
             steps: Vec::new(),
             seq: 0,
             attachments: 0,
+            images: Vec::new(),
             message_id: String::new(),
         }
     }
@@ -358,6 +359,7 @@ mod tests {
                 steps: Vec::new(),
                 seq: 0,
                 attachments: 0,
+                images: Vec::new(),
                 message_id: String::new(),
             },
             text("@1", ItemKind::Thought, "hmm"),
@@ -401,6 +403,7 @@ mod tests {
                 steps: Vec::new(),
                 seq: 0,
                 attachments: 0,
+                images: Vec::new(),
                 message_id: String::new(),
             },
             Item {
@@ -417,6 +420,7 @@ mod tests {
                 steps: Vec::new(),
                 seq: 0,
                 attachments: 0,
+                images: Vec::new(),
                 message_id: String::new(),
             },
             Item {
@@ -456,6 +460,7 @@ mod tests {
                 steps: Vec::new(),
                 seq: 0,
                 attachments: 0,
+                images: Vec::new(),
                 message_id: String::new(),
             },
         ];

@@ -33,6 +33,10 @@ static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 // Recording listener
 // ---------------------------------------------------------------------------
 
+// Vec<String> images on Item outsize some other variant enough to trip
+// clippy's variant-size lint; boxing over the whole recording surface is not
+// worth the churn for a test-only type.
+#[allow(clippy::large_enum_variant)]
 #[allow(dead_code)] // full listener surface; tests match a subset
 enum Ev {
     Status(ConnectionStatus),
@@ -131,6 +135,7 @@ fn item(id: &str, kind: grouse_core::ItemKind, text: &str) -> grouse_core::Item 
         steps: Vec::new(),
         seq: 0,
         attachments: 0,
+        images: Vec::new(),
         message_id: String::new(),
     }
 }
