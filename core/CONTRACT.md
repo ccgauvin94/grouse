@@ -335,10 +335,19 @@ reason this path exists.
   is omitted when both succeeded — "nothing to do" and "could not ask" must not
   look alike.
 - **Rows are slimmed by the core** (`tasks.rs`, `KEPT_FIELDS`): id, kind, state,
-  title, detail, owner, `due_at`, salience, confidence, resolution, and the
-  owning thread as `{slug, title}`. assistant-state's rows also carry evidence,
-  provenance and dedupe keys; those stay on the server — they are audit trail,
-  not row content, and shipping them made one refresh 82 KB.
+  title, detail, owner, `due_at`, salience, confidence, resolution,
+  `snooze_until`, and the owning thread as `{slug, title}`. assistant-state's rows
+  also carry evidence, provenance and dedupe keys; those stay on the server — they
+  are audit trail, not row content, and shipping them made one refresh 82 KB.
+- **`open` holds snoozed rows too, so `snooze_until` is what separates them.** A
+  snoozed item is still open server-side, only quiet until its wake time, which is
+  why the open query is `state=open,snoozed`. A client MUST group rather than
+  render them alike: put rows whose `snooze_until` is still in the future under
+  their own heading with the wake time, or a Snooze tap looks like a no-op (it did).
+  A snoozed row whose `until` has passed reads as open again — the server's wake
+  pass (`rank`/`maintain`) flips it, and until that runs the only truth is the
+  timestamp. Waking early is `state_snooze` with an already-past instant, not a
+  separate tool.
 - **The calls run on a dedicated HIDDEN session in `auto` mode.** goose refuses
   an app tool call in every mode but `auto`
   (`crates/goose/src/acp/server/tools.rs`: *app tool calls require auto mode*).

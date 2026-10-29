@@ -31,6 +31,17 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed
 
+- **Snooze looked like it did nothing.** The write always worked (assistant-state
+  flips the item to `snoozed` with a `snooze_until`, and the pulse log records it),
+  but the tab re-read the same open list and painted the row *identically* —
+  server-side a snoozed item is still open, just quiet, and the core was not even
+  carrying `snooze_until` across the FFI. Now the core keeps that field, My Day
+  splits the open list into **Open** and **Snoozed** (muted card, wake time in the
+  meta line), and a snoozed row's Snooze button becomes **Wake**. Snooze also
+  means *tomorrow morning* (next 05:00 local) rather than "+24h": an evening tap
+  used to land after the 06:00 digest and skip a whole day of the assistant's
+  attention. A snooze whose time has passed reads as open again, which is what the
+  server's own wake pass does on its next rank.
 - **My Day read "briefed never" (red dot) on any device that had not received a
   briefing push since install.** The status dot was driven by `lastBriefingAt`,
   which the PUSH path stamps — so a fresh install, or one with push off, showed a

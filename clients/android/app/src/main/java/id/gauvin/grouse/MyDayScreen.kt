@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -124,7 +125,15 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                 }
             }
 
-            val open = cm.openTasks.value
+            val all = cm.openTasks.value
+            // Snoozed rows arrive in the SAME section as awake ones (server-side a snoozed
+            // item is still open, it is only quiet), so a partition here is what makes the
+            // Snooze button observable at all. Read the clock once per composition: a row
+            // whose snooze has just expired reads as open, which is exactly what the
+            // server does on its next rank.
+            val nowMs = System.currentTimeMillis()
+            val snoozed = all.filter { it.isSnoozedAt(nowMs) }
+            val open = all.filterNot { it.isSnoozedAt(nowMs) }
             item { SectionHeader("Open", open.size) }
             if (open.isEmpty() && cm.tasksError.value == null) {
                 item { EmptyRow(if (cm.online.value) "Nothing open. The assistant adds here when a briefing finds something." else "Not connected — the lists load once the server is reachable.") }
@@ -135,9 +144,10 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                     onDone = { closing = t; closeState = "done"; closeNote = "" },
                     onDrop = { closing = t; closeState = "dropped"; closeNote = "" },
                     onSnooze = {
-                        // A day is the only snooze worth a single tap; a picker here would
-                        // cost more than it saves until the rhythm is known.
-                        cm.snoozeTask(t.id, Instant.now().plusSeconds(24 * 3600).toString(), "snoozed from My Day")
+                        // Snooze to tomorrow morning, not "+24h": the point is to be quiet
+                        // overnight and be back before the 06:00 digest, and "+24h" from an
+                        // evening tap would skip that briefing entirely.
+                        cm.snoozeTask(t.id, nextMorning().toString(), "snoozed from My Day")
                     },
                     onOpen = {
                         // Discuss in the ASSISTANT thread, not a per-task one: assistant-state's
@@ -153,6 +163,32 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                         }
                     },
                 )
+            }
+
+            if (snoozed.isNotEmpty()) {
+                item { SectionHeader("Snoozed", snoozed.size) }
+                items(snoozed, key = { "sn-${it.id}" }) { t ->
+                    TaskRow(
+                        t,
+                        snoozed = true,
+                        onDone = { closing = t; closeState = "done"; closeNote = "" },
+                        onDrop = { closing = t; closeState = "dropped"; closeNote = "" },
+                        onSnooze = {
+                            // "Wake" is a snooze into the past: the server's own wake pass
+                            // (rank/maintain) flips it back to open, and until that runs the
+                            // row already reads as open here because its until has passed.
+                            cm.snoozeTask(t.id, Instant.now().toString(), "brought back from My Day")
+                        },
+                        onOpen = {
+                            cm.pendingDraft.value = "About item ${t.id} (${t.title.take(80)}): "
+                            cm.openAssistant()
+                            nav.navigate("chat") {
+                                launchSingleTop = true
+                                popUpTo("chat") { inclusive = true }
+                            }
+                        },
+                    )
+                }
             }
 
             val done = cm.doneTasks.value
@@ -307,15 +343,35 @@ private fun EmptyRow(text: String) {
 }
 
 /** One open item. The body taps through to the assistant thread; the three actions are the
- *  whole vocabulary the server acts on (close / snooze / it was never real). */
+ *  whole vocabulary the server acts on (close / snooze / it was never real). A snoozed row
+ *  is the same card with its wake time in the meta line and Snooze swapped for Wake —
+ *  otherwise the two states are indistinguishable, which is the bug this section exists for. */
 @Composable
-private fun TaskRow(t: TaskItem, onDone: () -> Unit, onDrop: () -> Unit, onSnooze: () -> Unit, onOpen: () -> Unit) {
+private fun TaskRow(
+    t: TaskItem,
+    snoozed: Boolean = false,
+    onDone: () -> Unit,
+    onDrop: () -> Unit,
+    onSnooze: () -> Unit,
+    onOpen: () -> Unit,
+) {
     val meta = listOfNotNull(
+        wakeLabel(t.snoozeUntil).takeIf { snoozed && it.isNotBlank() },
         t.threadTitle.ifBlank { t.threadSlug }.takeIf { it.isNotBlank() },
         dueLabel(t.dueAt).takeIf { it.isNotBlank() },
         t.kind.takeIf { it.isNotBlank() && it != "commitment" },
     ).joinToString(" · ")
-    Card(shape = RoundedCornerShape(12.dp), onClick = onOpen) {
+    Card(
+        shape = RoundedCornerShape(12.dp),
+        onClick = onOpen,
+        // Asleep reads as asleep: a snoozed row sits in its own section AND is muted, so the
+        // tap that put it there is visible without reading the button label back.
+        colors = if (snoozed) {
+            CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+        } else {
+            CardDefaults.cardColors()
+        },
+    ) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)) {
             Text(t.title, style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
             if (t.detail.isNotBlank()) {
@@ -334,11 +390,51 @@ private fun TaskRow(t: TaskItem, onDone: () -> Unit, onDrop: () -> Unit, onSnooz
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = onDone, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Done") }
-                TextButton(onClick = onSnooze, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Snooze") }
+                TextButton(onClick = onSnooze, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                    Text(if (snoozed) "Wake" else "Snooze")
+                }
                 TextButton(onClick = onDrop, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Not real") }
             }
         }
     }
+}
+
+/** Whether this row is asleep right now. A snooze whose `until` has passed IS open — the
+ *  server wakes it on its next rank pass, and until then it is still quiet only if `until`
+ *  is in the future. An unparseable stamp reads as snoozed: keep it quiet rather than
+ *  shout about something the user asked not to be shown. */
+private fun TaskItem.isSnoozedAt(nowMs: Long): Boolean {
+    if (state != "snoozed") return false
+    val until = runCatching { Instant.parse(snoozeUntil) }.getOrNull() ?: return true
+    return until.toEpochMilli() > nowMs
+}
+
+/** When a snoozed row comes back: "wakes in 6h" / "wakes tomorrow 05:00". Short on purpose —
+ *  it shares a line with the thread and the due date. */
+private fun wakeLabel(iso: String): String {
+    if (iso.isBlank()) return ""
+    val until = runCatching { Instant.parse(iso) }.getOrNull() ?: return ""
+    val zone = java.time.ZoneId.systemDefault()
+    val mins = java.time.Duration.between(Instant.now(), until).toMinutes()
+    if (mins <= 0) return "wakes now"
+    val local = until.atZone(zone)
+    return when {
+        mins < 90 -> "wakes in ${mins}m"
+        mins < 12 * 60 -> "wakes in ${mins / 60}h"
+        java.time.LocalDate.now(zone) == local.toLocalDate() -> "wakes ${local.hour}:%02d".format(local.minute)
+        else -> "wakes tomorrow ${local.hour}:%02d".format(local.minute)
+    }
+}
+
+/** The next 05:00 local, which is the point of a snooze from this tab: quiet overnight and
+ *  back before the 06:00 morning digest. A flat "+24h" from an evening tap would land AFTER
+ *  that digest and silently skip a whole day of the assistant's attention. */
+private fun nextMorning(): Instant {
+    val zone = java.time.ZoneId.systemDefault()
+    val now = java.time.ZonedDateTime.now(zone)
+    var wake = now.toLocalDate().atTime(5, 0).atZone(zone)
+    if (wake.isBefore(now.plusHours(1))) wake = wake.plusDays(1)
+    return wake.toInstant()
 }
 
 /** `due_at` arrives as a bare date ("2026-07-05") or a naive datetime ("2026-10-15T15:30").

@@ -81,6 +81,8 @@ data class TaskItem(
     val salience: Double = 0.0,
     /** The one-line outcome for a closed item; empty while it is open. */
     val resolution: String = "",
+    /** When a snoozed item comes back (ISO instant). Empty unless state is `snoozed`. */
+    val snoozeUntil: String = "",
     val threadSlug: String = "",
     val threadTitle: String = "",
 )

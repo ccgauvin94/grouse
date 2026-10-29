@@ -165,7 +165,12 @@ fn section(result: Result<String, String>) -> (Value, Option<String>) {
 /// it evidence). Every byte crosses the FFI and lands in a Compose state list, so
 /// the projection is done HERE, once, and `state_item` remains the way to ask for
 /// one item's provenance when a row is opened.
-const KEPT_FIELDS: [&str; 10] = [
+///
+/// `snooze_until` is load-bearing: the open list is `open` AND `snoozed` (a
+/// snoozed item is still open, just quiet), so without this field a snoozed row
+/// arrives looking exactly like an awake one — which is why the first cut of the
+/// tab made Snooze look like it did nothing at all.
+const KEPT_FIELDS: [&str; 11] = [
     "id",
     "kind",
     "state",
@@ -176,6 +181,7 @@ const KEPT_FIELDS: [&str; 10] = [
     "salience",
     "confidence",
     "resolution",
+    "snooze_until",
 ];
 
 fn slim(items: &mut Value) {
@@ -335,5 +341,19 @@ mod tests {
         assert!(row.get("dedupe_key").is_none());
         assert!(row.get("sources").is_none());
         assert!(row.get("thread_id").is_none());
+    }
+
+    #[test]
+    fn a_snoozed_row_is_distinguishable_from_an_awake_one() {
+        // Both arrive in the same `open` section (snoozed is still open, just
+        // quiet), so `snooze_until` is the ONLY difference the UI can group on.
+        // Dropping it here is what made Snooze look like a no-op on the phone.
+        let raw = r#"[{"id":"a","state":"snoozed","title":"quiet","snooze_until":"2026-10-30T11:00:00Z"},
+                      {"id":"b","state":"open","title":"awake","snooze_until":null}]"#;
+        let got: Value =
+            serde_json::from_str(&envelope(Ok(raw.to_string()), Ok("[]".to_string()))).unwrap();
+        assert_eq!(got["open"][0]["snooze_until"], "2026-10-30T11:00:00Z");
+        assert_eq!(got["open"][1]["snooze_until"], Value::Null);
+        assert_eq!(got["open"][0]["state"], "snoozed");
     }
 }

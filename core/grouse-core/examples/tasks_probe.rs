@@ -72,4 +72,29 @@ fn main() {
     } else {
         println!("OK: both sections parsed");
     }
+
+    // The snooze regression: a snoozed row still arrives in `open` (server-side it is
+    // open, only quiet), so `snooze_until` is the ONLY thing that lets a client group it
+    // apart. Losing it in the projection is what made Snooze look like a no-op.
+    let last = got.last().cloned().unwrap_or_default();
+    let v: serde_json::Value = serde_json::from_str(&last).unwrap_or_default();
+    let snoozed: Vec<serde_json::Value> = v["open"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter(|r| r["state"] == "snoozed")
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    for r in &snoozed {
+        println!("snoozed row: {} until {}", r["id"], r["snooze_until"]);
+    }
+    if snoozed.is_empty() {
+        println!("NOTE: nothing snoozed on the server, so the field was not checked");
+    } else if snoozed.iter().any(|r| r["snooze_until"].is_null()) {
+        println!("FAIL: a snoozed row arrived without snooze_until");
+    } else {
+        println!("OK: snoozed rows carry snooze_until");
+    }
 }

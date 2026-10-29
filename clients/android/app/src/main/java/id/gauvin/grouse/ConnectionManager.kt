@@ -1580,7 +1580,10 @@ class ConnectionManager private constructor(context: Context) {
         io { core.taskClose(id, state, resolution) }
     }
 
-    /** Snooze until [until] (ISO instant). */
+    /** Silence an item until [until] (ISO instant). The server keeps it in the OPEN set —
+     *  snoozed is "still open, just quiet" — so the row comes back with `snoozeUntil` set
+     *  and the screen is what groups it under Snoozed. Snoozing until a time that has
+     *  already passed is the way back out: the server wakes it on the next rank. */
     fun snoozeTask(id: String, until: String, reason: String) {
         io { core.taskSnooze(id, until, reason) }
     }
@@ -1631,6 +1634,7 @@ class ConnectionManager private constructor(context: Context) {
                 dueAt = o["due_at"]?.jsonPrimitive?.contentOrNull.orEmpty(),
                 salience = o["salience"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull() ?: 0.0,
                 resolution = o["resolution"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                snoozeUntil = o["snooze_until"]?.jsonPrimitive?.contentOrNull.orEmpty(),
                 threadSlug = thread?.get("slug")?.jsonPrimitive?.contentOrNull.orEmpty(),
                 threadTitle = thread?.get("title")?.jsonPrimitive?.contentOrNull.orEmpty(),
             )
