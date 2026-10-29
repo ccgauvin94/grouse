@@ -196,10 +196,18 @@ Kirigami.Page {
     // Why a parked message has not gone out yet — the same three cases Android
     // shows, so the two clients never disagree about what "queued" means.
     function queuedNote(attachments) {
-        if (!Mgr.online) return qsTr("not connected — sends when it reconnects")
-        if (attachments > 0) return qsTr("with attachment — sends when this turn ends")
-        return qsTr("sends when this turn ends")
+        if (!Mgr.online) return qsTr("Not connected — sends when it reconnects")
+        if (attachments > 0) return qsTr("With attachment — sends when this turn ends")
+        return qsTr("Sends when this turn ends")
     }
+
+    /// The parked-card tints, named once. They are ALPHAS over the platform text
+    /// colour so the card follows the colour scheme; the tokens' `semantic.*` pairs are
+    /// fixed hexes per scheme and, as GrouseTheme notes, no surface consumes them yet.
+    /// Geometry does use the tokens where one exists (radius, padding).
+    readonly property real queuedCardFillAlpha: 0.06
+    readonly property real queuedCardBorderAlpha: 0.16
+    readonly property real queuedBadgeFillAlpha: 0.18
 
     // Per-conversation scroll memory (sessionId -> contentY): lets a user leave
     // a chat scrolled up, switch away, and return to the same spot. First open
@@ -1738,12 +1746,12 @@ Kirigami.Page {
                         width: parent.width
                         // Height follows the column, whose own implicit height already
                         // accounts for the wrapped text at this width and the margins.
-                        height: queuedCol.implicitHeight + Kirigami.Units.smallSpacing * 4
-                        radius: Kirigami.Units.smallSpacing * 1.5
+                        height: queuedCol.implicitHeight + GrouseTheme.spacing.s4
+                        radius: GrouseTheme.radius.md
                         color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
-                                       Kirigami.Theme.textColor.b, 0.06)
+                                       Kirigami.Theme.textColor.b, page.queuedCardFillAlpha)
                         border.color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
-                                              Kirigami.Theme.textColor.b, 0.16)
+                                              Kirigami.Theme.textColor.b, page.queuedCardBorderAlpha)
                         opacity: 0
                         // A translate (not y) so the slide never disturbs the Column's
                         // own layout slot — the card moves, the space is already there.
@@ -1781,7 +1789,7 @@ Kirigami.Page {
                         ColumnLayout {
                             id: queuedCol
                             anchors.fill: parent
-                            anchors.margins: Kirigami.Units.smallSpacing * 2
+                            anchors.margins: GrouseTheme.spacing.s2
                             spacing: Kirigami.Units.smallSpacing
 
                             RowLayout {
@@ -1792,7 +1800,8 @@ Kirigami.Page {
                                     radius: height / 2
                                     color: Qt.rgba(Kirigami.Theme.highlightColor.r,
                                                    Kirigami.Theme.highlightColor.g,
-                                                   Kirigami.Theme.highlightColor.b, 0.18)
+                                                   Kirigami.Theme.highlightColor.b,
+                                                   page.queuedBadgeFillAlpha)
                                     implicitWidth: queuedTag.implicitWidth + Kirigami.Units.smallSpacing * 2
                                     implicitHeight: queuedTag.implicitHeight + Kirigami.Units.smallSpacing * 0.5
                                     Controls.Label {
