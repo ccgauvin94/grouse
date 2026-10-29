@@ -68,6 +68,14 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed
 
+- **Roam chats lost all per-message stats (tok/s, TTFT, tokens) and
+  compaction/context status.** The ABI-4 custom-notification gate above keys on
+  the DISPLAYED session id, and a peer chat displays `roam:<label>:<raw>` — but
+  `RoamPeer` forwarded goose's custom notifications (`message_usage`,
+  `status_message`, `usage_update`) with the server's NAKED sessionId, so every
+  one of them for an open roam chat failed the gate and was silently dropped.
+  `RoamPeer` now namespaces the key (`roam:<label>:<raw>`) before dispatch.
+  Main-wire chats were unaffected (their two ids already match).
 - **A chat opens at its newest message, on both clients.** Both snapped once, then
   let the transcript paint over the top of that jump: rows are realized lazily (and
   recycled) on the desktop, and Android inserts each batch at the head of a

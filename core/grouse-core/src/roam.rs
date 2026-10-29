@@ -506,10 +506,22 @@ impl RoamPeer {
         let notif_peer = self.clone();
         let permission_peer = self.clone();
         let request_peer = self.clone();
+        let notification_peer = self.clone();
         let handlers = crate::session::ClientHandlers {
             notification: std::sync::Arc::new(move |notif| notif_peer.dispatch(notif)),
-            custom_notification: std::sync::Arc::new(|method, params| {
-                crate::spine::dispatch_custom_notification(method, params)
+            custom_notification: std::sync::Arc::new(move |method, params| {
+                // The ABI-4 session gate in `dispatch_notification` compares
+                // `sessionId` against the DISPLAYED id, and a peer chat's
+                // displayed id is `roam:<label>:<raw>`. The server keys
+                // notifications by the NAKED id, so forwarding them untouched
+                // made the gate eat every custom notification (message_usage
+                // stats, the compaction status, the roam context bar) for the
+                // chat that was actually open. Key them with this peer's
+                // namespace so the gate sees what it is comparing against.
+                crate::spine::dispatch_custom_notification(
+                    method,
+                    RoamPeer::prefix_notification_key(&params, notification_peer.label()),
+                )
             }),
             permission: std::sync::Arc::new(move |req, responder| {
                 permission_peer.on_permission_request(req, responder)
@@ -1233,6 +1245,24 @@ impl RoamPeer {
             .to_string()
     }
 
+    /// Rewrite a goose-custom notification's `sessionId` into this peer's
+    /// display namespace (`roam:<label>:<raw>`), the id form the dispatch
+    /// gate compares against. NO-OP when the payload carries no session id
+    /// (sessionless payloads pass the gate by design).
+    fn prefix_notification_key(params: &Value, label: &str) -> Value {
+        let Some(sid) = params.get("sessionId").and_then(Value::as_str) else {
+            return params.clone();
+        };
+        if sid.is_empty() {
+            return params.clone();
+        }
+        let mut out = params.clone();
+        if let Some(obj) = out.as_object_mut() {
+            obj["sessionId"] = Value::String(format!("roam:{label}:{sid}"));
+        }
+        out
+    }
+
     /// Cache key for a peer session: the prefixed id. Collision-free across
     /// machines (the main cache keys on bare sessionId, which two machines
     /// could share) — peer transcripts live under `roam:<label>:<raw>`.
@@ -1722,6 +1752,40 @@ mod tests {
     fn codec_encode_terminates_with_newline() {
         assert_eq!(RoamCodec::encode("{\"a\":1}"), b"{\"a\":1}\n");
         assert_eq!(RoamCodec::encode(""), b"\n");
+    }
+
+    // -- custom-notification keys (the ABI-4 session gate) ---------------------
+
+    #[test]
+    fn custom_notification_keys_are_namepaced_for_the_gate() {
+        // The gate in `dispatch_notification` compares `sessionId` against the
+        // DISPLAYED id, and a peer chat's displayed id is `roam:<label>:<raw>`.
+        // The peer must key its notifications the same way or the gate eats
+        // them (grouse stats regression).
+        let keyed = RoamPeer::prefix_notification_key(
+            &json!({"sessionId": "s-1", "update": {"sessionUpdate": "message_usage"}}),
+            "colins-box",
+        );
+        assert_eq!(
+            keyed.get("sessionId").and_then(Value::as_str),
+            Some("roam:colins-box:s-1")
+        );
+        // The rest of the payload survives the rewrite intact.
+        assert_eq!(
+            keyed.pointer("/update/sessionUpdate"),
+            Some(&json!("message_usage"))
+        );
+
+        // The main-wire chat: what the gate names and what arrives — untouched.
+        let same = RoamPeer::prefix_notification_key(&json!({"sessionId": "s-2"}), "colins-box");
+        assert_eq!(same.get("sessionId").and_then(Value::as_str), Some("roam:colins-box:s-2"));
+        assert_eq!(same.get("update"), None);
+
+        // Sessionless payloads (older servers) pass by design — no rewrite.
+        let sessionless = RoamPeer::prefix_notification_key(&json!({"used": 5}), "colins-box");
+        assert_eq!(sessionless.get("sessionId"), None);
+        let empty = RoamPeer::prefix_notification_key(&json!({"sessionId": ""}), "colins-box");
+        assert_eq!(empty.get("sessionId").and_then(Value::as_str), Some(""));
     }
 
     // -- browse-mode state transitions ----------------------------------------
