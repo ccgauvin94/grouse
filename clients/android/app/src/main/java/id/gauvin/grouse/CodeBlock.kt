@@ -3,9 +3,13 @@
 package id.gauvin.grouse
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -14,13 +18,25 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.surfaceColorAtElevation
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.delay
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -393,5 +409,44 @@ internal fun HighlightedCodeBlock(code: String, tag: String) {
                 )
             }
         }
+        CodeCopyButton(code, bg)
+    }
+}
+
+/** Copy affordance pinned to the block's top-right. Shows "Copied" briefly on
+ *  press so the tap is visibly acknowledged inside a scrolled block (a toast
+ *  would be a second channel for one word). The icon sits ABOVE the content and
+ *  must not scroll away with it, which is why it is a sibling in the outer Box,
+ *  not part of the scrolling column. */
+@Composable
+private fun BoxScope.CodeCopyButton(code: String, bg: Color) {
+    val clip = LocalClipboardManager.current
+    val copied = remember { mutableStateOf(false) }
+    // Reset the "Copied" check after a beat so the icon goes back to Copy.
+    LaunchedEffect(copied.value) {
+        if (copied.value) {
+            delay(2000)
+            copied.value = false
+        }
+    }
+    TextButton(
+        onClick = {
+            clip.setText(AnnotatedString(code))
+            copied.value = true
+        },
+        modifier = Modifier
+            .align(Alignment.TopEnd)
+            .padding(4.dp)
+            .height(28.dp),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+        colors = ButtonDefaults.textButtonColors(
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    ) {
+        Icon(
+            imageVector = if (copied.value) Icons.Filled.Check else Icons.Filled.ContentCopy,
+            contentDescription = if (copied.value) "Copied" else "Copy",
+            modifier = Modifier.size(16.dp)
+        )
     }
 }

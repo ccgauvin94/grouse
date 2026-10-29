@@ -29,6 +29,28 @@ Kirigami.Page {
         // Bounds the pane: long chunks scroll instead of stretching bubbles
         // into a page of their own.
         implicitHeight: Math.min(scroller.contentHeight + Theme.spacing.s2, 400)
+        // The copy control is a sibling of the Flickable (anchored to the chrome,
+        // not the content) so it stays under the pointer when the pane scrolls.
+        Controls.ToolButton {
+            id: copyBtn
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.margins: Theme.spacing.s1
+            display: Controls.AbstractButton.IconOnly
+            icon.source: "edit-copy"
+            ToolTip.visible: hovered
+            ToolTip.text: copiedTimer.wasCopied ? qsTr("Copied") : qsTr("Copy")
+            onClicked: {
+                Mgr.copyToClipboard(fence.code)
+                copiedTimer.wasCopied = true
+                copiedTimer.restart()
+            }
+            Timer {
+                id: copiedTimer
+                property bool wasCopied: false
+                interval: 2000
+            }
+        }
         Flickable {
             id: scroller
             anchors.fill: parent

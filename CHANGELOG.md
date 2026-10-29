@@ -8,8 +8,14 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Changed
 
-- **A failed `session/set_config_option` is now visible instead of silent.** A
-  provider/model/mode pick whose request never lands (peer refused, timed out,
+- **Code blocks have a copy button.** A small icon sits at each fenced
+  block's top-right (a sibling of the scroll pane, so it does not scroll
+  away with the content): one tap copies the raw code; the button flips
+  to a check briefly to acknowledge. Desktop (`CodeFence` ToolButton →
+  `Mgr.copyToClipboard`) and Android (`CodeCopyButton` in `CodeBlock.kt`
+  → `LocalClipboardManager`).
+
+- **A failed `session/set_config_option` is now visible instead of silent.** (peer refused, timed out,
   peer dropped) previously just left the dropdown on its old value (the core
   only updated state on `Ok`). The core now emits the new advisory
   `ConnectionStatus::Alert(message)`: the Android app shows a toast, and the
