@@ -945,6 +945,7 @@ mod tests {
         fn on_active_run(&self, _: String, _: String) {}
         fn on_commands(&self, _: Vec<String>) {}
         fn on_session_open_failed(&self, _: String, _: String) {}
+        fn on_tasks(&self, _: String) {}
     }
 
     fn hub() -> (Arc<SessionHub>, Arc<Recorder>) {
@@ -1847,5 +1848,8 @@ impl crate::CoreListener for SessionGate {
     }
     fn on_session_open_failed(&self, session_id: String, message: String) {
         self.inner.on_session_open_failed(session_id, message);
+    }
+    fn on_tasks(&self, tasks: String) {
+        self.inner.on_tasks(tasks);
     }
 }

@@ -369,6 +369,9 @@ class ConnectionManager private constructor(context: Context) {
         override fun onSessionOpenFailed(sessionId: String, message: String) {
             main.post { onCoreSessionOpenFailed(sessionId, message) }
         }
+        // My Day: assistant-state's own items over a deterministic tool call (no
+        // model turn), gated by the Assistant switch like the tab itself.
+        override fun onTasks(tasks: String) { main.post { onCoreTasks(tasks) } }
     }, appContext.filesDir.absolutePath)
     private val unstable = GrouseUnstable(object : GrouseUnstableListener {
         override fun onExport(data: String) { main.post { exportData.value = data } }
@@ -423,6 +426,15 @@ class ConnectionManager private constructor(context: Context) {
     val online = mutableStateOf(false)   // true between Ready and disconnect — for a UI status pill
     val config = mutableStateOf<List<ConfigOption>>(emptyList())
     val sessions = mutableStateOf<List<SessionInfo>>(emptyList())
+
+    /** The My Day tab's two lists (CONTRACT §3.3), straight from assistant-state. Both
+     *  arrive in ONE `on_tasks` so the tab never paints a half-updated pair. */
+    val openTasks = mutableStateOf<List<TaskItem>>(emptyList())
+    val doneTasks = mutableStateOf<List<TaskItem>>(emptyList())
+    /** Set when a section failed: "nothing to do" and "could not ask" must not look alike. */
+    val tasksError = mutableStateOf<String?>(null)
+    /** A refresh is outstanding (spinner on the tab's refresh affordance). */
+    val tasksLoading = mutableStateOf(false)
 
     /** Goose projects, refreshed alongside the session list. A project is a named source with an
      *  id, not a directory -- so filing a chat no longer decides where its tools run, and the
@@ -1541,6 +1553,84 @@ class ConnectionManager private constructor(context: Context) {
     private fun beginAssistantThread() {
         pendingAssistantRename = true
         newSession(kind = SessionKind.ASSISTANT)
+    }
+
+    // --- My Day: assistant-state's open loops over a deterministic tool call ---
+    // No model turn anywhere in this section: the tab has to open in milliseconds, and
+    // assistant-state answers `state_items` in a few ms of SQLite. The core owns the calls
+    // (and the hidden auto-mode session they need); the app only asks and renders.
+
+    /** Re-read both lists. Idempotent and cheap, so the tab calls it on open, on pull-to-
+     *  refresh, and after every action (the server's answer is the only truth). */
+    fun refreshTasks() {
+        tasksLoading.value = true
+        io { core.tasksRefresh() }
+        // A refresh that dies before `on_tasks` (no wire, evicted session) must not leave
+        // the spinner turning forever; the failure itself arrives as an alert.
+        main.postDelayed({ tasksLoading.value = false }, 15_000)
+    }
+
+    /** Close an item: `done` (it happened), `dropped` (it no longer matters) or `expired`.
+     *  [resolution] is the one line that keeps the next briefing from re-raising it. */
+    fun closeTask(id: String, state: String, resolution: String) {
+        io { core.taskClose(id, state, resolution) }
+    }
+
+    /** Snooze until [until] (ISO instant). */
+    fun snoozeTask(id: String, until: String, reason: String) {
+        io { core.taskSnooze(id, until, reason) }
+    }
+
+    /** What the user did about an item: `acted` closes it, `dismissed` snoozes a week,
+     *  `wrong` halves its confidence, `muted` silences it for a month. */
+    fun reactTask(id: String, reaction: String) {
+        io { core.taskReact(id, reaction) }
+    }
+
+    /** Send from My Day's composer into the always-on assistant thread. `send` routes by
+     *  the on-screen chat, so the thread has to be current first; a prompt that cannot go
+     *  out yet is parked by `dispatch` and flushed on Ready, so this is safe mid-connect. */
+    fun askAssistant(text: String) {
+        if (text.isBlank()) return
+        val id = assistantSessionId() ?: run { openAssistant(); return }  // no thread yet: create it
+        if (!onAssistant) openAssistant()
+        if (currentSession.value == id) send(text)
+    }
+
+    private fun onCoreTasks(json: String) {
+        tasksLoading.value = false
+        val root = try { Json.parseToJsonElement(json) as? JsonObject } catch (e: Exception) { null }
+        if (root == null) { tasksError.value = "My Day: unreadable reply from the server"; return }
+        openTasks.value = parseTasks(root["open"])
+        doneTasks.value = parseTasks(root["done"])
+        val errors = root["errors"] as? JsonObject
+        tasksError.value = errors?.entries?.joinToString("\n") { (section, msg) ->
+            "$section: ${msg.jsonPrimitive.contentOrNull ?: "failed"}"
+        }?.takeIf { it.isNotBlank() }
+    }
+
+    /** One section of the envelope. The rows are already projected by the core
+     *  (`tasks.rs` KEPT_FIELDS), so this is a plain read, not a filter. */
+    private fun parseTasks(el: kotlinx.serialization.json.JsonElement?): List<TaskItem> {
+        val arr = el as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { row ->
+            val o = row as? JsonObject ?: return@mapNotNull null
+            val id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val thread = o["thread"] as? JsonObject
+            TaskItem(
+                id = id,
+                kind = o["kind"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                state = o["state"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                title = o["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                detail = o["detail"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                owner = o["owner"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                dueAt = o["due_at"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                salience = o["salience"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull() ?: 0.0,
+                resolution = o["resolution"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                threadSlug = thread?.get("slug")?.jsonPrimitive?.contentOrNull.orEmpty(),
+                threadTitle = thread?.get("title")?.jsonPrimitive?.contentOrNull.orEmpty(),
+            )
+        }
     }
 
     // --- Server-side goose config (global config.yaml, edited over ACP) ---

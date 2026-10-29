@@ -74,6 +74,14 @@ public:
     // Outbound image rescale (CONTRACT §8.1): core policy, UI toggle.
     void (*grouse_set_image_rescale)(void *h, int on);
     int (*grouse_image_rescale)(void *h);
+        // My Day (CONTRACT §3.3): assistant-state's items over a deterministic
+        // tools/call. The lists come back on the `on_tasks` callback.
+        void (*grouse_tasks_refresh)(void *h);
+        void (*grouse_task_close)(void *h, const char *id, const char *state,
+                                  const char *resolution);
+        void (*grouse_task_snooze)(void *h, const char *id, const char *until,
+                                   const char *reason);
+        void (*grouse_task_react)(void *h, const char *id, const char *reaction);
         int (*grouse_run_summaries)(void *h);
         char *(*grouse_active_session_id)(void *h);
         char *(*grouse_sessions)(void *h);
@@ -235,5 +243,8 @@ struct GrouseCoreListener {
     // (session_id, message). Appended last to match the core's table exactly —
     // every earlier slot keeps its offset.
     void (*on_session_open_failed)(void *, const char *, const char *);
+    // The My Day tab's task lists (`{"open": [...], "done": [...], "errors": {...}}`),
+    // ABI 6. Appended last for the same reason as `on_session_open_failed`.
+    void (*on_tasks)(void *, const char *);
 };
 }

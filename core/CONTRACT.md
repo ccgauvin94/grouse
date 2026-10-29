@@ -94,6 +94,10 @@ defaulting to real verification; roam byte stream). The UI supplies only
 | `roam_connect(card, label)` | — | parallel peer (see §6) |
 | `roam_disconnect(label)` | | |
 | `roam_open_session(label, session_id)` | | |
+| `tasks_refresh()` | — | My Day (§3.6): both lists arrive in ONE `on_tasks` |
+| `task_close(id, state, resolution)` | — | `state` is `done` \| `dropped` \| `expired`; `resolution` is the one line that keeps the next briefing from re-raising it |
+| `task_snooze(id, until, reason)` | — | `until` is an ISO instant |
+| `task_react(id, reaction)` | — | `acted` \| `dismissed` \| `wrong` \| `muted` — assistant-state's only learning signal |
 
 ### 3.2 `CoreListener` — events (core → UI), one method per family
 
@@ -127,6 +131,11 @@ pub trait CoreListener {
     // explicitly with `new_session`. An answer to an intent, so it is not gated
     // by which chat is on screen (grouse#19).
     fn on_session_open_failed(&self, session_id: String, message: String);
+    // My Day (§3.6): assistant-state's task lists as one JSON document,
+    // `{"open": [...], "done": [...], "errors": {section: message}}`. Emitted
+    // for every refresh and after every task action — never mid-turn, because
+    // none of these calls runs a model.
+    fn on_tasks(&self, tasks: String);
 }
 ```
 
@@ -310,6 +319,44 @@ Rules:
   The transport differs only in dial/framing, reconnect budget, browse-mode
   session list and id namespace (`session::display_id` / `ChatEndpoint::wire_id`);
   routing and painting are the core's, keyed by display id.
+
+### 3.6 My Day (assistant-state items)
+
+The clients' "My Day" tab is assistant-state's own working state — open loops,
+waiting-ons, obligations — read over a **deterministic `_goose/unstable/tools/call`**,
+not a prompt. One call is a few milliseconds of SQLite on the server; a model
+turn would be a 60k-token prefill to answer "what is open", which is the whole
+reason this path exists.
+
+- **`on_tasks`** carries `{"open": [...], "done": [...], "errors": {...}}`. Both
+  sections are fetched together (`state_items` with `state=open,snoozed` and
+  with `state=done,expired`) and emitted in ONE callback, so a UI can never
+  paint a half-updated pair. `errors` maps a section name to why it failed and
+  is omitted when both succeeded — "nothing to do" and "could not ask" must not
+  look alike.
+- **Rows are slimmed by the core** (`tasks.rs`, `KEPT_FIELDS`): id, kind, state,
+  title, detail, owner, `due_at`, salience, confidence, resolution, and the
+  owning thread as `{slug, title}`. assistant-state's rows also carry evidence,
+  provenance and dedupe keys; those stay on the server — they are audit trail,
+  not row content, and shipping them made one refresh 82 KB.
+- **The calls run on a dedicated HIDDEN session in `auto` mode.** goose refuses
+  an app tool call in every mode but `auto`
+  (`crates/goose/src/acp/server/tools.rs`: *app tool calls require auto mode*).
+  Flipping the chat thread to `auto` would disarm its approvals, and patching the
+  fork to allow app calls under `smart_approve` would be a security bypass — so
+  the core mints one `_meta.hidden: true` session (never listed, never prompted,
+  its context stays empty) and sets it to `auto`. It is created on first use and
+  **dropped on any failed call**, which is what recovers from a server restart or
+  from goose evicting it.
+- **The params are a contract, not free-form:** `extensionName` is the
+  extension's display name (`Assistant State`; goose keys it through
+  `name_to_key`), and the TOOL name must carry the extension key prefix
+  (`assistantstate__state_items`) — goose compares tool names verbatim.
+- **Freshness is pull-shaped, by design.** Task state changes inside goose's own
+  scheduled sessions (the briefings), which `session/update` — session-scoped —
+  cannot report. So there is no push: clients refresh on tab open, on an explicit
+  refresh, and after every action (the core re-reads and re-emits; a UI never
+  patches its own list).
 
 ---
 

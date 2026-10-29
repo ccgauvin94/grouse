@@ -403,9 +403,21 @@ public:
     QVariant serverConfig() const { return m_serverConfig; }
     QVariant supportedModels() const { return m_supportedModels; }
     QVariant skills() const { return m_skills; }
+    /** My Day (CONTRACT §3.3): `{"open": [...], "done": [...], "errors": {...}}`
+     *  as the core emitted it. Empty until the first refresh lands. */
+    QString tasksJson() const { return m_tasksJson; }
 
     // ---- structured input (elicitations + recipe parameters) ------------------
     QVariant pendingForm() const;
+    // ---- My Day (CONTRACT §3.3) --------------------------------------------
+    // assistant-state's items over a deterministic tools/call — no model turn.
+    // The desktop has no My Day surface yet; the bridge exists so the ABI is
+    // complete and the eventual tab has the data it needs.
+    Q_INVOKABLE void refreshTasks();
+    Q_INVOKABLE void closeTask(const QString &id, const QString &state, const QString &resolution);
+    Q_INVOKABLE void snoozeTask(const QString &id, const QString &until, const QString &reason);
+    Q_INVOKABLE void reactTask(const QString &id, const QString &reaction);
+
     /** Answer the pending form. `values` maps field name → value (a bool for a
      *  boolean field, a number for number/integer, a string otherwise).
      *  `action` is "accept"/"decline"/"cancel" — a recipe's parameters only
@@ -432,6 +444,8 @@ public:
     /** An open/resume failed and nothing was substituted (grouse#19). */
     void coreOnSessionOpenFailed(const QString &sessionId, const QString &message);
     void coreOnExport(const QString &data);
+    /** The My Day lists arrived (both sections in one JSON document). */
+    void coreOnTasks(const QString &json);
     void coreOnRecipeParams(const QString &parameters);
     void coreOnElicitation(const QString &schema);
     void coreOnCompactionStatus(const QString &message);
@@ -487,6 +501,8 @@ signals:
     void serverConfigChanged();
     void supportedModelsChanged();
     void skillsChanged();
+    /** The My Day lists changed (see `tasksJson`). */
+    void tasksChanged();
     /** Result of testConnection(): reachability + secret-key auth + ACP handshake. */
     void connectionTested(bool ok, const QString &message);
     /** The pending structured-input form arrived, changed, or was answered. */
@@ -710,6 +726,8 @@ private:
     QVariantMap m_serverConfig;             // global config.yaml values (providers)
     QVariantList m_supportedModels;
     QVariantList m_skills;
+    /// My Day's last `on_tasks` document, verbatim (see `tasksJson()`).
+    QString m_tasksJson;
     // Pending structured-input forms, oldest first. The core parks ONE request
     // per family (spine::answer_request takes a single responder), so a second
     // request of the same family REPLACES the queued one — the old responder was

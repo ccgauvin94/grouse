@@ -103,6 +103,10 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_set_run_summaries);
     RESOLVE(grouse_set_image_rescale);
     RESOLVE(grouse_image_rescale);
+    RESOLVE(grouse_tasks_refresh);
+    RESOLVE(grouse_task_close);
+    RESOLVE(grouse_task_snooze);
+    RESOLVE(grouse_task_react);
     RESOLVE(grouse_run_summaries);
     RESOLVE(grouse_active_session_id);
     RESOLVE(grouse_sessions);
@@ -162,7 +166,7 @@ bool CoreBridge::resolve()
     // The listener table's layout and the symbol signatures are the contract.
     // An older core (or a stale GROUSE_CORE) is refused before any callback can
     // be invoked with the wrong arity.
-    static constexpr unsigned kExpectedAbiVersion = 4;
+    static constexpr unsigned kExpectedAbiVersion = 6;
     if (!a.grouse_abi_version) {
         qWarning() << "CoreBridge: core library predates the ABI version symbol; refusing it";
         return false;
@@ -183,7 +187,9 @@ bool CoreBridge::resolve()
         && check(a.grouse_open_session) && check(a.grouse_list_sessions)
         && check(a.grouse_status) && check(a.grouse_ready)
         && check(a.grouse_turn_log) && check(a.grouse_turn_diag)
-        && check(a.grouse_set_image_rescale) && check(a.grouse_image_rescale);
+        && check(a.grouse_set_image_rescale) && check(a.grouse_image_rescale)
+        && check(a.grouse_tasks_refresh) && check(a.grouse_task_close)
+        && check(a.grouse_task_snooze) && check(a.grouse_task_react);
     if (!ok) {
         qWarning() << "CoreBridge: core library is missing required grouse_* symbols";
         return false;
@@ -287,6 +293,10 @@ static void cb_on_session_open_failed(void *u, const char *sessionId, const char
     const QString msg = copyStr(message);
     marshal(u, nullptr, [=](Manager *m) { m->coreOnSessionOpenFailed(sid, msg); });
 }
+static void cb_on_tasks(void *u, const char *json) {
+    const QString s = copyStr(json);
+    marshal(u, nullptr, [=](Manager *m) { m->coreOnTasks(s); });
+}
 static void cb_on_export(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnExport(s); }); }
 static void cb_on_recipe_params(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnRecipeParams(s); }); }
 static void cb_on_elicitation(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnElicitation(s); }); }
@@ -381,6 +391,7 @@ void CoreBridge::installListener()
         nullptr,   // on_dictation_config
         nullptr,   // on_transcript
         cb_on_session_open_failed,
+        cb_on_tasks,
     };
     m_listener = &table;
 

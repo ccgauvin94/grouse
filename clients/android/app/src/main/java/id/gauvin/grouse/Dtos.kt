@@ -66,6 +66,25 @@ data class SessionInfo(
     val archived: Boolean = false,
 )
 
+/** One assistant-state item — an open loop, a waiting-on, an obligation — as the My
+ *  Day tab paints it. Deliberately slim: raw evidence and provenance stay on the
+ *  server, so only what a row shows crosses the wire (core `tasks.rs` projects it). */
+data class TaskItem(
+    val id: String,
+    val kind: String,
+    val state: String,
+    val title: String,
+    val detail: String = "",
+    val owner: String = "",
+    /** ISO instant, when the server has one (an obligation's deadline). */
+    val dueAt: String = "",
+    val salience: Double = 0.0,
+    /** The one-line outcome for a closed item; empty while it is open. */
+    val resolution: String = "",
+    val threadSlug: String = "",
+    val threadTitle: String = "",
+)
+
 /** A goose project: a named source with a slug, NOT a directory. */
 data class ProjectInfo(
     val id: String,

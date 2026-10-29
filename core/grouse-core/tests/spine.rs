@@ -56,6 +56,7 @@ enum Ev {
     Commands(Vec<String>),
     /// An open/resume failed; nothing was substituted (grouse#19).
     OpenFailed(String, String),
+    Tasks(String),
 }
 
 struct RecordingListener {
@@ -116,6 +117,9 @@ impl CoreListener for RecordingListener {
     }
     fn on_session_open_failed(&self, session_id: String, message: String) {
         let _ = self.tx.send(Ev::OpenFailed(session_id, message));
+    }
+    fn on_tasks(&self, tasks: String) {
+        let _ = self.tx.send(Ev::Tasks(tasks));
     }
 }
 

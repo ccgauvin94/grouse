@@ -1551,6 +1551,7 @@ mod tests {
 
         fn on_commands(&self, _commands: Vec<String>) {}
         fn on_session_open_failed(&self, _session_id: String, _message: String) {}
+        fn on_tasks(&self, _: String) {}
     }
 
     fn test_listener() -> Arc<RecordingListener> {

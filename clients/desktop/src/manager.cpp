@@ -2102,6 +2102,52 @@ void Manager::coreOnSessionOpenFailed(const QString &sessionId, const QString &m
     setStatus(QStringLiteral("couldn't open that chat — %1").arg(message));
 }
 
+void Manager::refreshTasks()
+{
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_tasks_refresh)
+        return;
+    m_bridge->api().grouse_tasks_refresh(m_bridge->handle());
+}
+
+void Manager::closeTask(const QString &id, const QString &state, const QString &resolution)
+{
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_task_close)
+        return;
+    const QByteArray i = id.toUtf8();
+    const QByteArray s = state.toUtf8();
+    const QByteArray r = resolution.toUtf8();
+    m_bridge->api().grouse_task_close(m_bridge->handle(), i.constData(), s.constData(),
+                                      r.constData());
+}
+
+void Manager::snoozeTask(const QString &id, const QString &until, const QString &reason)
+{
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_task_snooze)
+        return;
+    const QByteArray i = id.toUtf8();
+    const QByteArray u = until.toUtf8();
+    const QByteArray r = reason.toUtf8();
+    m_bridge->api().grouse_task_snooze(m_bridge->handle(), i.constData(), u.constData(),
+                                       r.constData());
+}
+
+void Manager::reactTask(const QString &id, const QString &reaction)
+{
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_task_react)
+        return;
+    const QByteArray i = id.toUtf8();
+    const QByteArray r = reaction.toUtf8();
+    m_bridge->api().grouse_task_react(m_bridge->handle(), i.constData(), r.constData());
+}
+
+void Manager::coreOnTasks(const QString &json)
+{
+    // Kept verbatim: the eventual My Day tab parses it exactly as the phone does,
+    // so there is one place that knows the envelope's shape (the core's tasks.rs).
+    m_tasksJson = json;
+    emit tasksChanged();
+}
+
 void Manager::coreOnExport(const QString &data)
 {
     onExportResult(data);

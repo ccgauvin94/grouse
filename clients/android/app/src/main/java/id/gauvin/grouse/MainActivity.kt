@@ -23,7 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MenuBook
-import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Today
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
@@ -251,13 +251,16 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                     )
                     if (drawerTab == "main") {
                         if (cm.assistantEnabled.value) {
+                            // My Day replaced the old Assistant button: same privileged thread,
+                            // now with the state it maintains under it. Gated by the same switch,
+                            // because the state and the assistant are one feature.
                             NavigationDrawerItem(
-                                label = { Text("Assistant") },
-                                icon = { Icon(Icons.Filled.Psychology, contentDescription = null) },
-                                selected = route == "chat" && cm.onAssistant,
+                                label = { Text("My Day") },
+                                icon = { Icon(Icons.Filled.Today, contentDescription = null) },
+                                selected = route == "myday",
                                 onClick = {
-                                    closeDrawer(); cm.openAssistant()
-                                    nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = false } }
+                                    closeDrawer()
+                                    nav.navigate("myday") { launchSingleTop = true; popUpTo("chat") { inclusive = false } }
                                 },
                                 modifier = Modifier.padding(horizontal = 12.dp),
                             )
@@ -325,6 +328,7 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                     ConnectScreen(cm) { nav.navigate("chat") { popUpTo("connect") { inclusive = true } } }
             }
             composable("chat") { ChatScreen(cm, onOpenDrawer = ::openDrawer) }
+            composable("myday") { MyDayScreen(cm, nav, onOpenDrawer = ::openDrawer) }
             composable("project/{pname}") { back ->
                 val pname = Uri.decode(back.arguments?.getString("pname") ?: "")
                 ProjectScreen(cm, nav, pname)

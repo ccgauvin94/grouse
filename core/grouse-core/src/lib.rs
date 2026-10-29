@@ -42,6 +42,7 @@ mod session;
 pub mod speak;
 pub mod spine;
 mod summarize;
+mod tasks;
 pub mod transcript;
 pub mod transport;
 pub mod unstable;
@@ -474,6 +475,10 @@ pub trait CoreListener: Send + Sync {
     /// (grouse#19: a silent `session/new` here was the "tapped a thread, got a
     /// blank one" defect).
     fn on_session_open_failed(&self, session_id: String, message: String);
+    /// The My Day tab's task lists (`{"open": [...], "done": [...], "errors": {...}}`),
+    /// from assistant-state's `state_items` over a deterministic `tools/call` —
+    /// no model turn. Emitted on every refresh and after every task action.
+    fn on_tasks(&self, tasks: String);
 }
 
 /// Unstable events (CONTRACT §5). Retiring with `grouse-unstable`.
@@ -670,6 +675,10 @@ struct CoreInner {
     /// The `Arc` this core is owned by, for handing itself to connections as
     /// the shared dispatch host (set once, right after construction).
     self_ref: std::sync::OnceLock<std::sync::Weak<Core>>,
+    /// The hidden session the My Day tab's task calls run on (`_meta.hidden`,
+    /// mode auto — see `tasks.rs`). Dropped on any failed call, which is what
+    /// recovers from a server restart and from goose evicting the session.
+    tasks_session: Mutex<Option<String>>,
 }
 
 /// The stable interface (CONTRACT §3).
@@ -745,6 +754,7 @@ impl Core {
                 peers: Mutex::new(Vec::new()),
                 active_peer_label,
                 self_ref: std::sync::OnceLock::new(),
+                tasks_session: Mutex::new(None),
             }),
         });
         let _ = core.inner.self_ref.set(Arc::downgrade(&core));
@@ -1453,6 +1463,49 @@ impl Core {
         self.inner.image_rescale.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    // -- My Day: assistant-state items over a deterministic tools/call -------
+    //
+    // No model turn: the tab must open in milliseconds, and a tool call is the
+    // only thing on this wire that answers without inference. See `tasks.rs` for
+    // why the calls run on a hidden `auto`-mode session (goose refuses app tool
+    // calls in every other mode at `crates/goose/src/acp/server/tools.rs`).
+
+    /// Re-read the open and closed task lists; the answer arrives on `on_tasks`.
+    pub fn tasks_refresh(&self) {
+        let this = self.clone();
+        crate::roam::runtime().spawn(async move { this.tasks_refresh_now().await });
+    }
+
+    /// Close an item: `done` (it happened), `dropped` (it no longer matters) or
+    /// `expired`. `resolution` is the one line that makes the history explain
+    /// itself — without it the next briefing re-raises what the user just closed.
+    pub fn task_close(&self, id: String, state: String, resolution: String) {
+        let this = self.clone();
+        crate::roam::runtime().spawn(async move {
+            this.task_action(|wire| crate::tasks::close_params(wire, &id, &state, &resolution))
+                .await;
+        });
+    }
+
+    pub fn task_snooze(&self, id: String, until: String, reason: String) {
+        let this = self.clone();
+        crate::roam::runtime().spawn(async move {
+            this.task_action(|wire| crate::tasks::snooze_params(wire, &id, &until, &reason))
+                .await;
+        });
+    }
+
+    /// Record what the user did about an item: `acted` closes it, `dismissed`
+    /// snoozes a week, `wrong` halves its confidence, `muted` silences a month.
+    /// The only learning signal assistant-state has.
+    pub fn task_react(&self, id: String, reaction: String) {
+        let this = self.clone();
+        crate::roam::runtime().spawn(async move {
+            this.task_action(|wire| crate::tasks::react_params(wire, &id, &reaction))
+                .await;
+        });
+    }
+
     /// The bound session of the active chat (the roam peer's, when one owns
     /// the chat).
     pub fn active_session_id(&self) -> Option<String> {
@@ -1536,6 +1589,107 @@ impl Core {
     /// The store of the chat the UI is showing, if any.
     fn store(&self) -> Option<Arc<TranscriptStore>> {
         self.inner.hub.displayed_store()
+    }
+
+    // -- My Day plumbing (`tasks.rs` holds the pure half) --------------------
+
+    /// The hidden session the task calls run on, created on first use.
+    ///
+    /// Hidden so it never enters a session list, and `auto` because goose
+    /// refuses app tool calls in every other mode. Nothing is ever prompted on
+    /// it — it exists to host deterministic tool calls, so its context stays
+    /// empty — which is why trading its mode away costs nothing.
+    async fn tasks_wire(&self) -> Result<(Arc<crate::spine::Conn>, String), String> {
+        let conn = self
+            .inner
+            .conn
+            .lock()
+            .clone()
+            .ok_or_else(|| "not connected".to_string())?;
+        if let Some(wire) = self.inner.tasks_session.lock().clone() {
+            return Ok((conn, wire));
+        }
+        let cwd = self
+            .inner
+            .state
+            .lock()
+            .last_config
+            .clone()
+            .map(|c| c.cwd)
+            .unwrap_or_default();
+        let reply = crate::session::request(
+            conn.as_ref(),
+            "session/new",
+            crate::tasks::new_session_params(&cwd),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        let wire = reply
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "session/new returned no session id".to_string())?
+            .to_string();
+        // Not fatal: the tool call that follows reports the real failure, and
+        // this alert is the only place that failure's CAUSE is named.
+        if let Err(e) = crate::session::request(
+            conn.as_ref(),
+            "session/set_mode",
+            crate::tasks::set_mode_params(&wire, "auto"),
+        )
+        .await
+        {
+            self.alert(format!("My Day: task session could not be set to auto ({e})"));
+        }
+        *self.inner.tasks_session.lock() = Some(wire.clone());
+        Ok((conn, wire))
+    }
+
+    /// One deterministic tool call. Any failure drops the cached hidden session:
+    /// a refusal is what an evicted or restarted session looks like, and
+    /// recreating it is cheaper than diagnosing which.
+    async fn tasks_call<F: Fn(&str) -> Value>(&self, build: F) -> Result<String, String> {
+        let (conn, wire) = self.tasks_wire().await?;
+        let reply =
+            crate::session::request(conn.as_ref(), "_goose/unstable/tools/call", build(&wire))
+                .await;
+        match reply {
+            Ok(reply) => {
+                let text = crate::tasks::content_text(&reply);
+                if crate::tasks::is_error(&reply) {
+                    *self.inner.tasks_session.lock() = None;
+                    Err(text)
+                } else {
+                    Ok(text)
+                }
+            }
+            Err(e) => {
+                *self.inner.tasks_session.lock() = None;
+                Err(e.to_string())
+            }
+        }
+    }
+
+    /// Both lists in one `on_tasks`. Sent together because the tab paints them
+    /// together; two callbacks would let it show a half-updated pair.
+    async fn tasks_refresh_now(&self) {
+        let open = self
+            .tasks_call(|wire| crate::tasks::open_params(wire, 60))
+            .await;
+        let done = self
+            .tasks_call(|wire| crate::tasks::done_params(wire, 20))
+            .await;
+        self.inner
+            .listener
+            .on_tasks(crate::tasks::envelope(open, done));
+    }
+
+    /// A mutation, then a refresh: the UI reflects server state, never a local
+    /// patch of it (the rule the unstable shim's list replies already follow).
+    async fn task_action<F: Fn(&str) -> Value>(&self, build: F) {
+        match self.tasks_call(build).await {
+            Ok(_) => self.tasks_refresh_now().await,
+            Err(e) => self.alert(format!("My Day: the change was not saved ({e})")),
+        }
     }
 
     /// The store for a session, created on first use.
@@ -3273,6 +3427,7 @@ mod tests {
         }
         fn on_commands(&self, _: Vec<String>) {}
         fn on_session_open_failed(&self, _: String, _: String) {}
+        fn on_tasks(&self, _: String) {}
     }
 
     fn core() -> (Arc<Core>, Arc<Events>) {
@@ -3339,6 +3494,9 @@ mod tests {
         }
         fn on_session_open_failed(&self, session_id: String, message: String) {
             self.0.on_session_open_failed(session_id, message);
+        }
+        fn on_tasks(&self, tasks: String) {
+            self.0.on_tasks(tasks);
         }
     }
 

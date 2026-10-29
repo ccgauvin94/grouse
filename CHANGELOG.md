@@ -6,6 +6,29 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **My Day: the Assistant tab, with the assistant's own working state under it.**
+  Android's drawer loses the "Assistant" button and gains **My Day** (still gated
+  by the Assistant switch): the always-on assistant thread at the top — status
+  dot from briefing recency, its last line, and a composer that sends straight
+  into the thread — then the assistant-state items that are open, then the ones
+  recently closed with the line that closed them. Each open item can be closed
+  (`done` / `dropped`, both asked for a one-line outcome, which is what stops the
+  next briefing re-raising it), snoozed a day, or tapped through to the assistant
+  thread for a discussion. The lists come from assistant-state over a
+  deterministic `_goose/unstable/tools/call` — **no model turn**, so the tab opens
+  in milliseconds instead of paying a 60k-token prefill to ask "what is open" —
+  and because goose refuses an app tool call outside `auto` mode, the core binds
+  them to one hidden, never-prompted `auto` session rather than disarming the chat
+  thread's approvals (CONTRACT §3.6). New core surface: `on_tasks` on
+  `CoreListener`, and `tasks_refresh`/`task_close`/`task_snooze`/`task_react` as
+  intents. This is a listener-table ABI change: `GROUSE_ABI_VERSION` is now **6**
+  (`on_tasks` appended last; the desktop's `corebridge.h` mirrors the table, and
+  `Manager` gained `tasksJson` + the four invokables — the desktop has no My Day
+  surface yet). No push for task state: the core refreshes on tab open, on the
+  refresh affordance, and after every action.
+
 ### Changed
 
 - **Code blocks have a copy button.** A small icon sits at each fenced

@@ -46,7 +46,7 @@ use crate::{
 /// The desktop refuses a library whose value it does not expect — a mismatch is
 /// a callback called with the wrong arity (a garbage pointer), not a compile
 /// error, so it must be caught at load time.
-pub const GROUSE_ABI_VERSION: u32 = 5;
+pub const GROUSE_ABI_VERSION: u32 = 6;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
@@ -222,6 +222,10 @@ pub struct GrouseCoreListener {
     /// the two are always built together.
     pub on_session_open_failed:
         Option<extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
+    /// The My Day tab's task lists as JSON (`{"open": [...], "done": [...],
+    /// "errors": {...}}`). Appended at the END for the same reason as
+    /// `on_session_open_failed`; ABI 6.
+    pub on_tasks: Option<extern "C" fn(*mut c_void, *const c_char)>,
 }
 
 /// Bridges the core's typed listener traits to the installed C table. The raw
@@ -488,6 +492,8 @@ impl CoreListener for CoreCallbackForwarder {
                 &message,
             )
         };
+    }    fn on_tasks(&self, tasks: String) {
+        unsafe { cb_str1(table_fn!(self, on_tasks), self.user_data, &tasks) };
     }
 }
 
@@ -756,6 +762,65 @@ pub extern "C" fn grouse_image_rescale(h: *mut c_void) -> i32 {
         handle(h).core.image_rescale() as i32
     }))
     .unwrap_or(1)
+}
+
+/// My Day (CONTRACT §3.3): the task lists come back on the `on_tasks` callback,
+/// `state` is `done` | `dropped` | `expired`, and `resolution` is the one line
+/// that keeps the next briefing from re-raising the item.
+#[no_mangle]
+pub extern "C" fn grouse_tasks_refresh(h: *mut c_void) {
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.tasks_refresh())).ok();
+}
+
+#[no_mangle]
+pub extern "C" fn grouse_task_close(
+    h: *mut c_void,
+    id: *const c_char,
+    state: *const c_char,
+    resolution: *const c_char,
+) {
+    // SAFETY: the caller owns these C strings for the duration of the call.
+    let (id, state, resolution) = unsafe { (c_param(id), c_param(state), c_param(resolution)) };
+    let (Some(id), Some(state), Some(resolution)) = (id, state, resolution) else {
+        return;
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        handle(h)
+            .core
+            .task_close(id.to_string(), state.to_string(), resolution.to_string())
+    }))
+    .ok();
+}
+
+#[no_mangle]
+pub extern "C" fn grouse_task_snooze(
+    h: *mut c_void,
+    id: *const c_char,
+    until: *const c_char,
+    reason: *const c_char,
+) {
+    let (id, until, reason) = unsafe { (c_param(id), c_param(until), c_param(reason)) };
+    let (Some(id), Some(until), Some(reason)) = (id, until, reason) else {
+        return;
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        handle(h)
+            .core
+            .task_snooze(id.to_string(), until.to_string(), reason.to_string())
+    }))
+    .ok();
+}
+
+#[no_mangle]
+pub extern "C" fn grouse_task_react(h: *mut c_void, id: *const c_char, reaction: *const c_char) {
+    let (id, reaction) = unsafe { (c_param(id), c_param(reaction)) };
+    let (Some(id), Some(reaction)) = (id, reaction) else {
+        return;
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        handle(h).core.task_react(id.to_string(), reaction.to_string())
+    }))
+    .ok();
 }
 
 #[no_mangle]
