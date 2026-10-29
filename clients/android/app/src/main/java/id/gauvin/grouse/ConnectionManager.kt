@@ -1999,6 +1999,9 @@ class ConnectionManager private constructor(context: Context) {
             return
         }
         when (st) {
+            // Unreachable (the if above returns first) — keeps the sealed when
+            // exhaustive so the compiler still flags any NEW status variant.
+            is ConnectionStatus.Alert -> return
             ConnectionStatus.Ready -> onCoreReady()
             ConnectionStatus.Connecting -> {
                 connecting = true
