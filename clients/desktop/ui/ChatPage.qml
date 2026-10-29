@@ -1716,7 +1716,11 @@ Kirigami.Page {
             Layout.topMargin: Kirigami.Units.smallSpacing
             spacing: Kirigami.Units.smallSpacing
             visible: queuedRepeater.count > 0
-            Behavior on implicitHeight { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+            // No container-level slide here: `implicitHeight` is READ-ONLY, and a
+            // Behavior on it is rejected with "Invalid property assignment", which
+            // takes the whole ChatPage down (every chat renders empty). Each card
+            // already animates its own entry (opacity + translate) below, which is
+            // the effect this line was after.
 
             Repeater {
                 id: queuedRepeater
