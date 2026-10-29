@@ -94,6 +94,7 @@ bool Manager::autoConnectEnabled() const { return m_store.value("auto_connect", 
 bool Manager::notificationsEnabled() const { return m_store.value("notify_events", true).toBool(); }
 bool Manager::configuredProvidersOnly() const { return m_store.value("configured_providers_only", true).toBool(); }
 bool Manager::runSummaries() const { return m_store.value("run_summaries", true).toBool(); }
+bool Manager::rescaleImages() const { return m_store.value("image_rescale", true).toBool(); }
 bool Manager::debugTools() const { return m_store.value("debug_tools", false).toBool(); }
 QString Manager::workingDir() const { return m_store.value("cwd", "").toString(); }
 bool Manager::roamEnabled() const { return m_store.value("roam_enabled", false).toBool(); }
@@ -130,6 +131,22 @@ void Manager::setRunSummaries(bool v)
     m_store.setValue("run_summaries", v);
     emit settingsChanged();
     syncRunSummariesToCore();
+}
+
+void Manager::setRescaleImages(bool v)
+{
+    if (rescaleImages() == v)
+        return;
+    m_store.setValue("image_rescale", v);
+    emit settingsChanged();
+    syncRescaleToCore();
+}
+
+void Manager::syncRescaleToCore()
+{
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_set_image_rescale)
+        return;
+    m_bridge->api().grouse_set_image_rescale(m_bridge->handle(), rescaleImages() ? 1 : 0);
 }
 
 void Manager::setDebugTools(bool v)
@@ -1768,6 +1785,7 @@ void Manager::coreOnStatus(const QString &json)
             restoreRoamPeers();
         }
         syncRunSummariesToCore();
+        syncRescaleToCore();
         flushQueue();
         refreshSessions();
         refreshProjects();

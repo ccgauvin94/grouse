@@ -279,6 +279,18 @@ Rules:
   inference per turn that never delays a reply. `set_run_summaries(bool)` /
   `run_summaries()` toggle it (on by default); with it off, or wherever the model
   does not answer, the provisional label stands.
+- **Outbound images are rescaled once, in the core** (§8.1). Every
+  `PromptBlock::Image` the UI hands in is downscaled to a 1600 px long edge
+  before it reaches the wire, the echoed row, or the transcript — one
+  `imgrescale::rescale()` hook at `send_prompt` entry covers all three, so a
+  send, its echo and every later replay carry the same (small) pixels. JPEG
+  re-encodes at q80; PNG stays PNG (and anything with meaningful alpha
+  stays PNG with it), so screenshots keep their format. WebP/HEIC or a
+  corrupt/unreadable payload passes through **unchanged** with an
+  `Alert("sent N image(s) in their original size…")` — compression must
+  never become "the message did not send". `set_image_rescale(bool)` /
+  `image_rescale()` are a UI preference (default **ON**), persisted
+  client-side; the core only applies it.
 - **A replayed thought never becomes a row of its own.** goose re-sends the
   reasoning trail on every `session/load`, but such a row would double the trail
   and carries no stable id to reconcile by. The core holds it as the thinking of

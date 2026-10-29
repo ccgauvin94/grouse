@@ -232,6 +232,14 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("run_summaries", true)
         set(v) = cfg.edit().putBoolean("run_summaries", v).apply()
 
+    /** Whether attached images are downscaled to a generous long edge (1600 px)
+     *  before they ride a prompt. A phone camera photo otherwise re-sends
+     *  megabytes of base64 with every turn of history. On by default; the
+     *  core applies the policy, the app only stores the toggle. */
+    var rescaleImages: Boolean
+        get() = cfg.getBoolean("image_rescale", true)
+        set(v) = cfg.edit().putBoolean("image_rescale", v).apply()
+
     /** Developer diagnostics: the turn log (long-press the chat title) and the
      *  idle-turn readout beside the typing dots. Off by default — the log is
      *  unescaped internal state (wire stages, run ids, panic text) that means

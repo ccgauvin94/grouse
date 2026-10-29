@@ -955,6 +955,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_flush_caches(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_image_rescale(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_item(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_list_sessions(
@@ -996,6 +998,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_grouse_core_checksum_method_core_sessions(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_set_config_option(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_core_set_image_rescale(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_set_run_summaries(
     ): Int
@@ -1209,6 +1213,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_flush_caches(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_core_image_rescale(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_grouse_core_fn_method_core_item(`ptr`: Long,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_list_sessions(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1250,6 +1256,8 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_method_core_sessions(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_set_config_option(`ptr`: Long,`configId`: RustBuffer.ByValue,`value`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_core_set_image_rescale(`ptr`: Long,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_set_run_summaries(`ptr`: Long,`on`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1505,6 +1513,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_flush_caches() and 0xFFFF) != 885) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_grouse_core_checksum_method_core_image_rescale() and 0xFFFF) != 4048) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_grouse_core_checksum_method_core_item() and 0xFFFF) != 1772) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1566,6 +1577,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_set_config_option() and 0xFFFF) != 58160) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_core_set_image_rescale() and 0xFFFF) != 581) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_set_run_summaries() and 0xFFFF) != 33914) {
@@ -2369,6 +2383,8 @@ public interface CoreInterface {
      */
     fun `flushCaches`()
     
+    fun `imageRescale`(): kotlin.Boolean
+    
     /**
      * One rich item by id from the displayed session.
      */
@@ -2509,6 +2525,13 @@ public interface CoreInterface {
      * `session/set_config_option`; queues until ready (CONTRACT §4).
      */
     fun `setConfigOption`(`configId`: kotlin.String, `value`: kotlin.String)
+    
+    /**
+     * Outbound image rescale (CONTRACT §8.1). UI setting, core policy: the
+     * default is ON, and the UI persists its own toggle so the core need not
+     * store anything.
+     */
+    fun `setImageRescale`(`enabled`: kotlin.Boolean)
     
     /**
      * Rewrite each tool run's label with a short model-written line at the end
@@ -2841,6 +2864,19 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 }
     }
     
+    
+
+    override fun `imageRescale`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_image_rescale(
+        it,
+        _status)
+}
+    }
+    )
+    }
     
 
     
@@ -3220,6 +3256,24 @@ open class Core: Disposable, AutoCloseable, CoreInterface
         
         FfiConverterString.lower(`configId`),
         FfiConverterString.lower(`value`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Outbound image rescale (CONTRACT §8.1). UI setting, core policy: the
+     * default is ON, and the UI persists its own toggle so the core need not
+     * store anything.
+     */override fun `setImageRescale`(`enabled`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_set_image_rescale(
+        it,
+        
+        FfiConverterBoolean.lower(`enabled`),_status)
 }
     }
     

@@ -75,6 +75,19 @@ All notable changes to Grouse are recorded here. The format is based on
   is unchanged; this just keeps the pixels available at full size in both
   clients.
 
+### Added
+
+- **Attached images are rescaled in the core before sending (toggle, default
+  on).** A phone camera photo otherwise rides the prompt — and every later
+  turn's re-sent history — as megabytes of base64. The core now downscales
+  every outbound image to a 1600 px long edge at `send_prompt` (one
+  transform covers the wire payload, the echoed row and the transcript):
+  JPEG re-encodes at q80, PNG keeps its format and transparency, WebP/HEIC
+  or an unreadable payload passes through unchanged with an advisory
+  alert. Both clients expose the toggle in Settings ("Rescale attached
+  images" / "Rescale attached images for sending"), persisted locally,
+  on by default.
+
 ### Fixed
 
 - **User images were flattened to `[image]` in the transcript on replay.**

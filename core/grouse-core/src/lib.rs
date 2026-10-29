@@ -35,6 +35,7 @@ uniffi::setup_scaffolding!();
 
 pub mod cache;
 pub mod capi;
+pub mod imgrescale;
 pub mod notify;
 pub mod roam;
 mod session;
@@ -647,6 +648,11 @@ struct CoreState {
 
 struct CoreInner {
     listener: Arc<dyn CoreListener>,
+    /// Outbound image rescale (CONTRACT §8.1): every `PromptBlock::Image` the
+    /// UI hands in is downscaled to imgrescale::MAX_EDGE before it reaches the
+    /// wire, the echoed row and the transcript. A UI setting (persisted
+    /// client-side); the core just applies it. Default ON.
+    image_rescale: std::sync::atomic::AtomicBool,
     /// Every session's transcript store, keyed by display id, with the one
     /// display gate the UI follows. Both transports feed it.
     hub: Arc<crate::session::SessionHub>,
@@ -727,6 +733,7 @@ impl Core {
         let core = Arc::new(Self {
             inner: Arc::new(CoreInner {
                 listener,
+                image_rescale: std::sync::atomic::AtomicBool::new(true),
                 hub,
                 cache: Arc::new(CacheStore::new(cache_dir)),
                 state: Mutex::new(CoreState {
@@ -1118,6 +1125,10 @@ impl Core {
     /// (fallback: the displayed session), queues per session until that chat's
     /// owner can accept it. A turn in another chat never blocks this one.
     pub fn send_prompt(&self, prompt: Prompt, expect: Option<SendExpect>) {
+        // Rescale outbound images BEFORE routing or queueing: one transform
+        // covers the wire payload, the echoed row and the transcripts, no
+        // matter which path the prompt takes from here.
+        let prompt = self.apply_image_policy(prompt);
         // The prompt names its chat. The UI sends only for the chat it shows,
         // but a queue drain may target a background chat — routing by `expect`
         // is what lets one chat's turn proceed while another waits.
@@ -1427,6 +1438,19 @@ impl Core {
             if replaying { "replaying" } else { "live" },
             if run == "none" { " · no server run" } else { " · server run live" },
         )
+    }
+
+    /// Outbound image rescale (CONTRACT §8.1). UI setting, core policy: the
+    /// default is ON, and the UI persists its own toggle so the core need not
+    /// store anything.
+    pub fn set_image_rescale(&self, enabled: bool) {
+        self.inner
+            .image_rescale
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn image_rescale(&self) -> bool {
+        self.inner.image_rescale.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The bound session of the active chat (the roam peer's, when one owns
@@ -2878,6 +2902,41 @@ impl Core {
     fn open_failed_hook(&self) -> Arc<dyn Fn(String, String) + Send + Sync> {
         let core = self.clone();
         Arc::new(move |session_id, message| core.on_session_open_failed(session_id, message))
+    }
+
+    /// Apply the outbound image policy to a prompt's image blocks: every
+    /// image over imgrescale::MAX_EDGE is downscaled once, here, so the wire
+    /// payload, the echoed row and the transcript all carry the small one. A
+    /// block that will not decode passes through unchanged (with an alert) —
+    /// compression must never become "the message did not send".
+    fn apply_image_policy(&self, mut prompt: Prompt) -> Prompt {
+        if !self.inner.image_rescale.load(std::sync::atomic::Ordering::Relaxed) {
+            return prompt;
+        }
+        let mut changed = 0usize;
+        let mut passthrough = 0usize;
+        for block in prompt.blocks.iter_mut() {
+            if let PromptBlock::Image { mime_type, data } = block {
+                match crate::imgrescale::rescale(mime_type, data) {
+                    Ok(Some(r)) => {
+                        *mime_type = r.mime_type;
+                        *data = r.data;
+                        changed += 1;
+                    }
+                    Ok(None) => {}
+                    Err(_) => passthrough += 1,
+                }
+            }
+        }
+        if passthrough > 0 {
+            // Distinguishing "why is this image 4 MB" is worth one line: an
+            // unreadable format rode the prompt unrescaled.
+            self.alert(format!(
+                "sent {passthrough} image(s) in their original size (format not rescalable)"
+            ));
+            let _ = changed; // changed-only prompts are silent — that is the point
+        }
+        prompt
     }
 
     /// An advisory failure on a control path: text to the UI, nothing else. It

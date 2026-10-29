@@ -101,6 +101,8 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_status);
     RESOLVE(grouse_ready);
     RESOLVE(grouse_set_run_summaries);
+    RESOLVE(grouse_set_image_rescale);
+    RESOLVE(grouse_image_rescale);
     RESOLVE(grouse_run_summaries);
     RESOLVE(grouse_active_session_id);
     RESOLVE(grouse_sessions);
@@ -180,7 +182,8 @@ bool CoreBridge::resolve()
         && check(a.grouse_send_prompt) && check(a.grouse_new_session)
         && check(a.grouse_open_session) && check(a.grouse_list_sessions)
         && check(a.grouse_status) && check(a.grouse_ready)
-        && check(a.grouse_turn_log) && check(a.grouse_turn_diag);
+        && check(a.grouse_turn_log) && check(a.grouse_turn_diag)
+        && check(a.grouse_set_image_rescale) && check(a.grouse_image_rescale);
     if (!ok) {
         qWarning() << "CoreBridge: core library is missing required grouse_* symbols";
         return false;

@@ -16,7 +16,12 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 [dependencies]
 agent-client-protocol = { version = "2.0.0", features = ["unstable_elicitation"] }
 async-tungstenite = { version = "0.34", default-features = false, features = ["tokio-rustls-webpki-roots"] }
+base64 = "0.22"
+# Hand-picked codecs only: jpeg + png cover phone cameras and screenshots for
+# the outbound image rescale (imgrescale.rs). WebP/HEIC etc. pass through
+# untouched rather than adding their decode weight to the shipped .so.
 futures = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # The shared iroh roam transport (CONTRACT §2/§6) — the RUST crate, not the C
 # ABI. A workspace member: the transport is part of this repo, not an external
 # pin (it was a SHA-pinned git dep on a commit that lived on no branch).

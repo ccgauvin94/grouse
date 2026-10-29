@@ -738,6 +738,26 @@ pub extern "C" fn grouse_cancel(h: *mut c_void) {
     catch_unwind(AssertUnwindSafe(|| handle(h).core.cancel())).ok();
 }
 
+/// Outbound image rescale (CONTRACT §8.1): every image the UI attaches is
+/// downscaled to imgrescale::MAX_EDGE before it reaches the wire, the echoed
+/// row and the transcript. A UI preference, persisted client-side; the core
+/// applies it. Default ON.
+#[no_mangle]
+pub extern "C" fn grouse_set_image_rescale(h: *mut c_void, enabled: i32) {
+    catch_unwind(AssertUnwindSafe(|| {
+        handle(h).core.set_image_rescale(enabled != 0);
+    }))
+    .ok();
+}
+
+#[no_mangle]
+pub extern "C" fn grouse_image_rescale(h: *mut c_void) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        handle(h).core.image_rescale() as i32
+    }))
+    .unwrap_or(1)
+}
+
 #[no_mangle]
 pub extern "C" fn grouse_set_config_option(h: *mut c_void, config_id: *const c_char, value: *const c_char, out_err: *mut *mut c_char) {
     if !out_err.is_null() {

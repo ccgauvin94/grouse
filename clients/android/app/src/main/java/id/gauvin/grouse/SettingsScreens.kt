@@ -366,6 +366,16 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                 }
                 SettingCaption("Labels each run of tool calls with a short line written by the " +
                     "model, instead of a bare call count.")
+
+                // Attached images are downscaled once in the core (1600 px long edge)
+                // instead of re-sending megabytes of camera-JPEG base64 every turn.
+                var rescaleImages by remember { mutableStateOf(cm.store.rescaleImages) }
+                SettingsSwitchRow("Rescale attached images", rescaleImages) { on ->
+                    rescaleImages = on; cm.setRescaleImages(on)
+                }
+                SettingCaption("Shrinks photos and screenshots to a generous edge " +
+                    "before sending — same picture to the model, ~10x fewer bytes. " +
+                    "Off sends the original pixels.")
                 // Debug surface: the core's turn log (long-press the chat title) and the
                 // live turn state under the typing indicator. Both show internal state
                 // rather than conversation, so they are opt-in and off by default.

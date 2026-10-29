@@ -29,6 +29,7 @@ Controls.Dialog {
         pushBox.checked = Push.enabled
         roamBox.checked = Mgr.roamEnabled
         runSummariesBox.checked = Mgr.runSummaries
+        rescaleBox.checked = Mgr.rescaleImages
         debugBox.checked = Mgr.debugTools
         dialog.testMessage = ""
     }
@@ -45,6 +46,7 @@ Controls.Dialog {
         Mgr.configuredProvidersOnly = configuredOnlyBox.checked
         Mgr.roamEnabled = roamBox.checked
         Mgr.runSummaries = runSummariesBox.checked
+        Mgr.rescaleImages = rescaleBox.checked
         Mgr.debugTools = debugBox.checked
     }
     onClosed: commit()
@@ -198,6 +200,14 @@ Controls.Dialog {
                 id: runSummariesBox
                 text: qsTr("Summarize tool runs with the model")
                 Kirigami.FormData.label: qsTr("Tool runs:")
+            }
+            // A phone camera photo rides every turn's prompt as megabytes of
+            // base64; downscaling to a generous long edge keeps the vision
+            // content and drops the bytes ~10x. Off sends the original pixels.
+            Controls.CheckBox {
+                id: rescaleBox
+                text: qsTr("Rescale attached images for sending")
+                Kirigami.FormData.label: qsTr("Images:")
             }
             // Debug surface: the core's turn log (and the live turn state under the
             // working indicator). Both show internal state rather than conversation,

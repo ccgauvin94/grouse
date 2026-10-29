@@ -61,6 +61,9 @@ class Manager : public QObject
     /** Rewrite each tool run's label with a short model-written line (issue #13).
      *  Costs one small inference per turn, on a hidden session. */
     Q_PROPERTY(bool runSummaries READ runSummaries WRITE setRunSummaries NOTIFY settingsChanged)
+    // Outbound image rescale (CONTRACT §8.1). Default ON; persisted in QSettings
+    // and pushed into the core on Ready + on toggle.
+    Q_PROPERTY(bool rescaleImages READ rescaleImages WRITE setRescaleImages NOTIFY settingsChanged)
     /** Developer diagnostics: the core's turn log and per-chat turn state.
      *  DEFAULT OFF. The log is unescaped internal state (thread ids, wire
      *  stages, panic text) that means nothing to a normal user, so it is
@@ -136,6 +139,7 @@ public:
     bool configuredProvidersOnly() const;
     QStringList configuredProviders() const { return m_configuredProviders; }
     bool runSummaries() const;
+    bool rescaleImages() const;
     bool debugTools() const;
     QString workingDir() const;
     bool roamEnabled() const;
@@ -147,6 +151,8 @@ public:
     void setNotificationsEnabled(bool v);
     void setConfiguredProvidersOnly(bool v);
     void setRunSummaries(bool v);
+    void setRescaleImages(bool v);
+    void syncRescaleToCore();
     void setDebugTools(bool v);
     void setWorkingDir(const QString &v);
     void setRoamEnabled(bool v);

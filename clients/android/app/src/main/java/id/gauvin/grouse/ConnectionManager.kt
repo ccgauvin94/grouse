@@ -854,6 +854,8 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Toggle the model-written run labels (issue #13): store it and push it to the core. */
     fun setRunSummaries(v: Boolean) { store.runSummaries = v; core.setRunSummaries(v) }
+    /** Outbound image rescale (CONTRACT §8.1). Core policy, app toggle. */
+    fun setRescaleImages(v: Boolean) { store.rescaleImages = v; core.setImageRescale(v) }
 
     /** Debug diagnostics: the core/app turn log and the live turn-state readout. Purely
      *  client-side (the core always keeps the log), so this only flips the UI gate. */
@@ -2981,6 +2983,7 @@ class ConnectionManager private constructor(context: Context) {
         // The core defaults the model-written run labels ON and keeps the flag for the
         // process; push the stored preference so an OFF setting survives a restart.
         core.setRunSummaries(store.runSummaries)
+        core.setImageRescale(store.rescaleImages)
         // Resuming means content is on its way — show "Loading…" from the tap,
         // not from whenever the core's first event happens to land. onCoreTranscript
         // turns it straight back off if a cached snapshot paints (content on screen
