@@ -328,6 +328,16 @@ static const QRegularExpression fenceOpener(
     QStringLiteral("^( {0,3})(`{3,}|~{3,})[ \\t]*([^\\s`]*)"),
     QRegularExpression::MultilineOption);
 
+// The fence state `markdownBlocks` accumulates between fence lines. It was referenced
+// but never declared, so the desktop did not compile at all (`'Fence' was not declared
+// in this scope`). Only `lang` and `code` are touched anywhere in the file, and
+// `open = {}` needs it to stay an aggregate.
+struct Fence
+{
+    QString lang;
+    QString code;
+};
+
 QVariantList markdownBlocks(const QString &md)
 {
     QVariantList blocks;
