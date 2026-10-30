@@ -79,6 +79,13 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
 
     LaunchedEffect(Unit) { if (cm.online.value) cm.refreshTasks() }
 
+    // Every way into the conversation lands here. `openAssistant()` only SELECTS the thread in
+    // the core — My Day is a separate route, so without this the tap looked dead while the chat
+    // behind it had already switched, which is exactly how the card's "Open" behaved.
+    val toChat: () -> Unit = {
+        nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
+    }
+
     Scaffold(topBar = {
         TopAppBar(
             title = { Text("My Day") },
@@ -103,11 +110,15 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
         ) {
             // The always-on thread first: this tab replaces the drawer's Assistant button,
             // so the way into the conversation has to be the first thing on it.
-            item { AssistantCard(cm, draft, onChange = { draft = it }) { text ->
-                cm.askAssistant(text)
-                draft = ""
-                nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
-            } }
+            item {
+                AssistantCard(
+                    cm,
+                    draft,
+                    onChange = { draft = it },
+                    onOpen = { cm.openAssistant(); toChat() },
+                    onSend = { text -> cm.askAssistant(text); draft = ""; toChat() },
+                )
+            }
 
             cm.tasksError.value?.let { msg ->
                 item {
@@ -157,10 +168,7 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                         // `state_close` on THIS item instead of guessing which one you mean.
                         cm.pendingDraft.value = "About item ${t.id} (${t.title.take(80)}): "
                         cm.openAssistant()
-                        nav.navigate("chat") {
-                            launchSingleTop = true
-                            popUpTo("chat") { inclusive = true }
-                        }
+                        toChat()
                     },
                 )
             }
@@ -182,10 +190,7 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                         onOpen = {
                             cm.pendingDraft.value = "About item ${t.id} (${t.title.take(80)}): "
                             cm.openAssistant()
-                            nav.navigate("chat") {
-                                launchSingleTop = true
-                                popUpTo("chat") { inclusive = true }
-                            }
+                            toChat()
                         },
                     )
                 }
@@ -240,7 +245,13 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
 /** The assistant thread's entry point: who it is, how fresh its last briefing is, and a
  *  one-line composer so a thought does not need a navigation to be written down. */
 @Composable
-private fun AssistantCard(cm: ConnectionManager, draft: String, onChange: (String) -> Unit, onSend: (String) -> Unit) {
+private fun AssistantCard(
+    cm: ConnectionManager,
+    draft: String,
+    onChange: (String) -> Unit,
+    onOpen: () -> Unit,
+    onSend: (String) -> Unit,
+) {
     val thread = cm.sessions.value.firstOrNull { it.sessionId == cm.assistantSessionId() }
     // Briefing health, same rule as the chat header: green while the hourly job is keeping
     // up, amber when it is late, red when it has stopped. Overnight the gap is expected.
@@ -288,7 +299,7 @@ private fun AssistantCard(cm: ConnectionManager, draft: String, onChange: (Strin
                         color = MaterialTheme.colorScheme.outline,
                     )
                 }
-                TextButton(onClick = { cm.openAssistant() }) { Text("Open") }
+                TextButton(onClick = onOpen) { Text("Open") }
             }
             if (snippet.isNotBlank()) {
                 Spacer(Modifier.height(6.dp))

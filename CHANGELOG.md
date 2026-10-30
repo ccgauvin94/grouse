@@ -44,6 +44,13 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed
 
+- **My Day's "Open" did nothing visible.** `openAssistant()` only *selects* the thread in
+  the core, and My Day is its own route — so the tap switched the chat behind the screen
+  and left you looking at My Day. It read as a dead button, and the next back press
+  revealed a chat you never asked to open. The card's Open, the composer, and a row's
+  tap-through now all go through one `toChat()` that navigates, so every entry point on
+  the tab lands in the conversation.
+
 - **Snooze looked like it did nothing.** The write always worked (assistant-state
   flips the item to `snoozed` with a `snooze_until`, and the pulse log records it),
   but the tab re-read the same open list and painted the row *identically* —
