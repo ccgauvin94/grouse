@@ -43,7 +43,10 @@ Controls.Dialog {
 
             delegate: Controls.ItemDelegate {
                 id: sdel
-                width: ListView.view.width
+                // Reserve the overlaying scrollbar's width: a row at the full view
+                // width puts its trailing text underneath the bar (same fix as the
+                // recipes list and the tools list).
+                width: ListView.view.width - Kirigami.Units.gridUnit * 1.5
                 height: Math.max(44, sdelCol.implicitHeight + Kirigami.Units.smallSpacing * 2)
                 onClicked: {
                     skillsList.currentIndex = index

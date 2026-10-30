@@ -649,7 +649,14 @@ impl RoamPeer {
     /// full replay (the desktop's "reload from the start").
     pub fn open_session_with(&self, session_id: String, cwd: String, force: bool) {
         match self.status() {
-            ConnectionStatus::Ready | ConnectionStatus::Connecting => {}
+            // Syncing is accepted for the same reason Connecting is: the command queue
+            // lives on the PEER, so a command sent now is buffered and runs when the
+            // loop picks it up. Dropping it silently meant a Reload press during a
+            // resync (or a reconnect's sync) did nothing at all — no request, no
+            // status, no error, on the peer only (the main wire has no such gate).
+            ConnectionStatus::Ready
+            | ConnectionStatus::Connecting
+            | ConnectionStatus::Syncing => {}
             _ => return,
         }
         // The raw id is derived by stripping the prefix when the caller passed

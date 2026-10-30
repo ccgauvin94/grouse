@@ -183,6 +183,13 @@ All notable changes to Grouse are recorded here. The format is based on
   and the desktop/Android now display goose's actual status line verbatim
   instead of a static "Compacting…" placeholder.
 
+- **The parked-message card reads like a card, not a clipped row.** Its text shared a
+  `RowLayout` with the Steer/✕ buttons, so it never got the card's width and broke off
+  mid-sentence under them, and the card's height came from a row whose implicit height
+  lagged the wrap. It is three bands now: a "Queued" badge with the note
+  ("sends when this turn ends", or the attachment caveat) and a proper close button
+  across the top, the message at full width with up to three lines, and Steer
+  right-aligned below out of the reading path.
 - **The APK that GitHub CI publishes is now signed with the release key.** The
   workflow built the debug variant and let it fall back to the runner's throwaway
   debug keystore, which GitHub regenerates on every run — so the artifact could not
@@ -243,6 +250,22 @@ All notable changes to Grouse are recorded here. The format is based on
   one of them for an open roam chat failed the gate and was silently dropped.
   `RoamPeer` now namespaces the key (`roam:<label>:<raw>`) before dispatch.
   Main-wire chats were unaffected (their two ids already match).
+- **Reload on the desktop now forces the replay.** A click used to be the QUICK
+  refresh — a freshness probe that re-loads the newest row and repaints nothing when
+  the cache already matches the server — so on an unchanged chat the button silently
+  did nothing, and the force path existed only behind a long-press nobody discovers.
+  A click is the full replay now (`reloadSessionFromStart`), which is what the label
+  promises and what Android already offers as its own explicit action; `refreshSession`
+  (Quick) stays for the automatic paths.
+- **A Reload press on a roam chat could do nothing at all.** `RoamPeer::open_session_with`
+  accepted only `Ready | Connecting` and returned silently for every other status, and
+  `Syncing` is a real one (a resync, a reconnect's sync) — so a reload pressed in that
+  window issued no request, no status and no error, on peers only; the main wire has no
+  such gate. It accepts `Syncing` now, which is safe for the same reason `Connecting` is:
+  the command queue lives on the peer, so the command is buffered and runs when the loop
+  picks it up. (The Reload button itself is unchanged in intent: a click is the QUICK
+  refresh — it probes the newest row and suppresses the repaint when the cache is
+  current — and press-and-hold is the full replay, as its tooltip says.)
 - **A chat opens at its newest message, on both clients.** Both snapped once, then
   let the transcript paint over the top of that jump: rows are realized lazily (and
   recycled) on the desktop, and Android inserts each batch at the head of a
@@ -282,6 +305,16 @@ All notable changes to Grouse are recorded here. The format is based on
   a display label (a CLI-detected entry and its API twin). An exact duplicate is
   dropped; a shared label with different values keeps both, the later one carrying
   its id so it is distinguishable.
+- **A roam chat's sidebar had no rename/edit menu, and its model bar could vanish.**
+  The roam rows' `MouseArea` counted only `Qt.LeftButton`, so right-click did
+  nothing there — rename/archive/export/delete were reachable for main-wire chats
+  only. Right-click now opens the same `sessionMenu` (already roam-aware: it hides
+  "Move to project…" for `roam:` ids, and the core routes session mutations to the
+  owning peer). The provider/model strip was gated on `Mgr.online` — the MAIN
+  WebSocket's state — so a peer chat hid its model picker whenever the main wire was
+  down, even with a working model over roam; it now gates on the session's own
+  options. The pickers also rebuild on a session switch, which previously left the
+  outgoing chat's provider/model on screen until that chat's config arrived.
 - **The form dialog's fields never initialised.** `function reset()` collided with
   Qt 6's `Dialog` `reset` signal, so QML rejected it as an invalid override and the
   pass that filled in defaults never ran: booleans did not start `false`, enum

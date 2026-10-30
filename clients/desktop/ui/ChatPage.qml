@@ -328,10 +328,18 @@ Kirigami.Page {
     // Why a parked message has not gone out yet — the same three cases Android
     // shows, so the two clients never disagree about what "queued" means.
     function queuedNote(attachments) {
-        if (!Mgr.online) return qsTr("not connected — sends when it reconnects")
-        if (attachments > 0) return qsTr("with attachment — sends when this turn ends")
-        return qsTr("sends when this turn ends")
+        if (!Mgr.online) return qsTr("Not connected — sends when it reconnects")
+        if (attachments > 0) return qsTr("With attachment — sends when this turn ends")
+        return qsTr("Sends when this turn ends")
     }
+
+    /// The parked-card tints, named once. They are ALPHAS over the platform text
+    /// colour so the card follows the colour scheme; the tokens' `semantic.*` pairs are
+    /// fixed hexes per scheme and, as GrouseTheme notes, no surface consumes them yet.
+    /// Geometry does use the tokens where one exists (radius, padding).
+    readonly property real queuedCardFillAlpha: 0.06
+    readonly property real queuedCardBorderAlpha: 0.16
+    readonly property real queuedBadgeFillAlpha: 0.18
 
     // Per-conversation scroll memory (sessionId -> contentY): lets a user leave
     // a chat scrolled up, switch away, and return to the same spot. First open
@@ -388,6 +396,11 @@ Kirigami.Page {
         if (scrollSession.length > 0 && list.contentHeight > 0)
             scrollMem[scrollSession] = list.contentY
         scrollSession = Mgr.currentSessionId
+        // Rebuild the provider/model pickers for the chat being opened. They were only
+        // ever rebuilt on a config/providers event, so after a switch they kept showing
+        // the PREVIOUS chat's picks until (and unless) this one's config arrived — and
+        // the strip's visibility reads those lists.
+        page.rebuildSelectors()
         pendingRestore = false
         pendingFirstScroll = false
         scrollApplyAttempts = 0
@@ -523,19 +536,21 @@ Kirigami.Page {
                 // replay when its cache looks current). The core paints the cached
                 // window provisionally and the full replay replaces it.
                 //
-                // Two strengths (grouse#18): the click is the QUICK refresh
-                // (freshness decides, the replay is ingested silently and painted
-                // once, so the chat lands on its newest messages); press-and-hold
-                // replays from the start, for a view known to have drifted.
+                // A click FORCES the reload (grouse#18's two strengths, but surfaced
+                // the way Android does it): the QUICK refresh is a freshness probe that
+                // legitimately repaints nothing when the cache already matches the
+                // server, so a button labelled "Reload" that silently did nothing read
+                // as broken — the force path was hidden behind a long-press nobody
+                // finds. `Mgr.refreshSession()` (Quick) remains for the automatic
+                // paths; the escape hatch is now the obvious gesture.
                 Controls.Button {
                     id: reloadPill
                     visible: Mgr.currentSessionId.length > 0
                     icon.name: "view-refresh"
                     text: qsTr("Reload")
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Re-fetch this conversation from the server · hold to replay it from the start")
-                    onClicked: Mgr.refreshSession()
-                    onPressAndHold: Mgr.reloadSessionFromStart()
+                    ToolTip.text: qsTr("Replay this conversation from the server, ignoring the local cache")
+                    onClicked: Mgr.reloadSessionFromStart()
                 }
 
                 // Per-conversation tool indicator: toggles the tools panel open
@@ -1903,7 +1918,11 @@ Kirigami.Page {
             Layout.topMargin: Kirigami.Units.smallSpacing
             spacing: Kirigami.Units.smallSpacing
             visible: queuedRepeater.count > 0
-            Behavior on implicitHeight { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+            // No container-level slide here: `implicitHeight` is READ-ONLY, and a
+            // Behavior on it is rejected with "Invalid property assignment", which
+            // takes the whole ChatPage down (every chat renders empty). Each card
+            // already animates its own entry (opacity + translate) below, which is
+            // the effect this line was after.
 
             Repeater {
                 id: queuedRepeater
@@ -1919,12 +1938,14 @@ Kirigami.Page {
                     Rectangle {
                         id: queuedCard
                         width: parent.width
-                        height: queuedCardRow.implicitHeight + Kirigami.Units.smallSpacing
-                        radius: Kirigami.Units.smallSpacing
+                        // Height follows the column, whose own implicit height already
+                        // accounts for the wrapped text at this width and the margins.
+                        height: queuedCol.implicitHeight + GrouseTheme.spacing.s4
+                        radius: GrouseTheme.radius.md
                         color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
-                                       Kirigami.Theme.textColor.b, 0.06)
+                                       Kirigami.Theme.textColor.b, page.queuedCardFillAlpha)
                         border.color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
-                                              Kirigami.Theme.textColor.b, 0.16)
+                                              Kirigami.Theme.textColor.b, page.queuedCardBorderAlpha)
                         opacity: 0
                         // A translate (not y) so the slide never disturbs the Column's
                         // own layout slot — the card moves, the space is already there.
@@ -1954,68 +1975,84 @@ Kirigami.Page {
                             }
                         }
 
-                        RowLayout {
-                            id: queuedCardRow
+                        // Three bands, not one row: the message gets the card's full
+                        // width (it used to share a RowLayout with the buttons, which is
+                        // why it broke off mid-sentence under the Steer button), the
+                        // header says what the card IS, and the actions sit out of the
+                        // reading path.
+                        ColumnLayout {
+                            id: queuedCol
                             anchors.fill: parent
-                            anchors.margins: Kirigami.Units.smallSpacing
+                            anchors.margins: GrouseTheme.spacing.s2
                             spacing: Kirigami.Units.smallSpacing
 
-                            ColumnLayout {
+                            RowLayout {
                                 Layout.fillWidth: true
-                                spacing: 2
+                                spacing: Kirigami.Units.smallSpacing
 
+                                Rectangle {
+                                    radius: height / 2
+                                    color: Qt.rgba(Kirigami.Theme.highlightColor.r,
+                                                   Kirigami.Theme.highlightColor.g,
+                                                   Kirigami.Theme.highlightColor.b,
+                                                   page.queuedBadgeFillAlpha)
+                                    implicitWidth: queuedTag.implicitWidth + Kirigami.Units.smallSpacing * 2
+                                    implicitHeight: queuedTag.implicitHeight + Kirigami.Units.smallSpacing * 0.5
+                                    Controls.Label {
+                                        id: queuedTag
+                                        anchors.centerIn: parent
+                                        text: qsTr("Queued")
+                                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8
+                                        font.bold: true
+                                    }
+                                }
                                 Controls.Label {
                                     Layout.fillWidth: true
-                                    text: modelData.text.length > 0 ? modelData.text : qsTr("Attachment")
-                                    wrapMode: Text.Wrap
-                                    maximumLineCount: 2
+                                    text: page.queuedNote(modelData.attachments)
+                                    opacity: 0.7
                                     elide: Text.ElideRight
-                                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.95
+                                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
                                 }
-                                RowLayout {
-                                    spacing: Kirigami.Units.smallSpacing
-                                    Rectangle {
-                                        radius: height / 2
-                                        color: Qt.rgba(Kirigami.Theme.highlightColor.r,
-                                                       Kirigami.Theme.highlightColor.g,
-                                                       Kirigami.Theme.highlightColor.b, 0.18)
-                                        implicitWidth: queuedTag.implicitWidth + Kirigami.Units.smallSpacing * 1.5
-                                        implicitHeight: queuedTag.implicitHeight + 2
-                                        Controls.Label {
-                                            id: queuedTag
-                                            anchors.centerIn: parent
-                                            text: qsTr("Queued")
-                                            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.75
-                                        }
-                                    }
-                                    Controls.Label {
-                                        text: page.queuedNote(modelData.attachments)
-                                        opacity: 0.7
-                                        elide: Text.ElideRight
-                                        Layout.fillWidth: true
-                                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8
-                                    }
+                                Controls.ToolButton {
+                                    icon.name: "window-close"
+                                    display: Controls.AbstractButton.IconOnly
+                                    implicitWidth: Kirigami.Units.gridUnit * 1.5
+                                    implicitHeight: Kirigami.Units.gridUnit * 1.5
+                                    onClicked: Mgr.cancelQueued(modelData.id)
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: qsTr("Discard this queued message")
                                 }
                             }
 
-                            Controls.Button {
-                                text: qsTr("Steer")
-                                // A steer carries text only, so a message with an
-                                // attachment can never be promoted — it keeps waiting
-                                // rather than losing its file silently.
-                                enabled: page.canSteer && modelData.attachments <= 0
-                                onClicked: Mgr.steerQueued(modelData.id)
-                                ToolTip.visible: hovered
-                                ToolTip.text: modelData.attachments > 0
-                                              ? qsTr("A steer carries text only — this message keeps its attachment and waits for the turn to end.")
-                                              : qsTr("Redirect the running turn: it answers this instead")
+                            Controls.Label {
+                                Layout.fillWidth: true
+                                text: modelData.text.length > 0 ? modelData.text : qsTr("Attachment")
+                                textFormat: Text.PlainText
+                                wrapMode: Text.Wrap
+                                // Three lines, then an ellipsis: enough to recognise the
+                                // message without the card pushing the composer down.
+                                maximumLineCount: 3
+                                elide: Text.ElideRight
                             }
-                            Controls.Button {
-                                text: "✕"
-                                flat: true
-                                onClicked: Mgr.cancelQueued(modelData.id)
-                                ToolTip.visible: hovered
-                                ToolTip.text: qsTr("Discard this queued message")
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Kirigami.Units.smallSpacing
+                                Item { Layout.fillWidth: true }
+                                Controls.Button {
+                                    text: qsTr("Steer")
+                                    icon.name: "media-playback-start"
+                                    display: Controls.AbstractButton.TextBesideIcon
+                                    // A steer carries text only, so a message with an
+                                    // attachment can never be promoted — it keeps waiting
+                                    // rather than losing its file silently.
+                                    enabled: page.canSteer && modelData.attachments <= 0
+                                    onClicked: Mgr.steerQueued(modelData.id)
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: modelData.attachments > 0
+                                                  ? qsTr("A steer carries text only — this message keeps its attachment and waits for the turn to end.")
+                                                  : qsTr("Redirect the running turn: it answers this instead")
+                                }
                             }
                         }
                     }
@@ -2145,7 +2182,11 @@ Kirigami.Page {
                 RowLayout {
                     id: providerStrip
                     Layout.fillWidth: true
-                    visible: Mgr.online
+                    // Gated on the SESSION's own options, not on the main wire: a roam
+                    // chat carries its provider/model options over its peer connection,
+                    // so `Mgr.online` (the main WebSocket) hid the whole bar there even
+                    // though the chat had a working model.
+                    visible: page.providerChoices.length > 0 || page.modelChoices.length > 0
                     spacing: Kirigami.Units.smallSpacing
 
                     Controls.ComboBox {

@@ -297,13 +297,23 @@ Controls.Dialog {
     }
 
     contentItem: RowLayout {
+        id: recRoot
         spacing: Kirigami.Units.smallSpacing
-        implicitWidth: 840
+        // A hint, not a floor: 840 here made the dialog's OWN implicitWidth larger than
+        // a narrow window's, so the content overflowed its box instead of fitting.
+        implicitWidth: 720
         implicitHeight: 620
 
         // --- master: the recipe list (SkillsDialog pattern) -------------------
         ColumnLayout {
+            id: recMaster
+            // A HARD 230: preferredWidth alone left the column free to grow to 584
+            // (its own content hint), so master(584) + detail(344) = 928 overflowed an
+            // 824 content box and the two panes overlapped and clipped instead of
+            // sharing it. The detail pane below takes the remainder.
             Layout.preferredWidth: 230
+            Layout.minimumWidth: 230
+            Layout.maximumWidth: 230
             Layout.fillHeight: true
             spacing: 2
 
@@ -356,7 +366,11 @@ Controls.Dialog {
 
                 delegate: Controls.ItemDelegate {
                     id: rdel
-                    width: ListView.view.width
+                    // The vertical ScrollBar overlays the viewport: a row laid out to
+                    // the full view width puts its trailing date/schedule text under
+                    // the bar, where it reads as clipped. Reserve the bar's width, the
+                    // same way the chat bubbles and the tools list do.
+                    width: ListView.view.width - Kirigami.Units.gridUnit * 1.5
                     height: Math.max(44, rdelCol.implicitHeight + Kirigami.Units.smallSpacing * 2)
                     onClicked: {
                         recipeList.currentIndex = index
@@ -412,11 +426,17 @@ Controls.Dialog {
             id: detailScroll
             visible: !!dialog.sel
             Layout.fillWidth: true
+            // Absorb the remainder and never demand a minimum: a floor here is what
+            // pushed the row past the dialog's width in the first place.
+            Layout.minimumWidth: 0
             Layout.fillHeight: true
             Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
 
             ColumnLayout {
-                width: detailScroll.availableWidth
+                // Same overlay scrollbar, same reserve: availableWidth does not
+                // shrink for an overlaying bar, so the detail pane's right-hand
+                // controls (the Save buttons, the model combos) sat under it.
+                width: detailScroll.availableWidth - Kirigami.Units.gridUnit * 1.5
                 spacing: Kirigami.Units.smallSpacing
 
                 Controls.Label {
@@ -648,6 +668,10 @@ Controls.Dialog {
                     Controls.TextArea {
                         id: promptArea
                         wrapMode: Text.Wrap
+                        // This ScrollView's vertical bar OVERLAYS the editor, so the
+                        // last character of every line sat under it. TextArea has no
+                        // room to reserve outside itself, so pad its right edge.
+                        rightPadding: Kirigami.Units.gridUnit * 1.5
                     }
                 }
                 RowLayout {
@@ -672,6 +696,7 @@ Controls.Dialog {
                     Controls.TextArea {
                         id: instrArea
                         wrapMode: Text.Wrap
+                        rightPadding: Kirigami.Units.gridUnit * 1.5   // see promptArea
                     }
                 }
                 RowLayout {
