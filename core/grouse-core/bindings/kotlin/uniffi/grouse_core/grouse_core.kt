@@ -1804,7 +1804,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_session_open_failed() and 0xFFFF) != 25102) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_tasks() and 0xFFFF) != 45831) {
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_tasks() and 0xFFFF) != 11726) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export() and 0xFFFF) != 3482) {
@@ -6761,9 +6761,12 @@ public interface CoreListener {
     fun `onSessionOpenFailed`(`sessionId`: kotlin.String, `message`: kotlin.String)
     
     /**
-     * The My Day tab's task lists (`{"open": [...], "done": [...], "errors": {...}}`),
-     * from assistant-state's `state_items` over a deterministic `tools/call` —
-     * no model turn. Emitted on every refresh and after every task action.
+     * The My Day tab's lists
+     * (`{"open": [...], "done": [...], "tasks": [...], "errors": {...}}`), from
+     * assistant-state's `state_items` and `task_list` over a deterministic
+     * `tools/call` — no model turn. `open`/`done` are items (loops); `tasks` is
+     * handed-over work (`running` or waiting for `review`). Emitted on every
+     * refresh and after every task action.
      */
     fun `onTasks`(`tasks`: kotlin.String)
     

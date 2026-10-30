@@ -328,12 +328,23 @@ not a prompt. One call is a few milliseconds of SQLite on the server; a model
 turn would be a 60k-token prefill to answer "what is open", which is the whole
 reason this path exists.
 
-- **`on_tasks`** carries `{"open": [...], "done": [...], "errors": {...}}`. Both
-  sections are fetched together (`state_items` with `state=open,snoozed` and
-  with `state=done,expired`) and emitted in ONE callback, so a UI can never
-  paint a half-updated pair. `errors` maps a section name to why it failed and
-  is omitted when both succeeded — "nothing to do" and "could not ask" must not
-  look alike.
+- **`on_tasks`** carries
+  `{"open": [...], "done": [...], "tasks": [...], "errors": {...}}`. All three
+  sections are fetched together (`state_items` with `state=open,snoozed`, with
+  `state=done,expired`, and `task_list` with `state=running,review`) and emitted
+  in ONE callback, so a UI can never paint a half-updated set. `errors` maps a
+  section name to why it failed and is omitted when all succeeded — "nothing to
+  do" and "could not ask" must not look alike.
+- **`tasks` is handed-over work, not items.** An item is a fact that needs
+  attention (re-observed, merged, evidenced, deduped); a task is an act —
+  something was asked for, something did it, and a RESULT came back. Fields: id,
+  title, state (`running` | `review`; the terminal states are not listed here),
+  thread, `session_id`, `request` (trimmed to 300 chars), `result`, artifacts
+  (`[{path, …}]`, paths in the agent's own workspace), `created_at`,
+  `updated_at`. `review` means the work stopped and is waiting for a human, which
+  is the only task state a tab has to make loud. A server older than
+  assistant-state v4 has no `task_list`, and that shows up as `errors.tasks`
+  rather than as an empty section that reads like "nothing was handed over".
 - **Rows are slimmed by the core** (`tasks.rs`, `KEPT_FIELDS`): id, kind, state,
   title, detail, owner, `due_at`, salience, confidence, resolution,
   `snooze_until`, and `thread` — the area's **label** as one string

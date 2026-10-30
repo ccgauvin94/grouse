@@ -69,6 +69,18 @@ pub(crate) fn done_params(wire: &str, limit: u32) -> Value {
     )
 }
 
+/// Handed-over work: `running` and `review` only. `review` is the state that
+/// matters to a person — the work stopped and is waiting for a look — and it is
+/// what makes this list worth painting above the open items rather than buried
+/// among them.
+pub(crate) fn task_params(wire: &str, limit: u32) -> Value {
+    tool_params(
+        wire,
+        "task_list",
+        json!({ "state": "running,review", "limit": limit }),
+    )
+}
+
 pub(crate) fn close_params(wire: &str, id: &str, state: &str, resolution: &str) -> Value {
     tool_params(
         wire,
@@ -140,12 +152,13 @@ pub(crate) fn is_error(reply: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// One section of the tab: a parsed item array, or the reason there is none.
-fn section(result: Result<String, String>) -> (Value, Option<String>) {
+/// One section of the tab: a parsed row array (projected by `project`), or the
+/// reason there is none.
+fn section(result: Result<String, String>, project: fn(&mut Value)) -> (Value, Option<String>) {
     match result {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
             Ok(mut v @ Value::Array(_)) => {
-                slim(&mut v);
+                project(&mut v);
                 (v, None)
             }
             Ok(other) => (
@@ -223,21 +236,72 @@ fn normalise_thread(map: &mut serde_json::Map<String, Value>) {
     }
 }
 
-/// The JSON `on_tasks` carries: `{"open": [...], "done": [...], "errors": {...}}`.
+/// The fields a task row needs. Deliberately a different set from an item's: a
+/// task has no salience, no evidence and no confidence — it has a state, the line
+/// it came back with, and where the work was written.
+const TASK_FIELDS: [&str; 10] = [
+    "id",
+    "title",
+    "state",
+    "thread",
+    "session_id",
+    "request",
+    "result",
+    "artifacts",
+    "created_at",
+    "updated_at",
+];
+
+/// `request` is context, not content: a row shows the RESULT line, and the asked-for
+/// prose can be a paragraph. Trimmed here because every byte crosses the FFI and
+/// lands in a Compose state list.
+const REQUEST_CAP: usize = 300;
+
+fn slim_task(items: &mut Value) {
+    let Value::Array(rows) = items else { return };
+    for row in rows.iter_mut() {
+        let Value::Object(map) = row else { continue };
+        map.retain(|k, _| TASK_FIELDS.contains(&k.as_str()));
+        if let Some(Value::String(s)) = map.get_mut("request") {
+            if s.chars().count() > REQUEST_CAP {
+                let mut cut: String = s.chars().take(REQUEST_CAP).collect();
+                cut.push('…');
+                *s = cut;
+            }
+        }
+        normalise_thread(map);
+    }
+}
+
+/// The JSON `on_tasks` carries:
+/// `{"open": [...], "done": [...], "tasks": [...], "errors": {...}}`.
 ///
-/// `errors` is keyed by section and omitted when both sections succeeded, so the
-/// UI's happy path is a plain pair of arrays and a failure is legible instead of
-/// an empty list that looks like "nothing to do".
-pub(crate) fn envelope(open: Result<String, String>, done: Result<String, String>) -> String {
-    let (open_items, open_err) = section(open);
-    let (done_items, done_err) = section(done);
-    let mut out = json!({ "open": open_items, "done": done_items });
+/// `errors` is keyed by section and omitted when every section succeeded, so the
+/// UI's happy path is three plain arrays and a failure is legible instead of an
+/// empty list that looks like "nothing to do".
+///
+/// `tasks` is handed-over work (assistant-state's `task` rows: running, or waiting
+/// for review). It is a different object from an item — an item is a fact that
+/// needs attention, a task is an act with a result — which is why it has its own
+/// key and its own projection rather than being folded into `open`.
+pub(crate) fn envelope(
+    open: Result<String, String>,
+    done: Result<String, String>,
+    tasks: Result<String, String>,
+) -> String {
+    let (open_items, open_err) = section(open, slim);
+    let (done_items, done_err) = section(done, slim);
+    let (task_items, task_err) = section(tasks, slim_task);
+    let mut out = json!({ "open": open_items, "done": done_items, "tasks": task_items });
     let mut errors = serde_json::Map::new();
     if let Some(e) = open_err {
         errors.insert("open".into(), Value::String(e));
     }
     if let Some(e) = done_err {
         errors.insert("done".into(), Value::String(e));
+    }
+    if let Some(e) = task_err {
+        errors.insert("tasks".into(), Value::String(e));
     }
     if !errors.is_empty() {
         out["errors"] = Value::Object(errors);
@@ -311,6 +375,7 @@ mod tests {
         let got: Value = serde_json::from_str(&envelope(
             Ok(r#"[{"id":"a","title":"Ship it"}]"#.to_string()),
             Ok("[]".to_string()),
+            Ok("[]".to_string()),
         ))
         .unwrap();
         assert_eq!(got["open"][0]["id"], "a");
@@ -323,6 +388,7 @@ mod tests {
         let got: Value = serde_json::from_str(&envelope(
             Ok(r#"[{"id":"a"}]"#.to_string()),
             Err("not connected".to_string()),
+            Ok("[]".to_string()),
         ))
         .unwrap();
         assert_eq!(got["open"][0]["id"], "a");
@@ -336,6 +402,7 @@ mod tests {
         let got: Value = serde_json::from_str(&envelope(
             Ok(r#"{"detail":"boom"}"#.to_string()),
             Ok("not json".to_string()),
+            Err("not connected".to_string()),
         ))
         .unwrap();
         assert_eq!(got["open"], json!([]));
@@ -358,7 +425,7 @@ mod tests {
             "meta":{},"thread_id":"thr_1",
             "thread":{"slug":"chami-billing","title":"chami billing"}}]"#;
         let got: Value =
-            serde_json::from_str(&envelope(Ok(raw.to_string()), Ok("[]".to_string()))).unwrap();
+            serde_json::from_str(&envelope(Ok(raw.to_string()), Ok("[]".to_string()), Ok("[]".to_string()))).unwrap();
         let row = &got["open"][0];
         assert_eq!(row["title"], "Ship it");
         // An OLDER server's `{slug, title}` still renders: the label is the title.
@@ -379,13 +446,85 @@ mod tests {
                       {"id":"c","thread":null,"title":"null"},
                       {"id":"d","title":"absent"}]"#;
         let got: Value =
-            serde_json::from_str(&envelope(Ok(raw.to_string()), Ok("[]".to_string()))).unwrap();
+            serde_json::from_str(&envelope(Ok(raw.to_string()), Ok("[]".to_string()), Ok("[]".to_string()))).unwrap();
         assert_eq!(got["open"][0]["thread"], "chami-billing");
         // A blank/absent label is no label: the meta line would otherwise carry a
         // stray separator for every unthreaded item, which is most of them.
         for i in 1..4 {
             assert!(got["open"][i].get("thread").is_none(), "row {i} kept a blank thread");
         }
+    }
+
+    #[test]
+    fn task_params_ask_for_the_states_a_person_cares_about() {
+        let p = task_params("s1", 20);
+        assert_eq!(p["name"], "assistantstate__task_list");
+        assert_eq!(p["arguments"]["state"], "running,review");
+        assert_eq!(p["extensionName"], EXTENSION);
+    }
+
+    #[test]
+    fn a_task_row_is_projected_to_its_own_fields() {
+        // A task is not an item: no salience, no evidence, no confidence — but it
+        // does carry what the work produced, and which session produced it.
+        let raw = r#"[{"id":"tsk_1","title":"Board deck","state":"review",
+                       "thread":"series-a","session_id":"sess-9",
+                       "request":"build a deck from the data room",
+                       "result":"12 slides","artifacts":[{"path":"/workspace/deck.pdf"}],
+                       "created_at":"2026-10-30T20:30:21Z",
+                       "updated_at":"2026-10-30T21:02:00Z",
+                       "ended_at":null,"meta":{"match":{"by":"nothing"}}}]"#;
+        let got: Value = serde_json::from_str(&envelope(
+            Ok("[]".to_string()),
+            Ok("[]".to_string()),
+            Ok(raw.to_string()),
+        ))
+        .unwrap();
+        let row = &got["tasks"][0];
+        assert_eq!(row["state"], "review");
+        assert_eq!(row["result"], "12 slides");
+        assert_eq!(row["session_id"], "sess-9");
+        assert_eq!(row["artifacts"][0]["path"], "/workspace/deck.pdf");
+        assert_eq!(row["thread"], "series-a");
+        // Server bookkeeping the tab never paints.
+        assert!(row.get("meta").is_none());
+        assert!(row.get("ended_at").is_none());
+    }
+
+    #[test]
+    fn a_long_request_is_trimmed_and_an_empty_thread_is_dropped() {
+        let long = "x".repeat(400);
+        let raw = format!(
+            r#"[{{"id":"tsk_1","title":"T","state":"running","request":"{long}","thread":"  "}}]"#
+        );
+        let got: Value = serde_json::from_str(&envelope(
+            Ok("[]".to_string()),
+            Ok("[]".to_string()),
+            Ok(raw),
+        ))
+        .unwrap();
+        let req = got["tasks"][0]["request"].as_str().unwrap();
+        assert_eq!(req.chars().count(), REQUEST_CAP + 1); // + the ellipsis
+        assert!(req.ends_with('…'));
+        assert!(got["tasks"][0].get("thread").is_none());
+    }
+
+    #[test]
+    fn a_failing_task_section_does_not_cost_the_item_lists() {
+        let got: Value = serde_json::from_str(&envelope(
+            Ok(r#"[{"id":"a"}]"#.to_string()),
+            Ok("[]".to_string()),
+            Err("unknown tool assistantstate__task_list".to_string()),
+        ))
+        .unwrap();
+        assert_eq!(got["open"][0]["id"], "a");
+        assert_eq!(got["tasks"], json!([]));
+        // An older server that has no task_list says so, instead of painting an
+        // empty section that reads like "nothing was handed over".
+        assert!(got["errors"]["tasks"]
+            .as_str()
+            .unwrap()
+            .contains("unknown tool"));
     }
 
     #[test]
@@ -396,7 +535,7 @@ mod tests {
         let raw = r#"[{"id":"a","state":"snoozed","title":"quiet","snooze_until":"2026-10-30T11:00:00Z"},
                       {"id":"b","state":"open","title":"awake","snooze_until":null}]"#;
         let got: Value =
-            serde_json::from_str(&envelope(Ok(raw.to_string()), Ok("[]".to_string()))).unwrap();
+            serde_json::from_str(&envelope(Ok(raw.to_string()), Ok("[]".to_string()), Ok("[]".to_string()))).unwrap();
         assert_eq!(got["open"][0]["snooze_until"], "2026-10-30T11:00:00Z");
         assert_eq!(got["open"][1]["snooze_until"], Value::Null);
         assert_eq!(got["open"][0]["state"], "snoozed");

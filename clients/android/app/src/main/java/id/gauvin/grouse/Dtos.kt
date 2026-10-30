@@ -89,6 +89,52 @@ data class TaskItem(
     val thread: String = "",
 )
 
+/** Work the assistant handed over — assistant-state's `task` row, not an item.
+ *
+ *  An item is a fact that needs attention; a task is an act. It has a state
+ *  (`running`, or `review` when the work stopped and is waiting for a look), the
+ *  session that did it, the line it came back with, and the files it left behind.
+ *  Its rows arrive in the same `on_tasks` envelope as the items, under `tasks`. */
+data class AgentTask(
+    val id: String,
+    val title: String,
+    val state: String,
+    /** The area it belongs to — same nullable label an item carries. */
+    val thread: String = "",
+    /** The goose session doing the work; blank when the task outlived it. */
+    val sessionId: String = "",
+    /** What was asked for (the core trims this to 300 characters). */
+    val request: String = "",
+    /** The line it came back with: empty until it reaches `review`. */
+    val result: String = "",
+    /** Paths in the agent's own workspace — where the answer was written. */
+    val artifacts: List<String> = emptyList(),
+    val createdAt: String = "",
+    val updatedAt: String = "",
+)
+
+/** One `tasks` row, or null when it has no id (a row without one cannot be keyed
+ *  or opened, so it is dropped rather than painted under a made-up key). Pure, so
+ *  it is unit-tested the way the other wire parsers are. */
+internal fun agentTaskFrom(o: kotlinx.serialization.json.JsonObject): AgentTask? {
+    val id = o["id"]?.jsonPrimitive?.contentOrNull ?: return null
+    val artifacts = (o["artifacts"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull {
+        (it as? kotlinx.serialization.json.JsonObject)?.get("path")?.jsonPrimitive?.contentOrNull
+    } ?: emptyList()
+    return AgentTask(
+        id = id,
+        title = o["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        state = o["state"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        thread = o["thread"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        sessionId = o["session_id"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        request = o["request"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        result = o["result"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        artifacts = artifacts,
+        createdAt = o["created_at"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        updatedAt = o["updated_at"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+    )
+}
+
 /** A goose project: a named source with a slug, NOT a directory. */
 data class ProjectInfo(
     val id: String,

@@ -8,6 +8,19 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Added
 
+- **My Day: handed-over work, above the loops.** assistant-state v4 (2026-11-01)
+  split "an act" out of "a fact": an `item` is a loop that needs attention, a
+  `task` is something you handed over — `running` while it works, `review` when it
+  stopped and is waiting for a look, with a one-line result and the paths it left
+  in the agent's workspace. This tab now paints those (`running`/`review` only) in
+  a **Handed over** section above Open: `review` rows are tinted and say "ready for
+  review", running ones show what was asked for, and the whole card taps through to
+  the session that did the work. **No new ABI** — the core grew a third section in
+  the existing `on_tasks` envelope (`tasks`, projected by its own field list, with
+  `request` trimmed to 300 characters since every byte crosses the FFI) and the app
+  parses it alongside `open`/`done`. A server older than v4 has no `task_list`,
+  which surfaces as `errors.tasks` rather than an empty section that would read
+  like "nothing was handed over".
 - **My Day: the Assistant tab, with the assistant's own working state under it.**
   Android's drawer loses the "Assistant" button and gains **My Day** (still gated
   by the Assistant switch): the always-on assistant thread at the top — status

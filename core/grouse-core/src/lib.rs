@@ -475,9 +475,12 @@ pub trait CoreListener: Send + Sync {
     /// (grouse#19: a silent `session/new` here was the "tapped a thread, got a
     /// blank one" defect).
     fn on_session_open_failed(&self, session_id: String, message: String);
-    /// The My Day tab's task lists (`{"open": [...], "done": [...], "errors": {...}}`),
-    /// from assistant-state's `state_items` over a deterministic `tools/call` —
-    /// no model turn. Emitted on every refresh and after every task action.
+    /// The My Day tab's lists
+    /// (`{"open": [...], "done": [...], "tasks": [...], "errors": {...}}`), from
+    /// assistant-state's `state_items` and `task_list` over a deterministic
+    /// `tools/call` — no model turn. `open`/`done` are items (loops); `tasks` is
+    /// handed-over work (`running` or waiting for `review`). Emitted on every
+    /// refresh and after every task action.
     fn on_tasks(&self, tasks: String);
 }
 
@@ -1669,8 +1672,8 @@ impl Core {
         }
     }
 
-    /// Both lists in one `on_tasks`. Sent together because the tab paints them
-    /// together; two callbacks would let it show a half-updated pair.
+    /// All three lists in one `on_tasks`. Sent together because the tab paints them
+    /// together; separate callbacks would let it show a half-updated set.
     async fn tasks_refresh_now(&self) {
         let open = self
             .tasks_call(|wire| crate::tasks::open_params(wire, 60))
@@ -1678,9 +1681,12 @@ impl Core {
         let done = self
             .tasks_call(|wire| crate::tasks::done_params(wire, 20))
             .await;
+        let tasks = self
+            .tasks_call(|wire| crate::tasks::task_params(wire, 20))
+            .await;
         self.inner
             .listener
-            .on_tasks(crate::tasks::envelope(open, done));
+            .on_tasks(crate::tasks::envelope(open, done, tasks));
     }
 
     /// A mutation, then a refresh: the UI reflects server state, never a local

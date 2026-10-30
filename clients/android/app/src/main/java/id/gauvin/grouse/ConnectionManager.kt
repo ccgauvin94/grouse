@@ -431,6 +431,8 @@ class ConnectionManager private constructor(context: Context) {
      *  arrive in ONE `on_tasks` so the tab never paints a half-updated pair. */
     val openTasks = mutableStateOf<List<TaskItem>>(emptyList())
     val doneTasks = mutableStateOf<List<TaskItem>>(emptyList())
+    /** Handed-over work: running, or waiting for review (assistant-state `task`). */
+    val handedTasks = mutableStateOf<List<AgentTask>>(emptyList())
     /** Set when a section failed: "nothing to do" and "could not ask" must not look alike. */
     val tasksError = mutableStateOf<String?>(null)
     /** A refresh is outstanding (spinner on the tab's refresh affordance). */
@@ -1619,6 +1621,7 @@ class ConnectionManager private constructor(context: Context) {
         if (root == null) { tasksError.value = "My Day: unreadable reply from the server"; return }
         openTasks.value = parseTasks(root["open"])
         doneTasks.value = parseTasks(root["done"])
+        handedTasks.value = parseAgentTasks(root["tasks"])
         val errors = root["errors"] as? JsonObject
         tasksError.value = errors?.entries?.joinToString("\n") { (section, msg) ->
             "$section: ${msg.jsonPrimitive.contentOrNull ?: "failed"}"
@@ -1649,6 +1652,14 @@ class ConnectionManager private constructor(context: Context) {
                 thread = o["thread"]?.jsonPrimitive?.contentOrNull.orEmpty(),
             )
         }
+    }
+
+    /** The `tasks` section: work handed over, not items. Absent on a server older
+     *  than assistant-state v4, which reads as "nothing was handed over" — the
+     *  envelope's `errors.tasks` is what distinguishes the two. */
+    private fun parseAgentTasks(el: kotlinx.serialization.json.JsonElement?): List<AgentTask> {
+        val arr = el as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { row -> (row as? JsonObject)?.let(::agentTaskFrom) }
     }
 
     // --- Server-side goose config (global config.yaml, edited over ACP) ---

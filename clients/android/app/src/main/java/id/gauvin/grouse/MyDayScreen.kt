@@ -136,6 +136,27 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                 }
             }
 
+            // Handed-over work first, above the loops: it is the only thing on this
+            // screen the assistant is DOING rather than reporting, and a row in
+            // `review` is a person's turn to act.
+            val handed = cm.handedTasks.value
+            if (handed.isNotEmpty()) {
+                item { SectionHeader("Handed over", handed.size) }
+                items(handed, key = { "task-${it.id}" }) { t ->
+                    HandedRow(
+                        t,
+                        onOpen = {
+                            // Tap through to the session that did the work: that is
+                            // where the discussion belongs, and it has the history.
+                            if (t.sessionId.isNotBlank()) {
+                                cm.openSession(t.sessionId)
+                                toChat()
+                            }
+                        },
+                    )
+                }
+            }
+
             val all = cm.openTasks.value
             // Snoozed rows arrive in the SAME section as awake ones (server-side a snoozed
             // item is still open, it is only quiet), so a partition here is what makes the
@@ -408,6 +429,56 @@ private fun TaskRow(
             }
         }
     }
+}
+
+/** One handed-over task. Read-only on purpose: the state moves from the server
+ *  (a turn updating it), and the action a person takes is to go and look at what
+ *  came back — so the whole card taps through to the session that did the work
+ *  rather than offering buttons that would need an intent the core does not have. */
+@Composable
+private fun HandedRow(t: AgentTask, onOpen: () -> Unit) {
+    val reviewing = t.state == "review"
+    val meta = listOfNotNull(
+        if (reviewing) "ready for review" else "working",
+        t.thread.takeIf { it.isNotBlank() }?.let(::threadName),
+        artifactsLabel(t.artifacts),
+    ).joinToString(" · ")
+    Card(
+        shape = RoundedCornerShape(12.dp),
+        onClick = onOpen,
+        colors = if (reviewing) {
+            CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+        } else {
+            CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+        },
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Text(t.title, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            // The line it came back with is the point of the row once it is done;
+            // while it runs, what was asked for is the only honest thing to show.
+            val body = if (t.result.isNotBlank()) t.result else t.request
+            if (body.isNotBlank()) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    body,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(meta, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+        }
+    }
+}
+
+/** "2 files · deck.pdf" — a count plus the first name, because a task's value is
+ *  usually a file and the full path list belongs in the thread, not in a meta line. */
+private fun artifactsLabel(paths: List<String>): String {
+    if (paths.isEmpty()) return ""
+    val first = paths.first().substringAfterLast('/')
+    return if (paths.size == 1) first else "${paths.size} files · $first"
 }
 
 /** Whether this row is asleep right now. A snooze whose `until` has passed IS open — the
