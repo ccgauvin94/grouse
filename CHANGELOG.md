@@ -35,6 +35,13 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed
 
+- **Reload on the desktop now forces the replay.** A click used to be the QUICK
+  refresh — a freshness probe that re-loads the newest row and repaints nothing when
+  the cache already matches the server — so on an unchanged chat the button silently
+  did nothing, and the force path existed only behind a long-press nobody discovers.
+  A click is the full replay now (`reloadSessionFromStart`), which is what the label
+  promises and what Android already offers as its own explicit action; `refreshSession`
+  (Quick) stays for the automatic paths.
 - **A Reload press on a roam chat could do nothing at all.** `RoamPeer::open_session_with`
   accepted only `Ready | Connecting` and returned silently for every other status, and
   `Syncing` is a real one (a resync, a reconnect's sync) — so a reload pressed in that

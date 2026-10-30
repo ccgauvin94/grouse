@@ -404,19 +404,21 @@ Kirigami.Page {
                 // replay when its cache looks current). The core paints the cached
                 // window provisionally and the full replay replaces it.
                 //
-                // Two strengths (grouse#18): the click is the QUICK refresh
-                // (freshness decides, the replay is ingested silently and painted
-                // once, so the chat lands on its newest messages); press-and-hold
-                // replays from the start, for a view known to have drifted.
+                // A click FORCES the reload (grouse#18's two strengths, but surfaced
+                // the way Android does it): the QUICK refresh is a freshness probe that
+                // legitimately repaints nothing when the cache already matches the
+                // server, so a button labelled "Reload" that silently did nothing read
+                // as broken — the force path was hidden behind a long-press nobody
+                // finds. `Mgr.refreshSession()` (Quick) remains for the automatic
+                // paths; the escape hatch is now the obvious gesture.
                 Controls.Button {
                     id: reloadPill
                     visible: Mgr.currentSessionId.length > 0
                     icon.name: "view-refresh"
                     text: qsTr("Reload")
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Re-fetch this conversation from the server · hold to replay it from the start")
-                    onClicked: Mgr.refreshSession()
-                    onPressAndHold: Mgr.reloadSessionFromStart()
+                    ToolTip.text: qsTr("Replay this conversation from the server, ignoring the local cache")
+                    onClicked: Mgr.reloadSessionFromStart()
                 }
 
                 // Per-conversation tool indicator: toggles the tools panel open
