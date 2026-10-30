@@ -896,6 +896,17 @@ impl Core {
         self.inner.hub.clear_display();
     }
 
+    /// The goose project that holds the assistant's own conversations (one chat per
+    /// thread label). A client creating a thread chat passes this as `new_session`'s
+    /// `project_id`: the session then inherits the project's instructions, which is
+    /// where the assistant persona lives, and is hidden from every chat list here.
+    ///
+    /// Exposed rather than duplicated so a client cannot drift from the rule the core
+    /// filters on — the value and the filtering are the same decision.
+    pub fn assistant_project(&self) -> String {
+        crate::session::ASSISTANT_PROJECT.to_string()
+    }
+
     /// `session/new` with `_meta.client` + cwd; replaces the current wire.
     /// `recipe_id` starts a recipe session; `project_id` files the chat under a
     /// project at creation (`_meta.projectId`, which stock goose persists to the

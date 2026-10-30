@@ -8,6 +8,18 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Added
 
+- **A thread chat now lives in the assistant PROJECT, and the project stays out of
+  every chat list.** discussing a thread files its session under the `assistant`
+  goose project, which is what makes the persona apply: goose injects a filed
+  session's project instructions into its prompts, so the model answers as the
+  assistant without the client pasting anything in. The other half is subtraction —
+  that project's sessions are the assistant's working memory for an area, not chats
+  in the user's list, so the core drops them from `session/list` (main and peer) and
+  drops the project from `sources/list`. It is one rule in one place because both
+  clients inherit it; the way into those chats is My Day's thread groups. Their cwds
+  are still recorded, because a thread chat is opened BY ID and `session/load`
+  rewrites the working dir from the cwd sent — dropping the side-table entry would
+  quietly move it on the first resume.
 - **My Day: threads group, and each one opens its own conversation.** A thread label
   with more than one thing in play now renders as a collapsible row — name, count,
   chevron, and **Discuss** — and expands in place to its items and handed-over work.

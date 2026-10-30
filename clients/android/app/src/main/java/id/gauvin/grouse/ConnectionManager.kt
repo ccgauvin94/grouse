@@ -1627,7 +1627,13 @@ class ConnectionManager private constructor(context: Context) {
             return
         }
         pendingThreadLabel = label
-        newSession(kind = SessionKind.CHAT)
+        // Filed under the assistant PROJECT, which is where the persona prompt lives:
+        // goose injects a session's project instructions into its prompts, so a thread
+        // chat answers the way the assistant does without the client pasting anything
+        // in. The core hides the project and its sessions from every chat list — the
+        // way in is My Day's thread groups — which is why the slug comes from the core
+        // rather than a constant of ours.
+        newSession(kind = SessionKind.CHAT, projectId = core.assistantProject())
     }
 
     /** Set by `openThreadChat` and consumed when the new session goes live, where its id

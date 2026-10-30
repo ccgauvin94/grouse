@@ -947,6 +947,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_archive_session(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_assistant_project(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_cancel(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_config(
@@ -1215,6 +1217,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_archive_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_core_assistant_project(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_cancel(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_config(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1514,6 +1518,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_archive_session() and 0xFFFF) != 46828) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_core_assistant_project() and 0xFFFF) != 34818) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_cancel() and 0xFFFF) != 53904) {
@@ -2373,6 +2380,17 @@ public interface CoreInterface {
     fun `archiveSession`(`sessionId`: kotlin.String)
     
     /**
+     * The goose project that holds the assistant's own conversations (one chat per
+     * thread label). A client creating a thread chat passes this as `new_session`'s
+     * `project_id`: the session then inherits the project's instructions, which is
+     * where the assistant persona lives, and is hidden from every chat list here.
+     *
+     * Exposed rather than duplicated so a client cannot drift from the rule the core
+     * filters on — the value and the filtering are the same decision.
+     */
+    fun `assistantProject`(): kotlin.String
+    
+    /**
      * `session/cancel` (a notification; never waits for a reply).
      */
     fun `cancel`()
@@ -2799,6 +2817,28 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 }
     }
     
+    
+
+    
+    /**
+     * The goose project that holds the assistant's own conversations (one chat per
+     * thread label). A client creating a thread chat passes this as `new_session`'s
+     * `project_id`: the session then inherits the project's instructions, which is
+     * where the assistant persona lives, and is hidden from every chat list here.
+     *
+     * Exposed rather than duplicated so a client cannot drift from the rule the core
+     * filters on — the value and the filtering are the same decision.
+     */override fun `assistantProject`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_assistant_project(
+        it,
+        _status)
+}
+    }
+    )
+    }
     
 
     

@@ -540,6 +540,26 @@ pub(crate) fn parse_config_options(result: &Value) -> Vec<ConfigOption> {
         .unwrap_or_default()
 }
 
+/// The goose project that holds the assistant's OWN conversations — one chat per
+/// thread label, opened from My Day's thread groups.
+///
+/// It is a real project, which is the point: goose injects a filed session's project
+/// instructions into its prompts (`agents/state_machine/ops_project.rs`), so the
+/// persona the assistant answers with in a thread chat is the project's content, not
+/// something a client has to paste in. It is also why the sessions filed under it are
+/// NOT chats in the user's list: they are the assistant's working memory for an area,
+/// reached from My Day, and both clients hide them by this one rule. That rule lives
+/// here rather than in either UI because "shared behaviour lands in the core, once".
+pub const ASSISTANT_PROJECT: &str = "assistant";
+
+/// Whether a summary belongs to the assistant's own project.
+pub(crate) fn in_assistant_project(summary: &SessionSummary) -> bool {
+    summary
+        .project_id
+        .as_deref()
+        .is_some_and(|p| p.trim().eq_ignore_ascii_case(ASSISTANT_PROJECT))
+}
+
 /// The fields every session summary shares. `lastMessageAt` takes precedence
 /// over `updatedAt`: goose bumps `updatedAt` on every load (merely selecting a
 /// chat), so ordering/freshness must follow message activity only.
@@ -647,6 +667,13 @@ pub(crate) fn parse_sessions(
         if !summary.updated_at.is_empty() {
             updated_at.push((session_id.to_string(), summary.updated_at.clone()));
         }
+        // Hidden from every chat list, but its cwd is recorded above on purpose: a
+        // thread chat is opened BY ID from My Day, and `session/load` rewrites the
+        // working dir from whatever cwd we send. Dropping the side-table entry would
+        // quietly move the chat's cwd on the first resume.
+        if in_assistant_project(&summary) {
+            continue;
+        }
         sessions.push(summary);
     }
     (sessions, cwds, updated_at)
@@ -655,13 +682,19 @@ pub(crate) fn parse_sessions(
 /// One typed `session/list` entry → summary (the peer's typed reply path).
 pub(crate) fn summary_from_info(label: Option<&str>, info: &SessionInfo) -> Option<SessionSummary> {
     let wire = info.session_id.to_string();
-    summary_from_fields(
+    let summary = summary_from_fields(
         display_id(label, &wire),
         info.title.as_deref(),
         info.updated_at.as_deref(),
         &info.cwd.to_string_lossy(),
         info.meta.as_ref(),
-    )
+    )?;
+    // Same rule as the WebSocket path: an assistant-project session is not a chat
+    // in the list, whoever is serving it.
+    if in_assistant_project(&summary) {
+        return None;
+    }
+    Some(summary)
 }
 
 /// The cwd a typed `session/list` entry carries.
@@ -802,6 +835,49 @@ mod tests {
         TranscriptOp,
     };
     use std::sync::Mutex as StdMutex;
+
+    #[test]
+    fn an_assistant_project_session_is_not_a_chat_but_keeps_its_cwd() {
+        // One chat per thread label is filed under the `assistant` project so the
+        // persona prompt applies — and then it must not appear in any chat list,
+        // because My Day's thread groups are the way in. Its cwd still has to be
+        // recorded: the chat is opened BY ID, and `session/load` rewrites the working
+        // dir from the cwd sent, so a missing side-table entry would move it.
+        let reply = json!({"sessions": [
+            {"sessionId": "s_thread", "title": "Thread: Dentist reschedule", "cwd": "/projects/x",
+             "updatedAt": "2026-10-30T21:00:00Z",
+             "_meta": {"projectId": "assistant", "lastMessageAt": "2026-10-30T21:02:00Z"}},
+            {"sessionId": "s_chat", "title": "Ordinary chat", "cwd": "/projects/y",
+             "updatedAt": "2026-10-30T20:00:00Z", "_meta": {}}
+        ]});
+        let (sessions, cwds, updated) = parse_sessions(&reply);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "s_chat");
+        assert!(cwds.contains(&("s_thread".to_string(), "/projects/x".to_string())));
+        assert!(updated.contains(&("s_thread".to_string(), "2026-10-30T21:02:00Z".to_string())));
+    }
+
+    #[test]
+    fn the_match_is_case_and_space_insensitive_but_not_fuzzy() {
+        // The column holds what a client sent; being lenient about case/whitespace
+        // costs nothing and the cost of being wrong is one hidden chat either way.
+        let mk = |pid: Option<&str>| SessionSummary {
+            id: "s".into(),
+            title: "t".into(),
+            updated_at: String::new(),
+            last_message_snippet: None,
+            project_id: pid.map(|p| p.to_string()),
+            message_count: 0,
+            model: String::new(),
+            has_recipe: false,
+            has_new: false,
+            archived: false,
+        };
+        assert!(in_assistant_project(&mk(Some("assistant"))));
+        assert!(in_assistant_project(&mk(Some(" Assistant "))));
+        assert!(!in_assistant_project(&mk(Some("assistant-2"))));
+        assert!(!in_assistant_project(&mk(None)));
+    }
 
     #[test]
     fn a_subagent_notification_becomes_one_step_on_the_delegate_row() {

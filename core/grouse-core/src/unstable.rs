@@ -277,7 +277,22 @@ impl GrouseUnstable {
         if let Some(result) =
             self.call(&*conn, "_goose/unstable/sources/list", json!({"type": source_type}))
         {
-            let sources = result.get("sources").cloned().unwrap_or(Value::Null).to_string();
+            let mut sources = result.get("sources").cloned().unwrap_or(Value::Null);
+            if source_type == "project" {
+                // The assistant's own project is not one of the user's groups: its
+                // sessions are hidden from every chat list (session.rs), so surfacing
+                // the project would paint an empty group with no way into it.
+                if let Some(list) = sources.as_array_mut() {
+                    list.retain(|p| {
+                        !p.get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|n| {
+                                n.trim().eq_ignore_ascii_case(crate::session::ASSISTANT_PROJECT)
+                            })
+                    });
+                }
+            }
+            let sources = sources.to_string();
             if source_type == "skill" {
                 self.listener.on_skills(sources);
             } else {
