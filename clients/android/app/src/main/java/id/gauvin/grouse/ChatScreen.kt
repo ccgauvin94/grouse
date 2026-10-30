@@ -183,15 +183,6 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     var hintDismissed by remember { mutableStateOf(cm.store.assistantHintSeen) }
     // rememberSaveable so a rotation/dark-mode recreate doesn't wipe the typed draft.
     var input by rememberSaveable { mutableStateOf("") }
-    // A handoff from My Day ("discuss this item") arrives as a prefilled line, not a sent
-    // prompt: the assistant needs the item id in the conversation, the user needs to finish
-    // the sentence. One-shot — consumed on entry so it cannot resurface on a later visit.
-    LaunchedEffect(Unit) {
-        cm.pendingDraft.value?.let { pending ->
-            cm.pendingDraft.value = null
-            if (input.isBlank()) input = pending
-        }
-    }
     // Hoisted to ConnectionManager so picked images survive recreation (see draftAttachments).
     val attachments = cm.draftAttachments
     // A NEW chat opens with an empty box. `input` is `rememberSaveable`, and starting a chat
@@ -199,6 +190,11 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     // composition slot, so the holder (and the half-typed message with it) came straight back:
     // the "new" chat was born with the previous one's draft. The counter is the explicit
     // signal, consumed exactly once so a rotation cannot eat a draft you are still writing.
+    //
+    // This effect is declared BEFORE the handoff below on purpose: a thread chat is created
+    // and prefilled in the same gesture (open the thread, type its opening line), and effects
+    // run in composition order, so clearing first and prefilling second is what makes the
+    // prefill survive.
     var handledFreshChat by rememberSaveable { mutableStateOf(0) }
     LaunchedEffect(cm.freshChatSeq.value) {
         val seq = cm.freshChatSeq.value
@@ -207,6 +203,15 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
             input = ""
             attachments.clear()
             cm.draftFiles.clear()
+        }
+    }
+    // A handoff from My Day ("discuss this item") arrives as a prefilled line, not a sent
+    // prompt: the assistant needs the item id in the conversation, the user needs to finish
+    // the sentence. One-shot — consumed on entry so it cannot resurface on a later visit.
+    LaunchedEffect(Unit) {
+        cm.pendingDraft.value?.let { pending ->
+            cm.pendingDraft.value = null
+            if (input.isBlank()) input = pending
         }
     }
     val listState = rememberLazyListState()
@@ -648,6 +653,10 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                 if (cm.onAssistant && !hintDismissed) AssistantHint {
                     hintDismissed = true; cm.store.assistantHintSeen = true
                 }
+                // A thread chat carries its thread with it: what is open under this
+                // label, and what has been handed over, painted above the conversation
+                // instead of left to a tool call the user cannot see.
+                cm.currentThreadLabel?.let { label -> ThreadPanel(cm, label) }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     if (cm.messages.isEmpty() && !cm.busy.value && cm.replayActive.value) {
                         // Opening an existing chat with nothing painted yet: the wire
@@ -1537,6 +1546,82 @@ private fun ComposerSheet(
 }
 
 /** Best-effort guess whether a model can accept images, to warn before hanging a text-only model. */
+/** The thread a chat is about, inline: its open loops and its handed-over work.
+ *
+ *  This is the "special" part of a thread chat — the same rows My Day shows, above the
+ *  conversation, so a discussion has the state in front of it. Collapsed by default to a
+ *  one-line summary; expanded it lists what is there. It reads the same `on_tasks`
+ *  payload the tab does (deterministic, no model turn), refreshed on entry, because
+ *  assistant-state has no push. */
+@Composable
+private fun ThreadPanel(cm: ConnectionManager, label: String) {
+    var expanded by rememberSaveable(label) { mutableStateOf(false) }
+    LaunchedEffect(label) { cm.refreshTasks() }
+    val items = cm.openTasks.value.filter { it.thread == label }
+    val tasks = cm.handedTasks.value.filter { it.thread == label }
+    if (items.isEmpty() && tasks.isEmpty()) return
+    val summary = listOfNotNull(
+        items.size.takeIf { n -> n > 0 }?.let { n -> "$n open" },
+        tasks.size.takeIf { n -> n > 0 }?.let { n -> "$n handed over" },
+    ).joinToString(" · ")
+    Card(
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Row(
+                Modifier.fillMaxWidth().clickable { expanded = !expanded },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    threadName(label),
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(summary, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline)
+                Icon(
+                    if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                    contentDescription = if (expanded) "collapse" else "expand",
+                    tint = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            if (expanded) {
+                tasks.forEach { t ->
+                    Text(
+                        (if (t.state == "review") "ready · " else "working · ") + t.title +
+                            if (t.result.isNotBlank()) " — ${t.result}" else "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                items.forEach { it ->
+                    val meta = listOfNotNull(
+                        dueLabel(it.dueAt).takeIf { d -> d.isNotBlank() },
+                        if (it.state == "snoozed") "snoozed" else null,
+                    ).joinToString(" · ")
+                    Text(
+                        it.title + if (meta.isNotBlank()) " — $meta" else "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
 private fun isLikelyVisionModel(model: String): Boolean {
     val s = model.lowercase()
     return listOf(

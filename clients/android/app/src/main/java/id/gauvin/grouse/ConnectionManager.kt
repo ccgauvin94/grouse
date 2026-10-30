@@ -433,6 +433,9 @@ class ConnectionManager private constructor(context: Context) {
     val doneTasks = mutableStateOf<List<TaskItem>>(emptyList())
     /** Handed-over work: running, or waiting for review (assistant-state `task`). */
     val handedTasks = mutableStateOf<List<AgentTask>>(emptyList())
+    /** `thread label -> session id`, mirrored from the store so the chat screen can ask
+     *  "is the conversation on screen a thread chat?" without parsing prefs per frame. */
+    val threadSessions = mutableStateOf(store.threadSessions)
     /** Set when a section failed: "nothing to do" and "could not ask" must not look alike. */
     val tasksError = mutableStateOf<String?>(null)
     /** A refresh is outstanding (spinner on the tab's refresh affordance). */
@@ -1570,6 +1573,72 @@ class ConnectionManager private constructor(context: Context) {
         newSession(kind = SessionKind.ASSISTANT)
     }
 
+    // --- Thread chats: one real conversation per thread label ---
+    // A thread is a LABEL on items, not a container — but talking about one deserves
+    // its own chat, so "what did we decide about the dentist" is one place instead of a
+    // needle in the always-on assistant thread. The session is a normal goose session
+    // (created once per label, renamed to it, remembered by id), so it has every
+    // globally-enabled extension — assistant-state, k_ir, chatrecall, memory — exactly
+    // as any other chat does. Nothing is scoped or faked here.
+
+    /** What a thread chat is titled. Humanised, because a label is a slug (`pnc-low-balance`). */
+    fun threadTitle(label: String): String =
+        "Thread: " + label.replace('-', ' ').replace('_', ' ').trim()
+            .replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+
+    /** The label of the conversation on screen, when that conversation IS a thread chat. */
+    val currentThreadLabel: String?
+        get() {
+            val cur = currentSession.value ?: return null
+            return threadSessions.value.entries.firstOrNull { it.value == cur }?.key
+        }
+
+    private fun threadSessionId(label: String): String? {
+        val id = threadSessions.value[label] ?: return null
+        // A session deleted on the server (or archived out of the list) must not be
+        // opened again — the core reports the failure and binds nothing (grouse#19), so
+        // a stale mapping would look like "the thread chat is broken". Forget it and
+        // create a fresh one instead. Skipped while the list is empty (not yet loaded).
+        if (sessions.value.isNotEmpty() && sessions.value.none { it.sessionId == id }) {
+            forgetThreadSession(label)
+            return null
+        }
+        return id
+    }
+
+    private fun rememberThreadSession(label: String, sid: String) {
+        val next = store.threadSessions + (label to sid)
+        store.threadSessions = next
+        threadSessions.value = next
+    }
+
+    private fun forgetThreadSession(label: String) {
+        val next = store.threadSessions - label
+        store.threadSessions = next
+        threadSessions.value = next
+    }
+
+    /** Open the chat for `label`, creating it the first time. Leaves the composer for the
+     *  caller to prefill; navigation is the caller's too, so this stays testable. */
+    fun openThreadChat(label: String) {
+        val existing = threadSessionId(label)
+        if (existing != null) {
+            openSession(existing)
+            return
+        }
+        pendingThreadLabel = label
+        newSession(kind = SessionKind.CHAT)
+    }
+
+    /** Set by `openThreadChat` and consumed when the new session goes live, where its id
+     *  is known: rename it after the thread and record the mapping. */
+    @Volatile private var pendingThreadLabel: String? = null
+
+    private fun adoptThreadSession(sid: String, label: String) {
+        core.renameSession(sid, threadTitle(label))
+        rememberThreadSession(label, sid)
+    }
+
     // --- My Day: assistant-state's open loops over a deterministic tool call ---
     // No model turn anywhere in this section: the tab has to open in milliseconds, and
     // assistant-state answers `state_items` in a few ms of SQLite. The core owns the calls
@@ -2230,6 +2299,12 @@ class ConnectionManager private constructor(context: Context) {
                 pendingAssistantRename = false
                 core.renameSession(sid, ASSISTANT_TITLE)
                 store.assistantSessionId = sid
+            }
+            // A thread chat is renamed and remembered here, where the created session's
+            // id first exists — the caller only knew the LABEL it asked for.
+            pendingThreadLabel?.let { label ->
+                pendingThreadLabel = null
+                adoptThreadSession(sid, label)
             }
             // Populate the in-chat "N tools" indicator and the per-extension tool lists.
             // MCP-backed extensions come up asynchronously AFTER the session is ready: a

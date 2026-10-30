@@ -8,6 +8,25 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Added
 
+- **My Day: threads group, and each one opens its own conversation.** A thread label
+  with more than one thing in play now renders as a collapsible row — name, count,
+  chevron, and **Discuss** — and expands in place to its items and handed-over work.
+  A single-entry label gets no header: nesting one row under a chevron costs a tap to
+  reveal the identical thing, and the last count was 21 in-play entries over 19
+  labels, so a header per label would have been all headers and no rows. Expansion
+  survives rotation (the state is a separator-joined string, because a `Set` is not
+  Bundle-friendly).
+- **A thread chat: one real goose session per thread, with the thread painted in.**
+  Discuss creates the session once per label, renames it `Thread: …`, remembers its id
+  (a title is not a safe key — you can rename it and goose can auto-name it) and
+  returns to it on the next tap. It is an ordinary session, so it carries every
+  globally-enabled extension — assistant-state, k_ir, chatrecall, memory — with no
+  scoping or faking. Above the conversation it shows that thread's open loops and
+  handed-over work, collapsed to "3 open · 1 handed over", refreshed on entry (the
+  same deterministic `on_tasks` payload the tab reads; no model turn).
+  Tapping a **labelled** item now opens its thread chat instead of the always-on
+  assistant thread; an unlabelled one still goes to the assistant thread, since it has
+  no thread to open. Either way the item id rides in the prefilled line.
 - **My Day: handed-over work, above the loops.** assistant-state v4 (2026-11-01)
   split "an act" out of "a fact": an `item` is a loop that needs attention, a
   `task` is something you handed over — `running` while it works, `review` when it

@@ -22,6 +22,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Refresh
@@ -73,6 +75,10 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
     // The item being closed, and which way: `done` (it happened) or `dropped` (it does
     // not matter). The note is REQUIRED by the workflow even though the tool accepts an
     // empty one: a closed item with no line is what makes the next briefing re-raise it.
+    // Which thread groups are open. A Set is not Bundle-friendly, so the state is a
+    // separator-joined string; it is only ever read whole, and rememberSaveable keeps a
+    // rotation from collapsing what you just opened.
+    var expandedLabels by rememberSaveable { mutableStateOf("") }
     var closing by remember { mutableStateOf<TaskItem?>(null) }
     var closeState by remember { mutableStateOf("done") }
     var closeNote by rememberSaveable { mutableStateOf("") }
@@ -136,27 +142,15 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                 }
             }
 
-            // Handed-over work first, above the loops: it is the only thing on this
-            // screen the assistant is DOING rather than reporting, and a row in
-            // `review` is a person's turn to act.
+            // Handed-over work and open loops together, GROUPED BY THREAD.
+            //
+            // A label is not a container — one area carries its obligations and the work
+            // handed over for it over months — so the list groups by it and lets a group
+            // with more than one entry open up. A single-entry label gets NO header:
+            // nesting one row under a chevron costs a tap to reveal the identical thing,
+            // and at the last count the in-play set was 21 entries over 19 labels, so a
+            // header per label would be all headers and no rows.
             val handed = cm.handedTasks.value
-            if (handed.isNotEmpty()) {
-                item { SectionHeader("Handed over", handed.size) }
-                items(handed, key = { "task-${it.id}" }) { t ->
-                    HandedRow(
-                        t,
-                        onOpen = {
-                            // Tap through to the session that did the work: that is
-                            // where the discussion belongs, and it has the history.
-                            if (t.sessionId.isNotBlank()) {
-                                cm.openSession(t.sessionId)
-                                toChat()
-                            }
-                        },
-                    )
-                }
-            }
-
             val all = cm.openTasks.value
             // Snoozed rows arrive in the SAME section as awake ones (server-side a snoozed
             // item is still open, it is only quiet), so a partition here is what makes the
@@ -166,32 +160,83 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
             val nowMs = System.currentTimeMillis()
             val snoozed = all.filter { it.isSnoozedAt(nowMs) }
             val open = all.filterNot { it.isSnoozedAt(nowMs) }
-            item { SectionHeader("Open", open.size) }
-            if (open.isEmpty() && cm.tasksError.value == null) {
+            val inPlay: List<DayEntry> = handed.map { DayEntry.Run(it) } + open.map { DayEntry.Loop(it) }
+            val groups = inPlay.groupBy { it.thread }.toList()
+            val expanded = expandedLabels.split(LABEL_SEP).filter { it.isNotBlank() }.toSet()
+
+            item { SectionHeader("Open", inPlay.size) }
+            if (inPlay.isEmpty() && cm.tasksError.value == null) {
                 item { EmptyRow(if (cm.online.value) "Nothing open. The assistant adds here when a briefing finds something." else "Not connected — the lists load once the server is reachable.") }
             }
-            items(open, key = { it.id }) { t ->
-                TaskRow(
-                    t,
-                    onDone = { closing = t; closeState = "done"; closeNote = "" },
-                    onDrop = { closing = t; closeState = "dropped"; closeNote = "" },
-                    onSnooze = {
-                        // Snooze to tomorrow morning, not "+24h": the point is to be quiet
-                        // overnight and be back before the 06:00 digest, and "+24h" from an
-                        // evening tap would skip that briefing entirely.
-                        cm.snoozeTask(t.id, nextMorning().toString(), "snoozed from My Day")
-                    },
-                    onOpen = {
-                        // Discuss in the ASSISTANT thread, not a per-task one: assistant-state's
-                        // beliefs and attention are global, so a task thread would talk to a
-                        // model with no context about any of it. The item id rides along in the
-                        // opening line — that is what lets the assistant call `state_items` /
-                        // `state_close` on THIS item instead of guessing which one you mean.
-                        cm.pendingDraft.value = "About item ${t.id} (${t.title.take(80)}): "
-                        cm.openAssistant()
-                        toChat()
-                    },
-                )
+            groups.forEach { (label, entries) ->
+                val collapsible = label.isNotBlank() && entries.size > 1
+                if (collapsible) {
+                    item(key = "thread:$label") {
+                        ThreadRow(
+                            label = label,
+                            count = entries.size,
+                            open = label in expanded,
+                            onToggle = { expandedLabels = toggleLabel(expandedLabels, label) },
+                            onDiscuss = {
+                                // A thread gets its own conversation: same label, own
+                                // session, every globally-enabled tool. The panel above
+                                // that chat paints this thread's rows inline.
+                                cm.openThreadChat(label)
+                                cm.pendingDraft.value = "About the \"$label\" thread: "
+                                toChat()
+                            },
+                        )
+                    }
+                }
+                if (!collapsible || label in expanded) {
+                    entries.forEach { entry ->
+                        when (entry) {
+                            is DayEntry.Run -> item(key = "task:${entry.task.id}") {
+                                HandedRow(
+                                    entry.task,
+                                    onOpen = {
+                                        // The session that did the work has the history —
+                                        // go there; fall back to the thread chat when the
+                                        // worker is gone.
+                                        if (entry.task.sessionId.isNotBlank()) {
+                                            cm.openSession(entry.task.sessionId)
+                                        } else if (entry.task.thread.isNotBlank()) {
+                                            cm.openThreadChat(entry.task.thread)
+                                        }
+                                        toChat()
+                                    },
+                                )
+                            }
+                            is DayEntry.Loop -> item(key = entry.task.id) {
+                                val t = entry.task
+                                TaskRow(
+                                    t,
+                                    onDone = { closing = t; closeState = "done"; closeNote = "" },
+                                    onDrop = { closing = t; closeState = "dropped"; closeNote = "" },
+                                    onSnooze = {
+                                        // Snooze to tomorrow morning, not "+24h": the point is
+                                        // to be quiet overnight and be back before the 06:00
+                                        // digest, and "+24h" from an evening tap would skip
+                                        // that briefing entirely.
+                                        cm.snoozeTask(t.id, nextMorning().toString(), "snoozed from My Day")
+                                    },
+                                    onOpen = {
+                                        // A labelled loop discusses in its THREAD chat (its own
+                                        // session, with the thread's rows above the composer);
+                                        // an unlabelled one has no thread to open, so it goes to
+                                        // the assistant thread. Either way the item id rides in
+                                        // the opening line so the model can state_items/state_close
+                                        // on THIS one instead of guessing.
+                                        if (t.thread.isNotBlank()) cm.openThreadChat(t.thread)
+                                        else cm.openAssistant()
+                                        cm.pendingDraft.value = "About item ${t.id} (${t.title.take(80)}): "
+                                        toChat()
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             if (snoozed.isNotEmpty()) {
@@ -353,6 +398,71 @@ private fun AssistantCard(
     }
 }
 
+/** One row of the in-play list, before grouping: either something the assistant is
+ *  doing (a `task`) or something it is reporting (an item). Both carry a thread label,
+ *  which is the only thing that decides how they group. */
+private sealed interface DayEntry {
+    val thread: String
+
+    data class Run(val task: AgentTask) : DayEntry {
+        override val thread: String get() = task.thread
+    }
+
+    data class Loop(val task: TaskItem) : DayEntry {
+        override val thread: String get() = task.thread
+    }
+}
+
+/** Separator for the expanded-labels string. A unit separator cannot appear in a
+ *  normalised label (those are `[a-z0-9-]`), so parsing can never split one in two. */
+private const val LABEL_SEP = "\u0001"
+
+internal fun toggleLabel(csv: String, label: String): String {
+    val set = csv.split(LABEL_SEP).filter { it.isNotBlank() }.toSet()
+    val next = if (label in set) set - label else set + label
+    return next.joinToString(LABEL_SEP)
+}
+
+/** A thread with more than one entry: its name, how many are under it, and the way
+ *  into its own conversation. */
+@Composable
+private fun ThreadRow(
+    label: String,
+    count: Int,
+    open: Boolean,
+    onToggle: () -> Unit,
+    onDiscuss: () -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(12.dp),
+        onClick = onToggle,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+    ) {
+        Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                contentDescription = if (open) "collapse" else "expand",
+                tint = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                threadName(label),
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text("$count", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.outline)
+            TextButton(onClick = onDiscuss, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                Text("Discuss")
+            }
+        }
+    }
+}
+
 @Composable
 private fun SectionHeader(title: String, count: Int) {
     Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -495,7 +605,7 @@ private fun TaskItem.isSnoozedAt(nowMs: Long): Boolean {
  *  (`chami-billing`), so hyphens become spaces and the first letter is capitalised — there is
  *  nothing to look up, because a label is all a thread is. An item with no label shows none
  *  rather than an empty segment in the meta line. */
-private fun threadName(label: String): String {
+internal fun threadName(label: String): String {
     val words = label.trim().replace('-', ' ').replace('_', ' ').trim()
     if (words.isEmpty()) return ""
     return words.replaceFirstChar { it.titlecase() }

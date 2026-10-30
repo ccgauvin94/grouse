@@ -301,6 +301,20 @@ class SecureStore(context: Context) {
         get() = cfg.getString("assistant_session", null)
         set(v) = cfg.edit().putString("assistant_session", v).apply()
 
+    /** Which chat belongs to which thread label — `label -> session id`.
+     *
+     *  "Discuss this thread" has to return to the SAME conversation, not mint a new
+     *  one every tap, and a session's title is not a safe key (the user can rename
+     *  it, and goose can auto-name it). Stored as a JSON object in plain prefs:
+     *  a thread label is not a secret, and the map is read whole, never queried. */
+    var threadSessions: Map<String, String>
+        get() = runCatching {
+            org.json.JSONObject(cfg.getString("thread_sessions", "{}") ?: "{}")
+                .let { o -> o.keys().asSequence().associateWith { o.getString(it) } }
+        }.getOrDefault(emptyMap())
+        set(v) = cfg.edit().putString("thread_sessions",
+            org.json.JSONObject(v as Map<*, *>).toString()).apply()
+
     /** Master switch for every assistant feature — the drawer entry, landing on the thread at
      *  startup, and the Assistant settings screen. OFF BY DEFAULT, deliberately.
      *
