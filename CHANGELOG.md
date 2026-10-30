@@ -35,6 +35,15 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed
 
+- **A Reload press on a roam chat could do nothing at all.** `RoamPeer::open_session_with`
+  accepted only `Ready | Connecting` and returned silently for every other status, and
+  `Syncing` is a real one (a resync, a reconnect's sync) — so a reload pressed in that
+  window issued no request, no status and no error, on peers only; the main wire has no
+  such gate. It accepts `Syncing` now, which is safe for the same reason `Connecting` is:
+  the command queue lives on the peer, so the command is buffered and runs when the loop
+  picks it up. (The Reload button itself is unchanged in intent: a click is the QUICK
+  refresh — it probes the newest row and suppresses the repaint when the cache is
+  current — and press-and-hold is the full replay, as its tooltip says.)
 - **A chat opens at its newest message, on both clients.** Both snapped once, then
   let the transcript paint over the top of that jump: rows are realized lazily (and
   recycled) on the desktop, and Android inserts each batch at the head of a
