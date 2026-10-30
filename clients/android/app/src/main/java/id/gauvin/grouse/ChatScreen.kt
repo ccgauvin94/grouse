@@ -194,6 +194,21 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
     }
     // Hoisted to ConnectionManager so picked images survive recreation (see draftAttachments).
     val attachments = cm.draftAttachments
+    // A NEW chat opens with an empty box. `input` is `rememberSaveable`, and starting a chat
+    // while already on this screen pops and re-pushes the SAME route — Compose reuses the
+    // composition slot, so the holder (and the half-typed message with it) came straight back:
+    // the "new" chat was born with the previous one's draft. The counter is the explicit
+    // signal, consumed exactly once so a rotation cannot eat a draft you are still writing.
+    var handledFreshChat by rememberSaveable { mutableStateOf(0) }
+    LaunchedEffect(cm.freshChatSeq.value) {
+        val seq = cm.freshChatSeq.value
+        if (seq != handledFreshChat) {
+            handledFreshChat = seq
+            input = ""
+            attachments.clear()
+            cm.draftFiles.clear()
+        }
+    }
     val listState = rememberLazyListState()
     // Leaving the chat closes the mic: conversation mode must not keep recording in the
     // background (or after a navigate-away).

@@ -619,6 +619,12 @@ class ConnectionManager private constructor(context: Context) {
     // images -- and base64 payloads stay out of the saved-state Bundle (TransactionTooLarge).
     val draftAttachments = mutableStateListOf<ImageBlock>()
     val draftFiles = mutableStateListOf<FileBlock>()
+    /** Bumped by `newSession()` and nothing else: "the box must be empty from here". The chat
+     *  screen needs a signal because starting a chat WHILE on the chat screen pops the `chat`
+     *  route and pushes it again, and Compose reuses the composition slot across that — so the
+     *  `rememberSaveable` draft holder survived and the "new" chat opened with the previous
+     *  chat's half-typed message (and its attachments) already in the composer. */
+    val freshChatSeq = mutableStateOf(0)
     val dynamicColor = mutableStateOf(store.dynamicColor)
     val showAllProviders = mutableStateOf(store.showAllProviders)
     // Live model list for the CURRENT provider, from the server, in memory only -- never
@@ -1393,6 +1399,9 @@ class ConnectionManager private constructor(context: Context) {
     ) {
         pendingOpenAssistant = false      // same as openSession: an explicit choice cancels it
         pendingAssistantRename = false
+        // A fresh chat starts with an empty composer (see freshChatSeq: the draft is local to
+        // the chat screen, and that screen's slot is reused when this replaces a live chat).
+        freshChatSeq.value += 1
         messages.clear(); lastSessionId = null; currentSession.value = null; config.value = emptyList()
         // A new chat always leaves any peer-owned session (the core clears its own routing too).
         currentRoamPeer = null

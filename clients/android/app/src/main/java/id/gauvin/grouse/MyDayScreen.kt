@@ -461,7 +461,7 @@ private fun nextMorning(): Instant {
 /** `due_at` arrives as a bare date ("2026-07-05") or a naive datetime ("2026-10-15T15:30").
  *  `relativeTime` parses neither, so it printed the raw string; what a reader needs is
  *  whether it is overdue and by how much. Past days dominate this list, hence "overdue". */
-private fun dueLabel(iso: String): String {
+internal fun dueLabel(iso: String): String {
     if (iso.isBlank()) return ""
     val date = runCatching {
         runCatching { java.time.LocalDate.parse(iso.take(10)) }
@@ -469,7 +469,10 @@ private fun dueLabel(iso: String): String {
             .recoverCatching { java.time.LocalDateTime.parse(iso).toLocalDate() }
             .getOrThrow()
     }.getOrNull() ?: return "due ${iso.take(10)}"
-    val days = java.time.temporal.ChronoUnit.DAYS.between(date, java.time.LocalDate.now())
+    // `DAYS.between(a, b)` is b - a, so NOW must come first for a future due date to be
+    // positive. With the arguments the other way round every branch inverted: an item due in
+    // a week read "overdue 7d" and the flu shot, 15 days past, read "due in 15d".
+    val days = java.time.temporal.ChronoUnit.DAYS.between(java.time.LocalDate.now(), date)
     return when {
         days <= -14 -> "overdue ${-days / 7}w"
         days < 0 -> "overdue ${-days}d"

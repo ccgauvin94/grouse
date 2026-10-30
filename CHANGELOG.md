@@ -44,6 +44,24 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed
 
+- **Every due date read backwards.** `ChronoUnit.DAYS.between(a, b)` is `b - a`, and the call
+  had `now` and the due date the wrong way round, so the sign of every branch inverted: the
+  year-end-review item due **2026-11-06** (seven days in the future) rendered "overdue 7d",
+  and the flu shot fifteen days past its Oct 15 date rendered "due in 15d". Nothing failed
+  loudly, because a due date is only ever read by a human and the briefing titles carry their
+  own prose — "eight days past its Oct 15 due date" sat directly above "due in 15d" and the
+  contradiction stayed invisible on screen. The fix is the argument order. `DueLabelTest`
+  pins both directions, today/tomorrow, the two-week switch to weeks, a naive datetime, and
+  junk/blank input.
+
+- **A new chat started with the previous chat's draft.** `input` is `rememberSaveable`, and
+  starting a chat while already on the chat screen pops the `chat` route and pushes it again —
+  Compose reuses the composition slot across that, so the holder (and the half-typed message,
+  and any picked attachments) came straight back and the "new" chat was born pre-filled.
+  Nothing in the core needed changing; `newSession()` now bumps `freshChatSeq` and the chat
+  screen empties the composer once per bump, so a rotation cannot eat a draft you are still
+  writing while an explicit "New chat" always starts clean.
+
 - **My Day's "Open" did nothing visible.** `openAssistant()` only *selects* the thread in
   the core, and My Day is its own route — so the tap switched the chat behind the screen
   and left you looking at My Day. It read as a dead button, and the next back press
