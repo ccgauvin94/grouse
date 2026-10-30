@@ -357,7 +357,7 @@ private fun TaskRow(
 ) {
     val meta = listOfNotNull(
         wakeLabel(t.snoozeUntil).takeIf { snoozed && it.isNotBlank() },
-        t.threadTitle.ifBlank { t.threadSlug }.takeIf { it.isNotBlank() },
+        threadName(t.thread).takeIf { it.isNotBlank() },
         dueLabel(t.dueAt).takeIf { it.isNotBlank() },
         t.kind.takeIf { it.isNotBlank() && it != "commitment" },
     ).joinToString(" · ")
@@ -407,6 +407,16 @@ private fun TaskItem.isSnoozedAt(nowMs: Long): Boolean {
     if (state != "snoozed") return false
     val until = runCatching { Instant.parse(snoozeUntil) }.getOrNull() ?: return true
     return until.toEpochMilli() > nowMs
+}
+
+/** The thread label as a reader wants it. The server's labels are normalised slugs
+ *  (`chami-billing`), so hyphens become spaces and the first letter is capitalised — there is
+ *  nothing to look up, because a label is all a thread is. An item with no label shows none
+ *  rather than an empty segment in the meta line. */
+private fun threadName(label: String): String {
+    val words = label.trim().replace('-', ' ').replace('_', ' ').trim()
+    if (words.isEmpty()) return ""
+    return words.replaceFirstChar { it.titlecase() }
 }
 
 /** When a snoozed row comes back: "wakes in 6h" / "wakes tomorrow 05:00". Short on purpose —

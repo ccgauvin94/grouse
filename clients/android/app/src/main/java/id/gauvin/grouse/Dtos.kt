@@ -83,8 +83,10 @@ data class TaskItem(
     val resolution: String = "",
     /** When a snoozed item comes back (ISO instant). Empty unless state is `snoozed`. */
     val snoozeUntil: String = "",
-    val threadSlug: String = "",
-    val threadTitle: String = "",
+    /** The area this item belongs to, as the server's normalised label (`chami-billing`);
+     *  empty when it has none. A LABEL, not a container: one thread can hold several items
+     *  over its life, and nothing in the server keys on it. */
+    val thread: String = "",
 )
 
 /** A goose project: a named source with a slug, NOT a directory. */

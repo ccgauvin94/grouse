@@ -189,11 +189,37 @@ fn slim(items: &mut Value) {
     for row in rows.iter_mut() {
         let Value::Object(map) = row else { continue };
         map.retain(|k, _| KEPT_FIELDS.contains(&k.as_str()) || k == "thread");
-        // `thread` is `{slug, title}` or null; the slug is what a message about
-        // the item references, the title is what the section header shows.
-        if let Some(Value::Object(t)) = map.get_mut("thread") {
-            t.retain(|k, _| k == "slug" || k == "title");
-        }
+        normalise_thread(map);
+    }
+}
+
+/// `thread` is a LABEL on the server since schema v3 (2026-10-29): one nullable
+/// string naming the area an item belongs to — one thread may hold many items
+/// over its life — and no thread table behind it. Servers before v3 answered
+/// `{slug, title}`; both shapes collapse to one string here so the app has a
+/// single field to render, and a blank label is DROPPED rather than forwarded as
+/// `""`, because an empty segment is visible noise in the row's meta line.
+///
+/// This is a real break, not a hypothetical: the app read `thread` as an object
+/// and rendered nothing once the server started answering a string, so the label
+/// silently vanished from every row until this normalisation landed.
+fn normalise_thread(map: &mut serde_json::Map<String, Value>) {
+    let Some(raw) = map.get("thread") else { return };
+    let label = match raw {
+        Value::String(s) => s.trim().to_string(),
+        Value::Object(o) => o
+            .get("title")
+            .or_else(|| o.get("slug"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        _ => String::new(),
+    };
+    if label.is_empty() {
+        map.remove("thread");
+    } else {
+        map.insert("thread".into(), Value::String(label));
     }
 }
 
@@ -335,12 +361,31 @@ mod tests {
             serde_json::from_str(&envelope(Ok(raw.to_string()), Ok("[]".to_string()))).unwrap();
         let row = &got["open"][0];
         assert_eq!(row["title"], "Ship it");
-        assert_eq!(row["thread"]["slug"], "chami-billing");
+        // An OLDER server's `{slug, title}` still renders: the label is the title.
+        assert_eq!(row["thread"], "chami billing");
         // Dropped: the tab never renders these, and they are the payload's bulk.
         assert!(row.get("evidence").is_none());
         assert!(row.get("dedupe_key").is_none());
         assert!(row.get("sources").is_none());
         assert!(row.get("thread_id").is_none());
+    }
+
+    #[test]
+    fn a_v3_thread_label_passes_through_and_a_blank_one_is_dropped() {
+        // The live shape since schema v3 (2026-10-29): `thread` is a nullable LABEL,
+        // not `{slug, title}`. Reading it as an object dropped it from every row.
+        let raw = r#"[{"id":"a","thread":"chami-billing","title":"Ship it"},
+                      {"id":"b","thread":"  ","title":"blank"},
+                      {"id":"c","thread":null,"title":"null"},
+                      {"id":"d","title":"absent"}]"#;
+        let got: Value =
+            serde_json::from_str(&envelope(Ok(raw.to_string()), Ok("[]".to_string()))).unwrap();
+        assert_eq!(got["open"][0]["thread"], "chami-billing");
+        // A blank/absent label is no label: the meta line would otherwise carry a
+        // stray separator for every unthreaded item, which is most of them.
+        for i in 1..4 {
+            assert!(got["open"][i].get("thread").is_none(), "row {i} kept a blank thread");
+        }
     }
 
     #[test]

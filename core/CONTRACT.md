@@ -336,9 +336,17 @@ reason this path exists.
   look alike.
 - **Rows are slimmed by the core** (`tasks.rs`, `KEPT_FIELDS`): id, kind, state,
   title, detail, owner, `due_at`, salience, confidence, resolution,
-  `snooze_until`, and the owning thread as `{slug, title}`. assistant-state's rows
+  `snooze_until`, and `thread` — the area's **label** as one string
+  (`chami-billing`), dropped when blank. assistant-state's rows
   also carry evidence, provenance and dedupe keys; those stay on the server — they
   are audit trail, not row content, and shipping them made one refresh 82 KB.
+  The label is normalised in the core because the server's own shape changed under
+  the client: assistant-state schema v3 (2026-10-29) replaced the `thread` table
+  with a nullable label on the item, so `thread` answers as a string where it used
+  to answer `{slug, title}`. `normalise_thread` accepts both and always emits the
+  string, so an app built against this contract has one field to render and an
+  older server cannot blank it. A thread is a grouping hint, not a container: one
+  label may hold many items over its life, and nothing keys on it.
 - **`open` holds snoozed rows too, so `snooze_until` is what separates them.** A
   snoozed item is still open server-side, only quiet until its wake time, which is
   why the open query is `state=open,snoozed`. A client MUST group rather than

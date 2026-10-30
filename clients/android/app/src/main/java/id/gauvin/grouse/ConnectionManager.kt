@@ -1623,7 +1623,6 @@ class ConnectionManager private constructor(context: Context) {
         return arr.mapNotNull { row ->
             val o = row as? JsonObject ?: return@mapNotNull null
             val id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-            val thread = o["thread"] as? JsonObject
             TaskItem(
                 id = id,
                 kind = o["kind"]?.jsonPrimitive?.contentOrNull.orEmpty(),
@@ -1635,8 +1634,10 @@ class ConnectionManager private constructor(context: Context) {
                 salience = o["salience"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull() ?: 0.0,
                 resolution = o["resolution"]?.jsonPrimitive?.contentOrNull.orEmpty(),
                 snoozeUntil = o["snooze_until"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                threadSlug = thread?.get("slug")?.jsonPrimitive?.contentOrNull.orEmpty(),
-                threadTitle = thread?.get("title")?.jsonPrimitive?.contentOrNull.orEmpty(),
+                // The core already normalised `thread` to one label (schema v3; it folds an
+                // older server's `{slug, title}` down to this string), so there is nothing
+                // shape-dependent left to do here.
+                thread = o["thread"]?.jsonPrimitive?.contentOrNull.orEmpty(),
             )
         }
     }

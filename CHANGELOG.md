@@ -29,6 +29,19 @@ All notable changes to Grouse are recorded here. The format is based on
   surface yet). No push for task state: the core refreshes on tab open, on the
   refresh affordance, and after every action.
 
+- **My Day: the item's thread is a label again.** assistant-state schema v3
+  (2026-10-29) dropped its `thread` table — an item now carries one nullable
+  label naming its area, and one label can hold many items over its life — so
+  `state_items` answers `thread` as a string where it used to answer
+  `{slug, title}`. The app still read the object shape, which meant the label
+  silently disappeared from every row. The core now normalises both shapes to
+  one string (`tasks.rs::normalise_thread`, blank dropped) and the row renders
+  it humanised ("Chami billing") instead of the raw slug. No ABI change: the
+  `on_tasks` payload only loses a nesting level. Grouping rows by label was
+  deliberately NOT added — measured against the live store, 21 open/snoozed
+  items span 19 labels (two labels hold two items each), so collapsing would
+  cost a tap to reveal one row; the label on the row says the same thing today.
+
 ### Fixed
 
 - **Snooze looked like it did nothing.** The write always worked (assistant-state
