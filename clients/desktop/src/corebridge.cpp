@@ -167,7 +167,7 @@ bool CoreBridge::resolve()
     // The listener table's layout and the symbol signatures are the contract.
     // An older core (or a stale GROUSE_CORE) is refused before any callback can
     // be invoked with the wrong arity.
-    static constexpr unsigned kExpectedAbiVersion = 6;
+    static constexpr unsigned kExpectedAbiVersion = 7;
     if (!a.grouse_abi_version) {
         qWarning() << "CoreBridge: core library predates the ABI version symbol; refusing it";
         return false;
@@ -299,6 +299,13 @@ static void cb_on_tasks(void *u, const char *json) {
     const QString s = copyStr(json);
     marshal(u, nullptr, [=](Manager *m) { m->coreOnTasks(s); });
 }
+static void cb_on_replay_progress(void *u, const char *sessionId, long long loaded,
+                                  long long total, int done) {
+    const QString sid = copyStr(sessionId);
+    marshal(u, nullptr, [=](Manager *m) {
+        m->coreOnReplayProgress(sid, static_cast<int>(loaded), static_cast<int>(total), done != 0);
+    });
+}
 static void cb_on_export(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnExport(s); }); }
 static void cb_on_recipe_params(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnRecipeParams(s); }); }
 static void cb_on_elicitation(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnElicitation(s); }); }
@@ -394,6 +401,7 @@ void CoreBridge::installListener()
         nullptr,   // on_transcript
         cb_on_session_open_failed,
         cb_on_tasks,
+        cb_on_replay_progress,
     };
     m_listener = &table;
 

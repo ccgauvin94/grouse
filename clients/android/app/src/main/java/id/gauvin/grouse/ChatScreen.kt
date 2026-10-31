@@ -511,7 +511,9 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                                 // seconds and a static "Connecting…" looked hung. The counter
                                 // proves it's advancing; it also covers the fresh-install
                                 // case where there is no cached snapshot to paint meanwhile.
-                                cm.replayActive.value -> "Loading… ${cm.replayProgress.value}"
+                                cm.replayActive.value -> if (cm.replayTotal.value > 0)
+                                    "Loading… ${cm.replayProgress.value} / ${cm.replayTotal.value}"
+                                else "Loading… ${cm.replayProgress.value}"
                                 cm.onAssistant && busy -> "Assistant · working…"
                                 cm.onAssistant -> "Assistant"
                                 online && busy -> "%s · working…".format(cm.currentChatTitle ?: "Grouse")
@@ -672,9 +674,25 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             Text(stringResource(R.string.loading_conversation), style = MaterialTheme.typography.titleMedium)
                             if (cm.replayProgress.value > 0) {
                                 Spacer(Modifier.height(4.dp))
-                                Text("${cm.replayProgress.value} messages",
+                                Text(
+                                    if (cm.replayTotal.value > 0)
+                                        "${cm.replayProgress.value} / ${cm.replayTotal.value} messages"
+                                    else
+                                        "${cm.replayProgress.value} messages",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.outline)
+                                // A reload rebuilds the whole history: say how far
+                                // along it is instead of leaving a spinner to stand
+                                // in for minutes. Thin, and gone the moment it ends.
+                                if (cm.replayTotal.value > 0) {
+                                    Spacer(Modifier.height(6.dp))
+                                    LinearProgressIndicator(
+                                        progress = { cm.replayProgress.value.toFloat() /
+                                            cm.replayTotal.value.toFloat() },
+                                        modifier = Modifier.width(180.dp).height(3.dp),
+                                        strokeCap = androidx.compose.ui.graphics.StrokeCap.Round,
+                                    )
+                                }
                             }
                         }
                     } else if (cm.messages.isEmpty() && !cm.busy.value) {

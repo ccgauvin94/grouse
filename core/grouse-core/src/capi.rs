@@ -46,7 +46,7 @@ use crate::{
 /// The desktop refuses a library whose value it does not expect — a mismatch is
 /// a callback called with the wrong arity (a garbage pointer), not a compile
 /// error, so it must be caught at load time.
-pub const GROUSE_ABI_VERSION: u32 = 6;
+pub const GROUSE_ABI_VERSION: u32 = 7;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
@@ -226,6 +226,13 @@ pub struct GrouseCoreListener {
     /// "errors": {...}}`). Appended at the END for the same reason as
     /// `on_session_open_failed`; ABI 6.
     pub on_tasks: Option<extern "C" fn(*mut c_void, *const c_char)>,
+    /// A full replay's progress: `(session_id, loaded, total, done)`. `loaded`
+    /// counts MESSAGES the replay has ingested and `total` is the server's
+    /// `messageCount` (0 when unknown) — the reload bar's two numbers. `done`
+    /// fires once when the replay ends, whatever its length. Appended at the
+    /// END; ABI 7.
+    pub on_replay_progress:
+        Option<extern "C" fn(*mut c_void, *const c_char, i64, i64, i32)>,
 }
 
 /// Bridges the core's typed listener traits to the installed C table. The raw
@@ -314,6 +321,25 @@ unsafe fn cb_str_i32(
         let cs = c_str(s);
         if !cs.is_null() {
             f(user_data, cs, v);
+            grouse_string_free(cs);
+        }
+    }
+}
+
+/// Call a string+two ints+flag callback (`on_replay_progress`).
+#[inline]
+unsafe fn cb_replay_progress(
+    f: Option<extern "C" fn(*mut c_void, *const c_char, i64, i64, i32)>,
+    user_data: *mut c_void,
+    session_id: &str,
+    loaded: i64,
+    total: i64,
+    done: bool,
+) {
+    if let Some(f) = f {
+        let cs = c_str(session_id);
+        if !cs.is_null() {
+            f(user_data, cs, loaded, total, if done { 1 } else { 0 });
             grouse_string_free(cs);
         }
     }
@@ -494,6 +520,18 @@ impl CoreListener for CoreCallbackForwarder {
         };
     }    fn on_tasks(&self, tasks: String) {
         unsafe { cb_str1(table_fn!(self, on_tasks), self.user_data, &tasks) };
+    }
+    fn on_replay_progress(&self, session_id: String, loaded: i64, total: i64, done: bool) {
+        unsafe {
+            cb_replay_progress(
+                table_fn!(self, on_replay_progress),
+                self.user_data,
+                &session_id,
+                loaded,
+                total,
+                done,
+            )
+        };
     }
 }
 

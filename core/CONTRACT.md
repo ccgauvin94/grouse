@@ -85,7 +85,7 @@ defaulting to real verification; roam byte stream). The UI supplies only
 | `disconnect()` | — | explicit close, no reconnect |
 | `new_session(recipe_id: Option<String>, project_id: Option<String>)` | — | `session/new` with `_meta.client` + cwd; `recipeId`/`projectId` when given. `projectId` is persisted by stock goose at creation, so a project chat needs no post-creation `session/project/update` |
 | `open_session(session_id: String)` | — | `session/load` with the real cwd (core resolves it); a settled, matching cache paints authoritatively and suppresses the replay, a settled-but-stale one merges a bounded tail, an incomplete one full-replays |
-| `refresh_session(session_id: String, mode: RefreshMode)` | — | routes by id: a `roam:<label>:<raw>` id reloads on its peer (`RoamPeer::open_session_with`, `force` honoured), anything else on the main wire. `RefreshMode::Quick` lets freshness decide (a settled, current cache suppresses the replay; a settled-but-stale one merges a bounded tail; an incomplete store still replays in full); `RefreshMode::Full` forces the full `session/load` replay regardless. Either way the replay is ingested silently and ends in one windowed paint (grouse#18) |
+| `refresh_session(session_id: String, mode: RefreshMode)` | — | routes by id: a `roam:<label>:<raw>` id reloads on its peer (`RoamPeer::open_session_with`, `force` honoured), anything else on the main wire. `RefreshMode::Quick` lets freshness decide (a settled, current cache suppresses the replay; a settled-but-stale one merges a bounded tail; an incomplete store still replays in full); `RefreshMode::Full` is a RELOAD: it deletes that session's cache file (transcript and tool cache — invalidation, not merely ignoring the stamp, so nothing can be merged from or re-saved out of a store known to be wrong), clears the painted transcript, forces the full `session/load` replay, and reports it on `on_replay_progress`. **One reload per session at a time**: a `Full` arriving while that session's replay is in flight is dropped, because a second one would clear the transcript again mid-rebuild. Either way the replay is ingested silently and ends in one windowed paint (grouse#18) |
 | `list_sessions()` | — | refreshes `session/list` |
 | `send_prompt(prompt: Prompt, expect: Option<SendExpect>)` | — | text/image/resource blocks; ONE path for both transports. Routes by `expect.session_id` (fallback: the displayed id) through `Core::owner_for`; an id the core has never opened is rejected instead of mis-routed. Queues per SESSION when that chat's owner is not ready or already has a turn in flight — a turn in another chat never blocks this one (turns are concurrent per session). Echoes the prompt once (`TranscriptStore::echo_prompt`) and finalizes in `Core::on_turn_ended` (run end, cache save with the incomplete-stamp rule, stamp re-baseline, per-session queue flush) |
 | `cancel()` | — | `session/cancel` (notification) |
@@ -136,8 +136,25 @@ pub trait CoreListener {
     // for every refresh and after every task action — never mid-turn, because
     // none of these calls runs a model.
     fn on_tasks(&self, tasks: String);
+    // A FULL replay's progress: `loaded` messages ingested so far, `total` the
+    // session's `messageCount` as the server last reported it (0 = unknown), and
+    // `done` once when the replay ends — the clients' reload bar, and a terminal
+    // event so none of them has to infer completion. Emitted for every replay
+    // (a normal open starts at 0 of N); `Quick` replays say nothing beyond that.
+    fn on_replay_progress(&self, session_id: String, loaded: i64, total: i64, done: bool);
 }
 ```
+
+**A reload invalidates; a refresh merely asks.** `RefreshMode::Quick` trusts a
+settled cache and merges a bounded tail, which is right for an open and useless
+for a transcript known to be wrong. `Full` therefore deletes the session's cache
+files before loading, so the rebuild starts from nothing: the client shows an
+empty chat and a progress bar (`on_replay_progress`) rather than a stale
+transcript that could be merged into. It is single-flight per session — while
+that session's replay is in flight, another `Full` for it is dropped — and the
+progress is counted in MESSAGES (distinct message ids the replay ingested), so
+the number is comparable with the server's `messageCount` instead of counting
+chunks a message arrives as many of.
 
 **A failed open never substitutes a session** (grouse#19). `open_session`/
 `refresh_session` either load the requested session or report

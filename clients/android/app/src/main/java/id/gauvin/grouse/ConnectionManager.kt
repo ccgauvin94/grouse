@@ -372,6 +372,12 @@ class ConnectionManager private constructor(context: Context) {
         // My Day: assistant-state's own items over a deterministic tool call (no
         // model turn), gated by the Assistant switch like the tab itself.
         override fun onTasks(tasks: String) { main.post { onCoreTasks(tasks) } }
+        // A full replay's progress: messages ingested, the server's message count,
+        // and `done`. The core owns the numbers (it counts distinct message ids);
+        // this only paints them.
+        override fun onReplayProgress(sessionId: String, loaded: Long, total: Long, done: Boolean) {
+            main.post { onCoreReplayProgress(sessionId, loaded.toInt(), total.toInt(), done) }
+        }
     }, appContext.filesDir.absolutePath)
     private val unstable = GrouseUnstable(object : GrouseUnstableListener {
         override fun onExport(data: String) { main.post { exportData.value = data } }
@@ -974,6 +980,10 @@ class ConnectionManager private constructor(context: Context) {
     // history streams in. Without it a long replay sat on a static "Connecting…" and looked
     // hung; the count proves it is advancing.
     val replayProgress = mutableStateOf(0)
+    /** The session's message count as the SERVER reports it (`onReplayProgress`),
+     *  0 while unknown. The reload bar's denominator: "412 / 4215" instead of a
+     *  bare count that cannot say how much is left. */
+    val replayTotal = mutableStateOf(0)
 
     /** True while the chat's pinned-app dock is open. The shell suspends the main drawer's
      *  swipe gesture on it: scrolling the dock's nested WebView leaks its horizontal component
@@ -1386,8 +1396,13 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun reloadCurrent(full: Boolean) {
         val sid = currentSession.value ?: return
+        // ONE reload at a time: a second pull while the replay is in flight would
+        // clear the transcript again mid-rebuild. The core refuses the repeat too;
+        // refusing here keeps the handle honest.
+        if (full && replayActive.value) return
         replayActive.value = true
         replayProgress.value = 0
+        replayTotal.value = 0
         openFailed.value = null
         // The core owns owner routing: `refreshSession` detects the `roam:` prefix,
         // rebinds the peer as display owner and asks that peer to re-load (honoring
@@ -1696,6 +1711,16 @@ class ConnectionManager private constructor(context: Context) {
         val id = assistantSessionId() ?: run { openAssistant(); return }  // no thread yet: create it
         if (!onAssistant) openAssistant()
         if (currentSession.value == id) send(text)
+    }
+
+    /** A full replay's progress from the core (`onReplayProgress`). Only the chat
+     *  on screen owns the bar — a background replay must not paint here. */
+    private fun onCoreReplayProgress(sessionId: String, loaded: Int, total: Int, done: Boolean) {
+        val current = currentSession.value
+        if (current != null && sessionId != current) return
+        replayProgress.value = loaded
+        replayTotal.value = total
+        replayActive.value = !done
     }
 
     private fun onCoreTasks(json: String) {

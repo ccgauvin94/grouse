@@ -468,6 +468,7 @@ void Manager::restoreRoamPeers()
 void Manager::openRoamSession(const QString &label, const QString &sessionId, const QString &cwd)
 {
     setMyDayVisible(false);   // opening a conversation takes the chat area back from My Day
+    resetReloadProgress();    // a reload bar belongs to the chat that started it
     m_activePeerLabel = label;
     // A parked message belongs to the chat it was typed in, so opening another chat must
     // not discard it — the same per-chat queue Android keeps. Only Stop drops one.
@@ -650,6 +651,7 @@ void Manager::testConnection()
 void Manager::openSession(const QString &sessionId)
 {
     setMyDayVisible(false);   // opening a conversation takes the chat area back from My Day
+    resetReloadProgress();    // a reload bar belongs to the chat that started it
     m_activePeerLabel.clear();
     // Parking is per chat: a message queued in the chat we are leaving keeps waiting for
     // ITS turn to end (flushQueue only drains the on-screen chat's), so a switch cannot
@@ -702,11 +704,40 @@ void Manager::refreshSession()
 
 void Manager::reloadSessionFromStart()
 {
-    // FULL: ignore freshness and replay the whole session — the escape hatch for
-    // a view known to have drifted. It is the slower, heavier of the two, so it
-    // stays behind an explicit gesture.
+    // FULL: throw the cached transcript away and rebuild the chat from the
+    // server — the escape hatch for a view known to have drifted, and the only
+    // path that is allowed to ignore what is on disk. It is the slower, heavier
+    // of the two, so it stays behind an explicit gesture.
+    //
+    // ONE at a time: a second press while the replay is in flight would clear
+    // the transcript again mid-rebuild and restart the bar. The core refuses the
+    // repeat as well; refusing here keeps the button honest.
+    if (m_reloading)
+        return;
     setStatus(QStringLiteral("reloading from the start…"));
     refreshSessionWith(1);
+}
+
+void Manager::resetReloadProgress()
+{
+    if (!m_reloading && m_replayLoaded == 0 && m_replayTotal == 0)
+        return;
+    m_reloading = false;
+    m_replayLoaded = 0;
+    m_replayTotal = 0;
+    emit reloadProgressChanged();
+}
+
+void Manager::coreOnReplayProgress(const QString &sessionId, int loaded, int total, bool done)
+{
+    // Only the chat on screen owns the bar: a background replay (a peer, or a
+    // chat opened behind this one) must not paint its progress here.
+    if (!sessionId.isEmpty() && sessionId != m_currentSessionId)
+        return;
+    m_replayLoaded = loaded;
+    m_replayTotal = total;
+    m_reloading = !done;
+    emit reloadProgressChanged();
 }
 
 void Manager::refreshSessionWith(int full)
@@ -722,6 +753,7 @@ void Manager::refreshSessionWith(int full)
 void Manager::newChat()
 {
     setMyDayVisible(false);   // a new conversation also takes the chat area back
+    resetReloadProgress();
     m_activePeerLabel.clear();
     emit queuedChanged();
     m_landing = false;

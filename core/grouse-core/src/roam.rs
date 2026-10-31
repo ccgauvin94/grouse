@@ -1483,6 +1483,7 @@ mod tests {
     }
 
     impl CoreListener for RecordingListener {
+        fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
         fn on_status(&self, status: ConnectionStatus) {
             self.events
                 .lock()

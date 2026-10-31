@@ -482,6 +482,16 @@ pub trait CoreListener: Send + Sync {
     /// handed-over work (`running` or waiting for `review`). Emitted on every
     /// refresh and after every task action.
     fn on_tasks(&self, tasks: String);
+
+    /// A full replay's progress (`refresh_session` with `Full`).
+    ///
+    /// `loaded` counts MESSAGES the replay has ingested, `total` is the
+    /// session's `messageCount` as the server last reported it (`0` when
+    /// unknown), and `done` fires once when the replay ends. A normal open —
+    /// `Quick`, which suppresses or tail-merges — reports nothing: it has no
+    /// full replay to describe. One `done` per reload is the client's signal to
+    /// put the bar away, so it does not have to infer completion.
+    fn on_replay_progress(&self, session_id: String, loaded: i64, total: i64, done: bool);
 }
 
 /// Unstable events (CONTRACT §5). Retiring with `grouse-unstable`.
@@ -621,6 +631,13 @@ struct CoreState {
     /// it on its connection (and the peer had none, so the peer's fresh-cache
     /// opens appended the last turn again).
     suppressing: HashSet<String>,
+    /// Message ids the replay in flight has ingested, per session — the
+    /// numerator of the reload bar. Cleared when that replay ends.
+    replay_seen: HashMap<String, HashSet<String>>,
+    /// Each session's message count as the server last reported it (`0` =
+    /// unknown): the reload bar's denominator, so it reads "412 / 4215" instead
+    /// of spinning.
+    message_counts: HashMap<String, i64>,
     /// The live turn's run id per displayed session (main or peer). A run ends
     /// only when one was actually started, so a bare title update cannot clear
     /// the app's busy/steer state.
@@ -996,6 +1013,20 @@ impl Core {
     /// and ends in one windowed paint (grouse#18).
     pub fn refresh_session(&self, session_id: String, mode: RefreshMode) {
         let force = matches!(mode, RefreshMode::Full);
+        if force {
+            // ONE reload at a time. A second command while the replay is in
+            // flight would clear the store again mid-rebuild and restart the
+            // bar, so it is dropped — the running reload already fetches
+            // everything the newer one would have.
+            if self.inner.state.lock().replaying.contains(&session_id) {
+                return;
+            }
+            // TOTAL invalidation, not just "disbelieve the stamp": the cache
+            // FILE goes. Otherwise a wrong store could be merged into or
+            // re-saved from, which is the thing a reload exists to escape.
+            self.inner.cache.forget(&session_id);
+            self.inner.hub.display(&session_id).clear();
+        }
         // A peer owns its own wire and cache; the same intent must reach it
         // instead of clearing the display owner and loading on the main wire
         // (which does not own `roam:<label>:<id>`).
@@ -1956,6 +1987,9 @@ impl Core {
                     state
                         .session_updated_at
                         .insert(key.clone(), updated_at.clone());
+                }
+                if message_count >= 0 {
+                    state.message_counts.insert(key.clone(), message_count);
                 }
                 // Baseline for the move test in `on_session_probe`. Without
                 // this, the first `session_info_update` after a prompt (the
@@ -3304,18 +3338,62 @@ impl crate::session::DispatchHost for Core {
         }
     }
     fn begin_replay(&self, key: &str, suppress: bool) {
-        let mut state = self.inner.state.lock();
-        state.replaying.insert(key.to_string());
-        if suppress {
-            state.suppressing.insert(key.to_string());
-        } else {
-            state.suppressing.remove(key);
-        }
+        let total = {
+            let mut state = self.inner.state.lock();
+            state.replaying.insert(key.to_string());
+            state.replay_seen.remove(key);
+            if suppress {
+                state.suppressing.insert(key.to_string());
+            } else {
+                state.suppressing.remove(key);
+            }
+            state.message_counts.get(key).copied().unwrap_or(0)
+        };
+        // Emitted for every replay (not only a forced one): a client that shows
+        // an open's progress gets a 0 of N to start from, and one that ignores
+        // it loses nothing.
+        self.inner
+            .listener
+            .on_replay_progress(key.to_string(), 0, total, false);
     }
     fn end_replay(&self, key: &str) {
-        let mut state = self.inner.state.lock();
-        state.replaying.remove(key);
-        state.suppressing.remove(key);
+        let (loaded, total) = {
+            let mut state = self.inner.state.lock();
+            state.replaying.remove(key);
+            state.suppressing.remove(key);
+            let loaded = state
+                .replay_seen
+                .remove(key)
+                .map(|seen| seen.len() as i64)
+                .unwrap_or(0);
+            (loaded, state.message_counts.get(key).copied().unwrap_or(0))
+        };
+        self.inner
+            .listener
+            .on_replay_progress(key.to_string(), loaded, total, true);
+    }
+    fn replay_tick(&self, key: &str, message_id: &str) {
+        let (loaded, total, emit) = {
+            let mut state = self.inner.state.lock();
+            if !state.replaying.contains(key) {
+                return;
+            }
+            let total = state.message_counts.get(key).copied().unwrap_or(0);
+            let seen = state.replay_seen.entry(key.to_string()).or_default();
+            let before = seen.len();
+            seen.insert(message_id.to_string());
+            let loaded = seen.len();
+            // A reassurance, not an odometer: redraw every 25 messages, or every
+            // one while the session is small enough that 25 would be a jump.
+            let emit =
+                loaded != before && (loaded.is_multiple_of(25) || total <= 25 || loaded as i64 == total);
+            (loaded as i64, total, emit)
+        };
+        if emit {
+            self.inner
+                .listener
+                .on_replay_progress(key.to_string(), loaded, total, false);
+        }
     }
     fn replaying(&self, key: &str) -> bool {
         self.inner.state.lock().replaying.contains(key)
@@ -3424,6 +3502,7 @@ mod tests {
     }
 
     impl CoreListener for Events {
+        fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
         fn on_status(&self, _: ConnectionStatus) {}
         fn on_sessions(&self, _: Vec<SessionSummary>) {}
         fn on_item(&self, _: TranscriptOp) {}
@@ -3464,6 +3543,9 @@ mod tests {
     struct ArcListener(Arc<dyn CoreListener>);
 
     impl CoreListener for ArcListener {
+        fn on_replay_progress(&self, s: String, l: i64, t: i64, d: bool) {
+            self.0.on_replay_progress(s, l, t, d);
+        }
         fn on_status(&self, status: ConnectionStatus) {
             self.0.on_status(status);
         }

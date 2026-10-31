@@ -580,7 +580,10 @@ Kirigami.Page {
                     icon.name: "view-refresh"
                     text: qsTr("Reload")
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Replay this conversation from the server, ignoring the local cache")
+                    ToolTip.text: Mgr.reloading
+                                  ? qsTr("A reload is already running for this chat")
+                                  : qsTr("Replay this conversation from the server, ignoring the local cache")
+                    enabled: !Mgr.reloading
                     onClicked: Mgr.reloadSessionFromStart()
                 }
 
@@ -588,6 +591,37 @@ Kirigami.Page {
                 // from the right of the chat area. A plain native Button (no
                 // custom background) so the label/icon render with theme colors
                 // and it behaves like a standard control.
+                // Reload progress. A reload throws the cached transcript away and
+                // rebuilds it from the server, which on a long thread is a wait
+                // with nothing to look at — so it says how far along it is. A 3px
+                // bar and the message count, nothing louder.
+                RowLayout {
+                    id: reloadProgressRow
+                    Layout.fillWidth: true
+                    spacing: Theme.spacing.s2
+                    visible: Mgr.reloading
+                    Controls.ProgressBar {
+                        Layout.fillWidth: true
+                        implicitHeight: 3
+                        from: 0
+                        to: Math.max(1, Mgr.replayTotal)
+                        value: Mgr.replayLoaded
+                        // Nothing to divide by yet (the server's messageCount has
+                        // not been probed): show movement rather than a bar that
+                        // sits at zero and looks stalled.
+                        indeterminate: Mgr.replayTotal <= 0
+                    }
+                    Controls.Label {
+                        textFormat: Text.PlainText
+                        renderType: Text.NativeRendering
+                        font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.78))
+                        color: Kirigami.Theme.disabledTextColor
+                        text: Mgr.replayTotal > 0
+                              ? qsTr("%1 / %2").arg(Mgr.replayLoaded).arg(Mgr.replayTotal)
+                              : qsTr("%1 messages").arg(Mgr.replayLoaded)
+                    }
+                }
+
                 Controls.Button {
                     id: toolsPill
                     visible: Mgr.online

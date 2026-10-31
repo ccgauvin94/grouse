@@ -160,6 +160,21 @@ impl CacheStore {
         Some((items, updated_at))
     }
 
+    /// Delete a session's cached transcript and its tool cache.
+    ///
+    /// Reload must INVALIDATE, not merely disbelieve: `plan_paint` can ignore a
+    /// cache's freshness, but a file that is wrong (a truncated turn, rows this
+    /// client cannot reconcile) is still there to be merged into or re-saved
+    /// from. Removing it makes the next open a genuine rebuild from the server.
+    /// Best-effort — a missing file is the success case.
+    pub fn forget(&self, session_id: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        let _ = fs::remove_file(self.transcript_path(session_id));
+        let _ = fs::remove_file(self.tools_path(session_id));
+    }
+
     /// Persist the session directory (the drawer's names + the per-session
     /// cwd side-table) so the UI can render it before the first session/list
     /// round trip. Returns whether the file was written.
@@ -336,6 +351,27 @@ mod tests {
             images: Vec::new(),
             message_id: String::new(),
         }
+    }
+
+    #[test]
+    fn forget_removes_the_transcript_and_the_tool_cache() {
+        // A reload invalidates: the file must be GONE, not merely disbelieved —
+        // a wrong cache left on disk is one a later open can merge into or
+        // re-save from, which is the thing the reload exists to escape.
+        let dir = temp_cache_dir("forget");
+        let store = CacheStore::new(dir.clone());
+        let items = vec![text("m1", ItemKind::Agent, "hi")];
+        assert!(store.save_transcript("s", &items, "2026-10-31T00:00:00Z"));
+        assert!(store.load_transcript("s").is_some());
+
+        store.forget("s");
+        assert!(store.load_transcript("s").is_none(), "transcript must be gone");
+
+        // Idempotent, and a blank id is not a directory-wide wipe.
+        store.forget("s");
+        store.forget("");
+        assert!(dir.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

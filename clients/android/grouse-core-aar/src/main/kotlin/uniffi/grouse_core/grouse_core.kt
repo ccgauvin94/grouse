@@ -701,6 +701,9 @@ internal interface UniffiCallbackInterfaceCoreListenerMethod15 : com.sun.jna.Cal
 internal interface UniffiCallbackInterfaceCoreListenerMethod16 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`tasks`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfaceCoreListenerMethod17 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`loaded`: Long,`total`: Long,`done`: Byte,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`data`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
@@ -767,7 +770,7 @@ internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod20 : com.s
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod21 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`method`: RustBuffer.ByValue,`message`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "onStatus", "onSessions", "onItem", "onUsage", "onRunEnded", "onSpeak", "onConfig", "onPermissionRequest", "onSessionTouched", "onProjects", "onRoamPeerStatus", "onRoamSessions", "onPeerNewSession", "onActiveRun", "onCommands", "onSessionOpenFailed", "onTasks")
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onStatus", "onSessions", "onItem", "onUsage", "onRunEnded", "onSpeak", "onConfig", "onPermissionRequest", "onSessionTouched", "onProjects", "onRoamPeerStatus", "onRoamSessions", "onPeerNewSession", "onActiveRun", "onCommands", "onSessionOpenFailed", "onTasks", "onReplayProgress")
 internal open class UniffiVTableCallbackInterfaceCoreListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
     @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
@@ -788,6 +791,7 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
     @JvmField internal var `onCommands`: UniffiCallbackInterfaceCoreListenerMethod14? = null,
     @JvmField internal var `onSessionOpenFailed`: UniffiCallbackInterfaceCoreListenerMethod15? = null,
     @JvmField internal var `onTasks`: UniffiCallbackInterfaceCoreListenerMethod16? = null,
+    @JvmField internal var `onReplayProgress`: UniffiCallbackInterfaceCoreListenerMethod17? = null,
 ) : Structure() {
     class UniffiByValue(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -809,7 +813,8 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
         `onCommands`: UniffiCallbackInterfaceCoreListenerMethod14? = null,
         `onSessionOpenFailed`: UniffiCallbackInterfaceCoreListenerMethod15? = null,
         `onTasks`: UniffiCallbackInterfaceCoreListenerMethod16? = null,
-    ): UniffiVTableCallbackInterfaceCoreListener(`uniffiFree`,`uniffiClone`,`onStatus`,`onSessions`,`onItem`,`onUsage`,`onRunEnded`,`onSpeak`,`onConfig`,`onPermissionRequest`,`onSessionTouched`,`onProjects`,`onRoamPeerStatus`,`onRoamSessions`,`onPeerNewSession`,`onActiveRun`,`onCommands`,`onSessionOpenFailed`,`onTasks`,), Structure.ByValue
+        `onReplayProgress`: UniffiCallbackInterfaceCoreListenerMethod17? = null,
+    ): UniffiVTableCallbackInterfaceCoreListener(`uniffiFree`,`uniffiClone`,`onStatus`,`onSessions`,`onItem`,`onUsage`,`onRunEnded`,`onSpeak`,`onConfig`,`onPermissionRequest`,`onSessionTouched`,`onProjects`,`onRoamPeerStatus`,`onRoamSessions`,`onPeerNewSession`,`onActiveRun`,`onCommands`,`onSessionOpenFailed`,`onTasks`,`onReplayProgress`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceCoreListener) {
         `uniffiFree` = other.`uniffiFree`
@@ -831,6 +836,7 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
         `onCommands` = other.`onCommands`
         `onSessionOpenFailed` = other.`onSessionOpenFailed`
         `onTasks` = other.`onTasks`
+        `onReplayProgress` = other.`onReplayProgress`
     }
 
 }
@@ -1142,6 +1148,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_grouse_core_checksum_method_corelistener_on_session_open_failed(
     ): Int
     external fun uniffi_grouse_core_checksum_method_corelistener_on_tasks(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_corelistener_on_replay_progress(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export(
     ): Int
@@ -1812,6 +1820,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_tasks() and 0xFFFF) != 11726) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_replay_progress() and 0xFFFF) != 38008) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export() and 0xFFFF) != 3482) {
@@ -6818,6 +6829,18 @@ public interface CoreListener {
      */
     fun `onTasks`(`tasks`: kotlin.String)
     
+    /**
+     * A full replay's progress (`refresh_session` with `Full`).
+     *
+     * `loaded` counts MESSAGES the replay has ingested, `total` is the
+     * session's `messageCount` as the server last reported it (`0` when
+     * unknown), and `done` fires once when the replay ends. A normal open —
+     * `Quick`, which suppresses or tail-merges — reports nothing: it has no
+     * full replay to describe. One `done` per reload is the client's signal to
+     * put the bar away, so it does not have to infer completion.
+     */
+    fun `onReplayProgress`(`sessionId`: kotlin.String, `loaded`: kotlin.Long, `total`: kotlin.Long, `done`: kotlin.Boolean)
+    
     companion object
 }
 
@@ -7040,6 +7063,21 @@ internal object uniffiCallbackInterfaceCoreListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
+    internal object `onReplayProgress`: UniffiCallbackInterfaceCoreListenerMethod17 {
+        override fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`loaded`: Long,`total`: Long,`done`: Byte,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onReplayProgress`(
+                    FfiConverterString.lift(`sessionId`),
+                    FfiConverterLong.lift(`loaded`),
+                    FfiConverterLong.lift(`total`),
+                    FfiConverterBoolean.lift(`done`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
 
     internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
@@ -7073,6 +7111,7 @@ internal object uniffiCallbackInterfaceCoreListener {
         `onCommands`,
         `onSessionOpenFailed`,
         `onTasks`,
+        `onReplayProgress`,
     )
 
     // Registers the foreign callback with the Rust side.

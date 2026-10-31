@@ -20,6 +20,7 @@ fn short(id: &str) -> &str {
 
 struct L(Arc<std::sync::Mutex<Vec<String>>>);
 impl CoreListener for L {
+    fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
     fn on_status(&self, s: ConnectionStatus) { println!("status: {s:?}"); self.0.lock().unwrap().push(format!("{s:?}")); }
     fn on_sessions(&self, _s: Vec<grouse_core::SessionSummary>) {}
     fn on_session_touched(&self, _i: String, t: String, u: String) { println!("-- touched: {:?} {}", t, u); }

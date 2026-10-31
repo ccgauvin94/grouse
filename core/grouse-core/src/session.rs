@@ -1022,6 +1022,7 @@ mod tests {
         fn on_commands(&self, _: Vec<String>) {}
         fn on_session_open_failed(&self, _: String, _: String) {}
         fn on_tasks(&self, _: String) {}
+        fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
     }
 
     fn hub() -> (Arc<SessionHub>, Arc<Recorder>) {
@@ -1343,6 +1344,11 @@ pub(crate) trait DispatchHost: Send + Sync {
     /// A live turn started for `key` (a replay is over).
     fn end_replay(&self, key: &str);
     fn replaying(&self, key: &str) -> bool;
+
+    /// One message id ingested by a `session/load` replay, for the reload
+    /// progress the clients paint. Defaulted to a no-op: only the real core
+    /// counts, and a host that does not care must not have to implement it.
+    fn replay_tick(&self, _key: &str, _message_id: &str) {}
     /// Fresh-cache opens drop replayed rows; other transports keep them.
     fn accepts_chat(&self, key: &str) -> bool;
     /// Background content arrived (green dot).
@@ -1554,6 +1560,19 @@ pub(crate) fn dispatch(
         }
     } else if host.is_summarizer(&key) {
         return;
+    }
+    // A replay's progress counts MESSAGES, not chunks — a message arrives as
+    // many — so the number is comparable with the server's `messageCount`.
+    if host.replaying(&key) {
+        let mid = match &notif.update {
+            SessionUpdate::UserMessageChunk(c) => c.message_id.as_ref().map(|m| m.to_string()),
+            SessionUpdate::AgentMessageChunk(c) => c.message_id.as_ref().map(|m| m.to_string()),
+            SessionUpdate::AgentThoughtChunk(c) => c.message_id.as_ref().map(|m| m.to_string()),
+            _ => None,
+        };
+        if let Some(mid) = mid {
+            host.replay_tick(&key, &mid);
+        }
     }
     let store = host.store(&key);
     let mut content = false;
@@ -1927,5 +1946,12 @@ impl crate::CoreListener for SessionGate {
     }
     fn on_tasks(&self, tasks: String) {
         self.inner.on_tasks(tasks);
+    }
+    fn on_replay_progress(&self, session_id: String, loaded: i64, total: i64, done: bool) {
+        // Gated like every other per-session event: a reload of a chat that is
+        // not on screen must not paint that chat's bar.
+        if self.shown() && session_id == self.key {
+            self.inner.on_replay_progress(session_id, loaded, total, done);
+        }
     }
 }
