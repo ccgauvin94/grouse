@@ -416,7 +416,16 @@ public:
     // tokens to answer "what is open". The core owns the call, the hidden
     // auto-mode session it runs on, and the three-section envelope; this side
     // decodes it (myday.cpp) and sends the four intents the server acts on.
+    // A reload is rebuilding this chat from the server: the bar is up and the
+    // Reload button is refusing further presses (ONE reload at a time).
+    Q_PROPERTY(bool reloading READ reloading NOTIFY reloadProgressChanged)
+    Q_PROPERTY(int replayLoaded READ replayLoaded NOTIFY reloadProgressChanged)
+    Q_PROPERTY(int replayTotal READ replayTotal NOTIFY reloadProgressChanged)
     Q_PROPERTY(bool myDayVisible READ myDayVisible NOTIFY myDayVisibleChanged)
+    bool reloading() const { return m_reloading; }
+    int replayLoaded() const { return m_replayLoaded; }
+    int replayTotal() const { return m_replayTotal; }
+
     /** True while the chat area shows My Day instead of a conversation. */
     bool myDayVisible() const { return m_myDayVisible; }
     /** Open items — snoozed ones included: server-side a snoozed item is still
@@ -511,6 +520,13 @@ public:
     void coreOnExport(const QString &data);
     /** The My Day lists arrived (both sections in one JSON document). */
     void coreOnTasks(const QString &json);
+
+public slots:
+    /// A full replay's progress (`on_replay_progress`): the Reload bar's numbers
+    /// and the flag that says one is running. `done` ends it.
+    void coreOnReplayProgress(const QString &sessionId, int loaded, int total, bool done);
+
+public:
     void coreOnRecipeParams(const QString &parameters);
     void coreOnElicitation(const QString &schema);
     void coreOnCompactionStatus(const QString &message);
@@ -572,6 +588,7 @@ signals:
     void myDayVisibleChanged();
     /** The on-screen chat became (or stopped being) a thread chat. */
     void currentThreadLabelChanged();
+    void reloadProgressChanged();
     /** Put `text` in the composer: a thread chat's opening line, or "" to clear
      *  it when a new conversation starts. A draft belongs to the chat it was
      *  typed in, and ChatPage's input outlives a `newChat()` — so the page clears
@@ -611,6 +628,9 @@ private:
     /// blocks are skipped) and bounded to the last few rows, so it costs
     /// nothing on the normal path.
     void finishTail(int lookback = 4);
+
+    /// Drop the reload bar (session switch, new chat). Emits only on a change.
+    void resetReloadProgress();
     QStringList m_configuredProviders;
     QString m_announcedTurnSession;
     qint64 m_announcedTurnAtMs = 0;
@@ -817,6 +837,9 @@ private:
     /// My Day's last `on_tasks` document, verbatim (see `tasksJson()`).
     QString m_tasksJson;
     // ---- My Day + thread chats -------------------------------------------
+    bool m_reloading = false;   // a full replay is rebuilding this chat
+    int m_replayLoaded = 0;     // messages ingested so far
+    int m_replayTotal = 0;      // the server's message count (0 = unknown)
     bool m_myDayVisible = false;
     bool m_tasksLoading = false;
     QVariantList m_myDayOpen;

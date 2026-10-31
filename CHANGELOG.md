@@ -120,6 +120,24 @@ All notable changes to Grouse are recorded here. The format is based on
   items span 19 labels (two labels hold two items each), so collapsing would
   cost a tap to reveal one row; the label on the row says the same thing today.
 
+### Changed
+
+- **Reload is a real rebuild, and it says how far along it is.** A refresh trusted
+  a settled cache and merged a bounded tail, which is right for an open and
+  useless for a transcript known to be wrong — so the reload path (`RefreshMode::Full`,
+  the Reload button on the desktop and the pull-up handle on the phone) now
+  DELETES that session's cache files instead of merely disbelieving their stamp,
+  clears the painted chat and replays the whole thing from the server. Nothing
+  stale is left on disk to be merged into or re-saved from, which is the thing a
+  reload exists to escape.
+  It is **single-flight per session**: a second reload while one is in flight is
+  dropped rather than restarting the rebuild, and both clients disable the gesture
+  while it runs. Progress arrives on a new listener event (`on_replay_progress`,
+  ABI 7) as `loaded` / `total` counted in MESSAGES — distinct message ids the
+  replay ingested, against the server's `messageCount` — so a long thread shows
+  "412 / 4215" beside a 3px bar instead of a spinner that means nothing. `done`
+  is the terminal event, so no client has to guess when to put the bar away.
+
 ### Fixed
 
 - **Desktop: a fenced code block came with a blank bubble at each end, and a message

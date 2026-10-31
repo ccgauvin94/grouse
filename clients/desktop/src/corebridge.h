@@ -250,5 +250,9 @@ struct GrouseCoreListener {
     // The My Day tab's task lists (`{"open": [...], "done": [...], "errors": {...}}`),
     // ABI 6. Appended last for the same reason as `on_session_open_failed`.
     void (*on_tasks)(void *, const char *);
+    // A full replay's progress: (session_id, loaded, total, done). `loaded`
+    // counts messages ingested, `total` is the server's messageCount (0 when
+    // unknown) — the Reload bar's two numbers. ABI 7.
+    void (*on_replay_progress)(void *, const char *, long long, long long, int);
 };
 }

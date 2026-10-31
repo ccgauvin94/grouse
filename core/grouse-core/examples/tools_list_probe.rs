@@ -19,6 +19,7 @@ fn short(id: &str) -> &str {
 
 struct L(Arc<std::sync::Mutex<Vec<String>>>);
 impl CoreListener for L {
+    fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
     fn on_status(&self, s: ConnectionStatus) {
         println!("status: {s:?}");
     }
