@@ -122,6 +122,17 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed
 
+- **Desktop: the window failed to load at all once My Day shipped.** `main.qml`
+  instantiates `MyDayPage`, but `ui/MyDayPage.qml` was never added to the
+  `qt_add_resources` list in `CMakeLists.txt`, so the type did not exist at runtime
+  and `QQmlApplicationEngine` failed the whole component
+  (`qrc:/main.qml:750:13: MyDayPage is not a type`) — host build and flatpak alike,
+  nothing rendered. Registered it with the other pages.
+- **`tst_myday`'s meta-line case only passed in UTC.** It built `now` as a
+  machine-local `QDateTime` and fed it `…T18:00:00Z` snooze strings, so "wakes in 6h"
+  was the expectation only in a UTC zone: in US Mountain 18:00Z *is* 12:00 local, the
+  delta was zero and the row read "wakes now". `now` is pinned to UTC, as in the
+  `wakeLabel` case above it.
 - **Desktop: a fenced code block came with a blank bubble at each end, and a message
   without one was split anyway.** `markdownBlocks` pushed a newline into the prose
   accumulator *before* flushing it, so a fence at the start of a message (or one closed

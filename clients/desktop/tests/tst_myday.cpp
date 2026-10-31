@@ -235,7 +235,11 @@ void TestMyDay::artifactsLabel_countsAndNamesOne()
 void TestMyDay::metaLine_dropsEmptySegments()
 {
     const QDate today(2026, 10, 30);
-    const QDateTime now(QDate(2026, 10, 30), QTime(12, 0, 0));
+    // UTC, like the snoozeUntil strings below: a machine-local `now` would make
+    // "wakes in 6h" the expectation only in a UTC zone (18:00Z IS 12:00 local in
+    // US Mountain, so the case silently became "wakes now").
+    const QDateTime now = QDateTime::fromString(QStringLiteral("2026-10-30T12:00:00Z"),
+                                               Qt::ISODate);
     // "commitment" is the default kind, so naming it says nothing.
     const QVariantMap plain{{"kind", "commitment"}, {"thread", ""}, {"dueAt", ""}};
     QCOMPARE(MyDay::metaLine(plain, false, today, now), QString());
