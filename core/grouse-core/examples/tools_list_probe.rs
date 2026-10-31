@@ -7,6 +7,16 @@
 use grouse_core::{ConnectionStatus, Core, CoreListener, ServerConfig};
 use std::sync::Arc;
 
+/// A session id is an identifier, not a credential — it is only usable
+/// alongside the secret key that authorised it — but CodeQL's
+/// `rust/cleartext-logging` query flags anything of that shape reaching a log
+/// sink, and a probe printing one added a high-severity alert to every PR. The
+/// probes therefore print a prefix: enough to correlate two runs by eye, not
+/// enough to be worth copying anywhere.
+fn short(id: &str) -> &str {
+    &id[..id.len().min(8)]
+}
+
 struct L(Arc<std::sync::Mutex<Vec<String>>>);
 impl CoreListener for L {
     fn on_status(&self, s: ConnectionStatus) {
@@ -104,7 +114,7 @@ fn main() {
     core.new_session(None, None);
     std::thread::sleep(std::time::Duration::from_secs(4));
     let sid = core.active_session_id().unwrap_or_default();
-    println!("session: {sid}");
+    println!("session: {}…", short(&sid));
     let unstable = grouse_core::GrouseUnstable::new(Box::new(UL(sink.clone())));
     unstable.list_tools(sid);
     std::thread::sleep(std::time::Duration::from_secs(6));

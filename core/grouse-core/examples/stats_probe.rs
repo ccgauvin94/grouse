@@ -7,6 +7,17 @@
 //!   (HOST/PORT env: default 127.0.0.1:3284, TLS trust-all for self-signed)
 use grouse_core::{ConnectionStatus, Core, CoreListener, Prompt, PromptBlock, ServerConfig};
 use std::sync::Arc;
+
+/// A session id is an identifier, not a credential — it is only usable
+/// alongside the secret key that authorised it — but CodeQL's
+/// `rust/cleartext-logging` query flags anything of that shape reaching a log
+/// sink, and a probe printing one added a high-severity alert to every PR. The
+/// probes therefore print a prefix: enough to correlate two runs by eye, not
+/// enough to be worth copying anywhere.
+fn short(id: &str) -> &str {
+    &id[..id.len().min(8)]
+}
+
 struct L(Arc<std::sync::Mutex<Vec<String>>>);
 impl CoreListener for L {
     fn on_status(&self, s: ConnectionStatus) { println!("status: {s:?}"); self.0.lock().unwrap().push(format!("{s:?}")); }
@@ -14,7 +25,7 @@ impl CoreListener for L {
     fn on_session_touched(&self, _i: String, t: String, u: String) { println!("-- touched: {:?} {}", t, u); }
     fn on_item(&self, _op: grouse_core::TranscriptOp) {}
     fn on_usage(&self, u: i64, s: i64, c: f64, cur: String) { println!("-- on_usage(acp): used={u} call={s} cost={c} model={cur}"); }
-    fn on_run_ended(&self, s: String, r: String) { println!("-- run_ended: {s} {r}"); }
+    fn on_run_ended(&self, s: String, r: String) { println!("-- run_ended: {}… {r}", short(&s)); }
     fn on_speak(&self, _t: String) {}
     fn on_config(&self, _o: Vec<grouse_core::ConfigOption>) {}
     fn on_permission_request(&self, _r: grouse_core::PermissionRequest) {}
