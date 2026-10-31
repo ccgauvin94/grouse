@@ -6305,13 +6305,21 @@ public object FfiConverterTypePromptBlock : FfiConverterRustBuffer<PromptBlock>{
 
 
 /**
- * What a push is: a finished-turn nudge, or a proactive briefing.
+ * What a push is: a finished-turn nudge, a proactive briefing, or a piece of
+ * handed-over work that has stopped and is waiting for a look.
+ *
+ * `Tasks` exists because those three land in different places. A turn wants the
+ * conversation, a briefing wants the assistant thread, and a task wants My Day —
+ * where its result line and the rest of the thread already are. A sender that does
+ * not know about it (or an older one) posts `briefing`, which is still a correct
+ * notification; only the deep link is lost.
  */
 
 enum class PushKind {
     
     TURN,
-    BRIEFING;
+    BRIEFING,
+    TASKS;
 
     
 

@@ -71,9 +71,25 @@ private convention (Android historically `GROUSE_PUSH_ENDPOINT`, desktop
 ```json
 {"type":"turn","session":"<session id>","text":"<optional reply text>"}
 {"type":"notify","text":"<one sentence>"}
+{"type":"task","text":"<the result line>"}
 ```
 
 Anything that is not a JSON object is treated as a briefing (`text` = the raw
-body). `turn` is a finished-turn nudge; every other type is proactive/briefing.
-`text` is optional — a sender that cannot know the reply (a server-side hook
-never sees the transcript) may omit it.
+body). `text` is optional — a sender that cannot know the reply (a server-side
+hook never sees the transcript) may omit it.
+
+The three known types differ in where a TAP lands, which is the whole reason
+`task` exists apart from `briefing`:
+
+| type | announced when | tap opens |
+|---|---|---|
+| `turn` | a reply you armed finished | that conversation |
+| `notify` / anything else | a proactive message (a briefing) | the app (the assistant thread is one tap away) |
+| `task` (`tasks` is accepted too) | handed-over work reached `review` | **My Day**, refreshed on arrival, because that is where the row, its result line and the rest of the thread live |
+
+The show/don't-show decision is one implementation for every client
+(`core/grouse-core/src/notify.rs`): a visible app is never interrupted, empty text
+is a sender bug, and a `turn` is only announced by a client that can call it its
+own. A `task` is proactive like a briefing — no armed session — but named for what
+it is, so the destination can differ. A client older than the type treats it as a
+briefing: a correct notification with the wrong destination, never silence.

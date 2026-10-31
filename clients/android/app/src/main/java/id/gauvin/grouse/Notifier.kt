@@ -30,17 +30,21 @@ class Notifier(context: Context) {
         }
     }
 
-    /** Tap intent: open the app, optionally deep-linking to a specific session. */
-    private fun openApp(sessionId: String? = null): PendingIntent {
+    /** Tap intent: open the app, optionally deep-linking to a session or to My Day. */
+    private fun openApp(sessionId: String? = null, myDay: Boolean = false): PendingIntent {
         val i = Intent(app, MainActivity::class.java)
             .setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         val sid = sessionId?.takeIf { it.isNotBlank() }   // blank == no thread yet → just open the app
-        if (sid != null) {
-            i.action = MainActivity.ACTION_OPEN_SESSION
-            i.putExtra(MainActivity.EXTRA_SESSION_ID, sid)
+        when {
+            myDay -> i.action = MainActivity.ACTION_OPEN_MYDAY
+            sid != null -> {
+                i.action = MainActivity.ACTION_OPEN_SESSION
+                i.putExtra(MainActivity.EXTRA_SESSION_ID, sid)
+            }
         }
-        // Distinct requestCode per session so PendingIntents don't collapse onto one another.
-        val rc = sid?.hashCode() ?: 0
+        // Distinct requestCode per target so PendingIntents don't collapse onto one another
+        // (a My Day tap and an unrelated session tap must not be the same identity).
+        val rc = if (myDay) -1 else sid?.hashCode() ?: 0
         return PendingIntent.getActivity(app, rc, i, flags(mutable = false))
     }
 
@@ -60,7 +64,8 @@ class Notifier(context: Context) {
      * MessagingStyle + the SEMANTIC_ACTION_REPLY/MARK_AS_READ actions are what Android Auto reads
      * aloud and turns into a voice reply; on the phone it renders like a chat message.
      */
-    private fun postReplyable(title: String, text: String, requestCode: Int, id: Int, sessionId: String? = null) {
+    private fun postReplyable(title: String, text: String, requestCode: Int, id: Int,
+                              sessionId: String? = null, myDay: Boolean = false) {
         val remote = RemoteInput.Builder(KEY_REPLY).setLabel("Reply to goose").build()
         val replyPi = PendingIntent.getBroadcast(app, requestCode,
             Intent(app, ReplyReceiver::class.java).setAction(ACTION_REPLY).putExtra(EXTRA_NOTIF_ID, id),
@@ -84,7 +89,7 @@ class Notifier(context: Context) {
             .setSmallIcon(R.drawable.ic_stat_goose)
             .setStyle(style)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setContentIntent(openApp(sessionId))
+            .setContentIntent(openApp(sessionId, myDay = myDay))
             .setAutoCancel(true)
             .addAction(replyAction)
             .addInvisibleAction(markReadAction)
@@ -96,11 +101,11 @@ class Notifier(context: Context) {
      *  summary and body so the phone and the desktop say the same thing for the same
      *  event; this only chooses the notification identity and the deep link. */
     fun postMessage(summary: String, body: String, sessionId: String? = null,
-                    proactive: Boolean = false) =
+                    proactive: Boolean = false, myDay: Boolean = false) =
         postReplyable(summary, body,
             if (proactive) 2 else 1,
             if (proactive) ID_PROACTIVE else ID_ALERT,
-            sessionId)
+            sessionId, myDay)
 
     /** goose is blocked on a tool approval while backgrounded. */
     fun postApprovalNeeded(tool: String) {

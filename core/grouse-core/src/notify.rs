@@ -14,11 +14,19 @@
 
 use serde::{Deserialize, Serialize};
 
-/// What a push is: a finished-turn nudge, or a proactive briefing.
+/// What a push is: a finished-turn nudge, a proactive briefing, or a piece of
+/// handed-over work that has stopped and is waiting for a look.
+///
+/// `Tasks` exists because those three land in different places. A turn wants the
+/// conversation, a briefing wants the assistant thread, and a task wants My Day —
+/// where its result line and the rest of the thread already are. A sender that does
+/// not know about it (or an older one) posts `briefing`, which is still a correct
+/// notification; only the deep link is lost.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PushKind {
     Turn,
     Briefing,
+    Tasks,
 }
 
 /// A decoded push envelope. Senders produce `{type,session,text}` JSON; anything
@@ -99,6 +107,9 @@ pub fn parse_push(raw: &str) -> PushEnvelope {
         .map(str::to_owned);
     match obj.get("type").and_then(serde_json::Value::as_str) {
         Some("turn") => PushEnvelope { kind: PushKind::Turn, session_id, text },
+        // Both spellings: a sender writing one item should not have to know whether the
+        // type names the family or the row.
+        Some("task") | Some("tasks") => PushEnvelope { kind: PushKind::Tasks, session_id, text },
         _ => PushEnvelope { kind: PushKind::Briefing, session_id, text },
     }
 }
@@ -164,6 +175,14 @@ pub fn decide_notify(envelope: PushEnvelope, ctx: NotifyContext) -> NotifyDecisi
             summary: "Grouse briefing".to_string(),
             body: envelope.text,
         },
+        // Handed-over work that stopped. It is proactive like a briefing (no armed
+        // session, no attribution question) but named for what it is, because the tap
+        // goes somewhere else: the tab that carries the row and its result.
+        PushKind::Tasks => NotifyDecision {
+            show: true,
+            summary: "Grouse · ready for a look".to_string(),
+            body: envelope.text,
+        },
     }
 }
 
@@ -205,6 +224,58 @@ mod tests {
         assert_eq!(b.kind, PushKind::Briefing);
         assert_eq!(b.session_id, None);
         assert_eq!(b.text, "brief");
+    }
+
+    #[test]
+    fn a_task_push_parses_and_names_itself() {
+        // The payload a sender posts when handed-over work stops. It is proactive like a
+        // briefing — no armed session, no attribution question — but it must be
+        // distinguishable, because the tap goes to My Day rather than to a conversation.
+        for raw in [
+            r#"{"type":"task","text":"12 slides, needs your eye"}"#,
+            r#"{"type":"tasks","text":"12 slides, needs your eye"}"#,
+        ] {
+            let e = parse_push(raw);
+            assert_eq!(e.kind, PushKind::Tasks, "{raw}");
+            assert_eq!(e.text, "12 slides, needs your eye");
+            let d = decide_notify(e, phone_ctx(false, None));
+            assert!(d.show);
+            assert_eq!(d.summary, "Grouse · ready for a look");
+            assert_eq!(d.body, "12 slides, needs your eye");
+        }
+        // …and the shared rule still applies: looking at the app is not interrupted.
+        let e = parse_push(r#"{"type":"task","text":"x"}"#);
+        assert!(!decide_notify(e, phone_ctx(true, None)).show);
+    }
+
+    #[test]
+    fn a_task_push_parses_both_ways_and_is_announced_as_work() {
+        // A sender naming one item or the family says the same thing: work stopped and
+        // is waiting for a look. It must not fall through to `Briefing`, because the tap
+        // goes to My Day rather than the assistant thread.
+        for body in [
+            r#"{"type":"task","text":"7 reminders drafted"}"#,
+            r#"{"type":"tasks","text":"7 reminders drafted"}"#,
+        ] {
+            let e = parse_push(body);
+            assert_eq!(e.kind, PushKind::Tasks, "{body}");
+            assert_eq!(e.text, "7 reminders drafted");
+        }
+        let d = decide_notify(
+            parse_push(r#"{"type":"task","text":"7 reminders drafted"}"#),
+            phone_ctx(false, None),
+        );
+        // Announced without an armed session: a task is not a reply, so the phone's
+        // "only buzz for turns I started" rule does not apply to it.
+        assert!(d.show);
+        assert_eq!(d.summary, "Grouse · ready for a look");
+        assert_eq!(d.body, "7 reminders drafted");
+        // Looking at the app still wins — the tab shows the row itself.
+        assert!(!decide_notify(
+            parse_push(r#"{"type":"task","text":"x"}"#),
+            phone_ctx(true, None),
+        )
+        .show);
     }
 
     #[test]

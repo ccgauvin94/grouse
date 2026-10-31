@@ -8,6 +8,16 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Added
 
+- **Push: a `task` type that lands on My Day, and a tab that refreshes on arrival.**
+  Handed-over work that reaches `review` now posts its own notification type instead of
+  riding as a briefing, because the two want different destinations: a briefing has no
+  single row to open, a task does — the row, its result line and the rest of the thread
+  are on My Day. The tap deep-links there and the tab re-reads on arrival (deterministic
+  `tools/call`, no model turn), and **every** proactive push now refreshes the lists, so
+  a fresh notification can no longer sit over a stale tab. `notify` gained
+  `target: thread|tasks` on the sender side; an older client treats an unknown type as a
+  briefing — a correct notification with the wrong destination, never silence. The
+  show/don't-show rule is unchanged and still one implementation in `notify.rs`.
 - **A thread chat now lives in the assistant PROJECT, and the project stays out of
   every chat list.** discussing a thread files its session under the `assistant`
   goose project, which is what makes the persona apply: goose injects a filed

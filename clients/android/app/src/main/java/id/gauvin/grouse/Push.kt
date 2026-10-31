@@ -71,6 +71,11 @@ class GoosePushService : PushService() {
                 announceAnyTurn = false,
             ),
         )
+        // Any proactive push is news about the assistant's state, so re-read it: a
+        // briefing or a task flip changes what My Day shows, and a fresh notification
+        // over a stale list is the version of this that wastes a tap. Deterministic
+        // tools/call, no model turn, and harmless when the app is in front.
+        if (envelope.kind != PushKind.TURN) cm.refreshTasks()
         if (envelope.kind == PushKind.BRIEFING) {
             // A briefing is recorded for the Assistant status/dialog even while the app is
             // in front — otherwise one that lands while you are looking is lost and the
@@ -81,7 +86,10 @@ class GoosePushService : PushService() {
         if (decision.show) {
             if (envelope.kind == PushKind.TURN) cm.store.pendingPushSessionId = null
             Notifier(this).postMessage(decision.summary, decision.body, envelope.sessionId,
-                proactive = envelope.kind != PushKind.TURN)
+                proactive = envelope.kind != PushKind.TURN,
+                // Handed-over work taps into My Day, where the row and its result are;
+                // a briefing has no single row to land on, so it keeps opening the app.
+                myDay = envelope.kind == PushKind.TASKS)
         }
     }
 

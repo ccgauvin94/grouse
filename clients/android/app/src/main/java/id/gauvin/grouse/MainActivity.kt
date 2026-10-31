@@ -92,6 +92,9 @@ class MainActivity : FragmentActivity() {
             ACTION_NEW_CHAT -> cm.pendingNewChat.value = true
             ACTION_OPEN_SESSION ->
                 intent.getStringExtra(EXTRA_SESSION_ID)?.let { cm.pendingOpenSession.value = it }
+            // A task push taps HERE, not into a chat: the row, its result line and the
+            // rest of the thread are on My Day, and that is the only place they are.
+            ACTION_OPEN_MYDAY -> cm.pendingOpenMyDay.value = true
         }
     }
 
@@ -99,6 +102,7 @@ class MainActivity : FragmentActivity() {
         const val ACTION_NEW_CHAT = "id.gauvin.grouse.NEW_CHAT"
         const val ACTION_OPEN_SESSION = "id.gauvin.grouse.OPEN_SESSION"
         const val EXTRA_SESSION_ID = "id.gauvin.grouse.extra.SESSION_ID"
+        const val ACTION_OPEN_MYDAY = "id.gauvin.grouse.OPEN_MYDAY"
     }
 }
 
@@ -182,6 +186,19 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
         }
     }
     // A finished-turn notification tap: open that session and land on the chat screen.
+    LaunchedEffect(cm.pendingOpenMyDay.value) {
+        if (cm.pendingOpenMyDay.value) {
+            if (cm.configured) {
+                cm.pendingOpenMyDay.value = false
+                // Land on the tab and ask it to re-read: the push is the news, the tab
+                // is where the news lives, and a stale list under a fresh notification
+                // is the version of this that wastes a tap.
+                nav.navigate("myday") { launchSingleTop = true; popUpTo("chat") { inclusive = false } }
+                cm.refreshTasks()
+            }
+        }
+    }
+
     LaunchedEffect(cm.pendingOpenSession.value) {
         cm.pendingOpenSession.value?.let { sid ->
             if (cm.configured) {
