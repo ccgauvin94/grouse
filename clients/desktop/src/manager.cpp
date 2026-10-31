@@ -3151,12 +3151,42 @@ void Manager::coreOnRunEnded(const QString &sessionId, const QString &stopReason
     emit promptingChanged();
     emit compactingChanged();
     flushQueue();
+    // Before the turn-over side effects: the last bubble is final now, so any
+    // markdown the seal missed gets rendered while the row is still the last
+    // thing the user is looking at.
+    finishTail();
     notifyTurnFinished();
 }
 
 // ---------------------------------------------------------------------------
 // Model-update handlers (called by the coreOn* entry points above)
 // ---------------------------------------------------------------------------
+
+void Manager::finishTail(int lookback)
+{
+    const int n = m_messageModel->count();
+    bool touched = false;
+    for (int i = n - 1; i >= 0 && i >= n - lookback; --i) {
+        QVariantMap row = m_messageModel->row(i);
+        const QString role = row.value("role").toString();
+        if (role != QLatin1String("user") && role != QLatin1String("agent")
+            && role != QLatin1String("error"))
+            continue;
+        if (!row.value("html").toString().isEmpty())
+            continue;
+        if (!row.value("blocks").toList().isEmpty())
+            continue;
+        if (row.value("text").toString().trimmed().isEmpty())
+            continue;
+        ensureRowHtml(row);
+        // update() (not updateDeferred): this row is final, so the last frame
+        // paints immediately instead of waiting on the coalescing timer.
+        m_messageModel->update(i, row);
+        touched = true;
+    }
+    if (touched)
+        requestMessagesUpdate();
+}
 
 void Manager::loadOlder(int count)
 {

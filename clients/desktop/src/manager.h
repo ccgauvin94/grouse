@@ -597,6 +597,20 @@ private:
      *  notification, and show it. The desktop announces any turn — it is the only client
      *  here — and contributes the session title, which a push to a sleeping phone cannot. */
     void notifyTurnFinished();
+
+    /// Give the rows a finished turn left unrendered their markdown.
+    ///
+    /// The core seals a turn with an authoritative `Upsert` carrying the whole
+    /// bubble, and THAT is what fills `html`/`blocks` — the streamed deltas
+    /// deliberately leave them empty so a bubble renders as plain text while it
+    /// grows. If that seal does not land (a client that attached mid-turn, a
+    /// turn whose stream index was already cleared), the row keeps its text and
+    /// no html, and a bubble renders the raw source forever: `**` and fences and
+    /// `#` visible, which reads as "markdown is broken" in exactly one chat.
+    /// Rendering the tail here is idempotent (rows that already have html or
+    /// blocks are skipped) and bounded to the last few rows, so it costs
+    /// nothing on the normal path.
+    void finishTail(int lookback = 4);
     QStringList m_configuredProviders;
     QString m_announcedTurnSession;
     qint64 m_announcedTurnAtMs = 0;
