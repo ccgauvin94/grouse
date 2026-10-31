@@ -122,6 +122,17 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed
 
+- **Desktop: a fenced code block came with a blank bubble at each end, and a message
+  without one was split anyway.** `markdownBlocks` pushed a newline into the prose
+  accumulator *before* flushing it, so a fence at the start of a message (or one closed
+  at its end) emitted a whitespace-only prose chunk — and `markdownToHtml("\n")` is a
+  complete HTML document with an empty body, i.e. a live element in the bubble that
+  occupies space and shows nothing. It also answered "blocks" for a message with no
+  fence at all, which is the caller's cue to split; prose-only messages now return an
+  empty list and take the single-document path, and whitespace-only prose is dropped
+  rather than rendered. Three `tst_markdown` cases had been failing on this and were
+  assumed to be pre-existing breakage, which is how it shipped.
+
 - **Every due date read backwards.** `ChronoUnit.DAYS.between(a, b)` is `b - a`, and the call
   had `now` and the due date the wrong way round, so the sign of every branch inverted: the
   year-end-review item due **2026-11-06** (seven days in the future) rendered "overdue 7d",

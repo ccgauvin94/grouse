@@ -346,19 +346,27 @@ QVariantList markdownBlocks(const QString &md)
     QString prose;          // the accumulation between fences
     QChar openChar = u'\0'; // '`' or '~' while one is open
     qsizetype openLen = 0;
+    bool anyCode = false;
 
-    const auto flushProse = [&](bool final) {
-        if (prose.isEmpty() && (final || openChar == u'\0'))
+    // Whitespace-only prose is DROPPED, not rendered: a fence at the very start
+    // of a message (or closed at its end) leaves prose == "\n", and
+    // markdownToHtml("\n") is a complete HTML document with an empty body — a
+    // live element in the bubble that occupies space and shows nothing. Before
+    // this, every message that opened with a fence paid one of those at each end.
+    const auto flushProse = [&]() {
+        if (prose.trimmed().isEmpty()) {
+            prose.clear();
             return;
-        if (!prose.isEmpty())
-            blocks.append(QVariantMap{{"type", "html"},
-                                      {"html", markdownToHtml(prose)}});
+        }
+        blocks.append(QVariantMap{{"type", "html"},
+                                  {"html", markdownToHtml(prose)}});
         prose.clear();
     };
     const auto flushCode = [&]() {
         blocks.append(QVariantMap{{"type", "code"},
                                   {"lang", open.lang},
                                   {"code", open.code}});
+        anyCode = true;
         open = {};
         openChar = u'\0';
     };
@@ -392,7 +400,7 @@ QVariantList markdownBlocks(const QString &md)
         const auto match = fenceOpener.match(line);
         if (match.hasMatch()) {
             prose += u'\n'; // fence breaks the running prose paragraph
-            flushProse(false);
+            flushProse();
             openChar = match.captured(2).at(0);
             openLen = match.captured(2).length();
             open.lang = match.captured(3);
@@ -400,9 +408,15 @@ QVariantList markdownBlocks(const QString &md)
         }
         prose += line + u'\n';
     }
-    flushProse(true);
     // An unclosed fence renders as code — never leave it dangling as prose.
     if (openChar != u'\0')
         flushCode();
+    flushProse();
+    // No fenced code at all: the caller takes the single-document path, so an
+    // all-prose split is not just useless but wrong (it also let a message with
+    // no code render as blocks). markdownBlocks() answers "is there code here
+    // worth splitting?" — the answer is no.
+    if (!anyCode)
+        blocks.clear();
     return blocks;
 }
