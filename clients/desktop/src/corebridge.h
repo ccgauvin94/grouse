@@ -82,6 +82,10 @@ public:
         void (*grouse_task_snooze)(void *h, const char *id, const char *until,
                                    const char *reason);
         void (*grouse_task_react)(void *h, const char *id, const char *reaction);
+        // The project slug thread chats are filed under (CONTRACT §3.6). Takes no
+        // handle on purpose: it is a constant of the core's own list filter, and a
+        // client that spelled it differently would file sessions nothing lists.
+        char *(*grouse_assistant_project)(void);
         int (*grouse_run_summaries)(void *h);
         char *(*grouse_active_session_id)(void *h);
         char *(*grouse_sessions)(void *h);

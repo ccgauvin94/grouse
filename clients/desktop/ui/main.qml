@@ -695,6 +695,16 @@ Controls.ApplicationWindow {
                     }
                 }
 
+                    // My Day: the assistant's own working state (open loops, work it
+                    // handed over) plus the way into its thread. It owns the chat area
+                    // while open, so it sits with the other surfaces, not in the list.
+                    Controls.Button {
+                        text: qsTr("My Day")
+                        icon.name: "view-calendar-day"
+                        Layout.fillWidth: true
+                        onClicked: Mgr.openMyDay()
+                    }
+
                     Controls.Button {
                         text: qsTr("New Chat")
                         icon.name: "document-new"
@@ -730,8 +740,18 @@ Controls.ApplicationWindow {
             ChatPage {
                 id: chatPage
                 anchors.fill: parent
-                visible: !Mgr.landingPage
+                visible: !Mgr.landingPage && !Mgr.myDayVisible
                 onToolsOpenRequested: toolsPanel.drawerOpen = !toolsPanel.drawerOpen
+            }
+
+            // My Day takes the chat area over rather than becoming a fourth column:
+            // it is a surface you go TO and come back from (`Mgr.closeMyDay`), and the
+            // conversation it replaced is one click away in the sidebar.
+            MyDayPage {
+                id: myDayPage
+                anchors.fill: parent
+                visible: Mgr.myDayVisible
+                onCloseItemRequested: (id, title, state) => closeItemDialog.openItem(id, title, state)
             }
 
             // Landing page: shown until a conversation is committed — cold
@@ -742,7 +762,7 @@ Controls.ApplicationWindow {
             ColumnLayout {
                 anchors.centerIn: parent
                 spacing: Kirigami.Units.largeSpacing
-                visible: Mgr.landingPage
+                visible: Mgr.landingPage && !Mgr.myDayVisible
 
                 BusyIndicator {
                     Layout.alignment: Qt.AlignHCenter
@@ -1023,6 +1043,71 @@ Controls.ApplicationWindow {
 
     GlobalExtensionsDialog {
         id: globalExtensionsDialog
+    }
+
+    // Closing an item from My Day. The outcome line is REQUIRED even though the tool
+    // accepts an empty one: an item closed with no line is exactly what makes the next
+    // briefing raise it again, so the primary button stays disabled until there is one.
+    Controls.Dialog {
+        id: closeItemDialog
+        property string itemId: ""
+        property string itemTitle: ""
+        property string itemState: "done"
+        readonly property bool closing: itemState === "done"
+        modal: true
+        width: 440
+        height: 260
+        title: closing ? qsTr("Done: %1").arg(itemTitle)
+                       : qsTr("Not real: %1").arg(itemTitle)
+
+        function openItem(id, title, state) {
+            itemId = id
+            itemTitle = title.length > 60 ? title.substring(0, 60) + "…" : title
+            itemState = state
+            outcomeField.text = ""
+            open()
+            outcomeField.focus = true
+        }
+        function submit() {
+            const note = outcomeField.text.trim()
+            if (note.length === 0)
+                return
+            Mgr.closeTask(itemId, itemState, note)
+            close()
+        }
+
+        contentItem: ColumnLayout {
+            spacing: Kirigami.Units.smallSpacing
+            Controls.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: closeItemDialog.closing
+                      ? qsTr("One line on what happened. The assistant records it as the outcome, "
+                             + "which is what keeps the next briefing from raising this again.")
+                      : qsTr("One line on why this was never a real task. The assistant learns "
+                             + "from it and won't raise it again.")
+                color: Kirigami.Theme.disabledTextColor
+                font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.9))
+                renderType: Text.NativeRendering
+            }
+            Controls.TextField {
+                id: outcomeField
+                Layout.fillWidth: true
+                placeholderText: qsTr("Outcome")
+                onAccepted: closeItemDialog.submit()
+            }
+        }
+        footer: Controls.DialogButtonBox {
+            Controls.Button {
+                text: closeItemDialog.closing ? qsTr("Close it") : qsTr("Drop it")
+                enabled: outcomeField.text.trim().length > 0
+                onClicked: closeItemDialog.submit()
+            }
+            Controls.Button {
+                text: qsTr("Cancel")
+                onClicked: closeItemDialog.close()
+            }
+        }
     }
 
     // Save-dialog for exporting a session's JSON (the URL-to-path strip mirrors

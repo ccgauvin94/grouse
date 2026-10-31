@@ -8,6 +8,30 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Added
 
+- **Desktop: My Day, thread chats, and a `task` push that brings the page up.** The
+  desktop client catches up with the last four phone releases. **My Day** takes the
+  chat area (`Mgr.myDayVisible`, opened from the sidebar, left with "Back to chat" —
+  opening any conversation also returns): the assistant card with a one-line composer,
+  then one Open list that interleaves handed-over work with open loops and groups them
+  by thread label (a label holding more than one row collapses; a single-entry label
+  never does), then Snoozed, then Recently done. The four intents are the server's own
+  vocabulary — close with the outcome line it requires, snooze to the next 05:00, wake
+  (a snooze into the past), refresh — and the rows come from the same deterministic
+  `tools/call` the phone reads, so there is no model turn anywhere on the page.
+  **Discuss** opens the thread's own conversation: a real session filed under the
+  assistant PROJECT (slug read from the core via a new `grouse_assistant_project`, so
+  the filing and the list filter that hides those sessions can never drift), renamed
+  `Thread: …`, remembered label → session in QSettings, and drawn with that thread's
+  rows collapsed above its transcript. A stale mapping is dropped when the open
+  FAILS, not by testing it against `session/list` — thread chats are filtered out of
+  every list, which is exactly the bug the phone had. `src/myday.cpp` is the pure half
+  (envelope decode + due/wake/thread/meta formatters, clock injected) with
+  `tests/tst_myday` on it, and the page's grouping and delegate tap-throughs are
+  covered by a QuickTest. A `task` push now opens My Day when the window is inactive
+  (the only time a notification is shown) and otherwise just refreshes the lists.
+  Two small parity fixes ride along: **New Chat clears the composer** (the field
+  outlives `newChat()`, so a draft used to follow you into the next conversation), and
+  phone-side, a thread chat is no longer forgotten-and-recreated on every Discuss.
 - **Push: a `task` type that lands on My Day, and a tab that refreshes on arrival.**
   Handed-over work that reaches `review` now posts its own notification type instead of
   riding as a briefing, because the two want different destinations: a briefing has no

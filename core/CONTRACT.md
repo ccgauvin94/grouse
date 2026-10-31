@@ -94,7 +94,7 @@ defaulting to real verification; roam byte stream). The UI supplies only
 | `roam_connect(card, label)` | — | parallel peer (see §6) |
 | `roam_disconnect(label)` | | |
 | `roam_open_session(label, session_id)` | | |
-| `tasks_refresh()` | — | My Day (§3.6): both lists arrive in ONE `on_tasks` |
+| `tasks_refresh()` | — | My Day (§3.6): open items, the done tail and handed-over tasks arrive in ONE `on_tasks` |
 | `task_close(id, state, resolution)` | — | `state` is `done` \| `dropped` \| `expired`; `resolution` is the one line that keeps the next briefing from re-raising it |
 | `task_snooze(id, until, reason)` | — | `until` is an ISO instant |
 | `task_react(id, reaction)` | — | `acted` \| `dismissed` \| `wrong` \| `muted` — assistant-state's only learning signal |
@@ -178,6 +178,9 @@ cache paint in place.
   has no choices there).
 - `load_older(count: u32)` — an **intent**: extend the window backward by
   `count` items, cache-first; outcomes arrive as `on_item` ops (§3.5).
+- `assistant_project(): String` — the project slug thread chats are filed under
+  (§3.6), for a client's `new_session` call. The C ABI spelling takes no handle
+  (`grouse_assistant_project()`): it is a constant of the core's own list filter.
 
 ### 3.4 (removed) the flat stream enum
 
@@ -385,6 +388,20 @@ reason this path exists.
   cannot report. So there is no push: clients refresh on tab open, on an explicit
   refresh, and after every action (the core re-reads and re-emits; a UI never
   patches its own list).
+- **A thread gets its own conversation, filed under the assistant project.**
+  "Discuss this thread" opens a real session created with
+  `_meta.projectId = assistant_project()`, so goose injects the project's
+  instructions (`agents/state_machine/ops_project.rs`) and the thread chat answers
+  with the assistant's persona without a client pasting anything in. The slug is
+  exported (`assistant_project()`, C ABI `grouse_assistant_project`) rather than
+  written down in a client, because the filing and the hiding below are one rule:
+  **session lists drop every session in that project** (`in_assistant_project`,
+  applied in `parse_sessions`, `summary_from_info` and `sources/list`), so both
+  clients inherit it and no sidebar paints an empty group. The way in is the task
+  surface, keyed by the row's `thread` label; a client-side map from label to
+  session id is a cache, so a mapping whose session is gone must be dropped when
+  the open FAILS (`on_session_open_failed`, grouse#19) — never by testing it
+  against the session list, which no longer contains it.
 
 ---
 

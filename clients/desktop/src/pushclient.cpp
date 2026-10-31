@@ -260,4 +260,19 @@ void PushClient::handlePush(const QString &raw)
     if (d.value(QStringLiteral("show")).toBool())
         Notifier::send(d.value(QStringLiteral("summary")).toString(),
                        d.value(QStringLiteral("body")).toString());
+
+    // Handed-over work belongs on My Day, not in a chat: the phone deep-links a
+    // `task` push there, and a freedesktop notification has no per-action target, so
+    // the page is brought up as the push arrives instead. Only when the window is
+    // INACTIVE — that is exactly when a notification is shown (the core's policy), so
+    // there is nothing to race with a conversation the user is reading; a push that
+    // lands while they are looking at the app just refreshes the lists behind it.
+    const QJsonObject env = QJsonDocument::fromJson(envelope.toUtf8()).object();
+    if (env.value(QStringLiteral("kind")).toString().compare(QLatin1String("Tasks"),
+                                                             Qt::CaseInsensitive) == 0) {
+        if (Notifier::appVisible())
+            m_manager->refreshTasks();
+        else
+            m_manager->openMyDay();
+    }
 }

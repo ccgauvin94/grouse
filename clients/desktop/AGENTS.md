@@ -81,6 +81,25 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
   `usage` role onto the last agent row — the server's `message_usage` carries no
   message id — so replayed history has no stats (the core cache does not carry
   them either).
+- **My Day is a third view of the chat area, not a fourth column.** `MyDayPage`
+  takes the slot `ChatPage` occupies (`Mgr.myDayVisible`), opened from the
+  sidebar and left with "Back to chat" — opening any session also returns. Data is
+  the core's `on_tasks` envelope (CONTRACT §3.6): assistant-state's `item` rows
+  (open loops, snoozed included, plus a closed tail) and its `task` rows (work the
+  assistant handed over, `running`/`review`) fetched over ONE deterministic
+  `tools/call` — no model turn, so the page opens in milliseconds. `Manager`
+  decodes it through `src/myday.cpp`; the page only paints. The four intents are
+  the server's whole vocabulary: close (`done`/`dropped`, outcome line REQUIRED by
+  the workflow), snooze (to the next 05:00 — back before the 06:00 digest), wake
+  (a snooze into the past), refresh.
+- **A thread label groups rows, and only a crowded one gets a header.** Handed-over
+  work and open loops share one label ("chami-billing"), so the Open list
+  interleaves them and collapses a label only when more than one row sits under it
+  (a single-entry label nested under a chevron costs a tap to reveal the identical
+  thing, and My Day held 21 entries over 19 labels at the last count). "Discuss"
+  opens that thread's own conversation — a real session filed under the assistant
+  PROJECT so goose injects the persona, renamed "Thread: <Label>", hidden from every
+  chat list by the core's one filter, and remembered label → session in QSettings.
 - Per-session transcript/tool caches live in `QStandardPaths::CacheLocation`,
   keyed by sessionId. Reconnects use exponential backoff.
 
@@ -114,6 +133,15 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
 - Streaming chat: the server sends HTML; the delegate shows `Text.RichText` only
   once `model.html` is set (at finalize), `Text.PlainText` while streaming —
   RichText re-parses the whole chunk every frame (quadratic).
+- **A thread mapping is a cache, and the open FAILURE is its only invalidation.**
+  Thread chats live in the assistant project, which the core filters out of
+  `session/list` — so a mapping cannot be checked against the sidebar (that check
+  would discard a live chat and mint a duplicate on every second Discuss; the phone
+  had exactly that bug). `coreOnSessionOpenFailed` drops the mapping instead.
+- **The composer is a surviving QML object, so `newChat()` clears it from the
+  Manager.** `draftRequested(text)` is the one-way push into `chatInput`: "" when a
+  conversation starts (a draft belongs to the chat it was typed in), a thread's
+  opening line, or the item named when a My Day card is tapped through.
 - **DBus exports of nested containers are opaque**: a `Q_SCRIPTABLE` slot
   returning `QVariantList`/`QVariantMap` of maps crosses the bus as unreadable
   `QDBusArgument` objects (the outer shell demarshals, inner maps don't).
@@ -124,9 +152,9 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
 
 |Dir|What lives there|
 |---|---|
-|`src/`|C++ core: `corebridge.{h,cpp}` (dlopen of `libgrouse_core.so`, the ONLY wire path), `manager.{h,cpp}` (thin facade, `Mgr`), `messagelistmodel`, `sessionlistmodel`, `roamlistmodel` (Roam tab), `markdown.{h,cpp}`, `appbridge.{h,cpp}` (loopback MCP-Apps host), `notifier.{h,cpp}` (freedesktop notifications), `pushclient.{h,cpp}` (UnifiedPush receive), `dbusadapter.{h,cpp}` (session-bus service for KRunner), `main.cpp`|
+|`src/`|C++ core: `corebridge.{h,cpp}` (dlopen of `libgrouse_core.so`, the ONLY wire path), `manager.{h,cpp}` (thin facade, `Mgr`), `messagelistmodel`, `sessionlistmodel`, `roamlistmodel` (Roam tab), `markdown.{h,cpp}`, `myday.{h,cpp}` (My Day's envelope decode + the due/wake/thread formatters — pure, unit-tested), `appbridge.{h,cpp}` (loopback MCP-Apps host), `notifier.{h,cpp}` (freedesktop notifications), `pushclient.{h,cpp}` (UnifiedPush receive), `dbusadapter.{h,cpp}` (session-bus service for KRunner), `main.cpp`|
 |`krunner/`|Host-side KRunner plugin (searches/opens sessions via the DBus service); standalone-buildable CMake, excluded from the flatpak (`BUILD_KRUNNER=OFF`)|
-|`ui/`|All QML, embedded into the binary via `qt_add_resources` (PREFIX `/`): `main.qml` (window root, sidebar, all dialog instances), `ChatPage.qml` (transcript/input/attachments/charts), feature dialogs|
+|`ui/`|All QML, embedded into the binary via `qt_add_resources` (PREFIX `/`): `main.qml` (window root, sidebar, all dialog instances), `ChatPage.qml` (transcript/input/attachments/charts, thread panel), `MyDayPage.qml` (the assistant's own lists), feature dialogs|
 |`data/`|Desktop file + SVG icon (single scalable icon; no size dirs, no index.theme)|
 |`.github/workflows/`|Flatpak build CI (only workflow)|
 
@@ -153,7 +181,8 @@ distrobox enter kde-build -- bash -lc 'cmake -B build -S . -DCMAKE_BUILD_TYPE=De
   the system dirs.
 
 - Fresh container needs `qt6-qtbase-devel qt6-qtdeclarative-devel
-  qt6-qtwebsockets-devel kf6-kirigami-devel extra-cmake-modules
+  qt6-qtwebsockets-devel kf6-kirigami-devel kf6-kcoreaddons-devel
+  kf6-krunner-devel kf6-kservice-devel kf6-ki18n-devel extra-cmake-modules
   kf6-qqc2-desktop-style` (CMakeLists runs `find_package(ECM REQUIRED)`; without
   the last one the `org.kde.desktop` QQuickStyle in `main.cpp` fails to load:
   "module org.kde.desktop is not installed") plus `xorg-x11-server-Xvfb`.
@@ -175,6 +204,19 @@ distrobox enter kde-build -- bash -lc 'xvfb-run -a -s "-screen 0 1280x800x24" ti
 ```
 
   Silence = all QML loaded.
+- No distrobox on the machine? Neither is required — the same package set
+  installs into a throwaway Fedora image and the build runs there:
+
+```sh
+podman run --rm -it --userns=keep-id -v "$PWD/../../..:/work" -w /work/clients/desktop \
+  fedora:44 bash -lc 'dnf install -y qt6-qtbase-devel qt6-qtdeclarative-devel \
+    kf6-kirigami-devel kf6-kcoreaddons-devel kf6-krunner-devel kf6-kservice-devel \
+    kf6-ki18n-devel extra-cmake-modules kf6-qqc2-desktop-style gcc-c++ cmake \
+    ninja-build xorg-x11-server-Xvfb && cmake -B build -S . && cmake --build build -j"$(nproc)"'
+```
+
+  Headless hosts need `QT_QPA_PLATFORM=offscreen` for `ctest` (the suites are
+  QApplication-based; without a display they abort before the first test).
 - Test suite (CTest; see Testing & QA):
 
 ```sh
@@ -260,11 +302,13 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
 |`src/messagelistmodel.h/.cpp`|Transcript model, 16 roles (role/text/html/title/detail/output/status/images/usage/chartData/appHtml/calls/…); `updateDeferred` coalesces dataChanged on a 120 ms QTimer; `commitDeferred` guards the cleared-model race.|
 |`src/sessionlistmodel.h/.cpp`|Sidebar model, 11 roles; flat list of group-header + session rows; sections prefixed `proj:`/`peer:` (id = `section.substring(5)`); `cwdFor()` is the source of cwd for `session/load` — never invent one; `toggleSection()`; no-op guard so unchanged lists never reset the model. The collapsed set is the user's state: Manager restores it from QSettings (`sidebar_collapsed`) at startup and persists it on `collapsedChanged` (`collapsedSections()`/`setCollapsedSections()`), so the sidebar opens the way it was left.|
 |`src/markdown.h/.cpp`|`markdownToHtml()` — Qt CommonMark → HTML, escapes input.|
+|`src/myday.h/.cpp`|My Day's pure half: the `on_tasks` decode (snake_case rows → the camelCase maps the page binds) and `dueLabel`/`wakeLabel`/`nextMorning`/`threadName`/`artifactsLabel`/`metaLine`. Clock and day are ARGUMENTS, so every branch is unit-tested.|
 |`src/appbridge.h/.cpp`|Loopback HTTP host for MCP Apps (the flatpak runtime has no QtWebEngine): serves the app template with a host shim injected on 127.0.0.1, answers `ui/initialize`, and delivers `ui/message` back into the originating chat. Routes are scoped by per-app opaque tokens; template + shim are server-supplied and untrusted.|
 |`src/notifier.h/.cpp`, `src/pushclient.h/.cpp`|Notifications: freedesktop notifications driven by the core's shared policy (this client supplies `app_visible`/window state), plus the UnifiedPush receive path (register + decode the envelope; the repo ships no sender).|
 |`src/main.cpp`|QApplication (widgets needed for QFileDialog), QSettings org/app, `org.kde.desktop` style, `Mgr` context property, `manager.autoConnect()`.|
 |`ui/main.qml`|Window shell: `Controls.ApplicationWindow` (NOT Kirigami's — its `contentItem` is read-only, so a sidebar+chat split can't be injected there); sidebar + ChatPage/landing page; every dialog instance and inline menu/dialog; landing provider/model ComboBoxes.|
-|`ui/ChatPage.qml`|Transcript ListView with pinned-to-end scroll logic, input bar, mode menu, attachments, ChartBubble, permission routing.|
+|`ui/ChatPage.qml`|Transcript ListView with pinned-to-end scroll logic, input bar, mode menu, attachments, ChartBubble, permission routing, and the thread panel a thread chat carries above its transcript.|
+|`ui/MyDayPage.qml`|My Day: the assistant card, the grouped Open list (a label gets a header only when it holds more than one row), the handed-over tasks, Snoozed, Recently done. Rows are Loaders over inline components; `entryModel` is a binding, so a refresh or a toggle rebuilds the sequence once.|
 |`ui/*Dialog.qml`|ConnectDialog, SettingsDialog, ProvidersDialog, GlobalExtensionsDialog, SkillsDialog, RecipesDialog (carries the schedule controls too — no separate Scheduler screen), ProjectDialog, PermissionDialog.|
 |`CMakeLists.txt`|Qt6 (Quick Qml QuickControls2 Widgets DBus Network, plus optional `WebEngineQuick` for inline MCP Apps) + ECM + KF6 (Kirigami CoreAddons); `qt_add_resources` embeds ALL `ui/*.qml`; app install rules only — the test targets live under `tests/` (wired via `include(CTest)` + `add_subdirectory(tests)`).|
 |`id.gauvin.Grouse.json` / `build-flatpak.sh`|Flatpak manifest (org.kde.Platform/Sdk 6.10, `io.qt.qtwebengine.BaseApp`, cmake-ninja Release) + bundle script.|
@@ -296,18 +340,30 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
     guard, peer headers + sessions).
   - `tst_appbridge` — the loopback MCP-Apps host: per-app token scoping, the
     injected host shim, and `ui/message` delivery back into the chat.
+  - `tst_myday` — My Day's envelope decode (three sections, per-section errors,
+    id-less rows dropped, artifacts) and the formatters: due labels in BOTH
+    directions (the sign of a day difference is what a port gets wrong once),
+    snooze/wake, `nextMorning`'s 05:00 rule, thread names, the meta line.
   - `tst_manager` — thin-client intent-mapping smoke: Manager Q_INVOKABLE ->
     CoreBridge routing and model invariant checks. The wire-level protocol
     (handshake, session/load, permissions, streaming, every reply parser) is
     covered by the grouse-core Rust crate (`cargo test -p grouse-core`), not
     here — there is no C++ wire client to test.
   - `tst_qml` — QtQuickTest run of `tests/qml/`: ChartBubble (chart-spec parsing
-    and axis math), ComboBox `valueRole` (provider/model wiring contract), and
-    RecipesDialog.
+    and axis math), ComboBox `valueRole` (provider/model wiring contract),
+    RecipesDialog, and MyDayPage (the thread-grouping rule plus the delegate
+    tap-throughs — the one place a Loader over an inline component is exercised at
+    all, so a TypeError there is a test failure and not a silently missing row).
 - QML test gotcha: QuickTest resolves relative imports against neither the test
   file nor CWD. The `ui/` import URL is baked in at configure time via
   `configure_file` (template `tests/qml/tst_chartbubble.qml.in` → generated file
   in the build dir), keeping machine-specific paths out of committed files.
+- A page that consumes the design tokens does `import Grouse 1.0`, and the app
+  registers that singleton in `main.cpp` from the **qrc** — which a test binary
+  does not have, so MyDayPage refused to load with `module "Grouse" is not
+  installed` until `tst_qml` registered `ui/GrouseTheme.qml` itself
+  (`GROUSE_THEME_URL`, baked in at configure time for the same
+  no-machine-paths reason). A new token-consuming page inherits that for free.
 - No test jobs run in CI (the flatpak workflow builds the bundle only) — run
   `ctest` locally after touching `src/` or `ui/`.
 - Manual QA still applies on top: `qmllint` for static QML errors, `xvfb-run`

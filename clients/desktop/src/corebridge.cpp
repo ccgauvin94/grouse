@@ -107,6 +107,7 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_task_close);
     RESOLVE(grouse_task_snooze);
     RESOLVE(grouse_task_react);
+    RESOLVE(grouse_assistant_project);
     RESOLVE(grouse_run_summaries);
     RESOLVE(grouse_active_session_id);
     RESOLVE(grouse_sessions);
@@ -189,7 +190,8 @@ bool CoreBridge::resolve()
         && check(a.grouse_turn_log) && check(a.grouse_turn_diag)
         && check(a.grouse_set_image_rescale) && check(a.grouse_image_rescale)
         && check(a.grouse_tasks_refresh) && check(a.grouse_task_close)
-        && check(a.grouse_task_snooze) && check(a.grouse_task_react);
+        && check(a.grouse_task_snooze) && check(a.grouse_task_react)
+        && check(a.grouse_assistant_project);
     if (!ok) {
         qWarning() << "CoreBridge: core library is missing required grouse_* symbols";
         return false;

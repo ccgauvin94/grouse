@@ -6,6 +6,7 @@
 #include "appbridge.h"
 #include "markdown.h"
 #include "messagelistmodel.h"
+#include "myday.h"
 #include "notifier.h"
 #include "roamlistmodel.h"
 #include "sessionlistmodel.h"
@@ -72,6 +73,37 @@ Manager::Manager(QObject *parent)
     m_updateTimer->setSingleShot(true);
     m_updateTimer->setInterval(50);
     connect(m_updateTimer, &QTimer::timeout, this, [this] { emit messagesChanged(); });
+
+    // Thread label -> session id, so "Discuss" returns to the same conversation
+    // across restarts. A cache: the server owns the sessions, and an entry whose
+    // session is gone is dropped when opening it fails.
+    const QVariantMap threads =
+        m_store.value(QStringLiteral("thread_sessions")).toMap();
+    for (auto it = threads.begin(); it != threads.end(); ++it) {
+        const QString sid = it.value().toString();
+        if (!it.key().isEmpty() && !sid.isEmpty())
+            m_threadSessions.insert(it.key(), sid);
+    }
+
+    // The thread label is derived from the CURRENT session, so it changes whenever the
+    // current session does — ChatPage's panel binds to it and refreshes on it. One
+    // signal-to-signal connection beats remembering to emit at every open/new site.
+    connect(this, &Manager::currentSessionChanged,
+            this, &Manager::currentThreadLabelChanged);
+
+    // My Day's refresh watchdog: a call that dies before `on_tasks` must not leave
+    // the page claiming it is still loading.
+    m_tasksWatchdog = new QTimer(this);
+    m_tasksWatchdog->setSingleShot(true);
+    m_tasksWatchdog->setInterval(15000);
+    connect(m_tasksWatchdog, &QTimer::timeout, this, [this] {
+        if (!m_tasksLoading)
+            return;
+        m_tasksLoading = false;
+        if (m_tasksError.isEmpty())
+            m_tasksError = QStringLiteral("My Day: no reply from the server");
+        emit tasksChanged();
+    });
 
     // The core is the sole wire path. dlopen + resolve on first use.
     CoreBridge *bridge = CoreBridge::instance();
@@ -435,6 +467,7 @@ void Manager::restoreRoamPeers()
 
 void Manager::openRoamSession(const QString &label, const QString &sessionId, const QString &cwd)
 {
+    setMyDayVisible(false);   // opening a conversation takes the chat area back from My Day
     m_activePeerLabel = label;
     // A parked message belongs to the chat it was typed in, so opening another chat must
     // not discard it — the same per-chat queue Android keeps. Only Stop drops one.
@@ -616,6 +649,7 @@ void Manager::testConnection()
 
 void Manager::openSession(const QString &sessionId)
 {
+    setMyDayVisible(false);   // opening a conversation takes the chat area back from My Day
     m_activePeerLabel.clear();
     // Parking is per chat: a message queued in the chat we are leaving keeps waiting for
     // ITS turn to end (flushQueue only drains the on-screen chat's), so a switch cannot
@@ -687,6 +721,7 @@ void Manager::refreshSessionWith(int full)
 
 void Manager::newChat()
 {
+    setMyDayVisible(false);   // a new conversation also takes the chat area back
     m_activePeerLabel.clear();
     emit queuedChanged();
     m_landing = false;
@@ -706,6 +741,10 @@ void Manager::newChat()
     emit pinnedAppsChanged();
     emit toolsChanged();
     emit messagesChanged();
+    // The composer is a surviving QML object, so a draft typed for the previous
+    // conversation would otherwise follow the user into the new one (and, in a
+    // thread chat, into a prefill it does not belong to).
+    emit draftRequested(QString());
     setStatus(QStringLiteral("connecting…"));
     char *err = nullptr;
     // The recipe id and project id ride session/new directly. `grouse_new_session`
@@ -1203,6 +1242,173 @@ void Manager::newChatInProject(const QString &projectId)
 {
     m_pendingProjectFiling = projectId;
     newChat();
+}
+
+// ---------------------------------------------------------------------------
+// Thread chats (CONTRACT §3.6)
+// ---------------------------------------------------------------------------
+
+QString Manager::assistantProject() const
+{
+    // Read from the CORE, never from a literal here: the core is what filters these
+    // sessions out of every chat list (session::in_assistant_project), and a client
+    // that spelled the slug differently would file chats nothing would ever find.
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_assistant_project)
+        return QString();
+    return m_bridge->takeString(m_bridge->api().grouse_assistant_project());
+}
+
+QString Manager::threadSessionId(const QString &label) const
+{
+    return m_threadSessions.value(label);
+}
+
+void Manager::persistThreadSessions()
+{
+    QVariantMap m;
+    for (auto it = m_threadSessions.begin(); it != m_threadSessions.end(); ++it)
+        m.insert(it.key(), it.value());
+    m_store.setValue(QStringLiteral("thread_sessions"), m);
+}
+
+void Manager::rememberThreadSession(const QString &label, const QString &sid)
+{
+    m_threadSessions.insert(label, sid);
+    persistThreadSessions();
+    emit currentThreadLabelChanged();
+}
+
+void Manager::forgetThreadSession(const QString &label)
+{
+    m_threadSessions.remove(label);
+    persistThreadSessions();
+    emit currentThreadLabelChanged();
+}
+
+QString Manager::currentThreadLabel() const
+{
+    if (m_currentSessionId.isEmpty())
+        return QString();
+    for (auto it = m_threadSessions.begin(); it != m_threadSessions.end(); ++it) {
+        if (it.value() == m_currentSessionId)
+            return it.key();
+    }
+    return QString();
+}
+
+void Manager::adoptThreadSession(const QString &sid, const QString &label)
+{
+    const QString title = MyDay::threadTitle(label);
+    if (!title.isEmpty() && m_bridge && m_bridge->isAvailable() && m_bridge->api().grouse_rename_session) {
+        const QByteArray s = sid.toUtf8();
+        const QByteArray t = title.toUtf8();
+        m_bridge->api().grouse_rename_session(m_bridge->handle(), s.constData(), t.constData());
+    }
+    rememberThreadSession(label, sid);
+    // A fresh chat has no id in this client until something names it (the core binds
+    // it, the sidebar does not know it yet). Adopting it here is what lets the chat
+    // page paint the thread panel and the sidebar show the conversation as current.
+    if (m_currentSessionId.isEmpty()) {
+        m_currentSessionId = sid;
+        m_currentSessionTitle = title;
+        restoreTurnState(sid);
+        emit queuedChanged();
+        emit currentSessionChanged();
+        emit pinnedAppsChanged();
+    }
+}
+
+void Manager::openThreadChat(const QString &label)
+{
+    const QString trimmed = label.trimmed();
+    if (trimmed.isEmpty())
+        return;
+    const QString existing = threadSessionId(trimmed);
+    if (!existing.isEmpty()) {
+        openSession(existing);
+        // The composer is seeded even on the way back in: the reason a thread chat
+        // exists is to talk about THIS area, and an empty box asks the user to
+        // retype its name.
+        emit draftRequested(QStringLiteral("About the \"%1\" thread: ").arg(trimmed));
+        return;
+    }
+    // No conversation yet: mint one FILED UNDER THE ASSISTANT PROJECT, which is
+    // where the persona prompt lives — goose injects a session's project
+    // instructions into its prompts, so the thread chat answers as the assistant
+    // without this client pasting anything in. The id is not knowable until the
+    // core binds it; `m_pendingThreadLabel` is consumed at Ready.
+    m_pendingThreadLabel = trimmed;
+    m_pendingProjectFiling = assistantProject();
+    closeMyDay();
+    newChat();
+    emit draftRequested(QStringLiteral("About the \"%1\" thread: ").arg(trimmed));
+}
+
+void Manager::openTaskSession(const QString &sessionId, const QString &thread)
+{
+    // The session that did the work has the history; the thread chat is the
+    // fallback when the worker outlived its session (a scheduled leg is deleted
+    // by the nightly sweep, its task row is not).
+    if (!sessionId.isEmpty())
+        openSession(sessionId);
+    else if (!thread.isEmpty())
+        openThreadChat(thread);
+}
+
+QString Manager::assistantSessionId() const
+{
+    // The always-on thread is an ordinary chat titled "Assistant" (the server pins
+    // the name with `user_set_name`), which is also how notify-mcp finds it. Newest
+    // wins if several were ever made.
+    QString best;
+    QString bestStamp;
+    for (const auto &v : m_sessions) {
+        const QVariantMap s = v.toMap();
+        if (s.value(QStringLiteral("title")).toString().trimmed() != QLatin1String("Assistant"))
+            continue;
+        const QString id = s.value(QStringLiteral("sessionId")).toString();
+        if (id.isEmpty() || id.startsWith(QLatin1String("roam:")))
+            continue;
+        const QString stamp = s.value(QStringLiteral("updatedAt")).toString();
+        if (best.isEmpty() || stamp > bestStamp) {
+            best = id;
+            bestStamp = stamp;
+        }
+    }
+    return best;
+}
+
+void Manager::openAssistant()
+{
+    const QString id = assistantSessionId();
+    if (id.isEmpty()) {
+        setStatus(QStringLiteral("no Assistant thread on this server yet"));
+        return;
+    }
+    closeMyDay();
+    openSession(id);
+}
+
+void Manager::askAssistant(const QString &text)
+{
+    if (text.trimmed().isEmpty())
+        return;
+    const QString id = assistantSessionId();
+    if (id.isEmpty()) {
+        setStatus(QStringLiteral("no Assistant thread on this server yet"));
+        return;
+    }
+    closeMyDay();
+    if (m_currentSessionId != id)
+        openSession(id);
+    // `send` routes by the on-screen chat, so the thread has to be current first;
+    // a prompt that cannot go out yet is parked by the core and flushed on Ready.
+    dispatchSend(text.trimmed(), {});
+}
+
+void Manager::setDraft(const QString &text)
+{
+    emit draftRequested(text);
 }
 
 void Manager::refreshRecipes()
@@ -1794,6 +2000,17 @@ void Manager::coreOnStatus(const QString &json)
         // Tool state must land WITH the session, not on the next toggle: global
         // extension catalog + this session's active tools + attached extensions.
         refreshToolGroups();
+        // A thread chat was just created for a My Day thread ("Discuss"). Its id is
+        // only knowable now: name it after the thread and remember the mapping, so
+        // the next Discuss returns to this conversation instead of minting another.
+        if (!m_pendingThreadLabel.isEmpty()) {
+            const QString sid = activeSessionId();
+            if (!sid.isEmpty()) {
+                const QString label = m_pendingThreadLabel;
+                m_pendingThreadLabel.clear();
+                adoptThreadSession(sid, label);
+            }
+        }
     } else if (s == QStringLiteral("\"Connecting\"") || s == QStringLiteral("Connecting")) {
         setOnline(false);
         setStatus(QStringLiteral("connecting…"));
@@ -2098,15 +2315,119 @@ void Manager::coreOnSessionOpenFailed(const QString &sessionId, const QString &m
     // whatever the cache painted and the wire has no session. Surface the
     // failure where "reloading…" was, so an open that never loaded is visible
     // instead of looking like an empty conversation.
-    Q_UNUSED(sessionId);
     setStatus(QStringLiteral("couldn't open that chat — %1").arg(message));
+    // A thread mapping is the one place this client opens a session it cannot see
+    // in any list, so a stale entry has no other way of being noticed: the next
+    // "Discuss" would keep opening a conversation the server has deleted. Forget
+    // it here (the failure is the signal) and let the next tap mint a fresh one.
+    for (auto it = m_threadSessions.begin(); it != m_threadSessions.end();) {
+        if (it.value() == sessionId) {
+            const QString label = it.key();
+            it = m_threadSessions.erase(it);
+            Q_UNUSED(label);
+        } else {
+            ++it;
+        }
+    }
+    persistThreadSessions();
+    emit currentThreadLabelChanged();
+}
+
+// ---------------------------------------------------------------------------
+// My Day + thread chats (CONTRACT §3.6)
+// ---------------------------------------------------------------------------
+
+void Manager::setMyDayVisible(bool v)
+{
+    if (m_myDayVisible == v)
+        return;
+    m_myDayVisible = v;
+    emit myDayVisibleChanged();
+}
+
+void Manager::openMyDay()
+{
+    // A second press is the refresh gesture: the lists change inside goose's own
+    // scheduled sessions, so there is nothing to subscribe to and re-reading is
+    // the only way to see them move.
+    setMyDayVisible(true);
+    refreshTasks();
+}
+
+void Manager::closeMyDay()
+{
+    setMyDayVisible(false);
 }
 
 void Manager::refreshTasks()
 {
-    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_tasks_refresh)
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_tasks_refresh) {
+        m_tasksLoading = false;
+        m_tasksError = QStringLiteral("My Day: the core has no task surface");
+        emit tasksChanged();
         return;
+    }
+    if (!m_online) {
+        // Offline there is nothing to ask. The page's empty state already says the
+        // lists load once the server is reachable, so this is not an error — just
+        // stop claiming to load.
+        m_tasksLoading = false;
+        emit tasksChanged();
+        return;
+    }
+    m_tasksLoading = true;
+    m_tasksError.clear();
+    emit tasksChanged();
     m_bridge->api().grouse_tasks_refresh(m_bridge->handle());
+    if (m_tasksWatchdog)
+        m_tasksWatchdog->start();
+}
+
+QString Manager::dueLabel(const QString &iso) const
+{
+    return MyDay::dueLabel(iso, QDate::currentDate());
+}
+
+QString Manager::wakeLabel(const QString &iso) const
+{
+    return MyDay::wakeLabel(iso, QDateTime::currentDateTime());
+}
+
+QString Manager::threadName(const QString &label) const
+{
+    return MyDay::threadName(label);
+}
+
+QString Manager::artifactsLabel(const QStringList &paths) const
+{
+    return MyDay::artifactsLabel(paths);
+}
+
+bool Manager::rowSnoozed(const QVariantMap &row) const
+{
+    return MyDay::isSnoozed(row, QDateTime::currentDateTime());
+}
+
+QString Manager::rowMeta(const QVariantMap &row, bool snoozed) const
+{
+    return MyDay::metaLine(row, snoozed, QDate::currentDate(), QDateTime::currentDateTime());
+}
+
+void Manager::snoozeTaskToMorning(const QString &id)
+{
+    // UTC with a Z suffix: `nextMorning` is LOCAL 05:00, and the server reads a naive
+    // stamp as UTC — sending "2026-10-31T05:00:00" from Denver would snooze until
+    // 23:00 the previous evening, which is to say not at all.
+    const QDateTime wake = MyDay::nextMorning(QDateTime::currentDateTime());
+    snoozeTask(id, wake.toUTC().toString(Qt::ISODate), QStringLiteral("snoozed from My Day"));
+}
+
+void Manager::wakeTask(const QString &id)
+{
+    // Waking is a snooze whose `until` has already passed: the server's own wake
+    // pass (rank/maintain) flips it back to open, and there is no separate tool.
+    snoozeTask(id, QDateTime::currentDateTimeUtc().toString(Qt::ISODate),
+               QStringLiteral("brought back from My Day"));
 }
 
 void Manager::closeTask(const QString &id, const QString &state, const QString &resolution)
@@ -2142,9 +2463,18 @@ void Manager::reactTask(const QString &id, const QString &reaction)
 
 void Manager::coreOnTasks(const QString &json)
 {
-    // Kept verbatim: the eventual My Day tab parses it exactly as the phone does,
-    // so there is one place that knows the envelope's shape (the core's tasks.rs).
+    // Verbatim, for a page that renders nothing to be compared against the wire;
+    // the decoded lists are what the UI binds. myday.cpp is the one place that
+    // knows the envelope's shape, and its unit test pins the translation.
     m_tasksJson = json;
+    const MyDay::Lists lists = MyDay::parse(json);
+    m_myDayOpen = lists.open;
+    m_myDayDone = lists.done;
+    m_myDayHanded = lists.handed;
+    m_tasksError = lists.error;
+    m_tasksLoading = false;
+    if (m_tasksWatchdog)
+        m_tasksWatchdog->stop();
     emit tasksChanged();
 }
 

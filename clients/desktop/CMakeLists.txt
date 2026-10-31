@@ -43,6 +43,8 @@ qt_add_executable(grouse-desktop
     src/sessionlistmodel.cpp
     src/markdown.h
     src/markdown.cpp
+    src/myday.h
+    src/myday.cpp
     src/notifier.h
     src/notifier.cpp
     src/pushclient.h

@@ -403,20 +403,85 @@ public:
     QVariant serverConfig() const { return m_serverConfig; }
     QVariant supportedModels() const { return m_supportedModels; }
     QVariant skills() const { return m_skills; }
-    /** My Day (CONTRACT §3.3): `{"open": [...], "done": [...], "errors": {...}}`
-     *  as the core emitted it. Empty until the first refresh lands. */
+    /** My Day's last `on_tasks` document, verbatim — the three decoded lists are
+     *  the surface to bind (see myDayOpen/myDayHanded/myDayDone); this stays for
+     *  debugging, so a page that renders nothing can be compared with the wire. */
     QString tasksJson() const { return m_tasksJson; }
 
     // ---- structured input (elicitations + recipe parameters) ------------------
     QVariant pendingForm() const;
-    // ---- My Day (CONTRACT §3.3) --------------------------------------------
-    // assistant-state's items over a deterministic tools/call — no model turn.
-    // The desktop has no My Day surface yet; the bridge exists so the ABI is
-    // complete and the eventual tab has the data it needs.
+    // ---- My Day (CONTRACT §3.6) --------------------------------------------
+    // assistant-state's own working state over a deterministic tools/call — no
+    // model turn, so the page opens in milliseconds instead of pre-filling 60k
+    // tokens to answer "what is open". The core owns the call, the hidden
+    // auto-mode session it runs on, and the three-section envelope; this side
+    // decodes it (myday.cpp) and sends the four intents the server acts on.
+    Q_PROPERTY(bool myDayVisible READ myDayVisible NOTIFY myDayVisibleChanged)
+    /** True while the chat area shows My Day instead of a conversation. */
+    bool myDayVisible() const { return m_myDayVisible; }
+    /** Open items — snoozed ones included: server-side a snoozed item is still
+     *  open, only quiet until `snoozeUntil`, so the page splits them itself. */
+    Q_PROPERTY(QVariantList myDayOpen READ myDayOpen NOTIFY tasksChanged)
+    QVariantList myDayOpen() const { return m_myDayOpen; }
+    /** The closed tail, newest first. */
+    Q_PROPERTY(QVariantList myDayDone READ myDayDone NOTIFY tasksChanged)
+    QVariantList myDayDone() const { return m_myDayDone; }
+    /** Work handed over: assistant-state `task` rows in `running` or `review`. */
+    Q_PROPERTY(QVariantList myDayHanded READ myDayHanded NOTIFY tasksChanged)
+    QVariantList myDayHanded() const { return m_myDayHanded; }
+    /** Per-section failure text from the last refresh (empty when it worked):
+     *  "nothing to do" and "could not ask" must not look alike. */
+    Q_PROPERTY(QString tasksError READ tasksError NOTIFY tasksChanged)
+    QString tasksError() const { return m_tasksError; }
+    Q_PROPERTY(bool tasksLoading READ tasksLoading NOTIFY tasksChanged)
+    bool tasksLoading() const { return m_tasksLoading; }
+    /** Show My Day and re-read its lists (a second press just refreshes). */
+    Q_INVOKABLE void openMyDay();
+    /** Back to the conversation (or the landing page) without touching the wire. */
+    Q_INVOKABLE void closeMyDay();
     Q_INVOKABLE void refreshTasks();
+    /** Close an item: `done` (it happened) / `dropped` (it never mattered) /
+     *  `expired`. `resolution` is the one line that stops the next briefing from
+     *  raising it again, which is why the page refuses an empty one. */
     Q_INVOKABLE void closeTask(const QString &id, const QString &state, const QString &resolution);
     Q_INVOKABLE void snoozeTask(const QString &id, const QString &until, const QString &reason);
+    /** Quiet until the next 05:00 — back before the 06:00 digest, unlike "+24h". */
+    Q_INVOKABLE void snoozeTaskToMorning(const QString &id);
+    /** Wake early: a snooze into the past, which the server's own wake pass flips. */
+    Q_INVOKABLE void wakeTask(const QString &id);
     Q_INVOKABLE void reactTask(const QString &id, const QString &reaction);
+    /// Formatting for the page. The date maths lives in myday.cpp (and its unit
+    /// test) rather than in QML, because the sign of a day difference is exactly
+    /// what a UI language gets wrong once per port.
+    Q_INVOKABLE QString dueLabel(const QString &iso) const;
+    Q_INVOKABLE QString wakeLabel(const QString &iso) const;
+    Q_INVOKABLE QString threadName(const QString &label) const;
+    Q_INVOKABLE QString artifactsLabel(const QStringList &paths) const;
+    Q_INVOKABLE bool rowSnoozed(const QVariantMap &row) const;
+    Q_INVOKABLE QString rowMeta(const QVariantMap &row, bool snoozed) const;
+
+    // ---- thread chats (§3.6) ------------------------------------------------
+    /** The thread label of the conversation on screen, when it IS a thread chat.
+     *  Empty otherwise — the chat page paints its thread panel only for this. */
+    Q_PROPERTY(QString currentThreadLabel READ currentThreadLabel NOTIFY currentThreadLabelChanged)
+    QString currentThreadLabel() const;
+    /** Open `label`'s conversation, creating it the first time: a real session
+     *  filed under the assistant PROJECT, so goose injects the persona the
+     *  assistant answers with. Also seeds the composer with the thread's name. */
+    Q_INVOKABLE void openThreadChat(const QString &label);
+    /** A handed-over task's tap-through: the session that did the work, falling
+     *  back to its thread chat when that session is gone. */
+    Q_INVOKABLE void openTaskSession(const QString &sessionId, const QString &thread);
+    /** The always-on assistant thread (a normal chat titled "Assistant"). */
+    Q_INVOKABLE void openAssistant();
+    /** Send a line into the assistant thread from My Day's composer. */
+    Q_INVOKABLE void askAssistant(const QString &text);
+    /** Put `text` in the composer of whatever chat is now on screen — the one-way
+     *  push into ChatPage's field (an item named from My Day, or "" to clear). */
+    Q_INVOKABLE void setDraft(const QString &text);
+    /** The project slug thread chats are filed under — read from the CORE, never
+     *  hardcoded: the filing and the list filter that hides them are one rule. */
+    Q_INVOKABLE QString assistantProject() const;
 
     /** Answer the pending form. `values` maps field name → value (a bool for a
      *  boolean field, a number for number/integer, a string otherwise).
@@ -501,8 +566,17 @@ signals:
     void serverConfigChanged();
     void supportedModelsChanged();
     void skillsChanged();
-    /** The My Day lists changed (see `tasksJson`). */
+    /** The My Day lists (or their error/loading state) changed. */
     void tasksChanged();
+    /** My Day took the chat area, or gave it back. */
+    void myDayVisibleChanged();
+    /** The on-screen chat became (or stopped being) a thread chat. */
+    void currentThreadLabelChanged();
+    /** Put `text` in the composer: a thread chat's opening line, or "" to clear
+     *  it when a new conversation starts. A draft belongs to the chat it was
+     *  typed in, and ChatPage's input outlives a `newChat()` — so the page clears
+     *  it from here rather than each caller remembering to. */
+    void draftRequested(const QString &text);
     /** Result of testConnection(): reachability + secret-key auth + ACP handshake. */
     void connectionTested(bool ok, const QString &message);
     /** The pending structured-input form arrived, changed, or was answered. */
@@ -728,6 +802,34 @@ private:
     QVariantList m_skills;
     /// My Day's last `on_tasks` document, verbatim (see `tasksJson()`).
     QString m_tasksJson;
+    // ---- My Day + thread chats -------------------------------------------
+    bool m_myDayVisible = false;
+    bool m_tasksLoading = false;
+    QVariantList m_myDayOpen;
+    QVariantList m_myDayDone;
+    QVariantList m_myDayHanded;
+    QString m_tasksError;
+    /// A refresh that dies before `on_tasks` (no wire, evicted session) must not
+    /// leave the spinner turning forever; the core also reports the failure, but
+    /// only the watchdog guarantees the page stops claiming it is loading.
+    QTimer *m_tasksWatchdog = nullptr;
+    /// Set by openThreadChat and consumed when the new session goes live, where
+    /// its id is finally known.
+    QString m_pendingThreadLabel;
+    /// thread label -> session id. A CACHE, not truth: the server owns the
+    /// session, so an entry whose session is gone is dropped when opening it
+    /// FAILS (coreOnSessionOpenFailed) — never by testing it against the session
+    /// list, which no longer contains it (thread chats are filtered out).
+    QHash<QString, QString> m_threadSessions;
+
+    void setMyDayVisible(bool v);
+    QString threadSessionId(const QString &label) const;
+    void rememberThreadSession(const QString &label, const QString &sid);
+    void forgetThreadSession(const QString &label);
+    void adoptThreadSession(const QString &sid, const QString &label);
+    void persistThreadSessions();
+    /// The always-on thread: a normal chat titled "Assistant", newest wins.
+    QString assistantSessionId() const;
     // Pending structured-input forms, oldest first. The core parks ONE request
     // per family (spine::answer_request takes a single responder), so a second
     // request of the same family REPLACES the queued one — the old responder was

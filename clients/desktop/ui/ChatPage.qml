@@ -379,6 +379,37 @@ Kirigami.Page {
         }
         function onOnlineChanged() { page.keepScrolled(); page.updateSlashPopup() }
         function onPromptingChanged() { page.keepScrolled() }
+        // The one-way push into the composer: a thread chat's opening line, an item
+        // named from My Day, or "" when a new conversation starts (a draft belongs
+        // to the chat it was typed in, and this field outlives `newChat()`).
+        function onDraftRequested(text) {
+            chatInput.text = text
+            chatInput.cursorPosition = text.length
+            chatInput.focus = true
+        }
+        // Entering a thread chat re-reads the task lists: the panel above the
+        // transcript is this thread's rows, and they may have moved since My Day
+        // was last opened (a briefing ran, work was handed over).
+        function onCurrentThreadLabelChanged() {
+            if (Mgr.currentThreadLabel.length > 0)
+                Mgr.refreshTasks()
+        }
+    }
+
+    /// This thread's open items and handed-over work, filtered out of the My Day
+    /// lists (the core fetches those over one deterministic tools/call; there is no
+    /// second source and no per-thread query). The LIST is an argument, not a
+    /// property name: looking a property up by string binds nothing, so the panel
+    /// would stop updating the first time the lists changed.
+    function threadRows(rows, label) {
+        const out = []
+        if (label.length === 0)
+            return out
+        for (let i = 0; i < rows.length; i++) {
+            if ((rows[i].thread || "") === label)
+                out.push(rows[i])
+        }
+        return out
     }
 
     // Scroll to the end only when the user is already pinned there, and defer
@@ -706,6 +737,96 @@ Kirigami.Page {
                         topDock.ratio = Math.max(0.15, Math.min(0.85,
                             topDock.ratio + (y - topHandle.lastY) / pageColumn.height))
                         topHandle.lastY = y
+                    }
+                }
+            }
+        }
+
+        // A thread chat's rows, above its own conversation: what the area holds, so
+        // the chat about it is read in context. Collapsed by default — the panel is
+        // a reminder of the thread, not the subject of the chat.
+        Rectangle {
+            id: threadPanel
+            readonly property string label: Mgr.currentThreadLabel
+            readonly property var items: page.threadRows(Mgr.myDayOpen, threadPanel.label)
+            readonly property var tasks: page.threadRows(Mgr.myDayHanded, threadPanel.label)
+            property bool expanded: false
+            onLabelChanged: expanded = false
+            Layout.fillWidth: true
+            Layout.topMargin: Kirigami.Units.smallSpacing
+            Layout.preferredHeight: visible ? panelCol.implicitHeight + Theme.spacing.s2 : 0
+            visible: label.length > 0 && (items.length + tasks.length) > 0
+            radius: Theme.radius.md
+            color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                           Kirigami.Theme.textColor.b, 0.05)
+
+            ColumnLayout {
+                id: panelCol
+                anchors.fill: parent
+                anchors.margins: Theme.spacing.s2
+                spacing: Theme.spacing.half
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacing.s2
+                    Controls.Label {
+                        text: Mgr.threadName(threadPanel.label)
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        font.weight: Font.DemiBold
+                        Layout.fillWidth: true
+                        renderType: Text.NativeRendering
+                    }
+                    Controls.Label {
+                        readonly property var parts: {
+                            const p = []
+                            if (threadPanel.items.length > 0)
+                                p.push(qsTr("%1 open").arg(threadPanel.items.length))
+                            if (threadPanel.tasks.length > 0)
+                                p.push(qsTr("%1 handed over").arg(threadPanel.tasks.length))
+                            return p
+                        }
+                        text: parts.join(" · ")
+                        color: Kirigami.Theme.disabledTextColor
+                        font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.8))
+                        renderType: Text.NativeRendering
+                    }
+                    Kirigami.Icon {
+                        source: threadPanel.expanded ? "arrow-down" : "arrow-right"
+                        implicitWidth: 12
+                        implicitHeight: 12
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: threadPanel.expanded = !threadPanel.expanded
+                    }
+                }
+
+                Repeater {
+                    model: threadPanel.expanded
+                           ? (threadPanel.tasks.length + threadPanel.items.length) : 0
+                    delegate: Controls.Label {
+                        // Handed-over work first, then the open loops: one is waiting
+                        // for a look, the other is waiting for the world.
+                        readonly property var task: index < threadPanel.tasks.length
+                                                    ? threadPanel.tasks[index] : null
+                        readonly property var item: task === null
+                            ? threadPanel.items[index - threadPanel.tasks.length] : null
+                        Layout.fillWidth: true
+                        topPadding: Theme.spacing.half
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                        maximumLineCount: 2
+                        elide: Text.ElideRight
+                        font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.9))
+                        color: task !== null ? Kirigami.Theme.textColor
+                                             : Kirigami.Theme.disabledTextColor
+                        text: task !== null
+                              ? ((task.state === "review" ? qsTr("ready · ") : qsTr("working · "))
+                                 + task.title
+                                 + ((task.result || "").length > 0 ? " — " + task.result : ""))
+                              : (item.title + ((Mgr.rowMeta(item, false)).length > 0
+                                               ? " — " + Mgr.rowMeta(item, false) : ""))
                     }
                 }
             }

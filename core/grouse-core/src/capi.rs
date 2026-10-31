@@ -823,6 +823,18 @@ pub extern "C" fn grouse_task_react(h: *mut c_void, id: *const c_char, reaction:
     .ok();
 }
 
+/// The project slug thread chats are filed under (CONTRACT §3.6), e.g.
+/// `"assistant"`. Caller frees with `grouse_string_free`.
+///
+/// Exported instead of documented as a literal so a client cannot file thread
+/// chats under a slug the core's own session-list filter stops recognising: the
+/// filing and the hiding are one rule, and they have to move together.
+#[no_mangle]
+pub extern "C" fn grouse_assistant_project() -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| c_str(crate::session::ASSISTANT_PROJECT)))
+        .unwrap_or(std::ptr::null_mut())
+}
+
 #[no_mangle]
 pub extern "C" fn grouse_set_config_option(h: *mut c_void, config_id: *const c_char, value: *const c_char, out_err: *mut *mut c_char) {
     if !out_err.is_null() {
@@ -1463,6 +1475,17 @@ mod capi_tests {
     fn listener_table_is_defaultable() {
         let t = GrouseCoreListener::default();
         assert!(t.on_status.is_none() && t.on_error.is_none());
+    }
+
+    /// The slug a client files thread chats under is the SAME one the list filter
+    /// hides them by; a handle of its own is not needed to read it.
+    #[test]
+    fn assistant_project_is_exported_without_a_handle() {
+        let p = grouse_assistant_project();
+        assert!(!p.is_null());
+        assert_eq!(unsafe { c_param(p) }.unwrap_or(""), crate::session::ASSISTANT_PROJECT);
+        assert_eq!(unsafe { c_param(p) }.unwrap_or(""), "assistant");
+        grouse_string_free(p);
     }
 
     #[test]

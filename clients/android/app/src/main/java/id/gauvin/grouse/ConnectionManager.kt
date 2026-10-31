@@ -1595,18 +1595,15 @@ class ConnectionManager private constructor(context: Context) {
             return threadSessions.value.entries.firstOrNull { it.value == cur }?.key
         }
 
-    private fun threadSessionId(label: String): String? {
-        val id = threadSessions.value[label] ?: return null
-        // A session deleted on the server (or archived out of the list) must not be
-        // opened again — the core reports the failure and binds nothing (grouse#19), so
-        // a stale mapping would look like "the thread chat is broken". Forget it and
-        // create a fresh one instead. Skipped while the list is empty (not yet loaded).
-        if (sessions.value.isNotEmpty() && sessions.value.none { it.sessionId == id }) {
-            forgetThreadSession(label)
-            return null
-        }
-        return id
-    }
+    /** The mapped session for `label`, or null to mint a fresh one.
+     *
+     *  Deliberately does NOT validate against `sessions`: a thread chat is filed under
+     *  the assistant project, and the core hides every session in that project from
+     *  this list — so a live thread chat is *never* in it, and checking membership
+     *  would discard the mapping on every second Discuss and create a duplicate chat
+     *  each time. The real staleness signal is the open FAILING (grouse#19), which is
+     *  where the mapping is dropped (`onCoreSessionOpenFailed`). */
+    private fun threadSessionId(label: String): String? = threadSessions.value[label]
 
     private fun rememberThreadSession(label: String, sid: String) {
         val next = store.threadSessions + (label to sid)
@@ -1618,6 +1615,15 @@ class ConnectionManager private constructor(context: Context) {
         val next = store.threadSessions - label
         store.threadSessions = next
         threadSessions.value = next
+    }
+
+    /** Drop a mapping whose session the server no longer has. Called from the open
+     *  FAILURE, which is the only signal a thread chat can produce (it is invisible to
+     *  `session/list`), and before that handler's "not the on-screen chat" guard: the
+     *  mapping is stale whether or not this chat happens to be the visible one. */
+    private fun forgetThreadSessionForSession(sid: String) {
+        val label = threadSessions.value.entries.firstOrNull { it.value == sid }?.key ?: return
+        forgetThreadSession(label)
     }
 
     /** Open the chat for `label`, creating it the first time. Leaves the composer for the
@@ -2492,6 +2498,10 @@ class ConnectionManager private constructor(context: Context) {
      *  (its cache, if any), and record WHY so the chat can say it rather than
      *  looking like an empty conversation nobody asked for. */
     private fun onCoreSessionOpenFailed(sessionId: String, message: String) {
+        // A thread chat the server has deleted must not be opened again: drop the
+        // mapping so the next Discuss mints a fresh conversation instead of retrying
+        // a dead id forever.
+        forgetThreadSessionForSession(sessionId)
         replayActive.value = false
         replayProgress.value = 0
         loadingOlder = false

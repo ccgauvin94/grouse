@@ -1,0 +1,143 @@
+import QtQuick
+import QtTest
+import "@MYDAY_UI_URL@"
+
+// MyDayPage's grouping, which is the only non-obvious rule on the page: a thread
+// LABEL groups rows, and a label gets a header only when more than one row sits
+// under it (at the last count My Day held 21 entries over 19 labels, so a header
+// per label would be all headers and no rows).
+//
+// Instantiating the page is half the point: its rows are Loaders over inline
+// components, and a binding TypeError at delegate creation is exactly what
+// qmllint and the page-load smoke cannot see. The stub Mgr comes from the
+// runner's Setup context property (tests/qml/tst_qml.cpp).
+TestCase {
+    id: tc
+    name: "MyDayPage"
+    width: 900
+    height: 700
+
+    Component {
+        id: pageComp
+        MyDayPage { }
+    }
+
+    function makePage() {
+        const page = pageComp.createObject(tc)
+        verify(page !== null, "MyDayPage failed to instantiate")
+        wait(50)   // let the entry sequence bind
+        return page
+    }
+
+    function test_threadWithSeveralRowsGetsAHeader() {
+        const page = makePage()
+        const model = page.entryModel
+        // Handed-over work first (1 task), then the two open loops in that thread,
+        // then the unlabelled loop: one header for "chami-billing", no header for
+        // the blank label.
+        const headers = model.filter((e) => e.type === "header")
+        compare(headers.length, 1)
+        compare(headers[0].label, "chami-billing")
+        compare(headers[0].count, 3)
+        // Collapsed by default: the header is there, its rows are not — but a row
+        // with NO label can never be collapsed behind one, so it is always painted.
+        compare(headers[0].open, false)
+        compare(model.length, 2)
+        compare(model[1].row.id, "itm_c")
+        page.destroy()
+    }
+
+    function test_expandingAThreadRevealsItsRows() {
+        const page = makePage()
+        page.toggleLabel("chami-billing")
+        wait(20)
+        const model = page.entryModel
+        compare(model.length, 5)          // header + 3 rows + the unlabelled loop
+        compare(model[0].type, "header")
+        compare(model[0].open, true)
+        compare(model[1].type, "task")    // handed-over work sorts first
+        compare(model[1].row.id, "tsk_a")
+        compare(model[2].type, "item")
+        // A lone label never collapses: its row is in the same sequence, always.
+        const lone = model.filter((e) => e.row && e.row.id === "itm_c")
+        compare(lone.length, 1)
+        page.destroy()
+    }
+
+    function test_snoozedRowsLeaveTheOpenList() {
+        const page = makePage()
+        // The stub reports "snoozed" for any row in that state; the page must take
+        // it OUT of the in-play list rather than painting it among the open loops.
+        const rows = page.snoozedModel
+        compare(rows.length, 0)           // nothing is snoozed in the fixture
+        compare(page.inPlayRows.length, 4)
+        page.destroy()
+    }
+
+    // Depth-first search for a control by its visible text. The rows are Loaders
+    // over inline components, so the only honest way to prove "Discuss" is wired is
+    // to find the button the user would click and click it.
+    function findControl(item, text) {
+        if (!item)
+            return null
+        if (item.text !== undefined && item.text === text)
+            return item
+        const kids = item.children || []
+        for (let i = 0; i < kids.length; i++) {
+            const hit = findControl(kids[i], text)
+            if (hit)
+                return hit
+        }
+        return null
+    }
+
+    function test_discussOpensTheThreadChat() {
+        const page = makePage()
+        page.toggleLabel("chami-billing")
+        wait(50)
+        const discuss = findControl(page, qsTr("Discuss"))
+        verify(discuss !== null, "the thread header has no Discuss button")
+        discuss.clicked()
+        compare(Mgr.lastCall, "openThreadChat:chami-billing")
+        page.destroy()
+    }
+
+    function findByName(item, name) {
+        if (!item)
+            return null
+        if (item.objectName === name)
+            return item
+        const kids = item.children || []
+        for (let i = 0; i < kids.length; i++) {
+            const hit = findByName(kids[i], name)
+            if (hit)
+                return hit
+        }
+        return null
+    }
+
+    function test_aRowTapThroughNamesTheItem() {
+        const page = makePage()
+        // An unlabelled loop has no thread to open, so the card body goes to the
+        // assistant thread — and names the ITEM in the opening line, so the model
+        // can state_close on THAT row instead of guessing which loop is meant.
+        const body = findByName(page, "myDayCardBody")
+        verify(body !== null, "no item card body rendered")
+        body.clicked(null)
+        // Order matters: the chat is chosen first, the item-specific line second.
+        verify(Mgr.lastCall.startsWith("setDraft:About item itm_"),
+               "unexpected call: " + Mgr.lastCall)
+        page.destroy()
+    }
+
+    function test_aHandedOverTaskOpensTheSessionThatDidTheWork() {
+        const page = makePage()
+        page.toggleLabel("chami-billing")
+        wait(50)
+        const body = findByName(page, "myDayTaskBody")
+        verify(body !== null, "no handed-over card rendered")
+        body.clicked(null)
+        compare(Mgr.lastCall, "openTaskSession:20261030_1:chami-billing")
+        page.destroy()
+    }
+}
