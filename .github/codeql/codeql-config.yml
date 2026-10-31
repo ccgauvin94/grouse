@@ -1,0 +1,17 @@
+# What CodeQL should not analyse, and why.
+#
+# `core/grouse-core/examples/` holds manual probe binaries. Each one needs a live
+# goose server and its secret key in the environment, and its entire job is to
+# print what the server sent back so a human can read it. CodeQL's
+# `rust/cleartext-logging` flags them anyway — "writes session_id to a log file" —
+# because the values are id-shaped; a session id is an identifier, not a
+# credential (it is useless without the `X-Secret-Key` that authorised it, and it
+# is visible in goose's own database and logs), so this is a false positive of a
+# query that is worth keeping switched on where it matters: shipped code.
+#
+# Excluding the directory keeps the query live everywhere else. The alternative —
+# dismissing the alerts one by one — would have to be redone for every new probe
+# and hides the query's real hits among the noise.
+name: grouse-codeql
+paths-ignore:
+  - core/grouse-core/examples
