@@ -64,6 +64,10 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
+          # Excludes the manual probe binaries under core/grouse-core/examples/
+          # from analysis — see the file for why that is a false positive of
+          # rust/cleartext-logging rather than a real leak.
+          config-file: ./.github/codeql/codeql-config.yml
 
       # Traced by CodeQL: this is the step default setup could not derive. The
       # Android SDK is preinstalled on ubuntu-latest (ANDROID_HOME), the Gradle
