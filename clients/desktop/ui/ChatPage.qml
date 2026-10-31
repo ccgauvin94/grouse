@@ -800,39 +800,47 @@ Kirigami.Page {
                 anchors.margins: Theme.spacing.s2
                 spacing: Theme.spacing.half
 
-                RowLayout {
+                // The MouseArea is the row, not an overlay inside it: a layout
+                // positions and sizes its own children, so `anchors.fill: parent` on
+                // a MouseArea placed in the RowLayout is undefined behavior (Qt warns
+                // and the hit area is then the layout's business, not ours).
+                MouseArea {
+                    id: threadHeader
                     Layout.fillWidth: true
-                    spacing: Theme.spacing.s2
-                    Controls.Label {
-                        text: Mgr.threadName(threadPanel.label)
-                        textFormat: Text.PlainText
-                        elide: Text.ElideRight
-                        font.weight: Font.DemiBold
-                        Layout.fillWidth: true
-                        renderType: Text.NativeRendering
-                    }
-                    Controls.Label {
-                        readonly property var parts: {
-                            const p = []
-                            if (threadPanel.items.length > 0)
-                                p.push(qsTr("%1 open").arg(threadPanel.items.length))
-                            if (threadPanel.tasks.length > 0)
-                                p.push(qsTr("%1 handed over").arg(threadPanel.tasks.length))
-                            return p
-                        }
-                        text: parts.join(" · ")
-                        color: Kirigami.Theme.disabledTextColor
-                        font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.8))
-                        renderType: Text.NativeRendering
-                    }
-                    Kirigami.Icon {
-                        source: threadPanel.expanded ? "arrow-down" : "arrow-right"
-                        implicitWidth: 12
-                        implicitHeight: 12
-                    }
-                    MouseArea {
+                    implicitHeight: headerRow.implicitHeight
+                    onClicked: threadPanel.expanded = !threadPanel.expanded
+
+                    RowLayout {
+                        id: headerRow
                         anchors.fill: parent
-                        onClicked: threadPanel.expanded = !threadPanel.expanded
+                        spacing: Theme.spacing.s2
+                        Controls.Label {
+                            text: Mgr.threadName(threadPanel.label)
+                            textFormat: Text.PlainText
+                            elide: Text.ElideRight
+                            font.weight: Font.DemiBold
+                            Layout.fillWidth: true
+                            renderType: Text.NativeRendering
+                        }
+                        Controls.Label {
+                            readonly property var parts: {
+                                const p = []
+                                if (threadPanel.items.length > 0)
+                                    p.push(qsTr("%1 open").arg(threadPanel.items.length))
+                                if (threadPanel.tasks.length > 0)
+                                    p.push(qsTr("%1 handed over").arg(threadPanel.tasks.length))
+                                return p
+                            }
+                            text: parts.join(" · ")
+                            color: Kirigami.Theme.disabledTextColor
+                            font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.8))
+                            renderType: Text.NativeRendering
+                        }
+                        Kirigami.Icon {
+                            source: threadPanel.expanded ? "arrow-down" : "arrow-right"
+                            implicitWidth: 12
+                            implicitHeight: 12
+                        }
                     }
                 }
 

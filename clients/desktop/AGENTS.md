@@ -229,9 +229,20 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
   purpose: the manifest's `base: io.qt.qtwebengine.BaseApp` makes the ostree
   checkout restore SELinux labels the host user context cannot set (`build-init`
   dies with `lsetxattr(security.selinux): Operation not supported`); the
-  container's `spc_t` domain can, and nested bwrap works on the current flatpak
-  generation (an older note about a `/oldroot/etc/resolv.conf` mount failure was
-  a previous container generation). The host's own `flatpak` is still what you
+  container's `spc_t` domain can. Nested bwrap works, but it is fragile in one
+  way that recurs (hit again 2026-10-31): the container's `/etc/resolv.conf` is a
+  bind mount of systemd-resolved's stub, and when systemd-resolved rewrites that
+  stub while the container runs, the mount is left on a deleted inode —
+  `grep resolv /proc/self/mountinfo` shows `…/stub-resolv.conf//deleted`. Reads
+  still work, so nothing else in the container looks sick, but `mount --bind` on
+  that path fails with ENOENT and every flatpak-builder module step dies with
+  `bwrap: Can't bind mount /oldroot/etc/resolv.conf on /newroot/etc/resolv.conf:
+  Unable to mount source on destination: No such file or directory`. Restart the
+  container (`distrobox stop kde-build -Y`, then re-enter) to recreate the mount
+  from the live file; the primitive checks it in one line —
+  `bwrap --dev-bind / / --bind /etc/resolv.conf /etc/resolv.conf true` (exit 0 =
+  healthy). It only surfaces on a module cache MISS, so a fully cached build
+  proves nothing about it. The host's own `flatpak` is still what you
   install/bundle with; only the builder needs the container. The host therefore
   needs just `flatpak` + `distrobox`; `build-flatpak.sh` checks for
   `flatpak-builder` inside `kde-build`, not on the host (atomic Fedora has no
