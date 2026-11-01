@@ -574,6 +574,64 @@ pub(crate) fn unlabeled_steps(turn_runs: &[String], labeled: &HashSet<String>) -
 /// the rest keep their provisional label instead of queueing a huge request.
 const MAX_SUMMARIZED_STEPS: usize = 40;
 
+/// How many trailing messages ONE backfill page asks the wire for. Pages are
+/// bounded so a scroll-back never waits on a whole transcript, and so a slow
+/// link still delivers something.
+const PAGE_MESSAGES: usize = 120;
+
+/// How long the background fill waits between pages. Slow on purpose: the user
+/// is reading the recent part, and each page re-reads the session server-side.
+const FILL_DELAY_MS: u64 = 600;
+
+/// Pages that may fail before the cursor closes for this open. A wire that
+/// cannot serve a page must not turn scroll-back into a retry storm; the next
+/// open re-probes from scratch.
+const PAGE_FAILURES: u32 = 2;
+
+/// Bound on one backfill page. `session/load` has no timeout of its own (a full
+/// replay can legitimately take minutes), but a page the user is SCROLLING for
+/// must not pin the session forever: the wire reports a dead link, and this
+/// covers the case where it does not.
+const PAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Why a page was fetched.
+#[derive(Debug, Clone, Copy)]
+enum PageReason {
+    /// The user scrolled back to the origin: answer them when it lands.
+    Scroll(usize),
+    /// The background fill: nobody is waiting, emit nothing.
+    Fill,
+}
+
+/// The server-side history a session still owes, and the page in flight that is
+/// fetching it (docs/TRANSCRIPT_MODEL.md, "Windows").
+#[derive(Debug, Clone, Default)]
+struct Backfill {
+    /// Leading messages the last `session/load` withheld (`_meta.replaySkipped`).
+    /// `0` once the store reaches the conversation's origin.
+    skipped: usize,
+    /// Token of the page in flight; `None` when idle. One page per session, and
+    /// a page that lands after its session moved on compares this and drops
+    /// itself.
+    page: Option<u64>,
+    /// Monotone source for [`Self::page`] tokens.
+    page_seq: u64,
+    /// The tail the last load or page asked for. The wire has no backwards
+    /// cursor, so each page asks for MORE trailing messages than the last and
+    /// the overlap is dropped by item id.
+    tail: usize,
+    /// Cancels the background fill: bumped by every new load, by a forced
+    /// reload, and when the chat stops being the one on screen.
+    fill: u64,
+    /// Consecutive failed pages (see [`PAGE_FAILURES`]).
+    failures: u32,
+    /// A scroll-back that arrived while a page was already in flight: how many
+    /// older items it asked for. The page in flight answers it when it ends —
+    /// without this the client's cursor would spin, because a page started by
+    /// the background fill emits nothing.
+    wait: Option<usize>,
+}
+
 /// The core's authoritative state, guarded by `CoreInner::state`.
 #[derive(Default)]
 struct CoreState {
@@ -642,6 +700,8 @@ struct CoreState {
     /// only when one was actually started, so a bare title update cannot clear
     /// the app's busy/steer state.
     active_runs: HashMap<String, String>,
+    /// Per-session backfill bookkeeping (docs/TRANSCRIPT_MODEL.md, "Windows").
+    backfill: HashMap<String, Backfill>,
     /// Each session's plain tool runs for the turn in flight, oldest first.
     /// The end-of-turn summarizer drains this; shared by every transport.
     turn_runs: HashMap<String, Vec<String>>,
@@ -1131,7 +1191,7 @@ impl Core {
     /// the same `Clear` the open path would; the later open is a no-op when
     /// the cache is fresh.
     pub fn load_cached_transcript(&self, session_id: String) {
-        if let Some((items, _)) = self.inner.cache.load_transcript(&session_id) {
+        if let Some((items, _, _)) = self.inner.cache.load_transcript(&session_id) {
             // Authoritative, NOT provisional: this is the cold-start
             // placeholder for the chat the user was last in, painted before any
             // connect. `connect()` binds a throwaway session first and the app
@@ -1599,14 +1659,62 @@ impl Core {
     }
 
     /// Extend the client's window backward by `count` items
-    /// (docs/TRANSCRIPT_MODEL.md). The store keeps the whole transcript, so the
-    /// items come from memory — no cache read and no wire call. Emits `Upsert`
-    /// per older item (oldest-first) + a refreshed `Window`; `has_older: false`
-    /// means there is nothing further back.
+    /// (docs/TRANSCRIPT_MODEL.md, "Windows").
+    ///
+    /// Two sources, in this order:
+    ///
+    /// 1. the STORE, which holds everything this client has already fetched —
+    ///    no cache read, no wire call;
+    /// 2. the WIRE, when the store is at its own origin and the server reported
+    ///    history behind it (`_meta.replaySkipped`). One page is fetched, spliced
+    ///    in front of the store, and then served like any other older batch.
+    ///
+    /// Either way the client sees `Upsert` per older item (oldest-first) + a
+    /// refreshed `Window`; `has_older: false` means there is nothing further
+    /// back, from either source.
     pub fn load_older(&self, count: u32) {
-        if let Some(store) = self.store() {
+        let Some(key) = self.inner.hub.displayed_key() else {
+            return;
+        };
+        let store = self.store_for(&key);
+        if store.can_load_older() {
             store.load_older(count as usize);
+            return;
         }
+        // At the store's origin. A page is owed only while the server still
+        // holds history and pages are not failing; otherwise settle the client's
+        // cursor with the (empty) batch it is waiting for.
+        let (pageable, in_flight) = {
+            let state = self.inner.state.lock();
+            match state.backfill.get(&key) {
+                Some(b) => (
+                    b.skipped > 0 && b.failures < PAGE_FAILURES,
+                    b.page.is_some(),
+                ),
+                None => (false, false),
+            }
+        };
+        if in_flight {
+            // The page in flight will answer this scroll when it lands (see
+            // `Backfill::wait`). Emitting a cursor now would make a client that
+            // is draining the history spin between two threads.
+            let mut state = self.inner.state.lock();
+            state
+                .backfill
+                .entry(key.to_string())
+                .or_default()
+                .wait = Some(count as usize);
+            return;
+        }
+        if !pageable {
+            store.load_older(count as usize);
+            return;
+        }
+        let core = self.clone();
+        let count = count as usize;
+        crate::roam::runtime().spawn(async move {
+            core.page(&key, count, PageReason::Scroll(count)).await;
+        });
     }
 
     pub fn config(&self) -> Vec<ConfigOption> {
@@ -1631,6 +1739,259 @@ impl Core {
 // ---------------------------------------------------------------------------
 
 impl Core {
+    // -- reverse loading: paging the wire -------------------------------------
+
+    /// The server reported `skipped` leading messages behind the load it just
+    /// answered, having asked for `tail` trailing ones
+    /// (docs/TRANSCRIPT_MODEL.md, "Windows"). Records the backlog, keeps
+    /// `has_older` honest at the store's origin, and starts the background fill.
+    fn note_backlog(&self, key: &str, skipped: usize, tail: usize) {
+        let store = self.store_for(key);
+        let more_changed = store.set_server_more(skipped > 0);
+        let fill = {
+            let mut state = self.inner.state.lock();
+            let entry = state.backfill.entry(key.to_string()).or_default();
+            entry.skipped = skipped;
+            entry.tail = tail;
+            entry.failures = 0;
+            // A new load supersedes any fill the previous one started.
+            entry.fill += 1;
+            entry.fill
+        };
+        // While a replay is held, the paint it owes carries the cursor; a
+        // SUPPRESSED open emits no paint at all, and the one it already sent
+        // said "nothing older" because the backlog was not known yet.
+        if more_changed && !store.emissions_held() {
+            store.publish_window();
+        }
+        if skipped > 0 {
+            self.spawn_fill(key.to_string(), fill);
+        }
+    }
+
+    /// Walk the rest of the conversation in while the user reads the recent
+    /// part: one page per [`FILL_DELAY_MS`], only while this chat is the one on
+    /// screen and nothing else is using the session.
+    ///
+    /// Slow and cancellable on purpose. It is a background reader, not a sync:
+    /// `entry.fill` is bumped by every new load, and leaving the chat ends it.
+    fn spawn_fill(&self, key: String, gen: u64) {
+        let core = self.clone();
+        crate::roam::runtime().spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(FILL_DELAY_MS)).await;
+                let live = {
+                    let state = core.inner.state.lock();
+                    state
+                        .backfill
+                        .get(&key)
+                        .is_some_and(|b| b.fill == gen && b.skipped > 0)
+                };
+                if !live {
+                    return;
+                }
+                if core.inner.hub.displayed_key().as_deref() != Some(key.as_str()) {
+                    return;
+                }
+                // A running turn owns the session: its rows and a page's rows
+                // would interleave on one wire, so wait for the next tick.
+                if !core.can_page(&key) {
+                    continue;
+                }
+                core.page(&key, PAGE_MESSAGES, PageReason::Fill).await;
+            }
+        });
+    }
+
+    /// May a page run for `key` right now?
+    ///
+    /// Every condition here is a corruption this could otherwise cause:
+    ///
+    /// - a turn in flight — the page's rows and the turn's would share one
+    ///   notification stream, and the page's store is a scratch one;
+    /// - a replay (open, reload, resync) — it owns the transcript;
+    /// - a page already in flight — one at a time;
+    /// - too many failures — a wire that cannot serve a page must not turn
+    ///   scroll-back into a retry storm.
+    fn can_page(&self, key: &str) -> bool {
+        let state = self.inner.state.lock();
+        !state.in_flight.contains(key)
+            && !state.replaying.contains(key)
+            && !state
+                .backfill
+                .get(key)
+                .is_some_and(|b| b.page.is_some() || b.failures >= PAGE_FAILURES)
+    }
+
+    /// Fetch ONE page of history older than what the store holds, and splice it
+    /// in front of it.
+    ///
+    /// Why a page and not a full replay: `session/load` replays from the START,
+    /// so the only way to get OLDER history from this server is to ask for a
+    /// LONGER trailing window — it has no backwards cursor. Each page therefore
+    /// asks for more trailing messages than we hold rows (rows are an upper
+    /// bound on messages), and the overlap is dropped by item id. That
+    /// guarantees progress even when the conversation grew between pages.
+    ///
+    /// Why a scratch store: the rows arrive on the same notification stream the
+    /// live chat uses, and turning them into items must not touch the transcript
+    /// on screen. They land in a store whose listener is a no-op; only after the
+    /// whole page has been ingested is it spliced in — and only if the real store
+    /// is still the one this page was opened against (its generation says so).
+    async fn page(&self, key: &str, want: usize, reason: PageReason) -> bool {
+        let store = self.store_for(key);
+        let (token, asked, before) = {
+            let mut state = self.inner.state.lock();
+            let entry = state.backfill.entry(key.to_string()).or_default();
+            if entry.page.is_some() {
+                return false;
+            }
+            entry.page_seq += 1;
+            let token = entry.page_seq;
+            entry.page = Some(token);
+            let held = store.len();
+            // Growth is GEOMETRIC, with a floor that guarantees progress:
+            //
+            //  - doubling keeps a big conversation to a handful of pages (a 4,221
+            //    message chat is 7, and the total re-sent is ~2x the transcript
+            //    rather than 17x, which is what linear growth costs);
+            //  - rows are an upper bound on messages, so `held + page` can never
+            //    be less than what we already have — which is what makes a page
+            //    progress even after the conversation grew between pages;
+            //  - the floor covers a SUPPRESSED load, whose tail was 1 (nothing to
+            //    replay), so the first page is a real page rather than a doubling
+            //    crawl from one message.
+            let asked = (entry.tail * 2)
+                .max(held + want.max(PAGE_MESSAGES))
+                .max(PAGE_MESSAGES);
+            entry.tail = asked;
+            (token, asked, entry.skipped)
+        };
+        // Serialize against opens and replays: they rebuild this transcript.
+        let load = store.begin_load().await;
+        let generation = store.generation();
+        let Some(owner) = self.owner_for(key) else {
+            drop(load);
+            self.end_page(key, token);
+            self.settle(key, reason);
+            return false;
+        };
+        let cwd = owner
+            .session_cwd(key)
+            .unwrap_or_else(|| self.resolve_cwd(key));
+        let scratch = Arc::new(TranscriptStore::new(Box::new(crate::session::NullListener)));
+        scratch.set_session(key);
+        self.inner.hub.set_page_target(key, Some(scratch.clone()));
+        let request = owner.request(
+            "session/load",
+            crate::session::session_load_params(key, &cwd, Some(asked)),
+        );
+        let reply = tokio::time::timeout(PAGE_TIMEOUT, request).await;
+        // Un-point the scratch store FIRST: from here on this key's rows are the
+        // live chat's again, whatever happens below.
+        self.inner.hub.set_page_target(key, None);
+
+        let done;
+        match reply {
+            Ok(Ok(reply)) => {
+                let skipped = crate::session::replay_skipped(&reply);
+                let items = scratch.rich_transcript();
+                let spliced = if store.generation() == generation {
+                    match store.prepend_rich(items.clone()) {
+                        Some(n) => n,
+                        None => {
+                            // No stamp headroom left (a page may not renumber rows
+                            // the client already holds). Rebuild from the whole
+                            // item list instead — one repaint, in order.
+                            let mut all = items;
+                            all.extend(store.rich_transcript());
+                            store.replace_rich(all, false);
+                            0
+                        }
+                    }
+                } else {
+                    // The transcript was replaced while the page was in flight: it
+                    // belongs to a conversation that is no longer on screen.
+                    0
+                };
+                let progressed = spliced > 0 || skipped < before;
+                let mut state = self.inner.state.lock();
+                let entry = state.backfill.entry(key.to_string()).or_default();
+                entry.skipped = if progressed { skipped } else { 0 };
+                entry.failures = 0;
+                done = entry.skipped == 0;
+                drop(state);
+                store.set_server_more(!done);
+                if done {
+                    // The cache is the whole conversation now: the next open must
+                    // not page for what is already here.
+                    self.save_cache_for(key);
+                }
+            }
+            Ok(Err(_)) | Err(_) => {
+                // A page that fails is not a transcript that is wrong: nothing
+                // was spliced. Close the cursor after PAGE_FAILURES so a wire
+                // that cannot serve pages does not turn scroll-back into a retry
+                // storm; the next open re-probes.
+                let mut state = self.inner.state.lock();
+                let entry = state.backfill.entry(key.to_string()).or_default();
+                entry.failures += 1;
+                if entry.failures >= PAGE_FAILURES {
+                    entry.skipped = 0;
+                }
+                done = entry.failures >= PAGE_FAILURES;
+                drop(state);
+                if done {
+                    store.set_server_more(false);
+                }
+            }
+        }
+        drop(load);
+        self.end_page(key, token);
+        // A prompt parked behind this page (the chat is "busy" while paging) can
+        // go now.
+        self.flush_pending();
+        // A scroll that arrived while this page was in flight takes precedence:
+        // it is a client waiting on a cursor, and the page that just landed has
+        // the rows it wants.
+        let waiting = {
+            let mut state = self.inner.state.lock();
+            state
+                .backfill
+                .get_mut(key)
+                .and_then(|entry| entry.wait.take())
+        };
+        self.settle(key, waiting.map_or(reason, PageReason::Scroll));
+        done
+    }
+
+    /// Release this session's page claim.
+    fn end_page(&self, key: &str, token: u64) {
+        let mut state = self.inner.state.lock();
+        if let Some(entry) = state.backfill.get_mut(key) {
+            if entry.page == Some(token) {
+                entry.page = None;
+            }
+        }
+    }
+
+    /// Answer whatever the client was waiting for when the page ended: a
+    /// scroll-back gets its batch (possibly empty, which is how it learns the
+    /// origin is real), and a background fill gets nothing (nobody is waiting).
+    fn settle(&self, key: &str, reason: PageReason) {
+        let PageReason::Scroll(count) = reason else {
+            return;
+        };
+        let store = self.store_for(key);
+        if store.can_load_older() {
+            store.load_older(count);
+        } else {
+            // Nothing splices in front of the window: emit the cursor so the
+            // client's in-flight `load_older` settles instead of spinning.
+            store.publish_window();
+        }
+    }
+
     /// The store of the chat the UI is showing, if any.
     fn store(&self) -> Option<Arc<TranscriptStore>> {
         self.inner.hub.displayed_store()
@@ -2081,12 +2442,18 @@ impl Core {
         // cache, so there is no merge base: `replace_rich_for_merge` was never
         // called and the store's `merging` flag is off. A "merge" here would
         // therefore just APPEND the replay onto the live rows — and goose
-        // ignores `_meta.replayTail` and replays the WHOLE session with
-        // `tool_call_id`s re-assigned from `call_0`, so appending duplicates
-        // every replayed row and collides the ids (the repeated/duplicated-bubble
-        // bug). Arm the provisional drop instead: the first replayed row
-        // supersedes the live rows and the full replay rebuilds cleanly. Never
-        // arm a merge on reconnect — the paint it would need does not exist.
+        // re-assigns `tool_call_id`s from `call_0` on every replay, so appending
+        // duplicates every replayed row and collides the ids (the
+        // repeated/duplicated-bubble bug). Arm the provisional drop instead: the
+        // first replayed row supersedes the live rows and the replay rebuilds
+        // cleanly. Never arm a merge on reconnect — the paint it would need does
+        // not exist.
+        //
+        // The replay that follows is bounded by what the store already holds
+        // (`session::replay_held`: a tail never asks for less than the store's
+        // rows), so a chat resumed with 60 rows on screen re-fetches ~140
+        // messages instead of the whole conversation — and a store with the
+        // whole conversation still gets the whole conversation back.
         if !suppress {
             self.store_for(&resume).mark_provisional();
         }
@@ -2162,7 +2529,17 @@ impl Core {
         let Some(owner) = self.owner_for(session) else {
             return Err((prompt, expect));
         };
-        let busy = self.inner.state.lock().in_flight.contains(session);
+        let busy = {
+            let state = self.inner.state.lock();
+            state.in_flight.contains(session)
+                // A backfill page owns this session's notification stream: a
+                // prompt sent into it would be answered into the SCRATCH store.
+                // Park it (the queue flushes when the page ends).
+                || state
+                    .backfill
+                    .get(session)
+                    .is_some_and(|b| b.page.is_some())
+        };
         if busy || !owner.accepts_prompt() {
             return Err((prompt, expect));
         }
@@ -2763,7 +3140,13 @@ impl Core {
     /// Persist one session's store. The store is keyed by display id, so the
     /// rows can never be filed under another chat.
     fn save_cache_for(&self, session_id: &str) {
-        let items = self.store_for(session_id).rich_transcript();
+        let store = self.store_for(session_id);
+        let items = store.rich_transcript();
+        // A cache that does not reach the conversation's origin is still a
+        // useful paint, but the next open must know to page for the rest
+        // (docs/TRANSCRIPT_MODEL.md, "Windows"). Bounded replay + background
+        // fill is exactly when that happens.
+        let complete = !store.server_more();
         let (incomplete, updated_at) = {
             let state = self.inner.state.lock();
             (
@@ -2776,7 +3159,9 @@ impl Core {
             )
         };
         let stamp = if incomplete { "" } else { &updated_at };
-        self.inner.cache.save_transcript(session_id, &items, stamp);
+        self.inner
+            .cache
+            .save_transcript(session_id, &items, stamp, complete);
     }
 
     fn on_sessions_reply(&self, reply: Value) {
@@ -3061,7 +3446,11 @@ impl Core {
             let plan = crate::session::PaintPlan {
                 suppress: false,
                 merge: false,
+                // A resync rebuilds because the SERVER changed this session, so
+                // it must see the whole thing: `0` = no tail, replay everything.
+                tail: 0,
                 items: None, // clear: this is a full rebuild, not a cache paint
+                complete: false,
             };
             match crate::session::load_with_plan(
                 owner.as_ref(),
@@ -3270,7 +3659,10 @@ impl crate::session::DispatchHost for Core {
         crate::session::display_id(None, wire)
     }
     fn store(&self, key: &str) -> Arc<TranscriptStore> {
-        self.inner.hub.store(key)
+        // The DISPATCH funnel, not the store accessor: while a backfill page is
+        // in flight this key's rows belong to a scratch store, so the page
+        // cannot touch the transcript on screen (see `Core::page`).
+        self.inner.hub.dispatch_store(key)
     }
     fn touched(&self, key: String, title: String, updated_at: String) {
         self.on_session_touched(key, title, updated_at);
@@ -3396,7 +3788,22 @@ impl crate::session::DispatchHost for Core {
         }
     }
     fn replaying(&self, key: &str) -> bool {
-        self.inner.state.lock().replaying.contains(key)
+        let state = self.inner.state.lock();
+        // A page is a replay too: its thought chunks are framing for the calls
+        // that follow them, never rows of their own.
+        state.replaying.contains(key)
+            || state.backfill.get(key).is_some_and(|b| b.page.is_some())
+    }
+    fn paging(&self, key: &str) -> bool {
+        self.inner
+            .state
+            .lock()
+            .backfill
+            .get(key)
+            .is_some_and(|b| b.page.is_some())
+    }
+    fn replay_backlog(&self, key: &str, skipped: usize, tail: usize) {
+        self.note_backlog(key, skipped, tail);
     }
     /// May a chunk for `key` land in its store right now?
     ///

@@ -174,11 +174,27 @@ keep them when extending the core.
   while a turn is in flight (or after it ended in error because the wire dropped
   mid-stream) is written with an empty `updatedAt`, so it can never suppress the
   replay that would complete it; a settled-but-stale cache merges a bounded tail,
-  an incomplete one full-replays. `refresh_session(id, mode)` is the clients'
-  "reload chat" action: `Quick` lets freshness decide (so an unchanged chat
-  reloads nothing, and a dropped turn — whose cache carries an empty stamp —
-  still full-replays), `Full` forces the replay. Either way the replay is
-  ingested silently and painted once, newest window first (grouse#18).
+  an incomplete one repaints provisionally behind a BOUNDED tail.
+  `refresh_session(id, mode)` is the clients' "reload chat" action: `Quick` lets
+  freshness decide (so an unchanged chat reloads nothing, and a dropped turn —
+  whose cache carries an empty stamp — still replays), `Full` deletes the cache
+  and replays from the server. Either way the replay is ingested silently and
+  painted once, newest window first (grouse#18).
+- **Loading is recent-first and paged, and that is the default path.** Every
+  `session/load` carries `_meta.replayTail` (1 for a settled fresh cache, 100 for
+  a stale-cache merge, **80** when there is nothing to paint — it used to be
+  unbounded, so an uncached open of the 4,221-message Assistant thread streamed
+  everything before the first row appeared). The reply's `_meta.replaySkipped` is
+  the BACKLOG: history the server holds that this client has not fetched, which is
+  what keeps `has_older` true at the store's own origin. `load_older` serves the
+  store first and then fetches ONE page — goose has no backwards cursor, so a page
+  is a LONGER trailing window (doubling, floored at the rows held plus a page), its
+  rows are ingested into a scratch store (`SessionHub::dispatch_store`) and spliced
+  in FRONT of the real one, stamped below every position the client holds, so the
+  transcript on screen is untouched until the client asks for them. A background
+  fill walks the rest in while the chat is displayed and idle. The cache records
+  whether it reaches the origin, so a partial cache still paints instantly and
+  still pages. Full contract: `docs/TRANSCRIPT_MODEL.md` §Windows.
 - **A failed open never substitutes a session** (grouse#19). `session/load` a
   server rejects (stale/archived) reports `on_session_open_failed` and leaves the
   connection with no session bound; a fresh empty session silently becoming the

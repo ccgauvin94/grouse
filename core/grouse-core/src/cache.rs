@@ -113,7 +113,13 @@ impl CacheStore {
     /// Persist a session transcript as the RICH item list. An empty transcript
     /// (or empty session id) is not cached, so `load_transcript` reports
     /// `None` for it. Returns whether the file was written.
-    pub fn save_transcript(&self, session_id: &str, items: &[Item], updated_at: &str) -> bool {
+    pub fn save_transcript(
+        &self,
+        session_id: &str,
+        items: &[Item],
+        updated_at: &str,
+        complete: bool,
+    ) -> bool {
         if session_id.is_empty() || items.is_empty() {
             return true;
         }
@@ -124,6 +130,14 @@ impl CacheStore {
             "v": TRANSCRIPT_CACHE_VERSION,
             "updatedAt": updated_at,
             "items": arr,
+            // Does this file reach the session's ORIGIN? A tail-first open
+            // caches the recent rows and fetches the rest in the background
+            // (docs/TRANSCRIPT_MODEL.md, "Windows"), so "settled" and "stale"
+            // are no longer enough to describe it: a fresh, settled, PARTIAL
+            // cache must still page the server for its history, and a complete
+            // one must not. Absent (every cache written before this) reads as
+            // false, which costs one page once and then self-heals.
+            "complete": complete,
         });
         write_json(&self.transcript_path(session_id), &root)
     }
@@ -132,7 +146,9 @@ impl CacheStore {
     /// updatedAt)`; the caller compares `updatedAt` against the session list for
     /// freshness. `None` when the file is missing, corrupt, or holds no items
     /// (desktop `loadCache` semantics).
-    pub fn load_transcript(&self, session_id: &str) -> Option<(Vec<Item>, String)> {
+    /// Returns `(items, updatedAt, complete)`; `complete` is whether the file
+    /// reaches the session's origin (see [`Self::save_transcript`]).
+    pub fn load_transcript(&self, session_id: &str) -> Option<(Vec<Item>, String, bool)> {
         let bytes = fs::read(self.transcript_path(session_id)).ok()?;
         let root: Value = serde_json::from_slice(&bytes).ok()?;
         // A pre-rich cache is lossy (see TRANSCRIPT_CACHE_VERSION) and its own
@@ -146,6 +162,7 @@ impl CacheStore {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        let complete = root.get("complete").and_then(Value::as_bool).unwrap_or(false);
         let arr = root.get("items")?.as_array()?;
         if arr.is_empty() {
             return None;
@@ -157,7 +174,7 @@ impl CacheStore {
         if items.is_empty() {
             return None;
         }
-        Some((items, updated_at))
+        Some((items, updated_at, complete))
     }
 
     /// Delete a session's cached transcript and its tool cache.
@@ -361,7 +378,7 @@ mod tests {
         let dir = temp_cache_dir("forget");
         let store = CacheStore::new(dir.clone());
         let items = vec![text("m1", ItemKind::Agent, "hi")];
-        assert!(store.save_transcript("s", &items, "2026-10-31T00:00:00Z"));
+        assert!(store.save_transcript("s", &items, "2026-10-31T00:00:00Z", true));
         assert!(store.load_transcript("s").is_some());
 
         store.forget("s");
@@ -401,9 +418,10 @@ mod tests {
             text("@1", ItemKind::Thought, "hmm"),
         ];
 
-        assert!(store.save_transcript("sess/1", &items, "2026-08-12T10:00:00Z"));
-        let (loaded, updated_at) =
+        assert!(store.save_transcript("sess/1", &items, "2026-08-12T10:00:00Z", true));
+        let (loaded, updated_at, complete) =
             store.load_transcript("sess/1").expect("cache must load back");
+        assert!(complete, "a saved complete transcript says so");
         assert_eq!(updated_at, "2026-08-12T10:00:00Z");
         assert_eq!(loaded, items, "the rich snapshot must round-trip exactly");
 
@@ -411,7 +429,7 @@ mod tests {
         assert!(dir.join("sess_1.json").exists());
 
         // Empty transcripts are not cached (desktop semantics) → None on load.
-        assert!(store.save_transcript("empty", &[], "2026-08-12T10:00:00Z"));
+        assert!(store.save_transcript("empty", &[], "2026-08-12T10:00:00Z", true));
         assert!(store.load_transcript("empty").is_none());
 
         let _ = fs::remove_dir_all(&dir);
@@ -500,8 +518,8 @@ mod tests {
                 message_id: String::new(),
             },
         ];
-        assert!(store.save_transcript("s1", &items, "2026-08-12T10:00:00Z"));
-        let (loaded, _) = store.load_transcript("s1").unwrap();
+        assert!(store.save_transcript("s1", &items, "2026-08-12T10:00:00Z", true));
+        let (loaded, _, _) = store.load_transcript("s1").unwrap();
         assert_eq!(loaded, items);
         assert_eq!(loaded[1].app_key, "assistantmonitor|ui://x/dashboard");
         assert_eq!(loaded[2].calls.len(), 2);
@@ -527,8 +545,8 @@ mod tests {
 
         // The current format is trusted, and carries the stamp through.
         let items = vec![text("m1", ItemKind::Agent, "new")];
-        assert!(store.save_transcript("s1", &items, "2026-08-12T10:00:00Z"));
-        let (loaded, updated_at) = store.load_transcript("s1").expect("v3 cache loads");
+        assert!(store.save_transcript("s1", &items, "2026-08-12T10:00:00Z", true));
+        let (loaded, updated_at, _) = store.load_transcript("s1").expect("v3 cache loads");
         assert_eq!(updated_at, "2026-08-12T10:00:00Z");
         assert_eq!(loaded, items);
 
@@ -541,8 +559,8 @@ mod tests {
         let store = CacheStore::new(dir.clone());
         let items = vec![text("m1", ItemKind::User, "hi")];
 
-        store.save_transcript("s1", &items, "2026-08-12T09:00:00Z");
-        let (_, updated_at) = store.load_transcript("s1").unwrap();
+        store.save_transcript("s1", &items, "2026-08-12T09:00:00Z", true);
+        let (_, updated_at, _) = store.load_transcript("s1").unwrap();
 
         // The store is dumb I/O: the caller compares the cached stamp against
         // the server's. A newer server stamp ⇒ stale cache.
@@ -553,8 +571,8 @@ mod tests {
         assert!(!is_fresh(&updated_at, server_updated_at));
 
         // Re-saving with the server stamp makes the cache fresh again.
-        store.save_transcript("s1", &items, server_updated_at);
-        let (_, updated_at) = store.load_transcript("s1").unwrap();
+        store.save_transcript("s1", &items, server_updated_at, true);
+        let (_, updated_at, _) = store.load_transcript("s1").unwrap();
         assert!(is_fresh(&updated_at, server_updated_at));
 
         // Missing and corrupt files both read as None (no panics).

@@ -1100,7 +1100,7 @@ mod tests {
             summary: String::new(),
             steps: Vec::new(),
         };
-        cache.save_transcript("s1", &[item], "t1");
+        cache.save_transcript("s1", &[item], "t1", true);
 
         let fresh = plan_paint(&cache, "s1", "t1", false, false);
         assert!(fresh.suppress && !fresh.merge);
@@ -1149,6 +1149,29 @@ pub(crate) trait ChatEndpoint: Send + Sync {
 /// replayed window always overlaps the cached tail it merges against.
 pub(crate) const REPLAY_TAIL: usize = 100;
 
+/// Trailing messages a FIRST load asks for when there is no cache to paint
+/// (docs/TRANSCRIPT_MODEL.md, "Windows": recent first, older on demand).
+///
+/// This used to be unbounded — no `_meta.replayTail` at all — so opening a chat
+/// this device had not seen streamed its entire history, held it silently, and
+/// painted 60 rows at the end (grouse#18's single windowed paint). Measured on
+/// the Assistant thread: 4,221 messages before the first row appeared. Bounded,
+/// the newest turn paints in one round trip and the rest arrives while the user
+/// reads it, a page at a time, when it is asked for.
+pub(crate) const OPEN_TAIL: usize = 80;
+
+/// The tail a load owes for a paint mode. `0` means the whole session (a full
+/// rebuild that must see everything, e.g. a resync after a remote change).
+pub(crate) fn first_tail(suppress: bool, merge: bool) -> usize {
+    if suppress {
+        1
+    } else if merge {
+        REPLAY_TAIL
+    } else {
+        OPEN_TAIL
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Cache paint policy (one decision for both transports)
 // ---------------------------------------------------------------------------
@@ -1160,7 +1183,15 @@ pub(crate) struct PaintPlan {
     pub suppress: bool,
     /// The cache is settled but stale: paint and merge a bounded tail.
     pub merge: bool,
+    /// How much history this load asks the wire for (`0` = the whole session).
+    /// A bounded tail is what makes an open recent-first instead of a wait for
+    /// the entire transcript.
+    pub tail: usize,
     pub items: Option<Vec<crate::Item>>,
+    /// Whether the cached transcript reaches the session's origin. A painted
+    /// cache that does not still owes the server a page, even when it is fresh
+    /// enough to suppress the replay.
+    pub complete: bool,
 }
 
 /// Decide the paint from the cache stamp alone. `force` (a full refresh)
@@ -1174,29 +1205,40 @@ pub(crate) fn plan_paint(
     incomplete: bool,
 ) -> PaintPlan {
     match cache.load_transcript(key) {
-        Some((items, cached_at)) => {
+        Some((items, cached_at, complete)) => {
             let settled = !cached_at.is_empty();
             // An incomplete store may not be trusted as current either: a
             // dropped turn's cache is written with an empty stamp, but a
             // mid-turn save could still carry the server's stamp.
             let fresh =
                 !force && !incomplete && settled && !listed_at.is_empty() && cached_at == listed_at;
+            let merge = !force && settled && !fresh && !incomplete;
             PaintPlan {
                 suppress: fresh,
-                merge: !force && settled && !fresh && !incomplete,
+                merge,
+                tail: first_tail(fresh, merge),
                 items: Some(items),
+                complete,
             }
         }
         None => PaintPlan {
             suppress: false,
             merge: false,
+            // Nothing to paint: ask for a bounded tail, not the whole session.
+            tail: OPEN_TAIL,
             items: None,
+            complete: false,
         },
     }
 }
 
 /// Paint a plan into a store (the one implementation of the three modes).
 pub(crate) fn apply_paint(store: &crate::transcript::TranscriptStore, plan: &PaintPlan) {
+    // The cache already knows whether it reaches the conversation's origin, so
+    // the cursor is right from the first paint instead of waiting for the load
+    // reply: a partial cache shows "there is more" and a complete one does not.
+    // The reply corrects it either way.
+    store.set_server_more(!plan.complete);
     match &plan.items {
         Some(items) if plan.suppress => store.replace_rich(items.clone(), false),
         Some(items) if plan.merge => store.replace_rich_for_merge(items.clone()),
@@ -1223,7 +1265,17 @@ pub(crate) async fn load_with_plan(
 ) -> Result<Value, AcpError> {
     let _load = store.begin_load().await;
     apply_paint(store, plan);
-    replay_held(endpoint, host, store, key, cwd, plan.suppress, plan.merge).await
+    replay_held(
+        endpoint,
+        host,
+        store,
+        key,
+        cwd,
+        plan.suppress,
+        plan.merge,
+        plan.tail,
+    )
+    .await
 }
 
 /// The `session/load` replay lifecycle after the paint — one implementation for
@@ -1258,7 +1310,17 @@ pub(crate) async fn replay_session(
     merge: bool,
 ) -> Result<Value, AcpError> {
     let _load = store.begin_load().await;
-    replay_held(endpoint, host, store, key, cwd, suppress, merge).await
+    replay_held(
+        endpoint,
+        host,
+        store,
+        key,
+        cwd,
+        suppress,
+        merge,
+        first_tail(suppress, merge),
+    )
+    .await
 }
 
 /// [`replay_session`]'s body, for callers already holding the load slot.
@@ -1298,6 +1360,17 @@ impl Drop for ReplayGuard<'_> {
     }
 }
 
+/// How much history a `session/load` reply withheld: `_meta.replaySkipped` is
+/// the index the replay started at, so it is exactly the backlog a page can
+/// still fetch. Absent (or zero) means the store has the whole session.
+pub(crate) fn replay_skipped(reply: &Value) -> usize {
+    reply
+        .get("_meta")
+        .and_then(|meta| meta.get("replaySkipped"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize
+}
+
 async fn replay_held(
     endpoint: &dyn ChatEndpoint,
     host: &dyn DispatchHost,
@@ -1306,16 +1379,22 @@ async fn replay_held(
     cwd: &str,
     suppress: bool,
     merge: bool,
+    tail: usize,
 ) -> Result<Value, AcpError> {
-    // A fresh cache asks for the minimum tail; a stale one for a bounded tail
-    // it merges; otherwise the full replay.
-    let tail = if suppress {
-        Some(1)
-    } else if merge {
-        Some(REPLAY_TAIL)
+    // `0` = the whole session (`first_tail` says which mode wants that).
+    //
+    // Otherwise the tail is a LOWER BOUND on what the replay must cover: it
+    // REPLACES the rows it covers, so asking for less than the store already
+    // holds would truncate the transcript. That is exactly what a reconnect
+    // resumes — a store that is already full — so the ask grows to the store
+    // (whose rows are an upper bound on messages, since one message can split
+    // into a bubble per tool call) plus one page of fresh tail.
+    let asked = if tail == 0 || suppress || merge {
+        tail
     } else {
-        None
+        tail.max(store.len() + OPEN_TAIL)
     };
+    let tail = if asked == 0 { None } else { Some(asked) };
     host.begin_replay(key, suppress);
     store.hold_emissions(true);
     let mut guard = ReplayGuard { host, store, key, ends: true, holds: true };
@@ -1331,13 +1410,23 @@ async fn replay_held(
     };
     guard.ends = false;
     host.end_replay(key);
+    let mut reply = reply;
     // Merge gap: the tail started past the cached prefix, so extending the
     // cache would leave a hole. Clear and load the whole transcript now.
     if store.end_merge() {
         store.clear();
         let full = session_load_params(key, cwd, None);
-        let _ = endpoint.request("session/load", full).await;
+        if let Ok(full_reply) = endpoint.request("session/load", full).await {
+            // This reply describes what is on screen now, backlog included.
+            reply = full_reply;
+        }
     }
+    // Tell the host how much history the server still holds BEFORE the paint is
+    // released: a bounded replay leaves a backlog, and the cursor that paint
+    // emits must already account for it — otherwise a client that drains the
+    // history (a hard reload) sees "nothing older" for one frame and stops.
+    // `note_backlog` also starts the background fill.
+    host.replay_backlog(key, replay_skipped(&reply), asked);
     // The replay is in: paint the newest window (or the empty transcript) once.
     store.release_held_replay();
     guard.holds = false;
@@ -1384,6 +1473,18 @@ pub(crate) trait DispatchHost: Send + Sync {
     /// progress the clients paint. Defaulted to a no-op: only the real core
     /// counts, and a host that does not care must not have to implement it.
     fn replay_tick(&self, _key: &str, _message_id: &str) {}
+    /// A backfill page is being ingested for `key`. Its rows land in a SCRATCH
+    /// store, so anything that belongs to the live turn — step labels, the green
+    /// dot, usage, commands, config — must not fire for them (they are history,
+    /// not news).
+    fn paging(&self, _key: &str) -> bool {
+        false
+    }
+    /// The `session/load` reply reported a backlog of `skipped` leading messages
+    /// (`0` = the transcript is complete), and `tail` is how much trailing
+    /// history that load asked for. Drives `has_older` at the store's origin and
+    /// sizes the next page.
+    fn replay_backlog(&self, _key: &str, _skipped: usize, _tail: usize) {}
     /// Fresh-cache opens drop replayed rows; other transports keep them.
     fn accepts_chat(&self, key: &str) -> bool;
     /// Background content arrived (green dot).
@@ -1448,7 +1549,9 @@ impl DispatchHost for PrefixHost {
         display_id(Some(&self.label), wire)
     }
     fn store(&self, key: &str) -> Arc<crate::transcript::TranscriptStore> {
-        self.hub.store(key)
+        // The dispatch funnel: a backfill page's rows go to its scratch store
+        // (see `SessionHub::dispatch_store`).
+        self.hub.dispatch_store(key)
     }
     fn touched(&self, key: String, title: String, updated_at: String) {
         if let Some(host) = self.host() {
@@ -1497,6 +1600,14 @@ impl DispatchHost for PrefixHost {
     }
     fn replaying(&self, key: &str) -> bool {
         self.host().is_some_and(|host| host.replaying(key))
+    }
+    fn paging(&self, key: &str) -> bool {
+        self.host().is_some_and(|host| host.paging(key))
+    }
+    fn replay_backlog(&self, key: &str, skipped: usize, tail: usize) {
+        if let Some(host) = self.host() {
+            host.replay_backlog(key, skipped, tail);
+        }
     }
     fn accepts_chat(&self, key: &str) -> bool {
         // The suppression window is the CORE's (one decision for both wires):
@@ -1610,6 +1721,9 @@ pub(crate) fn dispatch(
         }
     }
     let store = host.store(&key);
+    // A backfill page is HISTORY: its rows land in a scratch store and must not
+    // drive the live turn's machinery (labels, green dot, usage, commands).
+    let paging = host.paging(&key);
     let mut content = false;
     match notif.update {
         SessionUpdate::UserMessageChunk(chunk) => {
@@ -1677,7 +1791,7 @@ pub(crate) fn dispatch(
                 let (kind, detail) = tool_call_kind(&tool);
                 store.tool_call(&tool.title, &detail, &id, kind);
                 // The end-of-turn summarizer labels the turn's plain runs.
-                if let Some(run_id) = store.run_id_for(&id) {
+                if let Some(run_id) = store.run_id_for(&id).filter(|_| !paging) {
                     // The call anchors its own run ⇒ it OPENED a step, so the one
                     // above it is finished and can be labelled now rather than at
                     // the end of the turn.
@@ -1702,7 +1816,9 @@ pub(crate) fn dispatch(
                 .as_ref()
                 .map(|cost| (cost.amount, cost.currency.clone()))
                 .unwrap_or((0.0, String::new()));
-            host.usage(&key, usage.used as i64, usage.size as i64, amount, currency);
+            if !paging {
+                host.usage(&key, usage.used as i64, usage.size as i64, amount, currency);
+            }
         }
         SessionUpdate::SessionInfoUpdate(info) => {
             // `activeRunId` is three-state, and the difference between the last
@@ -1738,7 +1854,7 @@ pub(crate) fn dispatch(
                 host.touched(key.clone(), title, updated_at);
             }
         }
-        SessionUpdate::ConfigOptionUpdate(config) => {
+        SessionUpdate::ConfigOptionUpdate(config) if !paging => {
             let options = config
                 .config_options
                 .iter()
@@ -1757,11 +1873,13 @@ pub(crate) fn dispatch(
                 .iter()
                 .map(|command| command.name.clone())
                 .collect();
-            host.commands(&key, names);
+            if !paging {
+                host.commands(&key, names);
+            }
         }
         _ => {}
     }
-    if content {
+    if content && !paging {
         host.background(&key);
     }
 }
@@ -1811,6 +1929,12 @@ pub(crate) fn apply_tool_update(
 pub(crate) struct SessionHub {
     listener: Arc<dyn crate::CoreListener>,
     stores: Mutex<HashMap<String, Arc<crate::transcript::TranscriptStore>>>,
+    /// Scratch stores for a backfill PAGE: while a page is being ingested, the
+    /// dispatch funnel hands that key's rows here instead of to the session's
+    /// store, so one page can be turned into items without touching what is on
+    /// screen (and a failed page changes nothing). Installed and removed by
+    /// `Core::page`; see `docs/TRANSCRIPT_MODEL.md`.
+    page_targets: Mutex<HashMap<String, Arc<crate::transcript::TranscriptStore>>>,
     displayed: Arc<RwLock<Option<String>>>,
     /// Sessions whose background store gained content since the last time they
     /// were displayed (the drawer's green dot).
@@ -1822,6 +1946,7 @@ impl SessionHub {
         Arc::new(Self {
             listener,
             stores: Mutex::new(HashMap::new()),
+            page_targets: Mutex::new(HashMap::new()),
             displayed: Arc::new(RwLock::new(None)),
             has_new: Mutex::new(HashSet::new()),
         })
@@ -1844,6 +1969,34 @@ impl SessionHub {
         store.set_session(key);
         stores.insert(key.to_string(), store.clone());
         store
+    }
+
+    /// The store a NOTIFICATION for `key` belongs to: the session's own, unless a
+    /// backfill page has claimed the key. Only the dispatch funnel uses this —
+    /// every other caller wants [`Self::store`].
+    pub(crate) fn dispatch_store(&self, key: &str) -> Arc<crate::transcript::TranscriptStore> {
+        if let Some(scratch) = self.page_targets.lock().get(key) {
+            return scratch.clone();
+        }
+        self.store(key)
+    }
+
+    /// Point (or un-point) a key's notifications at a scratch store for the
+    /// duration of one backfill page.
+    pub(crate) fn set_page_target(
+        &self,
+        key: &str,
+        target: Option<Arc<crate::transcript::TranscriptStore>>,
+    ) {
+        let mut targets = self.page_targets.lock();
+        match target {
+            Some(store) => {
+                targets.insert(key.to_string(), store);
+            }
+            None => {
+                targets.remove(key);
+            }
+        }
     }
 
     /// Whether a store exists for `key` — the chat has been opened (or painted)
@@ -1906,6 +2059,32 @@ impl SessionHub {
             self.clear_display();
         }
     }
+}
+
+/// The sink for a scratch store: rows land in the store, nothing is emitted.
+/// Used to turn one backfill page's notifications into items without touching
+/// the transcript on screen — see `Core::page` and `docs/TRANSCRIPT_MODEL.md`.
+pub(crate) struct NullListener;
+
+impl crate::CoreListener for NullListener {
+    fn on_status(&self, _: crate::ConnectionStatus) {}
+    fn on_sessions(&self, _: Vec<crate::SessionSummary>) {}
+    fn on_item(&self, _: crate::TranscriptOp) {}
+    fn on_usage(&self, _: i64, _: i64, _: f64, _: String) {}
+    fn on_run_ended(&self, _: String, _: String) {}
+    fn on_speak(&self, _: String) {}
+    fn on_config(&self, _: Vec<crate::ConfigOption>) {}
+    fn on_permission_request(&self, _: crate::PermissionRequest) {}
+    fn on_session_touched(&self, _: String, _: String, _: String) {}
+    fn on_projects(&self, _: Vec<crate::ProjectSummary>) {}
+    fn on_roam_peer_status(&self, _: String, _: String) {}
+    fn on_roam_sessions(&self, _: String, _: Vec<crate::SessionSummary>) {}
+    fn on_peer_new_session(&self, _: String, _: String) {}
+    fn on_active_run(&self, _: String, _: String) {}
+    fn on_commands(&self, _: Vec<String>) {}
+    fn on_session_open_failed(&self, _: String, _: String) {}
+    fn on_tasks(&self, _: String) {}
+    fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
 }
 
 /// The per-store listener: paints only while its key is displayed; everything

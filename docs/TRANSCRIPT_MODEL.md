@@ -66,8 +66,9 @@ projection + `transcript()` getter, and the provisional-merge machinery
   reconciliation, no stashes, no "clear and rebuild".
 - **Full fidelity.** A chart stays a chart and an MCP app keeps its key across
   streaming, replay, cache, and restart.
-- **Recent first, older on demand.** Cold open paints the recent window from
-  cache; scrolling up extends the window backward.
+- **Recent first, older on demand.** A cold open paints the newest window — from
+  cache, or from a bounded tail fetched from the wire — and the rest arrives a
+  page at a time, on demand and in the background, back to the origin.
 - **Smooth streaming.** Text grows with O(chunk) appends, not O(message)
   re-emissions.
 - **One implementation.** Desktop and Android run the same semantics; the core
@@ -75,8 +76,10 @@ projection + `transcript()` getter, and the provisional-merge machinery
 
 ## Non-goals
 
-- Server-side paging beyond a bounded catch-up tail. A stock `goose serve` has no
-  history cursor; older-than-cache falls back to a full load (see *Windowing*).
+- A backwards cursor on the wire. `goose serve` has none: paging is a growing
+  trailing window (`_meta.replayTail`, see *Windowing*), so a page re-sends its
+  overlap with the one before. It is cheap (measured: 1.8 MB and ~50 ms for a
+  650-message session over loopback) and it needs no server change.
 - Changing the ACP wire. This is entirely a core/client model.
 
 ## The model
@@ -227,43 +230,104 @@ ignores it.
 
 ### Windows
 
-The core holds the full session transcript, but emits only a window of the most
-recent `N` items (default 50) plus any earlier windows the client has asked for.
+The core holds the session transcript it has FETCHED, and emits only a window of
+the most recent `CLIENT_WINDOW` items (60) plus any earlier batches the client
+has asked for. Two sources back that window, in this order:
+
+1. **the store** — everything this client has already fetched, cache included;
+2. **the wire** — one page at a time, oldest-first, back to the conversation's
+   origin.
 
 - `window()` → `{ oldest_id, newest_id, has_older }`.
-- `load_older(count)` → the core emits the next `count` items behind
-  `oldest_id`, oldest-first, then a refreshed `Window`.
-- Windowing is **cache-first**: earlier items come from the local cache. If the
-  cache does not reach the start of the session, the core reports
-  `has_older: false` and the client may request a full load (the one remaining
-  all-or-nothing path, and the only one a stock server forces).
+- `load_older(count)` → the next `count` items behind `oldest_id`, oldest-first,
+  then a refreshed `Window`. Served from the store when it has them; a page is
+  fetched when it does not.
 
-Cold open:
+#### Recent first: every load is bounded
 
-1. `Reset` + the cached recent window as Upserts + `Window`.
-2. A `session/load` catch-up, reconciled by id: overlapping items are Upserted
-   (authoritative), new items Upsert in order.
-3. New live ops as they arrive.
+A `session/load` carries `_meta.replayTail` — 1 for a settled, current cache
+(the replay is discarded, it only binds the session), `REPLAY_TAIL` (100) for a
+stale cache whose tail is merged, and `OPEN_TAIL` (80) when there is nothing to
+paint. That last case used to be **unbounded**, so opening a chat this device had
+not seen streamed its whole history, held it silently and painted 60 rows at the
+end — measured on the Assistant thread as 4,221 messages before the first row.
+
+The reply carries `_meta.replaySkipped`: the number of leading messages the
+server withheld. Absent (or `0`) means the store now has the whole conversation;
+anything else is a **backlog**, and it is what makes `has_older` true at the
+store's own origin. `Core::note_backlog` records it and starts the background
+fill.
+
+#### Paging the wire
+
+`load_older` at the origin with a backlog fetches ONE page:
+
+- **The tail grows geometrically.** goose has no backwards cursor, so the only
+  way to ask for older history is to ask for a LONGER trailing window. Each page
+  asks for twice the last one, floored at the number of rows the client holds
+  (rows are an upper bound on messages, because a message can split into a bubble
+  per tool call) plus a page. Doubling keeps a 4,221-message conversation to
+  seven pages and ~2× the transcript on the wire; the floor guarantees progress
+  even when the conversation grew between pages. The overlap is dropped by item
+  id.
+- **The page lands in a scratch store.** Its rows arrive on the same notification
+  stream the live chat uses, so `SessionHub::dispatch_store` routes that key's
+  notifications to a throwaway store whose listener is a no-op. The transcript on
+  screen is not touched until the page is complete, and a page that fails changes
+  nothing at all.
+- **It is spliced in FRONT, silently.** `TranscriptStore::prepend_rich` stamps the
+  page's rows strictly BELOW every position the client holds (`SEQ_START` keeps a
+  million-stamp headroom that each page moves down) so the client — which inserts
+  by `seq` — prepends them in order. The client's window does not move, so it is
+  told nothing: the rows appear when it asks for them.
+- **Guards, each for a corruption it prevents:** a page never runs while a turn is
+  in flight (its rows would go to the scratch store), while a replay owns the
+  session, or while another page is in flight; a prompt sent during a page is
+  PARKED (the chat is busy) and flushed when the page ends; the store's rebuild
+  generation is captured before the page and compared at the end, so a paint that
+  landed meanwhile discards the page; a page that makes no progress closes the
+  cursor, and two failed pages close it until the next open.
+
+#### The background fill
+
+After any load that leaves a backlog, the core walks the rest of the conversation
+in one page per `FILL_DELAY_MS` (600 ms) — but only while that chat is the one on
+screen and idle. It is a background reader, not a sync: leaving the chat ends it,
+and the next open resumes from the cache.
+
+#### The cache
+
+The cache is the store's item list, so it absorbs what paging fetched. It also
+records whether it reaches the origin (`complete`): a fresh, settled, PARTIAL
+cache still paints (instantly) and still owes the server a page, and a complete
+one does not page at all. A cache written before this field reads as incomplete
+and costs one page, which then closes itself.
+
+Cold open, end to end:
+
+1. the cache paints instantly (`Reset` + the newest window + `Window`);
+2. the load's bound-tail reply merges or replaces by id, ingested silently, and
+   reports the backlog;
+3. `load_older` / the background fill fetch the history behind it, a page at a
+   time, until the origin.
 
 **The catch-up is ingested SILENTLY** (grouse#18). While the replay is in flight
-the store takes every row — transcript, cache and window all end up complete —
-but emits nothing; the load's completion paints the newest `CLIENT_WINDOW` items
-once (`Reset` + Upserts + `Window`). Painting each replayed row as it arrived made
+the store takes every row but emits nothing; the load's completion paints the
+newest `CLIENT_WINDOW` items once. Painting each replayed row as it arrived made
 a reopen/refresh re-render the whole history from the first prompt, one row at a
 time, and left the newest messages below the fold. A failed load releases the
 hold *without* painting, so the provisional cache paint stays on screen (see
 `open_session`'s contract in `core/CONTRACT.md` §3.2).
 
-**A stock goose ignores `_meta.replayTail` and replays the WHOLE session, and it
-re-assigns `tool_call_id`s from `call_0` on every replay.** A replayed row's id
-therefore does NOT reliably match the live row it restates, so a replay must
-always REPLACE the rows already held, never append onto them: appending
-duplicates every replayed row and collides tool ids. A cache paint is
-provisional (dropped wholesale by the first replayed row), and the reconnect
-path arms that same drop — the store holds the LIVE transcript across a drop,
-not a merge base, so there is nothing to merge into. (The `merge` mode still
-exists for a painted stale cache, but against this server the anchor is the
-first replayed row, so it is a full rebuild in practice.)
+**A replay REPLACES the rows already held, it never appends onto them.** goose
+re-assigns `tool_call_id`s from `call_0` on every replay, so a replayed row's id
+does not reliably match the live row it restates; appending duplicates every
+replayed row and collides tool ids. A cache paint is provisional (dropped
+wholesale by the first replayed row), and the reconnect path arms that same drop —
+the store holds the LIVE transcript across a drop, not a merge base. (The `merge`
+mode still exists for a painted stale cache, but against this server the anchor
+is the first replayed row, so it is a full rebuild in practice. A PAGE is the
+opposite and is safe to splice: it is strictly older than everything held.)
 
 ## Types (sketch)
 
