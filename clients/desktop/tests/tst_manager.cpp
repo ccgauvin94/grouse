@@ -38,6 +38,8 @@ private slots:
     void providerChoicesDisambiguateDuplicateLabels();
     void roamOpenClearsTheLoadingStatus();
     void runEndRendersTheLastStreamedBubble();
+    void tailRendersWithoutAnySeal();
+    void fencedCodeBecomesBlocksNotHtml();
 };
 
 /**
@@ -138,6 +140,58 @@ void TstManager::runEndRendersTheLastStreamedBubble()
     mgr.coreOnRunEnded(QString(), QStringLiteral("end_turn"));
     QCOMPARE(m->row(agentRow).value("html").toString(), once);
     QCOMPARE(m->count(), 2);
+}
+
+/**
+ * No seal and no run_ended: the quiet-period render is the only thing left.
+ * A dropped run_ended (or a stream that simply stops) used to freeze the bubble
+ * as raw source until the next message re-sealed it.
+ */
+void TstManager::tailRendersWithoutAnySeal()
+{
+    Manager mgr;
+    auto *m = qobject_cast<MessageListModel *>(mgr.messageModel());
+    QVERIFY(m != nullptr);
+
+    mgr.coreOnItem(QStringLiteral(R"({"Reset":{"session_id":"s1"}})"));
+    mgr.coreOnItem(QStringLiteral(
+        R"({"Upsert":{"item":{"id":"u1","kind":"User","text":"hi","detail":"","output":"","status":"","app_key":"","calls":[]}}})"));
+    mgr.coreOnItem(QStringLiteral(
+        R"({"Upsert":{"item":{"id":"a1","kind":"Agent","text":"","detail":"","output":"","status":"","app_key":"","calls":[]}}})"));
+    mgr.coreOnItem(QStringLiteral(R"({"AppendText":{"id":"a1","chunk":"**bold**"}})"));
+    mgr.coreOnItem(QStringLiteral(R"({"AppendText":{"id":"a1","chunk":" and plain"}})"));
+
+    const int row = m->indexForId(QStringLiteral("a1"));
+    QVERIFY(row >= 0);
+    QVERIFY(m->row(row).value("html").toString().isEmpty());
+
+    // The reply goes quiet and nothing else ever arrives for it.
+    QTRY_VERIFY_WITH_TIMEOUT(!m->row(row).value("html").toString().isEmpty(), 3000);
+    QVERIFY(m->row(row).value("html").toString().contains(QStringLiteral("font-weight")));
+}
+
+/**
+ * The contract the delegate's `messageBlocks` wrapper exists for: a reply with a
+ * fenced block is rendered as blocks, and `html` is deliberately left EMPTY.
+ * Reading that role off the delegate Item instead of the model (`mdel.blocks`)
+ * is always undefined, which left the flat TextEdit showing the raw source and
+ * the code panes empty.
+ */
+void TstManager::fencedCodeBecomesBlocksNotHtml()
+{
+    Manager mgr;
+    auto *m = qobject_cast<MessageListModel *>(mgr.messageModel());
+    QVERIFY(m != nullptr);
+
+    mgr.coreOnItem(QStringLiteral(R"({"Reset":{"session_id":"s1"}})"));
+    mgr.coreOnItem(QStringLiteral(
+        R"({"Upsert":{"item":{"id":"a1","kind":"Agent","text":"intro\n\n```sh\nls -l\n```\n\noutro","detail":"","output":"","status":"","app_key":"","calls":[]}}})"));
+
+    const int row = m->indexForId(QStringLiteral("a1"));
+    QVERIFY(row >= 0);
+    const QVariantMap r = m->row(row);
+    QVERIFY2(!r.value("blocks").toList().isEmpty(), "a fenced block must become blocks");
+    QVERIFY2(r.value("html").toString().isEmpty(), "a blocks row carries no html by design");
 }
 
 void TstManager::modelAndStateInvariants()

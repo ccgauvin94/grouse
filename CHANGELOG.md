@@ -122,6 +122,16 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Changed
 
+- **Desktop: the fenced-code pane follows the palette.** It painted
+  `Kirigami.Theme.view`, which in this app's custom palette resolves to the platform's
+  light view background: a white card inside a dark bubble, with the theme's warm text
+  on it (measured off a screenshot: 1.7:1). It now tints the text colour over whatever
+  the bubble is — a subtle card in either scheme, ~8:1 — and the syntax palette is
+  picked from the TEXT colour's lightness rather than `colorScheme`, which could
+  disagree with the palette and put light-theme token colors on a dark pane. The copy
+  button moved into a header row beside the language label, so it no longer floats on
+  top of the first line of code, and a fence with no language is left monochrome:
+  coloring every timestamp and port in a pasted log turned the pane into confetti.
 - **Reload is a real rebuild, and it says how far along it is.** A refresh trusted
   a settled cache and merged a bounded tail, which is right for an open and
   useless for a transcript known to be wrong — so the reload path (`RefreshMode::Full`,
@@ -140,6 +150,23 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed
 
+- **Desktop: a reply containing a fenced code block rendered as raw markdown.**
+  `ensureRowHtml` splits such a row into `blocks` and deliberately leaves `html`
+  empty (each code chunk gets its own horizontal scroller), but the delegate read
+  that one role as `mdel.blocks` — the only role in the file not read through the
+  model. Roles are context properties on a delegate, not members of the delegate
+  `Item`, so it was always `undefined`: `hasBlocks` never became true, the flat
+  `TextEdit` stayed visible with an empty `html` and fell back to `messageText`,
+  and the code panes were handed `undefined` too. The wrapper now exposes
+  `messageBlocks`, like every other role.
+- **Desktop: the newest bubble stayed raw markdown until the next message.**
+  A row's `html` is computed once, at its authoritative upsert, and the streaming
+  deltas clear it on purpose (RichText re-parses the whole document every frame).
+  That leaves the TAIL depending on the turn-end seal: a late or lost `run_ended`
+  kept the last bubble showing its source until the following message re-sealed it
+  — which is why the previous bubble seemed to fix itself one message later.
+  `renderTail()` now renders the tail once the reply has been quiet for 700 ms,
+  independent of the seal, and skips it when the row did not change.
 - **Desktop: the window failed to load at all once My Day shipped.** `main.qml`
   instantiates `MyDayPage`, but `ui/MyDayPage.qml` was never added to the
   `qt_add_resources` list in `CMakeLists.txt`, so the type did not exist at runtime

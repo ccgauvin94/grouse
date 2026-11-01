@@ -192,6 +192,12 @@ QString highlightCode(const QString &code, const QString &lang,
 {
     const Family family = familyFor(lang.toLower());
     const QSet<QString> keywords = keywordsFor(family);
+    // A fence with no language is usually a log or a diff pasted for its text
+    // rather than to be read as source — and there every timestamp, port and hex
+    // id came out in the number colour, which turned the pane into confetti and
+    // made the timestamps the loudest thing in it. Only color numbers when the
+    // fence names a family we actually know.
+    const QString numColor = family == Family::None ? QString() : numberColor;
     const bool hashComments = family == Family::Hash || family == Family::Sql;
     const bool slashComments = family == Family::SlashStar;
     const bool dashComments = family == Family::Sql;
@@ -285,7 +291,7 @@ QString highlightCode(const QString &code, const QString &lang,
                                    || line.at(end) == u'_'
                                    || line.at(end) == u'.'))
                     end++;
-                flushSpan(out, line.mid(i, end - i), numberColor);
+                flushSpan(out, line.mid(i, end - i), numColor);
                 i = end;
                 continue;
             }
