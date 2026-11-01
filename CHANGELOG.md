@@ -132,6 +132,9 @@ All notable changes to Grouse are recorded here. The format is based on
   button moved into a header row beside the language label, so it no longer floats on
   top of the first line of code, and a fence with no language is left monochrome:
   coloring every timestamp and port in a pasted log turned the pane into confetti.
+  The horizontal bar is an overlay, so a pane whose content just fit its height had
+  its last line underneath it; the bar's height is now reserved inside the scrollable
+  content, and the pane grows by it.
 - **Reload is a real rebuild, and it says how far along it is.** A refresh trusted
   a settled cache and merged a bounded tail, which is right for an open and
   useless for a transcript known to be wrong — so the reload path (`RefreshMode::Full`,
