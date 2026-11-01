@@ -37,6 +37,7 @@ private slots:
     void roamTitleComesFromThePeerList();
     void providerChoicesDisambiguateDuplicateLabels();
     void roamOpenClearsTheLoadingStatus();
+    void runEndRendersTheLastStreamedBubble();
 };
 
 /**
@@ -86,6 +87,57 @@ void TstManager::itemStreamDrivesTheModel()
     mgr.coreOnItem(QStringLiteral(R"({"Remove":{"id":"t1"}})"));
     QCOMPARE(m->count(), 1);
     QCOMPARE(m->indexForId(QStringLiteral("t1")), -1);
+}
+
+/**
+ * The NEWEST bubble renders its markdown even when the core's turn-end seal never
+ * lands (measured against a live server: "the last message does not render, the
+ * previous ones do once a new one arrives").
+ *
+ * Why it is desktop-only: this client computes a row's html ONCE, at the row's
+ * authoritative upsert, because re-parsing markdown per repaint is quadratic on a
+ * long reply. Android renders markdown at paint time, so the same missing seal is
+ * invisible there. A turn whose seal is late or lost therefore left the newest
+ * bubble showing its source (`**`, fences, `#`) until something re-delivered the
+ * row — which is exactly what the next message did.
+ *
+ * finishTail() renders the tail at run end, idempotently and bounded, so the last
+ * bubble can never stay raw.
+ */
+void TstManager::runEndRendersTheLastStreamedBubble()
+{
+    Manager mgr;
+    auto *m = qobject_cast<MessageListModel *>(mgr.messageModel());
+    QVERIFY(m != nullptr);
+
+    mgr.coreOnItem(QStringLiteral(R"({"Reset":{"session_id":"s1"}})"));
+    mgr.coreOnItem(QStringLiteral(
+        R"({"Upsert":{"item":{"id":"u1","kind":"User","text":"hi","detail":"","output":"","status":"","app_key":"","calls":[]}}})"));
+    mgr.coreOnItem(QStringLiteral(
+        R"({"Upsert":{"item":{"id":"a1","kind":"Agent","text":"","detail":"","output":"","status":"","app_key":"","calls":[]}}})"));
+
+    // The reply arrives as deltas only: text grows, html is dropped on purpose
+    // (plain while streaming — RichText re-parses every chunk otherwise).
+    mgr.coreOnItem(QStringLiteral(
+        R"({"AppendText":{"id":"a1","chunk":"**bold** and a list:"}})"));
+    const int agentRow = m->indexForId(QStringLiteral("a1"));
+    QVERIFY(agentRow >= 0);
+    QVERIFY(m->row(agentRow).value("html").toString().isEmpty());
+
+    // The seal that would carry the rendered form never arrives.
+    mgr.coreOnRunEnded(QString(), QStringLiteral("end_turn"));
+
+    QVERIFY2(!m->row(agentRow).value("html").toString().isEmpty(),
+             "a finished turn must not leave its last bubble as raw markdown");
+    QVERIFY(m->row(agentRow).value("html").toString().contains(QStringLiteral("font-weight")));
+    QCOMPARE(m->row(agentRow).value("role").toString(), QStringLiteral("agent"));
+
+    // Idempotent: a second close-out changes nothing (no double render, no
+    // duplicated blocks).
+    const QString once = m->row(agentRow).value("html").toString();
+    mgr.coreOnRunEnded(QString(), QStringLiteral("end_turn"));
+    QCOMPARE(m->row(agentRow).value("html").toString(), once);
+    QCOMPARE(m->count(), 2);
 }
 
 void TstManager::modelAndStateInvariants()
