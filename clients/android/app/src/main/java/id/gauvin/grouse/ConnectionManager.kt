@@ -1409,6 +1409,8 @@ class ConnectionManager private constructor(context: Context) {
      *  drain the pages instead of leaving a 60-row chat — which reads as "the
      *  refresh lost everything". */
     private var drainingHistory = false
+    /** Guards `replayActive` against a reload the core never answers (see reloadCurrent). */
+    private var reloadSeq = 0
 
     private fun reloadCurrent(full: Boolean) {
         val sid = currentSession.value ?: return
@@ -1427,6 +1429,22 @@ class ConnectionManager private constructor(context: Context) {
         drainingHistory = full
         core.refreshSession(sid, if (full) RefreshMode.FULL else RefreshMode.QUICK)
         if (full) backgroundNotice.value = "Replaying this chat from the start…"
+        // The bar is armed optimistically, so SOMETHING has to disarm it if the core
+        // never reports. Two silent paths exist: the core refuses a forced reload while
+        // it believes one is already in flight, and a roam peer that is not connected
+        // drops the command outright (`open_session_with` gates on status). Either way
+        // the user gets a bar that never moves, and — because a forced reload refuses to
+        // run while `replayActive` — no amount of pulling again fixes it. Clearing the
+        // handle restores the gesture; the transcript is untouched either way.
+        val seq = ++reloadSeq
+        main.postDelayed({
+            if (seq != reloadSeq || !replayActive.value) return@postDelayed
+            replayActive.value = false
+            replayProgress.value = 0
+            replayTotal.value = 0
+            drainingHistory = false
+            backgroundNotice.value = "Reload did not start — the connection is busy or reconnecting"
+        }, 8_000)
     }
 
     fun newSession(
@@ -1749,6 +1767,8 @@ class ConnectionManager private constructor(context: Context) {
     private fun onCoreReplayProgress(sessionId: String, loaded: Int, total: Int, done: Boolean) {
         val current = currentSession.value
         if (current != null && sessionId != current) return
+        // The core answered, so the watchdog has nothing to disarm.
+        reloadSeq++
         replayProgress.value = loaded
         replayTotal.value = total
         replayActive.value = !done

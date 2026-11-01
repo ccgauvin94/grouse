@@ -1262,6 +1262,42 @@ pub(crate) async fn replay_session(
 }
 
 /// [`replay_session`]'s body, for callers already holding the load slot.
+/// Ends a replay that never finished.
+///
+/// `begin_replay` puts the session in `state.replaying` and the store into a held
+/// state; both are undone by the code below, but ONLY if this future runs to the end.
+/// When it does not — the peer's link dies under the load, the task is dropped, the
+/// process is tearing down — nothing cleans up, and the core then believes a replay is
+/// still in flight for that session **forever**:
+///
+/// - `refresh_session(Full)` returns immediately (`state.replaying.contains`), so a
+///   chat that had one interrupted replay can never be force-reloaded again;
+/// - the client's reload bar, set when the user asked, never gets a `done` event and
+///   spins with nothing to report.
+///
+/// A cancelled await is not an edge case on roam — it is what a laptop going to sleep
+/// looks like — which is why this is a drop guard rather than more `if let Err` arms.
+struct ReplayGuard<'a> {
+    host: &'a dyn DispatchHost,
+    store: &'a crate::transcript::TranscriptStore,
+    key: &'a str,
+    /// `end_replay` is still owed to the host.
+    ends: bool,
+    /// The store's emissions are still held.
+    holds: bool,
+}
+
+impl Drop for ReplayGuard<'_> {
+    fn drop(&mut self) {
+        if self.ends {
+            self.host.end_replay(self.key);
+        }
+        if self.holds {
+            self.store.release_held_replay();
+        }
+    }
+}
+
 async fn replay_held(
     endpoint: &dyn ChatEndpoint,
     host: &dyn DispatchHost,
@@ -1282,20 +1318,18 @@ async fn replay_held(
     };
     host.begin_replay(key, suppress);
     store.hold_emissions(true);
+    let mut guard = ReplayGuard { host, store, key, ends: true, holds: true };
     let reply = endpoint
         .request("session/load", session_load_params(key, cwd, tail))
         .await;
     let reply = match reply {
         Ok(reply) => reply,
-        Err(error) => {
-            // Discard the hold WITHOUT painting: the rows on screen are the
-            // provisional cache paint, which is the right thing to keep for a
-            // chat that failed to load.
-            store.hold_emissions(false);
-            host.end_replay(key);
-            return Err(error);
-        }
+        // The rows on screen are the provisional cache paint, which is the right
+        // thing to keep for a chat that failed to load; the guard releases the hold
+        // and tells the host the replay is over, so the session can be reloaded again.
+        Err(error) => return Err(error),
     };
+    guard.ends = false;
     host.end_replay(key);
     // Merge gap: the tail started past the cached prefix, so extending the
     // cache would leave a hole. Clear and load the whole transcript now.
@@ -1306,6 +1340,7 @@ async fn replay_held(
     }
     // The replay is in: paint the newest window (or the empty transcript) once.
     store.release_held_replay();
+    guard.holds = false;
     Ok(reply)
 }
 
