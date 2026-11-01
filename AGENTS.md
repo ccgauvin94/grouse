@@ -216,6 +216,21 @@ keep them when extending the core.
   at initialize; without it goose strips the tool's `_meta.goose.mcpApp` and every app
   degrades to a plain tool chip. The server also only hydrates apps whose TOOL DEFINITION
   carries `_meta.ui.resourceUri` (not merely the call result).
+- **The `assistant` project is INVISIBLE, so never resolve a session from the list
+  alone.** `session::in_assistant_project` drops every session filed under the project
+  slug `assistant` from the chat lists (both transports, both clients) and `sources_list`
+  drops the project itself, because those sessions are the assistant's per-area working
+  chats reached from My Day. A session filed there therefore cannot be found *by title*
+  in any list — and the list is also capped at 50 and excludes 0-message sessions, so a
+  live chat can be missing for three independent reasons. **A cached id is
+  authoritative; the list is a hint.** `openThreadChat`'s mapping already worked this way
+  (`threadSessionId` deliberately skips list validation); the assistant thread's lookup
+  did not, and on 2026-11-01 that cost the whole conversation: the real thread
+  (`20260912_61`, 4,221 messages) had been filed into the project, the tab's lookup found
+  nothing, and `openAssistant` minted a blank "New Chat" on every tap. The staleness
+  signal is the open FAILING (grouse#19) — that is where a cached id is dropped, never
+  "it was not in the list".
+
 - **Trust boundary** for `content`/`output`/`appHtml`/chart specs: the core
   never escapes server-provided content; every UI must treat it as untrusted at
   its rendering surface and sanitize or sandbox any HTML/JS renderer. See

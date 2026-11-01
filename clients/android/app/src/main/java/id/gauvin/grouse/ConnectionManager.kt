@@ -1541,13 +1541,12 @@ class ConnectionManager private constructor(context: Context) {
 
 /** The assistant thread's id.
      *
-     *  One rule, used by every caller: the cached id wins while it still exists in the
-     *  current list (it is the id this app created/renamed — authoritative); a cache that
-     *  no longer matches any listed session is stale and re-seeded from the title lookup.
-     *  The title lookup is the MAIN connection's newest "Assistant" by real time
-     *  (`updatedEpoch()` — timestamp shapes vary, so string compare mis-sorts); the roam
-     *  peers keep their own Assistant threads and only serve as last-resort matches, so a
-     *  peer's id can never displace the main one in the cache. */
+     *  Priority: a cached id the list confirms, then the newest listed session titled
+     *  "Assistant" (which heals a cache pointing at a thread that was superseded), then
+     *  the cached id anyway — because the list is filtered and capped and can be blind to
+     *  a thread that exists. See the note at the return for why that last tier matters.
+     *  The roam peers keep their own Assistant threads and only serve as last-resort
+     *  matches, so a peer's id can never displace the main one in the cache. */
     fun assistantSessionId(): String? {
         val cached = store.assistantSessionId
         if (cached != null && sessions.value.any { it.sessionId == cached }) return cached
@@ -1555,8 +1554,24 @@ class ConnectionManager private constructor(context: Context) {
         val match = named.filter { !it.sessionId.startsWith("roam:") }
             .ifEmpty { named }
             .maxByOrNull { it.updatedEpoch() }
-        match?.let { store.assistantSessionId = it.sessionId }   // heal the stale cache
-        return match?.sessionId
+        if (match != null) {
+            store.assistantSessionId = match.sessionId   // heal the stale cache
+            return match.sessionId
+        }
+        // NO LIST MATCH, BUT WE STILL KNOW THE ID — return it.
+        //
+        // This list is a cache, not the truth: the core hides every assistant-project
+        // session from it, caps it at 50, and drops 0-message ones, so a live thread can
+        // be absent from it while opening perfectly well. Trusting the list here is what
+        // turned one tap into a blank chat: the id was known, the lookup said "no such
+        // thread", and `openAssistant` minted a second empty one — on 2026-11-01 the real
+        // thread had simply been filed into the assistant project (which hides it) and the
+        // tab had been opening a brand-new "New Chat" ever since.
+        //
+        // The real staleness signal is the open FAILING (grouse#19), which is where the
+        // cache is dropped — the same rule the thread-chat mapping already follows. A dead
+        // id costs one tap and an explanation; a second thread costs the conversation.
+        return cached
     }
 
     /** True when the on-screen conversation IS the privileged assistant thread. */
@@ -2657,6 +2672,11 @@ class ConnectionManager private constructor(context: Context) {
         // mapping so the next Discuss mints a fresh conversation instead of retrying
         // a dead id forever.
         forgetThreadSessionForSession(sessionId)
+        // Same rule for the assistant thread: the cached id is authoritative, so its
+        // failure is the ONLY signal that it is gone. Dropping the cache here means the
+        // next tap re-resolves it by title — or mints the thread, which is correct once
+        // the server has actually said this one does not exist.
+        if (sessionId == store.assistantSessionId) store.assistantSessionId = null
         replayActive.value = false
         replayProgress.value = 0
         loadingOlder = false
