@@ -2595,6 +2595,15 @@ class ConnectionManager private constructor(context: Context) {
     private var loadingOlder = false
     /** True while the core can still emit items older than the painted window. */
     val itemHasOlder = mutableStateOf(false)
+    /** True while a scroll-back is waiting on the core — which, past what this device
+     *  has already fetched, is a round trip to the server (the core pages the wire;
+     *  docs/TRANSCRIPT_MODEL.md "Windows"). Drives the row at the top of the list. */
+    val loadingOlderItems = mutableStateOf(false)
+
+    private fun setLoadingOlder(loading: Boolean) {
+        loadingOlder = loading
+        loadingOlderItems.value = loading
+    }
 
     private fun appIdFor(coreId: String): Long =
         coreKeyToAppId.getOrPut(coreId) { chatMessageSeq.getAndIncrement() }
@@ -2611,7 +2620,7 @@ class ConnectionManager private constructor(context: Context) {
                 messages.clear()
                 coreKeyToAppId.clear()
                 olderPending.clear()
-                loadingOlder = false
+                setLoadingOlder(false)
                 // A fresh paint means the chat contents are being replaced: a
                 // previous open failure no longer describes what is on screen.
                 openFailed.value = null
@@ -2665,7 +2674,7 @@ class ConnectionManager private constructor(context: Context) {
                     // Older items arrive oldest-first; insert them as one batch.
                     olderPending.forEach { (key, bubble) -> upsertBubble(key, bubble) }
                     olderPending.clear()
-                    loadingOlder = false
+                    setLoadingOlder(false)
                 }
                 itemHasOlder.value = op.hasOlder
                 if (drainingHistory) {
@@ -2699,7 +2708,7 @@ class ConnectionManager private constructor(context: Context) {
         if (sessionId == store.assistantSessionId) store.assistantSessionId = null
         replayActive.value = false
         replayProgress.value = 0
-        loadingOlder = false
+        setLoadingOlder(false)
         olderPending.clear()
         if (sessionId != currentSession.value) return  // a background tap that lost the race
         val title = sessions.value.firstOrNull { it.sessionId == sessionId }?.title
@@ -2710,7 +2719,7 @@ class ConnectionManager private constructor(context: Context) {
      *  on_item Upserts + a Window; there is no client-side buffer. */
     fun loadOlder(count: Int = 40) {
         if (!itemHasOlder.value || loadingOlder) return
-        loadingOlder = true
+        setLoadingOlder(true)
         core.loadOlder(count.toUInt())
     }
 

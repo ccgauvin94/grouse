@@ -84,8 +84,8 @@ defaulting to real verification; roam byte stream). The UI supplies only
 | `connect(config: ServerConfig)` | — | opens the WebSocket; `initialize`; then new-or-resume per §4 |
 | `disconnect()` | — | explicit close, no reconnect |
 | `new_session(recipe_id: Option<String>, project_id: Option<String>)` | — | `session/new` with `_meta.client` + cwd; `recipeId`/`projectId` when given. `projectId` is persisted by stock goose at creation, so a project chat needs no post-creation `session/project/update` |
-| `open_session(session_id: String)` | — | `session/load` with the real cwd (core resolves it); a settled, matching cache paints authoritatively and suppresses the replay, a settled-but-stale one merges a bounded tail, an incomplete one full-replays |
-| `refresh_session(session_id: String, mode: RefreshMode)` | — | routes by id: a `roam:<label>:<raw>` id reloads on its peer (`RoamPeer::open_session_with`, `force` honoured), anything else on the main wire. `RefreshMode::Quick` lets freshness decide (a settled, current cache suppresses the replay; a settled-but-stale one merges a bounded tail; an incomplete store still replays in full); `RefreshMode::Full` is a RELOAD: it deletes that session's cache file (transcript and tool cache — invalidation, not merely ignoring the stamp, so nothing can be merged from or re-saved out of a store known to be wrong), clears the painted transcript, forces the full `session/load` replay, and reports it on `on_replay_progress`. **One reload per session at a time**: a `Full` arriving while that session's replay is in flight is dropped, because a second one would clear the transcript again mid-rebuild. Either way the replay is ingested silently and ends in one windowed paint (grouse#18) |
+| `open_session(session_id: String)` | — | `session/load` with the real cwd (core resolves it); a settled, matching cache paints authoritatively and suppresses the replay, a settled-but-stale one merges a bounded tail, an incomplete one repaints provisionally and takes a BOUNDED tail (`_meta.replayTail`, 80 messages) — never the whole session: the recent part paints first and history behind it is paged in (`load_older`, §3.5) |
+| `refresh_session(session_id: String, mode: RefreshMode)` | — | routes by id: a `roam:<label>:<raw>` id reloads on its peer (`RoamPeer::open_session_with`, `force` honoured), anything else on the main wire. `RefreshMode::Quick` lets freshness decide (a settled, current cache suppresses the replay; a settled-but-stale one merges a bounded tail; an incomplete store still replays in full); `RefreshMode::Full` is a RELOAD: it deletes that session's cache file (transcript and tool cache — invalidation, not merely ignoring the stamp, so nothing can be merged from or re-saved out of a store known to be wrong), clears the painted transcript, takes a fresh BOUNDED tail from `session/load` (the recent part is authoritative on the first round trip; the history behind it is re-fetched from the server page by page), and reports it on `on_replay_progress`. **One reload per session at a time**: a `Full` arriving while that session's replay is in flight is dropped, because a second one would clear the transcript again mid-rebuild. Either way the replay is ingested silently and ends in one windowed paint (grouse#18) |
 | `list_sessions()` | — | refreshes `session/list` |
 | `send_prompt(prompt: Prompt, expect: Option<SendExpect>)` | — | text/image/resource blocks; ONE path for both transports. Routes by `expect.session_id` (fallback: the displayed id) through `Core::owner_for`; an id the core has never opened is rejected instead of mis-routed. Queues per SESSION when that chat's owner is not ready or already has a turn in flight — a turn in another chat never blocks this one (turns are concurrent per session). Echoes the prompt once (`TranscriptStore::echo_prompt`) and finalizes in `Core::on_turn_ended` (run end, cache save with the incomplete-stamp rule, stamp re-baseline, per-session queue flush) |
 | `cancel()` | — | `session/cancel` (notification) |
@@ -194,7 +194,11 @@ cache paint in place.
   list for dropdowns (empty on the config_option_update path; the schema
   has no choices there).
 - `load_older(count: u32)` — an **intent**: extend the window backward by
-  `count` items, cache-first; outcomes arrive as `on_item` ops (§3.5).
+  `count` items. The store is served first; at its origin the core fetches ONE
+  page of history from the server (`_meta.replaySkipped`, §3.5) and then serves
+  the batch. Outcomes arrive as `on_item` ops; a client that asked is always
+  answered by a `Window`, including when the page failed or there was nothing
+  more.
 - `assistant_project(): String` — the project slug thread chats are filed under
   (§3.6), for a client's `new_session` call. The C ABI spelling takes no handle
   (`grouse_assistant_project()`): it is a constant of the core's own list filter.
@@ -276,9 +280,16 @@ Rules:
   (the cache and the legacy flat projection are unaffected); only the item
   stream is windowed, so a long chat does not realize every delegate on open.
   A `session/load` replay then continues the same id-keyed stream.
-- `load_older(count)` walks the window back over the store's in-memory rows —
-  no cache read and no wire call. A stock server has no history cursor, so once
-  the store's start is reached `has_older` is `false`.
+- `load_older(count)` walks the window back over the store's rows — no cache
+  read. When the store's own origin is reached it still reports `has_older: true`
+  if the SERVER holds history this client has not fetched (the backlog the last
+  `session/load` reported in `_meta.replaySkipped`), and the next `load_older`
+  fetches ONE page of it. goose has no backwards cursor, so a page is a LONGER
+  trailing window (`replayTail` grows) whose overlap is dropped by item id; the
+  rows are spliced in FRONT of the store, stamped below every position the
+  client holds, and the client is told nothing until it asks for them — its
+  window does not move. Once both the store and the server are exhausted,
+  `has_older` is `false`.
 - **The core echoes the prompt it sends.** goose does NOT send a
   `user_message_chunk` for a prompt WE sent — the prompt next crosses the wire in
   a later `session/load` replay (verified against a live serve). Without a local

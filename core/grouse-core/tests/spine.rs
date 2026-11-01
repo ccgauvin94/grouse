@@ -213,6 +213,11 @@ struct FakeServer {
     /// `release_load` before replying — the window in which the core must
     /// ingest the replay silently (grouse#18).
     gate_load: Arc<std::sync::atomic::AtomicBool>,
+    /// A synthetic conversation of this many messages, served by `session/load`
+    /// with `_meta.replayTail` honoured and `_meta.replaySkipped` reported —
+    /// the two things reverse loading is built on (docs/TRANSCRIPT_MODEL.md).
+    /// `0` = off (the small canned replay below).
+    history: Arc<Mutex<usize>>,
     release_load: Arc<tokio::sync::Notify>,
 }
 
@@ -233,6 +238,7 @@ impl FakeServer {
             last_prompt: Arc::new(Mutex::new(String::new())),
             fail_load: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             gate_load: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            history: Arc::new(Mutex::new(0)),
             release_load: Arc::new(tokio::sync::Notify::new()),
         });
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -397,6 +403,44 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
+                let history = *server.history.lock();
+                if history > 0 {
+                    // A synthetic conversation served the way goose serves one:
+                    // only the trailing `_meta.replayTail` messages are replayed,
+                    // and the count it withheld comes back as
+                    // `_meta.replaySkipped` (verified against a live serve).
+                    let tail = params
+                        .get("_meta")
+                        .and_then(|meta| meta.get("replayTail"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    let skip = history.saturating_sub(tail);
+                    for i in skip..history {
+                        let frame = json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": session,
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": { "type": "text", "text": format!("history row {i}") },
+                                    "messageId": format!("h{i}")
+                                }
+                            }
+                        });
+                        let _ = tx.send(WsMessage::Text(frame.to_string().into())).await;
+                    }
+                    let mut reply = json!({
+                        "sessionId": session,
+                        "configOptions": [
+                            { "id": "provider", "name": "Provider", "currentValue": "openai" }
+                        ]
+                    });
+                    if skip > 0 {
+                        reply["_meta"] = json!({ "replaySkipped": skip });
+                    }
+                    reply
+                } else {
                 let mid = if server.replay_alt_id.load(std::sync::atomic::Ordering::SeqCst) {
                     "r-2"
                 } else {
@@ -454,6 +498,7 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
                         { "id": "provider", "name": "Provider", "currentValue": "openai" }
                     ]
                 })
+                }
             }
             // The summarizer's own turn: answer with the numbered labels the
             // core parses (issue #13).
@@ -623,7 +668,7 @@ fn resume_replay_persists_the_fresh_cache() {
     // Seed a STALE cache: old content, old updatedAt.
     let cache = grouse_core::cache::CacheStore::new(data_dir.join("grouse"));
     let stale = vec![item("m-old", grouse_core::ItemKind::User, "stale cached line")];
-    assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z"));
+    assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z", true));
 
     let (port_tx, port_rx) = mpsc::channel();
     let _server = FakeServer::spawn(port_tx);
@@ -655,9 +700,9 @@ fn resume_replay_persists_the_fresh_cache() {
     // wins over the replay's own session_info_update (12:00): the stamp is
     // deterministic and matches the session/list entry byte-for-byte, so the
     // next open is fresh across restarts.
-    let (messages, updated_at) = {
+    let (messages, updated_at, _complete) = {
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut last: Option<(Vec<grouse_core::Item>, String)> = None;
+        let mut last: Option<(Vec<grouse_core::Item>, String, bool)> = None;
         while Instant::now() < deadline {
             if let Some(v) = cache.load_transcript("sess-r") {
                 last = Some(v.clone());
@@ -943,10 +988,145 @@ fn refresh_modes_differ_on_the_wire() {
         .last()
         .cloned()
         .expect("a session/load for the full reload");
-    assert!(
-        full.pointer("/params/_meta").is_none(),
-        "a FULL reload must replay the session, not ask for a tail: {full:?}"
+    // A FULL reload is the escape hatch for a drifted local view, and it is
+    // STAGED now: the newest turn is authoritative on the first round trip, and
+    // the history behind it is re-fetched from the server page by page
+    // (docs/TRANSCRIPT_MODEL.md, "Windows"). The cache is deleted first, so
+    // nothing stale survives either way.
+    assert_eq!(
+        full
+            .pointer("/params/_meta/replayTail")
+            .and_then(Value::as_u64),
+        Some(80),
+        "a FULL reload must fetch the recent part first, not the whole session: {full:?}"
     );
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+// ---------------------------------------------------------------------------
+// Reverse loading: a tail first, then a page at a time back to the origin
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_tail_first_open_pages_the_rest_of_the_history_from_the_wire() {
+    // docs/TRANSCRIPT_MODEL.md, "Windows". Opening a chat this device has not
+    // seen used to stream its WHOLE history before anything appeared (the
+    // Assistant thread: 4,221 messages). It now asks for a bounded tail, paints
+    // the recent part, and pages the rest back on demand — through the server's
+    // own `_meta.replayTail` / `_meta.replaySkipped` contract, which the fake
+    // server here implements the way goose does.
+    let _cache_guard = CACHE_TEST_LOCK.lock();
+    let data_dir = std::env::temp_dir().join(format!("grouse-pages-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    *server.history.lock() = 300;
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        data_dir.to_string_lossy().to_string(),
+    );
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+        initial_project_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
+
+    core.open_session("sess-p".to_string());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "open ready");
+
+    // 1. The open asked for a BOUNDED tail, not the whole conversation.
+    let first = server
+        .frames_for("session/load")
+        .last()
+        .cloned()
+        .expect("the open's session/load");
+    assert_eq!(
+        first
+            .pointer("/params/_meta/replayTail")
+            .and_then(Value::as_u64),
+        Some(80),
+        "an uncached open must fetch the recent part first: {first:?}"
+    );
+
+    // 2. The newest window is on screen, and the cursor says there is more.
+    let window = core.window();
+    assert!(window.has_older, "the server still holds the history behind it");
+    let rows = core.transcript();
+    assert!(!rows.is_empty(), "the recent part painted");
+    assert_eq!(
+        rows.last().map(|m| m.content.clone()).unwrap_or_default(),
+        "history row 299",
+        "the NEWEST message is what shines first"
+    );
+    assert!(
+        !rows.iter().any(|m| m.content == "history row 0"),
+        "the origin is NOT fetched up front"
+    );
+
+    // 3. Scroll back until the origin. The first batches come from the STORE
+    //    (the painted window's own tail); once it runs out, scrolling fetches a
+    //    page from the wire — and each page asks for MORE trailing messages
+    //    than the one before, because this server has no backwards cursor.
+    let loads_before = server.frames_for("session/load").len();
+    let mut guard = 0;
+    while core.window().has_older {
+        guard += 1;
+        assert!(guard < 30, "paging must terminate");
+        core.load_older(200);
+        wait_for(
+            &ev_rx,
+            |ev| matches!(ev, Ev::Item(TranscriptOp::Window { .. })),
+            "a batch or a page settled",
+        );
+    }
+    let page_tails: Vec<u64> = server
+        .frames_for("session/load")
+        .iter()
+        .skip(loads_before)
+        .filter_map(|f| f.pointer("/params/_meta/replayTail"))
+        .filter_map(Value::as_u64)
+        .collect();
+    assert!(
+        !page_tails.is_empty(),
+        "scrolling past the painted tail must fetch a page, not report the end"
+    );
+    assert!(
+        page_tails.iter().all(|tail| *tail > 80),
+        "a page always asks for more than the open did: {page_tails:?}"
+    );
+    // Growth is geometric, not a crawl: seven pages reach 4,221 messages (~2x
+    // the transcript on the wire), where +120 a page would re-send it 17 times.
+    let mut last = 80u64;
+    for tail in &page_tails {
+        assert!(
+            *tail >= (last * 2).min(300),
+            "each page at least doubles the previous ask ({last} -> {tail})"
+        );
+        last = *tail;
+    }
+
+    // 5. The whole conversation, in order, exactly once.
+    let texts: Vec<String> = core.transcript().iter().map(|m| m.content.clone()).collect();
+    assert_eq!(texts.len(), 300, "no duplicates, nothing missing");
+    assert_eq!(texts[0], "history row 0", "the origin is the transcript's start");
+    assert_eq!(texts[299], "history row 299");
+    let unique: std::collections::HashSet<&String> = texts.iter().collect();
+    assert_eq!(unique.len(), 300, "a page may not duplicate a row");
 
     core.disconnect();
     let _ = std::fs::remove_dir_all(&data_dir);
@@ -1479,7 +1659,7 @@ fn stale_cache_is_painted_then_replaced_not_appended() {
     let cache = grouse_core::cache::CacheStore::new(data_dir.clone());
     let stale = vec![item("m-old", grouse_core::ItemKind::Agent, "STALE-MARKER")];
     // An updatedAt the server will not agree with => stale => the load replays.
-    assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z"));
+    assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z", true));
 
     let (port_tx, port_rx) = mpsc::channel();
     let _server = FakeServer::spawn(port_tx);
@@ -1555,7 +1735,7 @@ fn reconnect_replaces_the_live_transcript_not_appends() {
     let _ = std::fs::remove_dir_all(&data_dir);
     let cache = grouse_core::cache::CacheStore::new(data_dir.clone());
     let stale = vec![item("m-old", grouse_core::ItemKind::Agent, "STALE-MARKER")];
-    assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z"));
+    assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z", true));
 
     let (port_tx, port_rx) = mpsc::channel();
     let server = FakeServer::spawn(port_tx);
@@ -1724,7 +1904,7 @@ fn rich_transcript_paints_and_replaces_on_a_stale_open() {
     let _ = std::fs::remove_dir_all(&data_dir);
     let cache = grouse_core::cache::CacheStore::new(data_dir.clone());
     let stale = vec![item("m-old", grouse_core::ItemKind::Agent, "STALE-MARKER")];
-    assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z"));
+    assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z", true));
 
     let (port_tx, port_rx) = mpsc::channel();
     let _server = FakeServer::spawn(port_tx);
@@ -1792,7 +1972,7 @@ fn stale_cache_tail_merge_keeps_the_older_prefix() {
         item("old-1", grouse_core::ItemKind::User, "VERY-OLD-PREFIX"),
         item("r-1", grouse_core::ItemKind::Agent, "replayed line one and two"),
     ];
-    assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z"));
+    assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z", true));
 
     let (port_tx, port_rx) = mpsc::channel();
     let server = FakeServer::spawn(port_tx);
@@ -1936,7 +2116,7 @@ fn cold_start_paint_is_not_filed_under_the_transient_session() {
     let _ = std::fs::remove_dir_all(&cache_dir);
     let cache = grouse_core::cache::CacheStore::new(cache_dir.clone());
     let seeded = vec![item("m-1", grouse_core::ItemKind::Agent, "OWNED-BY-SESS-R")];
-    assert!(cache.save_transcript("sess-r", &seeded, "2026-01-01T00:00:00.000Z"));
+    assert!(cache.save_transcript("sess-r", &seeded, "2026-01-01T00:00:00.000Z", true));
 
     let (port_tx, port_rx) = mpsc::channel();
     let _server = FakeServer::spawn(port_tx);

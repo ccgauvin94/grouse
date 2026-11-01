@@ -148,6 +148,11 @@ roam.rs        the peer registry: RoamPeer { label, transport, session list },
      `window() -> TranscriptWindow`, `replay_thought(text)`. The store keeps the
      whole transcript but emits only `bubbles[emitted_from..]` (the
      `CLIENT_WINDOW` newest on a paint); `load_older` walks `emitted_from` back.
+   - Reverse-loading seam: `prepend_rich(items) -> Option<usize>` (splice a page
+     of OLDER rows in front, stamped below everything held), `server_more()` /
+     `set_server_more(bool)` (the server's backlog keeps `has_older` true at the
+     origin), `can_load_older()`, `len()`, `generation()` (a wholesale rebuild
+     invalidates a page in flight), `publish_window()`, `emissions_held()`.
      A streamed text row is finalized with an authoritative Upsert when it ends
      (new bubble, tool call, or `run_ended`). A provisional drop emits Reset
      before the replay's Upserts; a merge replay truncates at its first
@@ -156,8 +161,10 @@ roam.rs        the peer registry: RoamPeer { label, transport, session list },
      append/replace rule.
 4. **CacheStore** (cache.rs):
    - `CacheStore::new(cache_dir: PathBuf)`
-   - `load_transcript(session_id) -> Option<(Vec<Item>, String /*updatedAt*/)>`
-   - `save_transcript(session_id, Vec<Item>, updated_at)`
+   - `load_transcript(session_id) -> Option<(Vec<Item>, String /*updatedAt*/, bool /*complete*/)>`
+   - `save_transcript(session_id, Vec<Item>, updated_at, complete)` — `complete`
+     is whether the file reaches the session's origin; a fresh-but-partial cache
+     still paints and still pages.
    - `load_tools(session_id) -> Option<...>` / `save_tools(session_id, ...)`
    - freshness is the CALLER's job (compare updatedAt); the store is dumb I/O.
      The core's caller is `Core::save_cache_for` (incomplete store ⇒ empty
@@ -184,6 +191,12 @@ gate and clears that key's green dot; a background store still accumulates and
 is cached, and `SessionHub::mark_new(key)` sets the dot via
 `on_session_touched` once per new content. `forget(key)` drops a store (deleted
 session, closed peer).
+
+`SessionHub::dispatch_store(key)` is the same store EXCEPT while a backfill page
+is in flight for that key, when it returns the page's scratch store: the page's
+rows arrive on the live notification stream, so turning them into items must not
+touch the transcript on screen. Only the dispatch funnel (`DispatchHost::store`)
+uses it; every other caller wants `store`.
 
 Every transport supplies two things to the gate: `display_id` (identity for the
 main wire, prefixed for a peer) and the wire itself. There is no second store

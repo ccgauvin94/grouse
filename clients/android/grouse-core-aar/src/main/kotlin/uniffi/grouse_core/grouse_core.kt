@@ -1564,7 +1564,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_load_cached_transcript() and 0xFFFF) != 50836) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_load_older() and 0xFFFF) != 38303) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_load_older() and 0xFFFF) != 58886) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_new_session() and 0xFFFF) != 6666) {
@@ -2474,10 +2474,19 @@ public interface CoreInterface {
     
     /**
      * Extend the client's window backward by `count` items
-     * (docs/TRANSCRIPT_MODEL.md). The store keeps the whole transcript, so the
-     * items come from memory — no cache read and no wire call. Emits `Upsert`
-     * per older item (oldest-first) + a refreshed `Window`; `has_older: false`
-     * means there is nothing further back.
+     * (docs/TRANSCRIPT_MODEL.md, "Windows").
+     *
+     * Two sources, in this order:
+     *
+     * 1. the STORE, which holds everything this client has already fetched —
+     * no cache read, no wire call;
+     * 2. the WIRE, when the store is at its own origin and the server reported
+     * history behind it (`_meta.replaySkipped`). One page is fetched, spliced
+     * in front of the store, and then served like any other older batch.
+     *
+     * Either way the client sees `Upsert` per older item (oldest-first) + a
+     * refreshed `Window`; `has_older: false` means there is nothing further
+     * back, from either source.
      */
     fun `loadOlder`(`count`: kotlin.UInt)
     
@@ -3045,10 +3054,19 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     
     /**
      * Extend the client's window backward by `count` items
-     * (docs/TRANSCRIPT_MODEL.md). The store keeps the whole transcript, so the
-     * items come from memory — no cache read and no wire call. Emits `Upsert`
-     * per older item (oldest-first) + a refreshed `Window`; `has_older: false`
-     * means there is nothing further back.
+     * (docs/TRANSCRIPT_MODEL.md, "Windows").
+     *
+     * Two sources, in this order:
+     *
+     * 1. the STORE, which holds everything this client has already fetched —
+     * no cache read, no wire call;
+     * 2. the WIRE, when the store is at its own origin and the server reported
+     * history behind it (`_meta.replaySkipped`). One page is fetched, spliced
+     * in front of the store, and then served like any other older batch.
+     *
+     * Either way the client sees `Upsert` per older item (oldest-first) + a
+     * refreshed `Window`; `has_older: false` means there is nothing further
+     * back, from either source.
      */override fun `loadOlder`(`count`: kotlin.UInt)
         = 
     callWithHandle {

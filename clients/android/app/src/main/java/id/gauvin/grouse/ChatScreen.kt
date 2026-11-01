@@ -817,6 +817,27 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                                     }
                                 }
                             }
+                            // The top of the scroll-back is where the CORE goes to the
+                            // wire: past what this device has already fetched, a batch
+                            // is a round trip (docs/TRANSCRIPT_MODEL.md, "Windows"). Say
+                            // so, or the list just stops with nothing to show for the
+                            // gesture. Rendered AFTER the rows, which reverseLayout puts
+                            // at the visual top.
+                            if (cm.loadingOlderItems.value) item(key = "older-loading") {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.5.dp)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        "loading older messages…",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.outline,
+                                    )
+                                }
+                            }
                         }
                         if (!atBottom) SmallFloatingActionButton(
                             onClick = { scope.launch { listState.animateScrollToItem(0) } },

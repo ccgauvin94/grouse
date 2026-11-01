@@ -342,9 +342,22 @@ struct State {
     /// the item stream paints only `bubbles[emitted_from..]` — the window
     /// (docs/TRANSCRIPT_MODEL.md). `load_older` walks this back.
     emitted_from: usize,
-    /// Whether the cache can still produce items older than `oldest_id` (the
-    /// client's `load_older` cursor). Set by the core when it paints a window.
+    /// Whether the store can still produce items older than `oldest_id` (the
+    /// client's `load_older` cursor) — `emitted_from > 0`, or the SERVER holds
+    /// history this store has not fetched yet ([`State::server_more`]).
     has_older: bool,
+    /// The server holds messages older than anything this store has: the
+    /// backlog reported by the last `session/load` (`_meta.replaySkipped`),
+    /// fetched a page at a time by the core. It is what makes `has_older` true
+    /// at the store's own origin — without it a tail-first open looks like the
+    /// whole conversation after 60 rows.
+    server_more: bool,
+    /// Bumped on every wholesale rebuild (`clear`, `replace_rich`,
+    /// `replace_inner`). A background page captures it before it starts and
+    /// drops its rows if it moved: the page was built from a transcript that
+    /// has since been replaced, so splicing it in front would graft one
+    /// conversation's history onto another's.
+    generation: u64,
     /// Monotonic counter for ids on live text rows the server sent without a
     /// `message_id` (see [`Bubble::Text::uid`]).
     next_uid: u64,
@@ -388,6 +401,18 @@ const MAX_BUBBLES: usize = 20_000;
 /// See docs/TRANSCRIPT_MODEL.md ("Windows"). A client that paints a long chat
 /// in full pays for every delegate on every open; the window bounds that.
 pub(crate) const CLIENT_WINDOW: usize = 60;
+
+/// Where a wholesale paint starts stamping [`Item::seq`].
+///
+/// A position is an ordinal, but a PREFIX ingest (an older page spliced in front
+/// of rows the client already holds — [`TranscriptStore::prepend_rich`]) can only
+/// number itself *below* what is already on screen, and it may not renumber those
+/// rows: the client would then be holding positions that no longer describe the
+/// store it reads from. So the scale starts a million above zero and moves DOWN
+/// as pages arrive. A rebuild restores the headroom, so this is a bound on how
+/// much history one open can splice in (a million items) rather than a real
+/// limit.
+const SEQ_START: u32 = 1_000_000;
 
 /// Rebuild `tool_by_id` from scratch — used after a bulk eviction or rebuild,
 /// when the surviving bubbles' absolute indices have shifted.
@@ -618,6 +643,55 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// The rich item id of a bubble, as the client keys rows by it.
+fn bubble_item_id(b: &Bubble) -> String {
+    bubble_uid(b)
+}
+
+impl Bubble {
+    /// How many CLIENT ROWS this bubble occupies: a group is one bubble but N
+    /// rows, and each row carries its own position.
+    fn stamp_span(&self) -> u32 {
+        match self {
+            Bubble::ToolGroup(calls, _) => calls.len().max(1) as u32,
+            _ => 1,
+        }
+    }
+
+    /// The position of this bubble's first row.
+    fn first_stamp(&self) -> u32 {
+        match self {
+            Bubble::Text { seq, .. } => *seq,
+            Bubble::Tool(r, _) | Bubble::Chart(r) | Bubble::McpApp(r) => r.seq,
+            Bubble::ToolGroup(calls, _) => calls.first().map(|c| c.seq).unwrap_or(0),
+        }
+    }
+
+    /// Renumber this bubble's rows consecutively from `next`, returning the next
+    /// free position. Used only for rows being spliced in FRONT of a store:
+    /// rows already held keep their stamps (see [`SEQ_START`]).
+    fn stamp_from(&mut self, next: u32) -> u32 {
+        match self {
+            Bubble::Text { seq, .. } => {
+                *seq = next;
+                next + 1
+            }
+            Bubble::Tool(r, _) | Bubble::Chart(r) | Bubble::McpApp(r) => {
+                r.seq = next;
+                next + 1
+            }
+            Bubble::ToolGroup(calls, _) => {
+                let mut n = next;
+                for c in calls.iter_mut() {
+                    c.seq = n;
+                    n += 1;
+                }
+                n
+            }
+        }
+    }
+}
+
 /// Does this bubble belong to `id` (its message id for text, its tool_call_id
 /// for the tool-ish bubbles)? Used to anchor a replay merge.
 fn bubble_owns(b: &Bubble, id: &str) -> bool {
@@ -798,8 +872,10 @@ impl TranscriptStore {
                 session_id: String::new(),
                 emitted_from: 0,
                 has_older: false,
+                server_more: false,
+                generation: 0,
                 next_uid: 0,
-                next_seq: 0,
+                next_seq: SEQ_START,
                 speak: SpeakStream::new(),
                 pending_thought: None,
                 pending_echo: VecDeque::new(),
@@ -1471,6 +1547,7 @@ impl TranscriptStore {
         let session_id = {
             let mut st = self.state.lock();
             st.reset();
+            st.generation += 1;
             st.session_id.clone()
         };
         self.emit_ops(vec![
@@ -1485,6 +1562,137 @@ impl TranscriptStore {
     /// The session the held rows belong to (stamped on `Reset` ops).
     pub fn set_session(&self, session_id: &str) {
         self.state.lock().session_id = session_id.to_string();
+    }
+
+    /// Whether `load_older` can serve from what this store already holds. False
+    /// at the origin — the core then fetches a page from the server, if the
+    /// server owes one ([`Self::server_more`]).
+    pub fn can_load_older(&self) -> bool {
+        self.state.lock().emitted_from > 0
+    }
+
+    /// How many bubbles (client rows, roughly) the store holds. The core uses it
+    /// to size the next page: the wire counts MESSAGES and the store counts rows
+    /// — including one per grouped call and one per echoed prompt — so rows are
+    /// an upper bound on what a page must exceed to make progress.
+    pub fn len(&self) -> usize {
+        self.state.lock().bubbles.len()
+    }
+
+    /// Re-emit the pagination cursor. The core calls this when it learns
+    /// something that changes `has_older` without changing a row — the server's
+    /// backlog after a bounded replay, or a page that turned out to be all
+    /// overlap. Gated like every other emission, so a background chat's cursor
+    /// stays off the wire.
+    pub fn publish_window(&self) {
+        let (oldest, has_older) = {
+            let st = self.state.lock();
+            (
+                st.bubbles
+                    .get(st.emitted_from)
+                    .map(bubble_uid)
+                    .unwrap_or_default(),
+                st.has_older,
+            )
+        };
+        self.listener
+            .on_item(TranscriptOp::Window {
+                oldest_id: oldest,
+                has_older,
+            });
+    }
+
+    /// Whether the server holds history older than anything here: the backlog
+    /// the last `session/load` reported (`_meta.replaySkipped`). This is what
+    /// keeps `has_older` true at the store's own origin, so a tail-first open is
+    /// a conversation with more behind it rather than a 60-row one.
+    pub fn server_more(&self) -> bool {
+        self.state.lock().server_more
+    }
+
+    /// Record whether the server still owes history. Returns whether the cursor
+    /// changed, so the caller can tell the client (a `Window`) when the answer
+    /// moved; the store never emits on its own here, because the caller knows
+    /// whether a client is even waiting.
+    pub fn set_server_more(&self, more: bool) -> bool {
+        let mut st = self.state.lock();
+        let changed = st.server_more != more;
+        st.server_more = more;
+        st.has_older = st.emitted_from > 0 || more;
+        changed
+    }
+
+    /// The store's rebuild generation (see [`State::generation`]). A background
+    /// page captures it before it starts and drops its rows if it moved.
+    pub fn generation(&self) -> u64 {
+        self.state.lock().generation
+    }
+
+    /// Splice a page of OLDER rows in front of everything held — the prefix half
+    /// of paging (docs/TRANSCRIPT_MODEL.md, "Windows").
+    ///
+    /// The rows came from the server and are older than the oldest row on
+    /// screen, so three things follow, each of which is a way this can go wrong:
+    ///
+    /// - they are stamped strictly BELOW every position the client holds, so the
+    ///   client (which inserts by `seq`) prepends them in order;
+    /// - rows already held are DROPPED: a page can overlap what we have, because
+    ///   the tail it asks for is measured from the end of a conversation that can
+    ///   grow between pages;
+    /// - the client is told NOTHING. Its window did not change; the rows appear
+    ///   when it asks for them with `load_older`.
+    ///
+    /// Returns `None` when the store holds nothing to splice in front of or has
+    /// no stamp headroom left (the caller rebuilds instead — see [`SEQ_START`]),
+    /// and `Some(n)` with how many rows it spliced (`0` = the page was all
+    /// overlap, which is how the core learns it has reached the origin).
+    pub fn prepend_rich(&self, items: Vec<Item>) -> Option<usize> {
+        let mut guard = self.state.lock();
+        let st = &mut *guard;
+        if st.bubbles.is_empty() {
+            return None;
+        }
+        let known: std::collections::HashSet<String> =
+            st.bubbles.iter().map(bubble_item_id).collect();
+        let mut fresh: Vec<Bubble> = Vec::new();
+        for it in &items {
+            if it.id.is_empty() || known.contains(&it.id) {
+                continue;
+            }
+            if let Some(bubble) = bubble_from_item(it) {
+                let id = bubble_item_id(&bubble);
+                if known.contains(&id) || fresh.iter().any(|b| bubble_item_id(b) == id) {
+                    continue;
+                }
+                fresh.push(bubble);
+            }
+        }
+        if fresh.is_empty() {
+            return Some(0); // the page was all overlap: nothing to splice
+        }
+        let span: u32 = fresh.iter().map(Bubble::stamp_span).sum();
+        let first = st
+            .bubbles
+            .first()
+            .map(Bubble::first_stamp)
+            .unwrap_or(u32::MAX);
+        if first < span {
+            return None;
+        }
+        let mut next = first - span;
+        for bubble in fresh.iter_mut() {
+            next = bubble.stamp_from(next);
+        }
+        let added = fresh.len();
+        st.bubbles.splice(0..0, fresh);
+        index_bubbles(&mut st.tool_by_id, &st.bubbles);
+        // The client still holds the same window; it just starts `added` rows in.
+        st.emitted_from += added;
+        if let Some(idx) = st.stream_idx {
+            st.stream_idx = Some(idx + added);
+        }
+        st.has_older = st.emitted_from > 0 || st.server_more;
+        Some(added)
     }
 
     /// The id of the oldest item the CLIENT holds (the window's origin).
@@ -1531,7 +1739,7 @@ impl TranscriptStore {
                 .map(Bubble::item)
                 .collect();
             st.emitted_from = from;
-            st.has_older = from > 0;
+            st.has_older = from > 0 || st.server_more;
             let oldest = st.bubbles.get(from).map(bubble_uid).unwrap_or_default();
             let has_older = st.has_older;
             (st.session_id.clone(), batch, oldest, has_older)
@@ -1676,6 +1884,12 @@ impl TranscriptStore {
         self.hold.store(hold, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Whether emissions are currently held, i.e. a paint is owed. A caller that
+    /// changes the cursor mid-hold does not need to emit it: the paint carries it.
+    pub fn emissions_held(&self) -> bool {
+        self.hold.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// How long since anything in this transcript changed. The turn watchdog's
     /// measure of "quiet": readings, labels and re-delivered rows all reset it,
     /// so a genuinely working turn never looks idle.
@@ -1814,7 +2028,7 @@ impl TranscriptStore {
         let (session_id, window, oldest, has_older) = {
             let mut st = self.state.lock();
             st.emitted_from = st.bubbles.len().saturating_sub(CLIENT_WINDOW);
-            let has_older = st.emitted_from > 0;
+            let has_older = st.emitted_from > 0 || st.server_more;
             st.has_older = has_older;
             let window: Vec<Item> = st.bubbles[st.emitted_from..]
                 .iter()
@@ -1887,7 +2101,7 @@ impl TranscriptStore {
             // group is ONE bubble but N client rows, so each call consumes its
             // own position — sharing the group's anchor put every call in a run
             // at the same place.
-            let mut next = 0u32;
+            let mut next = SEQ_START;
             for b in st.bubbles.iter_mut() {
                 match b {
                     Bubble::Text { seq, .. } => {
@@ -1910,11 +2124,12 @@ impl TranscriptStore {
             st.seed_next_uid();
             st.rebuild_pending_echo();
             st.provisional = provisional;
+            st.generation += 1;
             st.trim();
             // Paint only the newest CLIENT_WINDOW items; the store keeps all (for
             // the cache and the legacy flat projection), load_older walks back.
             st.emitted_from = st.bubbles.len().saturating_sub(CLIENT_WINDOW);
-            let has_older = st.emitted_from > 0;
+            let has_older = st.emitted_from > 0 || st.server_more;
             st.has_older = has_older;
             let window: Vec<Item> = st.bubbles[st.emitted_from..]
                 .iter()
@@ -2009,8 +2224,9 @@ impl TranscriptStore {
             st.seed_next_uid();
             st.rebuild_pending_echo();
             st.provisional = provisional;
+            st.generation += 1;
             st.emitted_from = st.bubbles.len().saturating_sub(CLIENT_WINDOW);
-            let has_older = st.emitted_from > 0;
+            let has_older = st.emitted_from > 0 || st.server_more;
             st.has_older = has_older;
             let items: Vec<Item> = st.bubbles[st.emitted_from..]
                 .iter()
@@ -2376,7 +2592,14 @@ mod tests {
         ];
         store.replace_rich(items, false);
         let seqs: Vec<u32> = store.rich_transcript().iter().map(|i| i.seq).collect();
-        assert_eq!(seqs, vec![0, 1], "a repaint owns the order it just built");
+        // Consecutive from the paint's base: a repaint owns the order it just
+        // built, and the base leaves room for OLDER pages to sort beneath it
+        // (`SEQ_START`).
+        assert_eq!(
+            seqs,
+            vec![super::SEQ_START, super::SEQ_START + 1],
+            "a repaint owns the order it just built"
+        );
     }
 
     #[test]
@@ -2438,7 +2661,11 @@ mod tests {
             .find(|i| i.kind == ItemKind::ToolGroup)
             .expect("the run survives the repaint");
         let seqs: Vec<u32> = group.calls.iter().map(|c| c.seq).collect();
-        assert_eq!(seqs, vec![0, 1], "a repaint owns the order it built");
+        assert_eq!(
+            seqs,
+            vec![super::SEQ_START, super::SEQ_START + 1],
+            "a repaint owns the order it built"
+        );
     }
 
     #[test]
@@ -3853,5 +4080,141 @@ mod tests {
         let items = store.rich_transcript();
         assert_eq!(items.len(), 2);
         assert_eq!(items[1].images, vec!["data:image/png;base64,CCC"]);
+    }
+
+    // -- reverse loading: a page of older rows spliced in front -------------
+
+    /// A settled store holding `n` agent rows, painted (window = newest 60).
+    fn painted_store(n: usize) -> (Arc<TranscriptStore>, Arc<Mutex<Vec<String>>>) {
+        let (l, evts) = listener();
+        let store = Arc::new(TranscriptStore::new(l));
+        let items: Vec<Item> = (0..n)
+            .map(|i| text_item(&format!("m{i}"), ItemKind::Agent, &format!("row {i}")))
+            .collect();
+        store.replace_rich(items, false);
+        (store, evts)
+    }
+
+    #[test]
+    fn a_page_splices_older_rows_in_front_and_the_window_is_untouched() {
+        let (store, evts) = painted_store(80);
+        let window_before = store.window();
+        let top_before: Vec<String> =
+            store.rich_transcript()[60..].iter().map(|i| i.id.clone()).collect();
+        evts.lock().clear();
+
+        // The server hands back 20 messages older than m0.
+        let page: Vec<Item> = (0..20)
+            .map(|i| text_item(&format!("o{i}"), ItemKind::Agent, &format!("old {i}")))
+            .collect();
+        assert_eq!(store.prepend_rich(page), Some(20), "the page spliced in");
+
+        let all = store.rich_transcript();
+        assert_eq!(all.len(), 100);
+        assert_eq!(all[0].id, "o0", "oldest page row is the transcript origin");
+        assert_eq!(all[19].id, "o19");
+        assert_eq!(all[20].id, "m0");
+        // Nothing was told to the client: its window did not change.
+        assert_eq!(store.window(), window_before);
+        assert!(evts.lock().is_empty(), "a silent splice");
+
+        // And the page's rows sort BELOW the rows the client already holds.
+        evts.lock().clear();
+        store.load_older(40);
+        let emitted: Vec<Item> = evts
+            .lock()
+            .iter()
+            .filter(|d| d.starts_with("upsert:"))
+            .map(|d| {
+                let id = d.split(':').nth(1).unwrap_or("");
+                store.item(id).expect("emitted item")
+            })
+            .collect();
+        assert_eq!(emitted.len(), 40);
+        assert_eq!(emitted[0].id, "o0");
+        for item in &emitted {
+            let floor = top_before.first().cloned().unwrap_or_default();
+            if let Some(bottom) = store.item(&floor) {
+                assert!(
+                    item.seq < bottom.seq,
+                    "{} ({}) must sort below the client's oldest held row ({})",
+                    item.id,
+                    item.seq,
+                    bottom.seq
+                );
+            }
+        }
+        assert!(
+            !store.window().has_older,
+            "the page plus the window is the whole 100-row transcript"
+        );
+        assert_eq!(store.window().oldest_id, "o0");
+    }
+
+    #[test]
+    fn a_page_drops_rows_the_store_already_holds() {
+        // A tail is measured from the END of a conversation that can grow
+        // between pages, so a page may restate rows we already have. Splicing
+        // those in would duplicate them in the transcript (the same message
+        // twice, one copy above the window).
+        let (store, _evts) = painted_store(80);
+        let page = vec![
+            text_item("old", ItemKind::Agent, "older than everything"),
+            text_item("m79", ItemKind::Agent, "row 79"),
+            text_item("m10", ItemKind::Agent, "row 10"),
+        ];
+        assert_eq!(store.prepend_rich(page), Some(1));
+        let ids: Vec<String> = store.rich_transcript().iter().map(|i| i.id.clone()).collect();
+        assert_eq!(ids[0], "old");
+        assert_eq!(ids.len(), 81, "the two overlapping rows were dropped: {ids:?}");
+        assert_eq!(ids.iter().filter(|id| *id == "m79").count(), 1);
+    }
+
+    #[test]
+    fn an_empty_page_is_a_no_op_rather_than_a_refusal() {
+        let (store, _e) = painted_store(80);
+        let all_overlap = vec![text_item("m79", ItemKind::Agent, "row 79")];
+        assert_eq!(store.prepend_rich(all_overlap), Some(0), "all overlap: nothing spliced");
+        assert_eq!(store.rich_transcript().len(), 80);
+    }
+
+    #[test]
+    fn a_page_cannot_be_spliced_into_an_empty_store() {
+        let (l, _e) = listener();
+        let store = TranscriptStore::new(l);
+        assert_eq!(store.prepend_rich(vec![text_item("o1", ItemKind::Agent, "x")]), None);
+        assert!(store.rich_transcript().is_empty());
+    }
+
+    #[test]
+    fn the_server_backlog_keeps_the_cursor_open_at_the_origin() {
+        // 60 rows exactly: the store's own origin IS the window, so without the
+        // backlog the client is told there is nothing older and a tail-first
+        // open looks like a 60-row conversation.
+        let (store, evts) = painted_store(60);
+        assert!(!store.window().has_older);
+        assert!(store.set_server_more(true));
+        assert!(store.window().has_older, "the server still owes history");
+
+        // Scrolling back finds nothing here, and says so honestly.
+        evts.lock().clear();
+        store.load_older(40);
+        assert!(store.window().has_older, "still owed");
+        assert_eq!(store.window().oldest_id, "m0");
+
+        // Once the backlog is drained the cursor closes.
+        assert!(store.set_server_more(false));
+        assert!(!store.window().has_older);
+    }
+
+    #[test]
+    fn a_rebuild_bumps_the_generation_so_a_page_in_flight_is_discarded() {
+        let (store, _e) = painted_store(80);
+        let before = store.generation();
+        store.replace_rich(vec![text_item("n1", ItemKind::Agent, "different chat")], false);
+        assert!(store.generation() > before);
+        // The caller compares the two and drops the page; nothing here changes.
+        store.clear();
+        assert!(store.generation() > before);
     }
 }
