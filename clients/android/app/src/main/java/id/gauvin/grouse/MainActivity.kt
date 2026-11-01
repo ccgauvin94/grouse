@@ -344,7 +344,7 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                 composable("connect") {
                     ConnectScreen(cm) { nav.navigate("chat") { popUpTo("connect") { inclusive = true } } }
             }
-            composable("chat") { ChatScreen(cm, onOpenDrawer = ::openDrawer) }
+            composable("chat") { ChatScreen(cm, nav, onOpenDrawer = ::openDrawer) }
             composable("myday") { MyDayScreen(cm, nav, onOpenDrawer = ::openDrawer) }
             composable("project/{pname}") { back ->
                 val pname = Uri.decode(back.arguments?.getString("pname") ?: "")

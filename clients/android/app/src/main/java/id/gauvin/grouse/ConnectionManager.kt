@@ -1010,8 +1010,19 @@ class ConnectionManager private constructor(context: Context) {
 
     val configured: Boolean get() = store.hasKey()
 
-    /** Connect using the already-saved host/port/key (post-unlock auto-connect). */
-    fun connectSaved() { if (store.hasKey()) open(resume = null) }
+    /** Connect using the already-saved host/port/key (post-unlock auto-connect).
+     *
+     *  RESUMES the chat on screen. This used to pass `resume = null`, which is not a
+     *  reconnect at all: the core binds a fresh `session/new` and the user's tap landed
+     *  them on a blank chat next to the one they were reading (the app bar's
+     *  "tap to reconnect" made that the primary way to reconnect, so it was the ordinary
+     *  path, not an edge case). */
+    fun connectSaved() {
+        if (!store.hasKey()) return
+        endRetry(MAIN_RETRY_KEY)   // an explicit connect gets the whole schedule back
+        linkFailed.value = false
+        open(resume = resumeTarget())
+    }
 
     // --- Roam (parallel iroh peers) -------------------------------------------
     // The CORE owns the peer registry (CONTRACT §6): `roam_connect(card, label)` dials a peer
@@ -1244,6 +1255,8 @@ class ConnectionManager private constructor(context: Context) {
         store.host = h; store.port = p; store.secretKey = key
         store.workingDir = workingDir
         lastSessionId = null; config.value = emptyList()
+        endRetry(MAIN_RETRY_KEY)
+        linkFailed.value = false
         open(resume = null)
     }
 
@@ -1344,6 +1357,9 @@ class ConnectionManager private constructor(context: Context) {
 
     fun openSession(sessionId: String, knownKind: SessionKind? = null) {
         noteApp("app: openSession $sessionId (was ${currentSession.value})")
+        // Opening a chat is a user action, so it re-arms the retry schedule even out of a
+        // red dot: the tap IS the "try again".
+        linkFailed.value = false
         // Cancel any deferred "open the assistant thread" -- the user has since picked a specific
         // session and that choice wins.
         pendingOpenAssistant = false
@@ -1965,13 +1981,15 @@ class ConnectionManager private constructor(context: Context) {
             // is alive — but a backgrounded Android froze or killed us first,
             // and the core's backoff budget can be spent by the time we're
             // thawed. Foreground return is the one moment that can always act,
-            // so it is the last-resort re-poke: main socket and roam peers.
+            // so it re-arms the app's own schedule: main socket and roam peers.
             if (live) {
                 config.value.firstOrNull { it.id == "provider" }?.currentValue
                     ?.takeIf { it.isNotBlank() }
                     ?.let { model -> io { unstable.supportedModels(model) } }
             }
-            pokeMainConnection()
+            endRetry(MAIN_RETRY_KEY)   // waking up is a fresh chance, not the tail of the last one
+            linkFailed.value = false   // ... including out of a red dot
+            autoReconnectMain()
             redialFallenRoamPeers()
             if (!store.persistentConnection && !busy.value) stopService()
         } else {
@@ -1995,16 +2013,107 @@ class ConnectionManager private constructor(context: Context) {
         roamStatus.values.any { it == "ready" || it.startsWith("connecting") }
     private fun connectionHeld(): Boolean = live || roamHeld()
 
-    /** Bring the main connection back if it is dead and was connected before.
-     *  open() → core.openSession() IS a fresh connect (the core resets its
-     *  reconnect budget on every new connect), so this is the recovery from a
-     *  spent backoff budget; while the core is mid-retry (`connecting`) it does
-     *  nothing and lets the core's own sequence finish. */
-    private fun pokeMainConnection() {
-        if (!store.hasKey() || core.ready() || live || connecting) return
-        val sid = lastSessionId ?: store.lastSessionId
-        if (sid == null || sid.startsWith("roam:")) return
-        open(resume = sid)
+    // --- the app's own auto reconnect ----------------------------------------
+    // The core supervises reconnect while the PROCESS runs, so a socket that dies with the
+    // app awake heals by itself. The case that does not is the phone in a pocket: Android
+    // freezes us, the socket dies unobserved, and by the time we are thawed the core's
+    // whole backoff budget is spent — leaving a dead wire and an app bar that said
+    // "Offline · tap to reconnect". So the app keeps its own bounded schedule, fires it on
+    // the terminal statuses (the core's give-up) and again on every foreground return, and
+    // ALWAYS resumes the chat on screen (never a fresh session).
+    private val MAIN_RETRY_KEY = "main"
+
+    /** True while our reconnect loop is between attempts — the amber blink. */
+    val autoRetrying = mutableStateOf(false)
+    /** The attempts ran out; the dot is red until something else tries (a foreground
+     *  return, an explicit connect, or the user opening an endpoint's page). */
+    val linkFailed = mutableStateOf(false)
+
+    private class RetryState {
+        var attempt = 0
+        var runnable: Runnable? = null
+    }
+    private val retries = HashMap<String, RetryState>()
+
+    /** Stop [key]'s loop, wherever it is in the schedule. */
+    private fun endRetry(key: String) {
+        retries.remove(key)?.runnable?.let { main.removeCallbacks(it) }
+    }
+
+    /** Start [key]'s loop unless one is already running. Each tick calls [fire]; when the
+     *  schedule is exhausted [giveUp] runs once and the loop is gone, so nothing keeps
+     *  dialing in the dark. [fire] itself is the caller's guard — a tick that lands while
+     *  the wire is already back should be a no-op, not a reason to stop the loop. */
+    private fun beginRetry(key: String, fire: () -> Unit, giveUp: () -> Unit) {
+        if (retries.containsKey(key)) return
+        val st = RetryState()
+        retries[key] = st
+
+        fun tick() {
+            if (!retries.containsKey(key)) return          // cancelled by a success
+            if (st.attempt >= LINK_RETRY_DELAYS_MS.size) {
+                retries.remove(key)
+                giveUp()
+                return
+            }
+            val delay = LINK_RETRY_DELAYS_MS[st.attempt++]
+            val r = Runnable {
+                st.runnable = null
+                if (!retries.containsKey(key)) return@Runnable
+                // A throw here would take the app down from a background retry, which is the
+                // worst moment to crash: the user opens the phone to a dead app as well as a
+                // dead wire. A failed attempt is just a failed attempt.
+                runCatching { fire() }
+                tick()
+            }
+            st.runnable = r
+            main.postDelayed(r, delay)
+        }
+        tick()
+    }
+
+    /** The chat a reconnect must come back to: the one on screen when it belongs to the
+     *  main wire, else the last main chat. A roam-owned screen must NOT be resumed onto
+     *  the main connection — that would be "reconnected into a different chat". */
+    private fun resumeTarget(): String? {
+        val shown = currentSession.value
+        if (shown != null && roamPeer(shown) == null) return shown
+        return lastSessionId?.takeIf { roamPeer(it) == null }
+            ?: store.lastSessionId?.takeIf { roamPeer(it) == null }
+    }
+
+    /** The main wire is down: start (or continue) the app's retry loop. Idempotent, and a
+     *  no-op while a try is already in flight, the wire is up, or the budget is spent.
+     *
+     *  Sticky once it gives up: the LAST in-flight attempt of a spent loop can land an error
+     *  after `giveUp()` has run, and letting that start a fresh loop would mean "red" was
+     *  unreachable — the app would retry forever behind a dot that never admits it is stuck.
+     *  A foreground return, a service restart or an explicit connect clears the flag. */
+    private fun autoReconnectMain() {
+        if (!store.hasKey()) return
+        if (online.value || connecting) return
+        if (linkFailed.value) return
+        if (resumeTarget() == null) return    // nothing to come back to: minting a session is the bug
+        autoRetrying.value = true
+        linkFailed.value = false
+        beginRetry(
+            key = MAIN_RETRY_KEY,
+            fire = { if (!online.value && !connecting) open(resume = resumeTarget()) },
+            giveUp = { autoRetrying.value = false; linkFailed.value = true },
+        )
+    }
+
+    /** This peer's dial gave up (its supervisor spent its own budget): retry it the same
+     *  way, and only while the peer is still the one in error — a tick that lands mid-dial
+     *  must not stack a second one. */
+    private fun autoRedialPeer(label: String) {
+        if (label in explicitRoamOff) return
+        if (roamPeers.none { it.name == label }) return
+        beginRetry(
+            key = "roam:$label",
+            fire = { if (roamStatus[label]?.startsWith("error") == true) connectRoam(label) },
+            giveUp = { /* the endpoint's own error status stays visible; the dot is red */ },
+        )
     }
 
     /** The START_STICKY restart path (see ConnectionService): the process was
@@ -2013,19 +2122,23 @@ class ConnectionManager private constructor(context: Context) {
      *  re-pokes the foreground return does, no-ops when already live. */
     fun rekindleOnServiceStart() {
         main.post {
-            pokeMainConnection()
+            linkFailed.value = false
+            autoReconnectMain()
             redialFallenRoamPeers()
         }
     }
 
     /** Re-dial peers whose supervisor gave up (terminal error). An explicit
      *  user disconnect is recorded and respected — only the retry budget
-     *  running out is the app's cue to try again. */
+     *  running out is the app's cue to try again. A foreground return is a fresh
+     *  chance, so each peer starts over with the full schedule. */
     private fun redialFallenRoamPeers() {
         for (peer in roamPeers.toList()) {
             val st = roamStatus[peer.name]
             if (st?.startsWith("error") == true && peer.name !in explicitRoamOff) {
+                endRetry("roam:${peer.name}")
                 connectRoam(peer.name)
+                autoRedialPeer(peer.name)    // keeps trying if THIS attempt also fails
             }
         }
     }
@@ -2253,12 +2366,23 @@ class ConnectionManager private constructor(context: Context) {
                 status.value = "not connected"
                 // The only owner of the turn on this socket is the on-screen main chat.
                 if (currentRoamPeer == null) currentSession.value?.let { releaseTurnForLostWire(it) }
+                // A drop is not the user's cue to act any more: retry it, bounded, resuming
+                // the chat on screen. (Explicit disconnects don't exist on the main wire —
+                // there is no intent for one — so every drop here is fair game.)
+                autoReconnectMain()
             }
             is ConnectionStatus.Error -> {
                 live = false; connecting = false; online.value = false
                 replayActive.value = false
                 status.value = friendlyConnectError(st.message)
                 if (currentRoamPeer == null) currentSession.value?.let { releaseTurnForLostWire(it) }
+                // A refusal (bad key, untrusted cert) is not worth a retry schedule — the
+                // dot goes straight to red so the connection settings are one tap away.
+                if (linkFailureIsTerminal(st.message)) {
+                    endRetry(MAIN_RETRY_KEY)
+                    autoRetrying.value = false
+                    linkFailed.value = true
+                } else autoReconnectMain()
             }
         }
     }
@@ -2280,6 +2404,12 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun onCoreReady() {
         live = true; connecting = false; online.value = true
+        // The wire is back: the auto-reconnect loop has nothing left to do, and the dot
+        // goes green. Also covers a reconnect that succeeded while our schedule was
+        // still ticking.
+        endRetry(MAIN_RETRY_KEY)
+        autoRetrying.value = false
+        linkFailed.value = false
         // Consume a deferred open BEFORE the active-session check: a first connect whose
         // `connectResume` failed (or a transient session that never bound) reaches Ready
         // with no active id, and returning first would drop the tap the user made while
@@ -2811,6 +2941,8 @@ class ConnectionManager private constructor(context: Context) {
             st.startsWith("connecting: reconnect")) cancelRoamWatchdog(label)
         when {
             st == "ready" -> {
+                // A peer the app was re-dialing is back: stop the loop.
+                endRetry("roam:$label")
                 // Peer connected, or a session/load on it finished. Either way the
                 // peer's transcript is settled: replay chunks arrive BEFORE the load
                 // reply, so they are staged and open() paints them in one go. This is
@@ -2840,6 +2972,9 @@ class ConnectionManager private constructor(context: Context) {
                 }
             }
             st == "disconnected" -> {
+                // A CLEAN end (the core only says this when close() ran — a transport drop
+                // stays silent and re-dials), i.e. the user disconnected this peer.
+                endRetry("roam:$label")
                 if (currentRoamPeer == label) {
                     val owned = currentSession.value
                     currentRoamPeer = null
@@ -2855,14 +2990,19 @@ class ConnectionManager private constructor(context: Context) {
                 if (currentRoamPeer == null) status.value = "not connected"
             }
             st.startsWith("error") -> {
-                if (currentRoamPeer == label) {
-                    currentRoamPeer = null
-                    replayActive.value = false
-                    // A settled dial failure is terminal: the turn it owned ended with it.
-                    currentSession.value?.takeIf { roamPeer(it) == label }
-                        ?.let { releaseTurnForLostWire(it) }
-                }
+                // The peer's dial gave up, but the CHAT is not lost: the core owes a resume
+                // on the next successful dial, so keep it bound to this peer and let the
+                // re-dial repaint it. Handing the screen back to the main connection here
+                // (currentRoamPeer = null) is what let the next main Ready "repair" it by
+                // opening a roam id on the wrong wire — a different chat, or a failed open,
+                // for a peer that was about to come back on its own.
+                if (currentRoamPeer == label) replayActive.value = false
+                // A settled dial failure is terminal for the turn it owned: nothing will
+                // ever end it on that wire.
+                currentSession.value?.takeIf { roamPeer(it) == label }
+                    ?.let { releaseTurnForLostWire(it) }
                 status.value = "roam: $label — ${st.removePrefix("error:")}"
+                autoRedialPeer(label)
             }
             // In-flight phases (connecting: dialing/handshake/listing sessions): show which
             // step the dial is on, so a stall is visible instead of a static "connecting…".
@@ -3225,7 +3365,14 @@ class ConnectionManager private constructor(context: Context) {
         // not from whenever the core's first event happens to land. onCoreTranscript
         // turns it straight back off if a cached snapshot paints (content on screen
         // needs no spinner); a new chat is empty by definition and never loads.
-        replayActive.value = resume != null; replayProgress.value = 0
+        //
+        // Only when the chat being resumed IS the one on screen: the main wire also
+        // reconnects in the background while a roam chat is displayed, and that must not
+        // put a "Loading…" strip over a conversation it has nothing to do with.
+        val resumesOnScreen = currentRoamPeer == null &&
+            (currentSession.value == null || currentSession.value == resume)
+        replayActive.value = resume != null && resumesOnScreen
+        replayProgress.value = 0
         // A fresh config (first connect of the process, or host/port/key/cwd changed) needs a
         // real `connect()` — the core's new/open intents reuse the LAST config only. connect()
         // is the one blocking core intent (bounded ≤15s), so it runs on a worker thread.

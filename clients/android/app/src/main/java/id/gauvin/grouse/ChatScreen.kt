@@ -52,7 +52,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -161,8 +160,15 @@ private fun LevelBar(level: Float) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
+fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Unit) {
     val ctx = LocalContext.current
+    // Which wire carries the chat on screen, and what the dot should say about it. Both are
+    // read from snapshot state, so the dot follows the connection without the app bar having
+    // to re-derive anything: a roam-owned chat reports ITS endpoint, everything else reports
+    // the main connection.
+    val roamPeer = ConnectionManager.roamPeer(cm.currentSession.value)
+    val link = if (roamPeer != null) roamLinkState(cm.roamStatus[roamPeer])
+               else mainLinkState(cm.online.value, cm.autoRetrying.value, cm.linkFailed.value)
     var showSchedule by remember { mutableStateOf(false) }
     var showContextDetail by remember { mutableStateOf(false) }
     var showTurnLog by remember { mutableStateOf(false) }
@@ -472,55 +478,52 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
         Column {
         TopAppBar(
             title = {
-                val online = cm.online.value
                 val busy = cm.busy.value
-                val dot = when {
-                    online -> MaterialTheme.statusColors.online                       // connected → green
-                    cm.status.value.contains("connect", true) ||
-                        cm.status.value.contains("load", true) -> MaterialTheme.statusColors.connecting  // connecting → amber
-                    else -> MaterialTheme.colorScheme.error          // offline → red
-                }
                 Column {
                     Row(verticalAlignment = Alignment.CenterVertically,
                         // fillMaxWidth lets the weight spacer push the donut to the
                         // far right of the title row.
                         modifier = Modifier.fillMaxWidth()
-                            .clickable(enabled = !online) { cm.connectSaved() }
                             // Long-press the title for the core's turn log: the one
                             // place the client can show WHY a chat thinks it is busy.
                             .pointerInput(debugTools) {
                                 // Long-press is the debug gesture only; with the switch
-                                // off the title is just the reconnect tap it always was.
+                                // off the title is just the title. Reconnecting is no
+                                // longer a tap HERE — see the dot.
                                 if (debugTools) {
                                     detectTapGestures(onLongPress = { showTurnLog = true })
                                 }
                             }) {
-                        Surface(color = dot, shape = RoundedCornerShape(50), modifier = Modifier.size(10.dp)) {}
-                        Spacer(Modifier.width(8.dp))
+                        // The dot IS the connection UI: colour for state (green / slowly
+                        // blinking amber while a reconnect is being attempted / red once the
+                        // automatic attempts ran out), tap for the settings of the wire it
+                        // reports on. For a roam chat that is this endpoint's page, so the
+                        // chat-level and the endpoint-level story are the same gesture.
+                        LinkDot(
+                            state = link,
+                            onClick = {
+                                if (roamPeer != null) nav.navigate("roam_endpoint/" + Uri.encode(roamPeer))
+                                else nav.navigate("instance")
+                            },
+                        )
+                        Spacer(Modifier.width(2.dp))
                         // Single line + ellipsis: this Row shares the app bar with up to 3 action
                         // icons, so on a compact width the default (titleLarge, unbounded) title text
                         // used to wrap to a second line and visually collide with/get clipped by the
                         // icons (e.g. "Assistant · working…" broke across two lines mid-word). A
                         // tighter style plus a hard single-line cap keeps it readable and self-eliding
                         // instead of visually breaking.
+                        //
+                        // The TITLE never changes with the connection. It used to be replaced by
+                        // "Reconnecting…" / "Connecting…" / "Offline · tap to reconnect", which
+                        // cost the user the name of the chat they were in at exactly the moment
+                        // they needed to know where they were.
                         Text(
                             when {
-                                !cm.wireUpForCurrentChat && busy -> "Reconnecting…"
-                                // A session/load replay is streaming into the buffer: count
-                                // replayed messages live — a big history can take tens of
-                                // seconds and a static "Connecting…" looked hung. The counter
-                                // proves it's advancing; it also covers the fresh-install
-                                // case where there is no cached snapshot to paint meanwhile.
-                                cm.replayActive.value -> if (cm.replayTotal.value > 0)
-                                    "Loading… ${cm.replayProgress.value} / ${cm.replayTotal.value}"
-                                else "Loading… ${cm.replayProgress.value}"
                                 cm.onAssistant && busy -> "Assistant · working…"
                                 cm.onAssistant -> "Assistant"
-                                online && busy -> "%s · working…".format(cm.currentChatTitle ?: "Grouse")
-                                online -> cm.currentChatTitle ?: "Grouse"
-                                cm.status.value.contains("connect", true) ||
-                                    cm.status.value.contains("load", true) -> "Connecting…"
-                                else -> "Offline · tap to reconnect"
+                                busy -> "%s · working…".format(cm.currentChatTitle ?: "Grouse")
+                                else -> cm.currentChatTitle ?: "Grouse"
                             },
                             style = MaterialTheme.typography.titleMedium,
                             maxLines = 1,
@@ -562,24 +565,60 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                             modifier = Modifier.size(9.dp).align(Alignment.TopEnd)) {}
                     }
                 }
-                val roamPeer = ConnectionManager.roamPeer(cm.currentSession.value)
                 // Tools and model/mode now live in the + sheet and model pill — nothing
                 // in the top bar for them. The roam chip stays as the "this chat is
-                // remote" marker.
-                if (roamPeer != null) AssistChip(
-                    onClick = {},
-                    label = { Text(roamPeer) },
-                    leadingIcon = { Icon(Icons.Filled.Public, contentDescription = "remote session",
-                        modifier = Modifier.size(16.dp)) },
-                    modifier = Modifier.padding(end = 4.dp),
-                )
+                // remote" marker, and it reports that endpoint the same way the dot
+                // reports the main wire: colour for state, tap for the endpoint's page
+                // (which is where its reconnect/disconnect/remove actions live).
+                if (roamPeer != null) {
+                    val chipState = roamLinkState(cm.roamStatus[roamPeer])
+                    AssistChip(
+                        onClick = { nav.navigate("roam_endpoint/" + Uri.encode(roamPeer)) },
+                        label = {
+                            Text(
+                                roamPeer,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                // Tint only when there is something wrong: a green chip every
+                                // time would say nothing, red/amber says "this endpoint" at a
+                                // glance without the user reading the dot.
+                                color = when (chipState) {
+                                    LinkState.Connected -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    LinkState.Retrying -> MaterialTheme.statusColors.connecting
+                                    LinkState.Down -> MaterialTheme.statusColors.offline
+                                },
+                            )
+                        },
+                        leadingIcon = {
+                            LinkDot(chipState, dotSize = 9.dp, touchSize = 16.dp)
+                        },
+                        modifier = Modifier.padding(end = 4.dp),
+                    )
+                }
             }
         )
+                        // A session/load replay is streaming into the buffer: count replayed
+                        // messages live — a big history can take tens of seconds and a static
+                        // spinner looked hung. The counter proves it's advancing. It lives here
+                        // rather than in the title: the title is the chat's NAME and no
+                        // connection/loading event is allowed to replace it.
+                        if (cm.replayActive.value) {
+                            Row(verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(start = 18.dp, top = 2.dp)) {
+                                LinearProgressIndicator(modifier = Modifier.width(40.dp).height(3.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    if (cm.replayTotal.value > 0)
+                                        "Loading… ${cm.replayProgress.value} / ${cm.replayTotal.value}"
+                                    else "Loading… ${cm.replayProgress.value}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.outline)
+                            }
+                        } else if (cm.compacting.value) {
                         // Compacting (manual /compact or a server-triggered auto-compact) takes priority
                         // over the usage line — it's transient and explains why the numbers are about to
                         // change. INDETERMINATE: the protocol only ever sends text status lines, never a
                         // numeric percentage, so there's no real fraction to show.
-                        if (cm.compacting.value) {
                             Row(verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.padding(start = 18.dp, top = 2.dp)) {
                                 LinearProgressIndicator(modifier = Modifier.width(40.dp).height(3.dp))
@@ -719,7 +758,12 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                                 Icon(Icons.Filled.Psychology, contentDescription = null,
                                     modifier = Modifier.size(56.dp), tint = MaterialTheme.colorScheme.primary)
                                 Spacer(Modifier.height(12.dp))
-                                Text(if (cm.online.value) "Ask Grouse anything" else "Connecting…",
+                                Text(
+                                    when (link) {
+                                        LinkState.Down -> "Not connected"
+                                        LinkState.Retrying -> "Reconnecting…"
+                                        LinkState.Connected -> "Ask Grouse anything"
+                                    },
                                     style = MaterialTheme.typography.titleMedium)
                                 Spacer(Modifier.height(4.dp))
                                 Text(stringResource(R.string.wired_up_hint),
@@ -787,10 +831,10 @@ fun ChatScreen(cm: ConnectionManager, onOpenDrawer: () -> Unit) {
                 // back it just tails. A dedicated handle (not a list-edge swipe)
                 // because the transcript is reverseLayout, where an upward drag is
                 // ordinary scroll-back.
-                val reloadHint = when {
-                    !cm.wireUpForCurrentChat -> "Offline — pull up to reload"
-                    cm.status.value.contains("reconnect", true) -> "Reconnecting… pull up to reload"
-                    else -> null
+                val reloadHint = when (link) {
+                    LinkState.Down -> "Offline — pull up to reload"
+                    LinkState.Retrying -> "Reconnecting… pull up to reload"
+                    LinkState.Connected -> null
                 }
                 ReloadHandle(
                     hint = reloadHint,
