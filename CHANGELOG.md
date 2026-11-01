@@ -6,7 +6,46 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.58] - 2026-11-01
+
 ### Added
+
+- **Chats load recent-first, and the history behind them arrives a page at a time.**
+  Opening a chat this device had not seen was all-or-nothing: `session/load` went out
+  with no `_meta.replayTail`, so the server streamed the WHOLE conversation, the core
+  ingested it silently and painted 60 rows at the end — measured on the Assistant
+  thread, **4,221 messages before the first row appeared**. Every load is bounded now
+  (1 message for a settled, current cache; 100 for a stale one it merges; **80** when
+  there is nothing to paint), and the reply's `_meta.replaySkipped` is kept as the
+  **backlog**: history the server holds that this client has not fetched. That number
+  is what keeps `has_older` true at the store's own origin, so a tail-first open is a
+  conversation with more behind it rather than a 60-row one.
+  `load_older` serves the store first and then fetches ONE page. goose has no
+  backwards cursor, so a page is a LONGER trailing window — doubling, floored at the
+  rows held plus a page — which makes a 4,221-message chat seven pages and ~2x the
+  transcript on the wire, where a linear crawl would re-send it seventeen times.
+  Measured live on a 2,012-message chat: `replaySkipped` 1576 -> 1494 -> 1324 -> 992 ->
+  376 -> 0 in six pages, the union of which is exactly the whole replay-visible
+  conversation, 28.7 MiB total, 300-570 ms a page after a 2 s cold first.
+  A page lands in a scratch store (`SessionHub::dispatch_store` routes that key's
+  notifications to it), so a half-ingested page cannot touch the transcript on screen;
+  its rows are deduped by item id, because a tail measured from the end of a
+  conversation that grew between pages can overlap what we already hold; and they are
+  spliced in FRONT stamped strictly below every position the client holds, so the
+  client prepends them in order when it asks and nothing moves before it does. A
+  background fill walks the rest in, one page per 600 ms, while the chat is displayed
+  and idle, and the cache records whether it reaches the origin — a fresh-but-partial
+  cache still paints instantly *and* still pages.
+  The robustness is a set of guards, each for a corruption it prevents: no page while
+  a turn is in flight (its rows would go to the scratch store), while a replay owns the
+  session, or while another page is in flight; a prompt sent during a page is parked
+  and flushed after; the store's rebuild generation is captured before the page and
+  compared after, so a paint that landed meanwhile discards it instead of grafting one
+  conversation's history onto another's; a page that makes no progress closes the
+  cursor, and two failures close it until the next open, so a wire that cannot serve
+  pages never turns scroll-back into a retry storm; and a reconnect replay never asks
+  for LESS than the store already holds, so bounding it cannot truncate the transcript
+  it resumes.
 
 - **Desktop: My Day, thread chats, and a `task` push that brings the page up.** The
   desktop client catches up with the last four phone releases. **My Day** takes the
@@ -32,6 +71,7 @@ All notable changes to Grouse are recorded here. The format is based on
   Two small parity fixes ride along: **New Chat clears the composer** (the field
   outlives `newChat()`, so a draft used to follow you into the next conversation), and
   phone-side, a thread chat is no longer forgotten-and-recreated on every Discuss.
+
 - **Push: a `task` type that lands on My Day, and a tab that refreshes on arrival.**
   Handed-over work that reaches `review` now posts its own notification type instead of
   riding as a briefing, because the two want different destinations: a briefing has no
@@ -42,6 +82,7 @@ All notable changes to Grouse are recorded here. The format is based on
   `target: thread|tasks` on the sender side; an older client treats an unknown type as a
   briefing — a correct notification with the wrong destination, never silence. The
   show/don't-show rule is unchanged and still one implementation in `notify.rs`.
+
 - **A thread chat now lives in the assistant PROJECT, and the project stays out of
   every chat list.** discussing a thread files its session under the `assistant`
   goose project, which is what makes the persona apply: goose injects a filed
@@ -54,6 +95,7 @@ All notable changes to Grouse are recorded here. The format is based on
   are still recorded, because a thread chat is opened BY ID and `session/load`
   rewrites the working dir from the cwd sent — dropping the side-table entry would
   quietly move it on the first resume.
+
 - **My Day: threads group, and each one opens its own conversation.** A thread label
   with more than one thing in play now renders as a collapsible row — name, count,
   chevron, and **Discuss** — and expands in place to its items and handed-over work.
@@ -62,6 +104,7 @@ All notable changes to Grouse are recorded here. The format is based on
   labels, so a header per label would have been all headers and no rows. Expansion
   survives rotation (the state is a separator-joined string, because a `Set` is not
   Bundle-friendly).
+
 - **A thread chat: one real goose session per thread, with the thread painted in.**
   Discuss creates the session once per label, renames it `Thread: …`, remembers its id
   (a title is not a safe key — you can rename it and goose can auto-name it) and
@@ -73,6 +116,7 @@ All notable changes to Grouse are recorded here. The format is based on
   Tapping a **labelled** item now opens its thread chat instead of the always-on
   assistant thread; an unlabelled one still goes to the assistant thread, since it has
   no thread to open. Either way the item id rides in the prefilled line.
+
 - **My Day: handed-over work, above the loops.** assistant-state v4 (2026-11-01)
   split "an act" out of "a fact": an `item` is a loop that needs attention, a
   `task` is something you handed over — `running` while it works, `review` when it
@@ -86,6 +130,7 @@ All notable changes to Grouse are recorded here. The format is based on
   parses it alongside `open`/`done`. A server older than v4 has no `task_list`,
   which surfaces as `errors.tasks` rather than an empty section that would read
   like "nothing was handed over".
+
 - **My Day: the Assistant tab, with the assistant's own working state under it.**
   Android's drawer loses the "Assistant" button and gains **My Day** (still gated
   by the Assistant switch): the always-on assistant thread at the top — status
@@ -120,7 +165,127 @@ All notable changes to Grouse are recorded here. The format is based on
   items span 19 labels (two labels hold two items each), so collapsing would
   cost a tap to reveal one row; the label on the row says the same thing today.
 
+- **Tap an inline chat image to expand it.** Attached images in a user
+  bubble open fullscreen on tap: Android launches a fullscreen dialog
+  (black backdrop, tap anywhere to close), and the desktop opens a modal
+  overlay over the window (click or Escape to close). The inline thumbnail
+  is unchanged; this just keeps the pixels available at full size in both
+  clients.
+
+- **Attached images are rescaled in the core before sending (toggle, default
+  on).** A phone camera photo otherwise rides the prompt — and every later
+  turn's re-sent history — as megabytes of base64. The core now downscales
+  every outbound image to a 1600 px long edge at `send_prompt` (one
+  transform covers the wire payload, the echoed row and the transcript):
+  JPEG re-encodes at q80, PNG keeps its format and transparency, WebP/HEIC
+  or an unreadable payload passes through unchanged with an advisory
+  alert. Both clients expose the toggle in Settings ("Rescale attached
+  images" / "Rescale attached images for sending"), persisted locally,
+  on by default.
+
+- **A message sent mid-turn now parks as a card above the composer, on both
+  clients (0.2.39).** Sending while a reply streams used to steer the running
+  turn silently (desktop) or park invisibly behind a "1 queued" count (both).
+  A steer REDIRECTS the reply being written — the agent drops what it was saying
+  and answers the new message instead — so it can no longer be a side effect of
+  pressing send. The message now slides up as a card with a **Queued** label and
+  the reason it is waiting (`sends when this turn ends`, `with attachment — …`,
+  `not connected — sends when it reconnects`), plus **Steer** to promote it into
+  the live turn and **✕** to discard it. Steering is offered only while this
+  chat owns a live run id (the key the server validates against) and only for a
+  text-only message: a steer carries no blocks, so one with an attachment keeps
+  waiting rather than losing the file. The queue is also per chat on the desktop
+  now — it used to be one global FIFO cleared whenever a chat was opened or
+  started, which meant a prompt parked in chat A could be delivered into chat B,
+  and switching chats silently threw away input. Draining, counting, and Stop's
+  discard all name the on-screen chat, matching Android.
+
+- **The turn log can be copied, and it survives the dialog.** The stuck-turn
+  readout was a 40-line ring buffer behind a scrollable dialog, which meant the
+  one line that mattered could be off-screen and the only way to read it was a
+  screenshot. The app-side log now keeps 200 lines, mirrors every line to logcat
+  under the `GrouseTurn` tag, and appends to `files/turn.log` in app-private
+  storage (pulled with `adb shell run-as id.gauvin.grouse cat files/turn.log`).
+  The dialog gained a **Copy** button.
+
+- **The desktop can answer the two structured requests it used to drop (0.2.38).** A recipe
+  that declares parameters, and an MCP tool that asks a question
+  (`elicitation/create`), both park a responder on the server side and the turn
+  waits on it — so a client with no form for them did not merely lose a feature,
+  it hung the run until the request timed out. Both families now land in one
+  `FormDialog`: booleans as checkboxes, `enum`/`oneOf` schemas as a ComboBox
+  (with `valueRole`, or `currentValue` hands back the model item), everything
+  else as a text field, with `required` gating submit. Recipe parameters answer
+  as strings with submit|cancel — a decline is a cancel there — while an
+  elicitation sends typed values with accept|decline|cancel. Every exit answers
+  the request, including Escape and the window close, because a dropped request
+  is a hung turn rather than a dismissed dialog. The core parks one responder
+  per family, so a second request of the same family replaces the first queued
+  form instead of stacking behind a request the server already abandoned.
+
+- **A delegate's own tool calls are visible (0.2.38).** A `delegate` call carries the
+  sub-agent's calls, which both clients were dropping on the floor: the chip
+  said "4 tool calls" and nothing showed what they were. The item already
+  carries them (`steps`), so the desktop now has a `steps` role, a *n* steps
+  line on the chip header, and a `name · detail` list inside the open chip —
+  the same rows Android renders.
+
+- **Debug diagnostics are a switch on both clients, off by default (0.2.38).** The turn
+  log and the live turn-state readout show internal state rather than
+  conversation, so they now sit behind Settings → *Developer diagnostics*
+  (Android: Experimental). Off, the chat title's long-press does nothing and the
+  typing indicator has no polling behind it — the readout's `produceState` loop
+  runs only while the switch is on. The core keeps the log either way; the flag
+  is pure UI, stored per client (`debug_tools`), so turning it on does not
+  change what the core does. The desktop's copy of the log is a dialog with
+  Copy/Reload and the same live turn-state line.
+
+- **Steps are labelled while the turn runs, not only when it ends.** A step's
+  chip used to keep the provisional label (the thinking's first line) until the
+  whole turn finished, which is most of what a reader actually sees. Now the
+  moment a call opens a NEW step, the step before it is closed and its label is
+  requested — debounced, so a fast loop coalesces into one request per quiet gap,
+  and serialised against the end-of-turn pass so two prompts never share the
+  hidden session. Measured on a real turn: `Creating temp directory and timestamp
+  file` landed before the turn ended, and the remaining steps' labels followed
+  right after it. A step with no absorbed thinking is labelled from its call
+  titles instead of being skipped, since goose narrates between steps and the
+  call after a narration opens a step with nothing thought directly above it.
+
+- **The pulse is where the waiting is.** The thinking row and the "Grouse is
+  thinking…" line tick `…` as well, so a turn in progress always shows movement —
+  a chip's own pulse only lasts as long as its tool call, which for a shell
+  command is under a second.
+
+- **A running step's chip pulses.** While a step is actually working its label
+  ticks `…` (and the collapsed run shows a spinner instead of the wrench), so a
+  live chip reads as "Looking up the game time…" and settles the instant it
+  finishes. It animates only while *this chat's* turn is in flight: a replayed
+  row whose completion the server never re-sent keeps `in_progress` forever, and a
+  chip pulsing in a finished chat would claim work that is not happening.
+
+- **Concurrent turns, one per chat.** A reply can stream in a roam chat while
+  another runs on a different peer or on the main connection: in-flight state is
+  keyed per session, each chat keeps its own queue, and a completion clears only
+  its own chat. Switching to a running chat restores its spinner and steer key
+  instead of showing it idle; a prompt queued in a background chat starts when
+  that chat's turn ends, even while another chat is on screen.
+
 ### Changed
+
+- **Android: a drop reconnects in the background, and says so with a dot.** The chat
+  title no longer turns into "not connected — tap to reconnect": the header keeps the
+  conversation's name and the link state becomes one small dot — green connected,
+  slowly blinking amber while it retries on the existing backoff, red once
+  auto-reconnect has given up — and tapping the dot opens the connection settings. A
+  roam peer is drawn the same way by colouring its endpoint bubble, and tapping that
+  bubble opens THAT endpoint's settings. A reconnect never opens a different chat, on
+  either transport.
+
+- **Android: scroll-back says when it is waiting on the server.** Past what this device
+  has already fetched, an older batch is a round trip now, so the top of the list
+  carries a "loading older messages…" row while the core pages the wire — instead of
+  the list simply stopping with nothing to show for the gesture.
 
 - **Desktop: the fenced-code pane follows the palette.** It painted
   `Kirigami.Theme.view`, which in this app's custom palette resolves to the platform's
@@ -135,6 +300,7 @@ All notable changes to Grouse are recorded here. The format is based on
   The horizontal bar is an overlay, so a pane whose content just fit its height had
   its last line underneath it; the bar's height is now reserved inside the scrollable
   content, and the pane grows by it.
+
 - **Reload is a real rebuild, and it says how far along it is.** A refresh trusted
   a settled cache and merged a bounded tail, which is right for an open and
   useless for a transcript known to be wrong — so the reload path (`RefreshMode::Full`,
@@ -151,7 +317,128 @@ All notable changes to Grouse are recorded here. The format is based on
   "412 / 4215" beside a 3px bar instead of a spinner that means nothing. `done`
   is the terminal event, so no client has to guess when to put the bar away.
 
+- **Code blocks have a copy button.** A small icon sits at each fenced
+  block's top-right (a sibling of the scroll pane, so it does not scroll
+  away with the content): one tap copies the raw code; the button flips
+  to a check briefly to acknowledge. Desktop (`CodeFence` ToolButton →
+  `Mgr.copyToClipboard`) and Android (`CodeCopyButton` in `CodeBlock.kt`
+  → `LocalClipboardManager`).
+
+- **A failed `session/set_config_option` is now visible instead of silent.** (peer refused, timed out,
+  peer dropped) previously just left the dropdown on its old value (the core
+  only updated state on `Ok`). The core now emits the new advisory
+  `ConnectionStatus::Alert(message)`: the Android app shows a toast, and the
+  desktop prints the message in the status bar — without flipping either
+  client's online/turn state (that is what `Error` means, and this isn't it).
+
+- **Roam chat lists sort newest-first everywhere.** Android already sorted the
+  Roam tab per peer by parsed `updatedAt`, but its parser gave up on timestamps
+  missing an offset (all tie at 0, and the ascending-id tie-break then reads
+  exactly as "most recent chat at the bottom"); it now also accepts naive
+  datetime shapes. The desktop applied NO sort at all to a peer's list
+  (`RoamListModel` took the core's JSON verbatim) — it now stable-sorts
+  newest-first as well.
+
+- **Compaction and context-window status are now keyed to the session on
+  screen.** The core's custom-notification dispatch (`status_message`,
+  `usage_update`, `message_usage`) drops any notification whose `sessionId` is
+  not the displayed chat: goose's own scheduled runs compact constantly, and
+  their status lines (and token numbers) were reaching whichever client window
+  happened to be idle — the root of the random "compacting" spinner. The
+  `usage_update` branch is NEW: before, the custom channel carried no
+  context-window data at all, so a roam session's context bar (which only
+  receives custom notifications) never refreshed. This is a listener-table ABI
+  change (the surface gained `on_usage`); bump `GROUSE_ABI_VERSION` to 4 and
+  mirror in `corebridge` — both done.
+
+- **Only the phrases goose uses for a RUNNING compaction arm the spinner**
+  (desktop + Android both matched any status text containing "compact"). The
+  arm strings are the three goose emits ("Exceeded auto-compact threshold of
+  N%", "goose is compacting the conversation...", "Context limit reached.
+  Compacting to continue conversation...") and the terminators are
+  complete/error/failed/cleared; the end of the turn clears it as a backstop,
+  and the desktop/Android now display goose's actual status line verbatim
+  instead of a static "Compacting…" placeholder.
+
+- **The parked-message card reads like a card, not a clipped row.** Its text shared a
+  `RowLayout` with the Steer/✕ buttons, so it never got the card's width and broke off
+  mid-sentence under them, and the card's height came from a row whose implicit height
+  lagged the wrap. It is three bands now: a "Queued" badge with the note
+  ("sends when this turn ends", or the attachment caveat) and a proper close button
+  across the top, the message at full width with up to three lines, and Steer
+  right-aligned below out of the reading path.
+
+- **The APK that GitHub CI publishes is now signed with the release key.** The
+  workflow built the debug variant and let it fall back to the runner's throwaway
+  debug keystore, which GitHub regenerates on every run — so the artifact could not
+  install over an installed release-signed build (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`,
+  same code, different signer) and no two CI builds upgraded each other either. It
+  now configures the same keystore the release workflow uses, and a verification step
+  compares the APK's certificate against the keystore's and **fails the build** if
+  they differ, so a silent fallback cannot ship.
+
+- **The desktop transcript no longer keeps every bubble alive for the life of a
+  chat.** `cacheBuffer` was 20000px ("keep every delegate realized", which
+  stabilised the scrollbar) while each scroll-back prepends another 40 rows from
+  the core's 60-item window — so a long read grew the live set without bound, and
+  every row had already paid for all four bubble variants (user, agent, tool chip,
+  tool group) because they share one delegate. The cache is bounded and rows are
+  recycled, which is what made scrolling smooth again. Per-row UI state (thinking
+  bubbles, tool chips) moved into the model and is keyed by a stable row uid
+  rather than the row index, so it survives both scrolling away and being recycled.
+
+- **The newest chip is labelled too, instead of waiting for the next step.** A
+  step's chip appears when its call lands, and by then the thinking that opened it
+  is finished — so it was never actually "still being thought". It is now
+  labelled like every other step, which means the chip under the reader's eye
+  stops showing a raw first line of thinking. The turn's last step is rewritten
+  once more when the turn ends, since a run can gain calls after its first label.
+
+- **A turn that has gone quiet says why.** After 20 s with nothing arriving while
+  a chat is "working", the typing line gains `· run <id|none> · wire-busy|idle ·
+  quiet <n>s`. That is the whole diagnosis: a live run id means goose still owns
+  a run (something in the turn is hung), no run id means goose already closed it
+  and the end signal never reached the client.
+
+- **A tool run is now one chip per step, labelled with what it set out to do.**
+  A turn used to collapse its whole loop into one chip carrying a paraphrase of
+  the model's first thought ("The user is asking what time the Yankees ga…"), with
+  the rest of the thinking and every call hidden inside it. Now a burst of
+  thinking plus the calls it ran is ONE step — its own chip — so a turn reads as
+  its intentions in order: *Looking up the Yankees game time* → *Checking your
+  calendar for conflicts* → the answer. Calls that share a step (parallel calls,
+  nothing thought between them) still collapse into one chip, since they are one
+  decision. Issue #13 collapsed the loop into a single run when a chip could only
+  show a count; with a label per step the loop reads better as its steps.
+
+- **The step labels are written as intentions.** The end-of-turn summarizer (the
+  existing hidden session — no second model) now asks for what the step *set out
+  to do*, in the agent's own voice, and forbids quoting the thinking or starting
+  with "The user": measured against the live model, "The user is asking what time
+  the Yankees play today" becomes "Searching for today's Yankees game time". A
+  turn's steps are capped at 40 per rewrite; past that the provisional label (the
+  thinking's first line) stands.
+
 ### Fixed
+
+- **Android: the Assistant tab opened a blank chat instead of the assistant thread.**
+  The thread had been filed into the assistant PROJECT, and that project is invisible to
+  every chat list by design (its sessions are the assistant's per-area working chats,
+  reached from My Day) — so a lookup by title found nothing and the tab minted a fresh
+  "New Chat" on every tap. Measured cost: a 4,221-message conversation that looked gone.
+  A cached id is authoritative and the list is a hint — the staleness signal is the open
+  FAILING (grouse#19), which is where a cached id is dropped — so the thread now opens by
+  its id even when no list mentions it, and `openThreadChat`'s mapping already worked
+  that way. The thread itself was re-filed out of the project on the server.
+
+- **A reload that was cancelled could wedge a chat forever.** `begin_replay` puts a
+  session in the "replaying" set and only a completed load removed it, so a
+  `session/load` that never returned — a roam peer's link dying under it, the task being
+  dropped, a laptop going to sleep — left the session marked forever: a forced reload
+  refused to run (`replaying` is the single-flight gate), and the client's reload bar
+  spun with nothing to report. A drop guard now ends the replay and releases the held
+  emissions however the future ends, and the phone disarms its own bar after 8 s so a
+  command a disconnected peer legitimately discards cannot leave a dead handle.
 
 - **Desktop: a reply containing a fenced code block rendered as raw markdown.**
   `ensureRowHtml` splits such a row into `blocks` and deliberately leaves `html`
@@ -162,6 +449,7 @@ All notable changes to Grouse are recorded here. The format is based on
   `TextEdit` stayed visible with an empty `html` and fell back to `messageText`,
   and the code panes were handed `undefined` too. The wrapper now exposes
   `messageBlocks`, like every other role.
+
 - **Desktop: the newest bubble stayed raw markdown until the next message.**
   A row's `html` is computed once, at its authoritative upsert, and the streaming
   deltas clear it on purpose (RichText re-parses the whole document every frame).
@@ -170,17 +458,20 @@ All notable changes to Grouse are recorded here. The format is based on
   — which is why the previous bubble seemed to fix itself one message later.
   `renderTail()` now renders the tail once the reply has been quiet for 700 ms,
   independent of the seal, and skips it when the row did not change.
+
 - **Desktop: the window failed to load at all once My Day shipped.** `main.qml`
   instantiates `MyDayPage`, but `ui/MyDayPage.qml` was never added to the
   `qt_add_resources` list in `CMakeLists.txt`, so the type did not exist at runtime
   and `QQmlApplicationEngine` failed the whole component
   (`qrc:/main.qml:750:13: MyDayPage is not a type`) — host build and flatpak alike,
   nothing rendered. Registered it with the other pages.
+
 - **`tst_myday`'s meta-line case only passed in UTC.** It built `now` as a
   machine-local `QDateTime` and fed it `…T18:00:00Z` snooze strings, so "wakes in 6h"
   was the expectation only in a UTC zone: in US Mountain 18:00Z *is* 12:00 local, the
   delta was zero and the row read "wakes now". `now` is pinned to UTC, as in the
   `wakeLabel` case above it.
+
 - **Desktop: a fenced code block came with a blank bubble at each end, and a message
   without one was split anyway.** `markdownBlocks` pushed a newline into the prose
   accumulator *before* flushing it, so a fence at the start of a message (or one closed
@@ -228,6 +519,7 @@ All notable changes to Grouse are recorded here. The format is based on
   used to land after the 06:00 digest and skip a whole day of the assistant's
   attention. A snooze whose time has passed reads as open again, which is what the
   server's own wake pass does on its next rank.
+
 - **My Day read "briefed never" (red dot) on any device that had not received a
   briefing push since install.** The status dot was driven by `lastBriefingAt`,
   which the PUSH path stamps — so a fresh install, or one with push off, showed a
@@ -235,106 +527,17 @@ All notable changes to Grouse are recorded here. The format is based on
   stamp and the Assistant thread's own `updatedAt` (briefings append to the
   thread; nothing else moves it while the assistant is idle), and when neither is
   known it shows **no dot and no claim**: an unknown age is not a stale one.
+
 - **Due dates rendered as raw ISO.** `due_at` is usually a bare date
   (`2026-07-05`), which `relativeTime` cannot parse, so rows read "due
   2026-07-05". A dedicated `dueLabel` says what a reader needs instead —
   "overdue 16w", "overdue 8d", "due today", "due in 3d".
+
 - **Tapping an item now discusses THAT item.** It opens the assistant thread with
   `About item <id> (<title>): ` already in the composer instead of an empty chat:
   the id is the handle that lets the assistant call `state_items`/`state_close`
   on the item on screen rather than guessing. A one-shot `pendingDraft` carries
   it in and is consumed on entry, so it never resurfaces on a later visit.
-
-### Changed
-
-- **Code blocks have a copy button.** A small icon sits at each fenced
-  block's top-right (a sibling of the scroll pane, so it does not scroll
-  away with the content): one tap copies the raw code; the button flips
-  to a check briefly to acknowledge. Desktop (`CodeFence` ToolButton →
-  `Mgr.copyToClipboard`) and Android (`CodeCopyButton` in `CodeBlock.kt`
-  → `LocalClipboardManager`).
-
-- **A failed `session/set_config_option` is now visible instead of silent.** (peer refused, timed out,
-  peer dropped) previously just left the dropdown on its old value (the core
-  only updated state on `Ok`). The core now emits the new advisory
-  `ConnectionStatus::Alert(message)`: the Android app shows a toast, and the
-  desktop prints the message in the status bar — without flipping either
-  client's online/turn state (that is what `Error` means, and this isn't it).
-- **Roam chat lists sort newest-first everywhere.** Android already sorted the
-  Roam tab per peer by parsed `updatedAt`, but its parser gave up on timestamps
-  missing an offset (all tie at 0, and the ascending-id tie-break then reads
-  exactly as "most recent chat at the bottom"); it now also accepts naive
-  datetime shapes. The desktop applied NO sort at all to a peer's list
-  (`RoamListModel` took the core's JSON verbatim) — it now stable-sorts
-  newest-first as well.
-- **Compaction and context-window status are now keyed to the session on
-  screen.** The core's custom-notification dispatch (`status_message`,
-  `usage_update`, `message_usage`) drops any notification whose `sessionId` is
-  not the displayed chat: goose's own scheduled runs compact constantly, and
-  their status lines (and token numbers) were reaching whichever client window
-  happened to be idle — the root of the random "compacting" spinner. The
-  `usage_update` branch is NEW: before, the custom channel carried no
-  context-window data at all, so a roam session's context bar (which only
-  receives custom notifications) never refreshed. This is a listener-table ABI
-  change (the surface gained `on_usage`); bump `GROUSE_ABI_VERSION` to 4 and
-  mirror in `corebridge` — both done.
-- **Only the phrases goose uses for a RUNNING compaction arm the spinner**
-  (desktop + Android both matched any status text containing "compact"). The
-  arm strings are the three goose emits ("Exceeded auto-compact threshold of
-  N%", "goose is compacting the conversation...", "Context limit reached.
-  Compacting to continue conversation...") and the terminators are
-  complete/error/failed/cleared; the end of the turn clears it as a backstop,
-  and the desktop/Android now display goose's actual status line verbatim
-  instead of a static "Compacting…" placeholder.
-
-- **The parked-message card reads like a card, not a clipped row.** Its text shared a
-  `RowLayout` with the Steer/✕ buttons, so it never got the card's width and broke off
-  mid-sentence under them, and the card's height came from a row whose implicit height
-  lagged the wrap. It is three bands now: a "Queued" badge with the note
-  ("sends when this turn ends", or the attachment caveat) and a proper close button
-  across the top, the message at full width with up to three lines, and Steer
-  right-aligned below out of the reading path.
-- **The APK that GitHub CI publishes is now signed with the release key.** The
-  workflow built the debug variant and let it fall back to the runner's throwaway
-  debug keystore, which GitHub regenerates on every run — so the artifact could not
-  install over an installed release-signed build (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`,
-  same code, different signer) and no two CI builds upgraded each other either. It
-  now configures the same keystore the release workflow uses, and a verification step
-  compares the APK's certificate against the keystore's and **fails the build** if
-  they differ, so a silent fallback cannot ship.
-- **The desktop transcript no longer keeps every bubble alive for the life of a
-  chat.** `cacheBuffer` was 20000px ("keep every delegate realized", which
-  stabilised the scrollbar) while each scroll-back prepends another 40 rows from
-  the core's 60-item window — so a long read grew the live set without bound, and
-  every row had already paid for all four bubble variants (user, agent, tool chip,
-  tool group) because they share one delegate. The cache is bounded and rows are
-  recycled, which is what made scrolling smooth again. Per-row UI state (thinking
-  bubbles, tool chips) moved into the model and is keyed by a stable row uid
-  rather than the row index, so it survives both scrolling away and being recycled.
-
-### Added
-
-- **Tap an inline chat image to expand it.** Attached images in a user
-  bubble open fullscreen on tap: Android launches a fullscreen dialog
-  (black backdrop, tap anywhere to close), and the desktop opens a modal
-  overlay over the window (click or Escape to close). The inline thumbnail
-  is unchanged; this just keeps the pixels available at full size in both
-  clients.
-
-### Added
-
-- **Attached images are rescaled in the core before sending (toggle, default
-  on).** A phone camera photo otherwise rides the prompt — and every later
-  turn's re-sent history — as megabytes of base64. The core now downscales
-  every outbound image to a 1600 px long edge at `send_prompt` (one
-  transform covers the wire payload, the echoed row and the transcript):
-  JPEG re-encodes at q80, PNG keeps its format and transparency, WebP/HEIC
-  or an unreadable payload passes through unchanged with an advisory
-  alert. Both clients expose the toggle in Settings ("Rescale attached
-  images" / "Rescale attached images for sending"), persisted locally,
-  on by default.
-
-### Fixed
 
 - **User images were flattened to `[image]` in the transcript on replay.**
   ACP is fine: goose sends the full base64 image in every `session/update`
@@ -354,6 +557,7 @@ All notable changes to Grouse are recorded here. The format is based on
   one of them for an open roam chat failed the gate and was silently dropped.
   `RoamPeer` now namespaces the key (`roam:<label>:<raw>`) before dispatch.
   Main-wire chats were unaffected (their two ids already match).
+
 - **Reload on the desktop now forces the replay.** A click used to be the QUICK
   refresh — a freshness probe that re-loads the newest row and repaints nothing when
   the cache already matches the server — so on an unchanged chat the button silently
@@ -361,6 +565,7 @@ All notable changes to Grouse are recorded here. The format is based on
   A click is the full replay now (`reloadSessionFromStart`), which is what the label
   promises and what Android already offers as its own explicit action; `refreshSession`
   (Quick) stays for the automatic paths.
+
 - **A Reload press on a roam chat could do nothing at all.** `RoamPeer::open_session_with`
   accepted only `Ready | Connecting` and returned silently for every other status, and
   `Syncing` is a real one (a resync, a reconnect's sync) — so a reload pressed in that
@@ -370,6 +575,7 @@ All notable changes to Grouse are recorded here. The format is based on
   picks it up. (The Reload button itself is unchanged in intent: a click is the QUICK
   refresh — it probes the newest row and suppresses the repaint when the cache is
   current — and press-and-hold is the full replay, as its tooltip says.)
+
 - **A chat opens at its newest message, on both clients.** Both snapped once, then
   let the transcript paint over the top of that jump: rows are realized lazily (and
   recycled) on the desktop, and Android inserts each batch at the head of a
@@ -377,38 +583,46 @@ All notable changes to Grouse are recorded here. The format is based on
   few messages short of the end. The desktop now re-pins until the list reports
   `atYEnd`; Android snaps until the transcript stops growing, or the reader takes
   over. Neither client tracks unread state, so every open is "newest".
+
 - **Expansion stayed on the wrong message after a scroll-back.** `MessageListModel`
   keyed per-row UI state (a thinking bubble's open state) by row index while
   `prepend()` shifted every row and never remapped it: open a bubble, scroll up
   once, and a different bubble came back expanded, with no `dataChanged` for the
   rows that had inherited it. Keyed by a per-row uid now, remapped by construction.
+
 - **A roam chat showed the transport handle instead of its title.** `roam:<peer>:<id>`
   is an internal namespace; the human title lives only in the peer's session list,
   so the open now seeds from it and the list keeps an on-screen title in sync (a
   peer names a chat after its first turn, or renames it later). An untitled chat
   reads `peer · id`, never the namespace.
+
 - **A roam chat said "loading…" forever.** The status is set locally on open and
   only the connection-level `Ready` cleared it — which a peer open never emits. The
   core's `Window` op marks the painted transcript and is the only event a
   *successful* open raises, so it settles the status now (and the same latent hole
   on the main wire: a second chat opened in the same connection).
+
 - **The bottom of a roam session row was dead to hover and clicks.** The gap came
   from `ListView.spacing`, which belongs to no delegate: use `spacing: 0`, draw the
   gap inside the row, and let the hit target cover the whole row.
+
 - **The desktop logged 61 "Unable to assign [undefined]" warnings per launch.** The
   roam delegate is one `Item` hosting both row layouts and a hidden branch still
   evaluates its bindings, so every role has to answer for every row type; the
   session map's own lookups are coerced too (a peer may not carry a key). A
   guardrail test now asserts every declared role is valid for both row types.
+
 - **The Tools and Recipes dialogs clipped their right edge.** Tools put its trailing
   type tag under the overlay scrollbar (now reserved, like the chat bubbles); Recipes
   had six fixed-width cron pickers summing to ~620px in a ~500px pane, which pushed
   a horizontal scrollbar onto the whole detail area — they wrap now — and its
   provider/model row claimed fixed widths that cut off the Save button.
+
 - **A provider could be listed twice in the model picker.** Two providers can share
   a display label (a CLI-detected entry and its API twin). An exact duplicate is
   dropped; a shared label with different values keeps both, the later one carrying
   its id so it is distinguishable.
+
 - **A roam chat's sidebar had no rename/edit menu, and its model bar could vanish.**
   The roam rows' `MouseArea` counted only `Qt.LeftButton`, so right-click did
   nothing there — rename/archive/export/delete were reachable for main-wire chats
@@ -419,10 +633,12 @@ All notable changes to Grouse are recorded here. The format is based on
   down, even with a working model over roam; it now gates on the session's own
   options. The pickers also rebuild on a session switch, which previously left the
   outgoing chat's provider/model on screen until that chat's config arrived.
+
 - **The form dialog's fields never initialised.** `function reset()` collided with
   Qt 6's `Dialog` `reset` signal, so QML rejected it as an invalid override and the
   pass that filled in defaults never ran: booleans did not start `false`, enum
   pickers did not pre-select, and a server-parked form opened blank.
+
 - **The desktop no longer prints the user's own message twice (0.2.38).** A send
   that carried attachments made `dispatchSend` append a user row of its own, and
   the core then echoed the prompt's row as it always does: two bubbles, one with
@@ -431,6 +647,7 @@ All notable changes to Grouse are recorded here. The format is based on
   the first time an item asks for them with a non-zero attachment count, which is
   exactly how Android already did it. Matching on the count is what keeps a later
   text-only prompt with identical text from inheriting the pictures.
+
 - **The desktop inserts by sequence, not by arrival (0.2.38).** `MessageListModel`
   appended every new item, so any row that the core delivered out of order — a
   replay's tail, a prefill's later seq — landed at the bottom of the chat instead
@@ -438,6 +655,7 @@ All notable changes to Grouse are recorded here. The format is based on
   the new one and inserts before it, and appends only when nothing does. `seq` 0
   is a real position (a turn's first prompt), so the test is `>`, exactly as
   Android's `upsertBubble` does it.
+
 - **A finished turn no longer leaves the chat stuck on "working" (0.2.37).** The
   core announced the run end correctly the whole time — the turn log showed
   `stage: announced` — and the app dropped it on its own main-thread hop: the
@@ -453,126 +671,6 @@ All notable changes to Grouse are recorded here. The format is based on
   unqualified. It now posts to `onCoreRunEnded`, matching the convention, and logs
   `ffi: runEnded …` synchronously on the callback thread so a lost callback is
   distinguishable from a lost event.
-
-### Added
-
-- **A message sent mid-turn now parks as a card above the composer, on both
-  clients (0.2.39).** Sending while a reply streams used to steer the running
-  turn silently (desktop) or park invisibly behind a "1 queued" count (both).
-  A steer REDIRECTS the reply being written — the agent drops what it was saying
-  and answers the new message instead — so it can no longer be a side effect of
-  pressing send. The message now slides up as a card with a **Queued** label and
-  the reason it is waiting (`sends when this turn ends`, `with attachment — …`,
-  `not connected — sends when it reconnects`), plus **Steer** to promote it into
-  the live turn and **✕** to discard it. Steering is offered only while this
-  chat owns a live run id (the key the server validates against) and only for a
-  text-only message: a steer carries no blocks, so one with an attachment keeps
-  waiting rather than losing the file. The queue is also per chat on the desktop
-  now — it used to be one global FIFO cleared whenever a chat was opened or
-  started, which meant a prompt parked in chat A could be delivered into chat B,
-  and switching chats silently threw away input. Draining, counting, and Stop's
-  discard all name the on-screen chat, matching Android.
-
-- **The turn log can be copied, and it survives the dialog.** The stuck-turn
-  readout was a 40-line ring buffer behind a scrollable dialog, which meant the
-  one line that mattered could be off-screen and the only way to read it was a
-  screenshot. The app-side log now keeps 200 lines, mirrors every line to logcat
-  under the `GrouseTurn` tag, and appends to `files/turn.log` in app-private
-  storage (pulled with `adb shell run-as id.gauvin.grouse cat files/turn.log`).
-  The dialog gained a **Copy** button.
-
-### Changed
-
-- **The newest chip is labelled too, instead of waiting for the next step.** A
-  step's chip appears when its call lands, and by then the thinking that opened it
-  is finished — so it was never actually "still being thought". It is now
-  labelled like every other step, which means the chip under the reader's eye
-  stops showing a raw first line of thinking. The turn's last step is rewritten
-  once more when the turn ends, since a run can gain calls after its first label.
-- **A turn that has gone quiet says why.** After 20 s with nothing arriving while
-  a chat is "working", the typing line gains `· run <id|none> · wire-busy|idle ·
-  quiet <n>s`. That is the whole diagnosis: a live run id means goose still owns
-  a run (something in the turn is hung), no run id means goose already closed it
-  and the end signal never reached the client.
-
-- **A tool run is now one chip per step, labelled with what it set out to do.**
-  A turn used to collapse its whole loop into one chip carrying a paraphrase of
-  the model's first thought ("The user is asking what time the Yankees ga…"), with
-  the rest of the thinking and every call hidden inside it. Now a burst of
-  thinking plus the calls it ran is ONE step — its own chip — so a turn reads as
-  its intentions in order: *Looking up the Yankees game time* → *Checking your
-  calendar for conflicts* → the answer. Calls that share a step (parallel calls,
-  nothing thought between them) still collapse into one chip, since they are one
-  decision. Issue #13 collapsed the loop into a single run when a chip could only
-  show a count; with a label per step the loop reads better as its steps.
-- **The step labels are written as intentions.** The end-of-turn summarizer (the
-  existing hidden session — no second model) now asks for what the step *set out
-  to do*, in the agent's own voice, and forbids quoting the thinking or starting
-  with "The user": measured against the live model, "The user is asking what time
-  the Yankees play today" becomes "Searching for today's Yankees game time". A
-  turn's steps are capped at 40 per rewrite; past that the provisional label (the
-  thinking's first line) stands.
-
-### Added
-
-- **The desktop can answer the two structured requests it used to drop (0.2.38).** A recipe
-  that declares parameters, and an MCP tool that asks a question
-  (`elicitation/create`), both park a responder on the server side and the turn
-  waits on it — so a client with no form for them did not merely lose a feature,
-  it hung the run until the request timed out. Both families now land in one
-  `FormDialog`: booleans as checkboxes, `enum`/`oneOf` schemas as a ComboBox
-  (with `valueRole`, or `currentValue` hands back the model item), everything
-  else as a text field, with `required` gating submit. Recipe parameters answer
-  as strings with submit|cancel — a decline is a cancel there — while an
-  elicitation sends typed values with accept|decline|cancel. Every exit answers
-  the request, including Escape and the window close, because a dropped request
-  is a hung turn rather than a dismissed dialog. The core parks one responder
-  per family, so a second request of the same family replaces the first queued
-  form instead of stacking behind a request the server already abandoned.
-- **A delegate's own tool calls are visible (0.2.38).** A `delegate` call carries the
-  sub-agent's calls, which both clients were dropping on the floor: the chip
-  said "4 tool calls" and nothing showed what they were. The item already
-  carries them (`steps`), so the desktop now has a `steps` role, a *n* steps
-  line on the chip header, and a `name · detail` list inside the open chip —
-  the same rows Android renders.
-- **Debug diagnostics are a switch on both clients, off by default (0.2.38).** The turn
-  log and the live turn-state readout show internal state rather than
-  conversation, so they now sit behind Settings → *Developer diagnostics*
-  (Android: Experimental). Off, the chat title's long-press does nothing and the
-  typing indicator has no polling behind it — the readout's `produceState` loop
-  runs only while the switch is on. The core keeps the log either way; the flag
-  is pure UI, stored per client (`debug_tools`), so turning it on does not
-  change what the core does. The desktop's copy of the log is a dialog with
-  Copy/Reload and the same live turn-state line.
-- **Steps are labelled while the turn runs, not only when it ends.** A step's
-  chip used to keep the provisional label (the thinking's first line) until the
-  whole turn finished, which is most of what a reader actually sees. Now the
-  moment a call opens a NEW step, the step before it is closed and its label is
-  requested — debounced, so a fast loop coalesces into one request per quiet gap,
-  and serialised against the end-of-turn pass so two prompts never share the
-  hidden session. Measured on a real turn: `Creating temp directory and timestamp
-  file` landed before the turn ended, and the remaining steps' labels followed
-  right after it. A step with no absorbed thinking is labelled from its call
-  titles instead of being skipped, since goose narrates between steps and the
-  call after a narration opens a step with nothing thought directly above it.
-- **The pulse is where the waiting is.** The thinking row and the "Grouse is
-  thinking…" line tick `…` as well, so a turn in progress always shows movement —
-  a chip's own pulse only lasts as long as its tool call, which for a shell
-  command is under a second.
-- **A running step's chip pulses.** While a step is actually working its label
-  ticks `…` (and the collapsed run shows a spinner instead of the wrench), so a
-  live chip reads as "Looking up the game time…" and settles the instant it
-  finishes. It animates only while *this chat's* turn is in flight: a replayed
-  row whose completion the server never re-sent keeps `in_progress` forever, and a
-  chip pulsing in a finished chat would claim work that is not happening.
-- **Concurrent turns, one per chat.** A reply can stream in a roam chat while
-  another runs on a different peer or on the main connection: in-flight state is
-  keyed per session, each chat keeps its own queue, and a completion clears only
-  its own chat. Switching to a running chat restores its spinner and steer key
-  instead of showing it idle; a prompt queued in a background chat starts when
-  that chat's turn ends, even while another chat is on screen.
-
-### Fixed
 
 - **A chat can now say why it thinks it is working.** Long-press the chat title
   for the core's turn log: prompt sent (with the wire id), run start/end, the
@@ -593,6 +691,7 @@ All notable changes to Grouse are recorded here. The format is based on
   flight, so the end signal releases it. Pinned by
   `a_run_adopted_after_a_reconnect_still_ends_its_turn` (verified to fail without
   the fix).
+
 - **The quiet readout no longer lies.** A chip's label rewrite is not progress:
   counting those Upserts kept a stuck turn reading `quiet 0s`. Only rows whose
   text, output, steps, status or role actually changed reset the timer.
@@ -619,9 +718,11 @@ All notable changes to Grouse are recorded here. The format is based on
   on the main connection with the peer hardcoding "accept everything" — which had
   made every peer open with a current cache append a SECOND copy of the last turn
   (measured: +64 rows per open).
+
 - **A chart or MCP-app row could jump to the top of the chat.** Those two item
   projections never carried `seq`, so the row was emitted at position 0 and an
   ordered client put it above the question, not where the call happened.
+
 - **A roam chat's recent prompts appeared twice after reopening: inline and
   again at the bottom.** Two causes, both in the reopen path. First, the peer
   wrote its own copy of the `session/load` replay lifecycle and had lost two
@@ -637,6 +738,7 @@ All notable changes to Grouse are recorded here. The format is based on
   every later prompt from matching too. `Item::message_id` now carries the
   server's id (cache v8; a v7 file repaints once), and the echo queue is keyed by
   row uid instead of a bubble index that a paint or an anchor invalidates.
+
 - **A roam turn could stay "thinking" until Stop was pressed.** A turn ended
   only on its `session/prompt` response, so when that response reached the app
   late or not at all the chat stayed busy and its composer queued every later
@@ -646,10 +748,12 @@ All notable changes to Grouse are recorded here. The format is based on
   (a late second signal is a no-op, not a second end). A dropped roam link also
   ends the turn it was carrying, instead of leaving the core believing that chat
   is still busy forever.
+
 - **A generated session name no longer reads as "the run ended".** The
   session-name update carries only `title`/`messageCount`; reading its missing
   `activeRunId` as null cleared the steer key in the middle of a live run.
   `activeRunId` is now parsed three-state (absent / null / id).
+
 - **Android: a send could park behind a dead turn.** When the app believed a
   turn was running, no run id was known, and the core had already closed it, the
   message was queued for a `RunEnded` that never came. It is now sent.
