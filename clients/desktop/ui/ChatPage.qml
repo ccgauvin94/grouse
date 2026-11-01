@@ -32,6 +32,14 @@ Kirigami.Page {
                                                     : Kirigami.Theme.disabledTextColor
         radius: Theme.radius.sm
         clip: true
+        // The bars are OVERLAYS: they are drawn on top of the viewport, so a code
+        // pane whose content exactly fit its height had its last line under the
+        // horizontal bar (it clipped the text). Reserve the bar's height inside the
+        // scrollable content — the pane grows by it, and at the end of the scroll
+        // the last line sits above the bar instead of behind it. Narrow content
+        // keeps just the small breathing gap.
+        readonly property bool needsHBar: scroller.contentWidth > scroller.width
+        readonly property int hbarGutter: needsHBar ? Theme.spacing.s5 : Theme.spacing.half
         // Bounds the pane: long chunks scroll instead of stretching bubbles
         // into a page of their own. The header sits outside that cap.
         implicitHeight: fenceHeader.implicitHeight + Theme.spacing.s2
@@ -88,7 +96,7 @@ Kirigami.Page {
             ScrollBar.horizontal: Controls.ScrollBar {}
             ScrollBar.vertical: Controls.ScrollBar {}
             contentWidth: codeText.contentWidth + Theme.spacing.s4
-            contentHeight: codeText.contentHeight + Theme.spacing.s1
+            contentHeight: codeText.contentHeight + Theme.spacing.s1 + fence.hbarGutter
             TextEdit {
                 id: codeText
                 text: Mgr.highlightCode(fence.code, fence.lang,
