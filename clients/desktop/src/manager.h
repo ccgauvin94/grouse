@@ -629,6 +629,14 @@ private:
     /// nothing on the normal path.
     void finishTail(int lookback = 4);
 
+    /// Render the tail once it stops growing. `finishTail` needs a turn-end event,
+    /// so a lost or late seal (a dropped run_ended, a roam peer, a replay) leaves
+    /// the newest bubble raw until the next message arrives and re-seals it —
+    /// which is what "markdown works in every chat except the last message" is.
+    /// Idempotent and skipped unless the tail actually changed since the last
+    /// render, so it costs one parse per quiet period, never one per chunk.
+    void renderTail();
+
     /// Drop the reload bar (session switch, new chat). Emits only on a change.
     void resetReloadProgress();
     QStringList m_configuredProviders;
@@ -821,6 +829,12 @@ private:
     QString m_lastCwd;
     /// Coalesces messagesChanged while chunks stream (see requestMessagesUpdate).
     QTimer *m_updateTimer = nullptr;
+    /// Fires when the tail has stopped receiving chunks; renders it without
+    /// waiting for the turn-end seal (see renderTail).
+    QTimer *m_tailTimer = nullptr;
+    /// "<item id>:<text length>" of the last tail render, so a quiet period that
+    /// changed nothing does not re-parse the markdown.
+    QString m_tailRendered;
 
     // chat parity state
     QList<PendingSend> m_pendingQueue;      // sends that must wait for the current turn / a session

@@ -74,6 +74,13 @@ Manager::Manager(QObject *parent)
     m_updateTimer->setInterval(50);
     connect(m_updateTimer, &QTimer::timeout, this, [this] { emit messagesChanged(); });
 
+    // Longer than the repaint coalescer on purpose: this must not fire between two
+    // chunks of the same reply, only once the stream has actually gone quiet.
+    m_tailTimer = new QTimer(this);
+    m_tailTimer->setSingleShot(true);
+    m_tailTimer->setInterval(700);
+    connect(m_tailTimer, &QTimer::timeout, this, &Manager::renderTail);
+
     // Thread label -> session id, so "Discuss" returns to the same conversation
     // across restarts. A cache: the server owns the sessions, and an entry whose
     // session is gone is dropped when opening it fails.
@@ -3084,6 +3091,8 @@ void Manager::coreOnItem(const QString &json)
         m_loadingOlder = false;
         m_messageModel->clear();
         m_currentIndex = -1;
+        m_tailTimer->stop();
+        m_tailRendered.clear();
         if (!m_itemOldestId.isEmpty() || m_itemHasOlder) {
             m_itemOldestId.clear();
             m_itemHasOlder = false;
@@ -3140,6 +3149,7 @@ void Manager::coreOnItem(const QString &json)
         const QJsonObject o = root.value(QStringLiteral("AppendText")).toObject();
         m_messageModel->appendText(o.value(QStringLiteral("id")).toString(),
                                    o.value(QStringLiteral("chunk")).toString());
+        m_tailTimer->start();   // restart: fires only once the reply goes quiet
         requestMessagesUpdate();
         return;
     }
@@ -3147,6 +3157,7 @@ void Manager::coreOnItem(const QString &json)
         const QJsonObject o = root.value(QStringLiteral("AppendOutput")).toObject();
         m_messageModel->appendOutput(o.value(QStringLiteral("id")).toString(),
                                      o.value(QStringLiteral("chunk")).toString());
+        m_tailTimer->start();
         requestMessagesUpdate();
         return;
     }
@@ -3218,6 +3229,39 @@ void Manager::finishTail(int lookback)
     }
     if (touched)
         requestMessagesUpdate();
+}
+
+void Manager::renderTail()
+{
+    const int n = m_messageModel->count();
+    if (n <= 0)
+        return;
+    // Only the tail can be waiting on a seal: every row above it was sealed when
+    // the stream moved on to the next one.
+    const int i = n - 1;
+    QVariantMap row = m_messageModel->row(i);
+    const QString role = row.value("role").toString();
+    if (role != QLatin1String("user") && role != QLatin1String("agent")
+        && role != QLatin1String("error"))
+        return;
+    if (!row.value("html").toString().isEmpty())
+        return;
+    if (!row.value("blocks").toList().isEmpty())
+        return;
+    const QString text = row.value("text").toString();
+    if (text.trimmed().isEmpty())
+        return;
+    // One parse per quiet period: a stall in the middle of a long reply must not
+    // re-parse the same prefix on every pause. `appendText` clears html, so text
+    // that keeps growing earns a fresh render at the next quiet period.
+    const QString sig = row.value("id").toString() + QLatin1Char(':')
+        + QString::number(text.size());
+    if (sig == m_tailRendered)
+        return;
+    m_tailRendered = sig;
+    ensureRowHtml(row);
+    m_messageModel->update(i, row);
+    requestMessagesUpdate();
 }
 
 void Manager::loadOlder(int count)

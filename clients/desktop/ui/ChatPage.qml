@@ -21,45 +21,74 @@ Kirigami.Page {
         id: fence
         property string lang: ""
         property string code: ""
-        color: Kirigami.Theme.view
+        // A tint of the TEXT colour, not `Kirigami.Theme.view`: the app's palette is
+        // custom, so `view` fell back to the platform's light view background and
+        // the pane rendered white inside a dark bubble — tan code on white. A tint
+        // composites over whatever the bubble is, in either scheme, and stays
+        // readable against `textColor` by construction.
+        color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                       Kirigami.Theme.textColor.b, 0.07)
         border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
                                                     : Kirigami.Theme.disabledTextColor
         radius: Theme.radius.sm
         clip: true
         // Bounds the pane: long chunks scroll instead of stretching bubbles
-        // into a page of their own.
-        implicitHeight: Math.min(scroller.contentHeight + Theme.spacing.s2, 400)
-        // The copy control is a sibling of the Flickable (anchored to the chrome,
-        // not the content) so it stays under the pointer when the pane scrolls.
-        Controls.ToolButton {
-            id: copyBtn
+        // into a page of their own. The header sits outside that cap.
+        implicitHeight: fenceHeader.implicitHeight + Theme.spacing.s2
+                        + Math.min(scroller.contentHeight + Theme.spacing.s2, 400)
+
+        // Language label and copy control own their own row, so the button never
+        // floats on top of the first line of code.
+        RowLayout {
+            id: fenceHeader
             anchors.top: parent.top
+            anchors.left: parent.left
             anchors.right: parent.right
-            anchors.margins: Theme.spacing.s1
-            display: Controls.AbstractButton.IconOnly
-            icon.source: "edit-copy"
-            ToolTip.visible: hovered
-            ToolTip.text: copiedTimer.wasCopied ? qsTr("Copied") : qsTr("Copy")
-            onClicked: {
-                Mgr.copyToClipboard(fence.code)
-                copiedTimer.wasCopied = true
-                copiedTimer.restart()
+            anchors.topMargin: Theme.spacing.s1
+            anchors.leftMargin: Theme.spacing.s2
+            anchors.rightMargin: Theme.spacing.s1
+            spacing: Theme.spacing.s2
+            Controls.Label {
+                text: fence.lang.length > 0 ? fence.lang : qsTr("code")
+                color: Kirigami.Theme.disabledTextColor
+                opacity: 0.85
+                font.pixelSize: Math.max(9, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.72))
+                font.weight: Font.DemiBold
+                renderType: Text.NativeRendering
             }
-            Timer {
-                id: copiedTimer
-                property bool wasCopied: false
-                interval: 2000
+            Item { Layout.fillWidth: true }
+            Controls.ToolButton {
+                id: copyBtn
+                display: Controls.AbstractButton.IconOnly
+                icon.source: "edit-copy"
+                implicitWidth: Theme.spacing.s5
+                implicitHeight: Theme.spacing.s5
+                ToolTip.visible: hovered
+                ToolTip.text: copiedTimer.wasCopied ? qsTr("Copied") : qsTr("Copy")
+                onClicked: {
+                    Mgr.copyToClipboard(fence.code)
+                    copiedTimer.wasCopied = true
+                    copiedTimer.restart()
+                }
+                Timer {
+                    id: copiedTimer
+                    property bool wasCopied: false
+                    interval: 2000
+                }
             }
         }
         Flickable {
             id: scroller
-            anchors.fill: parent
+            anchors.top: fenceHeader.bottom
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
             // Horizontal is the reason this component exists; vertical appears
             // for the 400.dp-capped tall chunks.
             ScrollBar.horizontal: Controls.ScrollBar {}
             ScrollBar.vertical: Controls.ScrollBar {}
             contentWidth: codeText.contentWidth + Theme.spacing.s4
-            contentHeight: codeText.contentHeight
+            contentHeight: codeText.contentHeight + Theme.spacing.s1
             TextEdit {
                 id: codeText
                 text: Mgr.highlightCode(fence.code, fence.lang,
@@ -71,6 +100,7 @@ Kirigami.Page {
                 font.family: "monospace"
                 font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82)
                 x: Theme.spacing.s2
+                y: Theme.spacing.s1
                 width: Math.max(scroller.width - Theme.spacing.s4, contentWidth)
                 wrapMode: TextEdit.NoWrap
                 readOnly: true
@@ -86,10 +116,12 @@ Kirigami.Page {
     }
 
     // The palette half of the highlighter (tokens.json semantic.code; the
-    // C++ side only accepts colors from a call). Read per render because the
-    // scheme can follow the system while the app is open.
+    // C++ side only accepts colors from a call). Keyed on the TEXT colour's
+    // lightness rather than `colorScheme`: this app runs on a custom palette, and
+    // a scheme value that disagreed with it painted the light token colors into a
+    // dark pane. Read per render because the scheme can follow the system.
     function highlightPalette() {
-        return Kirigami.Theme.colorScheme === Kirigami.Theme.Dark
+        return Kirigami.Theme.textColor.hsvValue > 0.5
             ? Theme.semantic.dark.code
             : Theme.semantic.light.code
     }
@@ -998,6 +1030,13 @@ Kirigami.Page {
                 readonly property string messageRole: model.role ? model.role : ""
                 readonly property string messageText: model.text ? model.text : ""
                 readonly property string messageHtml: model.html ? model.html : ""
+                // Roles are CONTEXT properties on a delegate, not members of the
+                // delegate Item: a role read as `mdel.blocks` is always undefined, whatever the
+                // model holds. That silently killed the fenced-code render — a row
+                // with code is given `blocks` and deliberately no `html`, so the flat
+                // TextEdit's `messageHtml || messageText` fell back to raw markdown
+                // and the code panes got undefined. Wrapped like every other role.
+                readonly property var messageBlocks: model.blocks ? model.blocks : []
                 readonly property string messageTitle: model.title ? model.title : ""
                 readonly property string messageDetail: model.detail ? model.detail : ""
                 readonly property string messageOutput: model.output ? model.output : ""
@@ -1110,7 +1149,7 @@ Kirigami.Page {
                 // is the blocks column's one editable — with several chunks the
                 // selection lives in whichever has focus, not a single bubble.
                 readonly property bool hasBlocks:
-                    (mdel.isUser || mdel.isAgent) && mdel.blocks.length > 0
+                    (mdel.isUser || mdel.isAgent) && mdel.messageBlocks.length > 0
 
                 // The selectable bubble text under the cursor (user or agent).
                 // When the message rendered as blocks (fenced code), the
@@ -1266,7 +1305,7 @@ Kirigami.Page {
                             id: userBlocks
                             visible: mdel.hasBlocks
                             width: mdel.userBubbleW - mdel.pad * 2
-                            blocks: mdel.blocks
+                            blocks: mdel.messageBlocks
                             userStyle: true
                         }
                     }
@@ -1360,7 +1399,7 @@ Kirigami.Page {
                             id: agentBlocks
                             visible: mdel.hasBlocks
                             width: mdel.agentBubbleW - mdel.pad * 2
-                            blocks: mdel.blocks
+                            blocks: mdel.messageBlocks
                             TapHandler {
                                 acceptedButtons: Qt.LeftButton
                                 onTapped: (tap) => {

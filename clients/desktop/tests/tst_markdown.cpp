@@ -186,18 +186,24 @@ void TstMarkdown::highlightKeywordStringCommentNumber()
 
 void TstMarkdown::highlightUnknownLangIsSafe()
 {
-    // An unknown tag falls back to strings + numbers only, and the
-    // highlighter must never crash or emit raw markup.
+    // A fence with no known tag falls back to strings only: numbers are left
+    // alone on purpose (a log or diff pasted for its text was all timestamps and
+    // ports in the number colour), and the highlighter must never crash or emit
+    // raw markup.
     const QString html = highlightCode(QStringLiteral("fn = 1 \"s\""), QStringLiteral(""),
-                                       QString(), QStringLiteral("st"), QString(), QString());
+                                       QString(), QStringLiteral("st"), QString(),
+                                       QStringLiteral("num"));
     QVERIFY(html.contains(QStringLiteral("fn"))); // plain text untouched
     QVERIFY(html.contains(QStringLiteral("<span style=\"color:st\">\"s\"</span>")));
+    QVERIFY2(!html.contains(QStringLiteral("color:num")),
+             "no language: a bare number must not be colored");
 }
 
 void TstMarkdown::highlightNumberNeedsNonWordPrev()
 {
-    // x2 is an identifier tail; 3.5 (after a space) gets the number span.
-    const QString html = highlightCode(QStringLiteral("x2 3.5\n"), QStringLiteral(""),
+    // x2 is an identifier tail; 3.5 (after a space) gets the number span. A known
+    // language, because numbers are only colored for one.
+    const QString html = highlightCode(QStringLiteral("x2 3.5\n"), QStringLiteral("c"),
                                        QString(), QString(), QString(),
                                        QStringLiteral("num"));
     QVERIFY(!html.contains(QStringLiteral("<span style=\"color:num\">x2</span>")));
