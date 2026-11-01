@@ -1579,6 +1579,11 @@ impl TranscriptStore {
         self.state.lock().bubbles.len()
     }
 
+    /// Whether the store holds no rows at all (an open with nothing to paint).
+    pub fn is_empty(&self) -> bool {
+        self.state.lock().bubbles.is_empty()
+    }
+
     /// Re-emit the pagination cursor. The core calls this when it learns
     /// something that changes `has_older` without changing a row — the server's
     /// backlog after a bounded replay, or a page that turned out to be all

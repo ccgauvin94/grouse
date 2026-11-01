@@ -1172,6 +1172,33 @@ pub(crate) fn first_tail(suppress: bool, merge: bool) -> usize {
     }
 }
 
+/// What one `session/load` owes: the two paint gates and the size of the window
+/// it asks the wire for. Grouped because they are read as one decision — a
+/// caller that sets `suppress` but a full `tail` (or the reverse) is a bug, and
+/// a value makes that visible at one site.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReplayAsk {
+    /// The cache is current and authoritative: discard the replayed rows.
+    pub suppress: bool,
+    /// The cache is the merge BASE for the replayed tail.
+    pub merge: bool,
+    /// Trailing messages to request (`0` = the whole session).
+    pub tail: usize,
+}
+
+impl ReplayAsk {
+    /// The ask implied by a paint mode: a fresh cache needs one message (only to
+    /// bind the session), a stale one needs the overlapping tail, and nothing to
+    /// paint owes the last [`OPEN_TAIL`] messages.
+    pub(crate) fn for_mode(suppress: bool, merge: bool) -> Self {
+        Self {
+            suppress,
+            merge,
+            tail: first_tail(suppress, merge),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Cache paint policy (one decision for both transports)
 // ---------------------------------------------------------------------------
@@ -1271,9 +1298,11 @@ pub(crate) async fn load_with_plan(
         store,
         key,
         cwd,
-        plan.suppress,
-        plan.merge,
-        plan.tail,
+        ReplayAsk {
+            suppress: plan.suppress,
+            merge: plan.merge,
+            tail: plan.tail,
+        },
     )
     .await
 }
@@ -1316,9 +1345,7 @@ pub(crate) async fn replay_session(
         store,
         key,
         cwd,
-        suppress,
-        merge,
-        first_tail(suppress, merge),
+        ReplayAsk::for_mode(suppress, merge),
     )
     .await
 }
@@ -1377,10 +1404,13 @@ async fn replay_held(
     store: &crate::transcript::TranscriptStore,
     key: &str,
     cwd: &str,
-    suppress: bool,
-    merge: bool,
-    tail: usize,
+    ask: ReplayAsk,
 ) -> Result<Value, AcpError> {
+    let ReplayAsk {
+        suppress,
+        merge,
+        tail,
+    } = ask;
     // `0` = the whole session (`first_tail` says which mode wants that).
     //
     // Otherwise the tail is a LOWER BOUND on what the replay must cover: it
