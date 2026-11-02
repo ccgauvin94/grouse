@@ -1292,48 +1292,13 @@ Kirigami.Page {
                             spacing: Kirigami.Units.smallSpacing
                             Repeater {
                                 model: mdel.messageFiles
-                                delegate: Rectangle {
+                                AttachmentCard {
                                     width: userFiles.width
-                                    height: cardRow.implicitHeight + 12
-                                    radius: 8
-                                    // A tint of the bubble's own text colour, so
-                                    // the card sits ON the highlighted bubble
-                                    // without a second palette entry.
-                                    color: Qt.rgba(1, 1, 1, 0.14)
-                                    Row {
-                                        id: cardRow
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        anchors.left: parent.left
-                                        anchors.right: parent.right
-                                        anchors.leftMargin: 10
-                                        anchors.rightMargin: 10
-                                        spacing: 8
-                                        Kirigami.Icon {
-                                            source: modelData.icon
-                                            implicitWidth: 20
-                                            implicitHeight: 20
-                                            isMask: true
-                                            color: Kirigami.Theme.highlightedTextColor
-                                        }
-                                        Controls.Label {
-                                            text: modelData.name
-                                            elide: Text.ElideMiddle
-                                            width: cardRow.width - 28
-                                            color: Kirigami.Theme.highlightedTextColor
-                                        }
-                                    }
-                                    // The kind · size line rides under the name,
-                                    // so a long name loses the middle rather than
-                                    // the size.
-                                    Controls.Label {
-                                        anchors.left: cardRow.left
-                                        anchors.leftMargin: 28
-                                        anchors.top: cardRow.bottom
-                                        text: modelData.subtitle
-                                        font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.8))
-                                        opacity: 0.75
-                                        color: Kirigami.Theme.highlightedTextColor
-                                    }
+                                    name: modelData.name
+                                    icon: modelData.icon
+                                    subtitle: modelData.subtitle
+                                    fillColor: Qt.rgba(1, 1, 1, 0.14)
+                                    foreground: Kirigami.Theme.highlightedTextColor
                                 }
                             }
                         }

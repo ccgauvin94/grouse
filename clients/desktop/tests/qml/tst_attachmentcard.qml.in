@@ -1,0 +1,83 @@
+import QtQuick
+import QtTest
+import "@CARD_UI_URL@"
+
+// The attachment card, instantiated directly. It is a component with real rules
+// (a long name keeps its suffix, an unknown size drops the second line, the icon
+// is a tinted mask) and it lives inside a ListView delegate in the app — where a
+// binding TypeError is invisible to qmllint and to an offscreen page load.
+TestCase {
+    id: tc
+    name: "AttachmentCard"
+    width: 640
+    height: 400
+
+    Component {
+        id: cardComp
+        AttachmentCard { }
+    }
+
+    function make(props) {
+        const card = cardComp.createObject(tc, props || {})
+        verify(card !== null, "AttachmentCard failed to instantiate")
+        return card
+    }
+
+    function test_name_and_subtitle_are_shown() {
+        const card = make({
+            name: "document 513.pdf",
+            icon: "application-pdf",
+            subtitle: "PDF \u00b7 106 KB"
+        })
+        const name = findChild(card, "cardName")
+        const subtitle = findChild(card, "cardSubtitle")
+        verify(name !== null, "the card has no name label")
+        compare(name.text, "document 513.pdf")
+        compare(subtitle.text, "PDF \u00b7 106 KB")
+        verify(card.implicitHeight > 0, "the card has no height")
+        card.destroy()
+    }
+
+    // A replayed attachment has a name but no size (the link stub carries
+    // none). Printing "0 B" there would claim a 26 MB deck is empty, so the
+    // second line is simply absent — the label binds its visibility to its own
+    // text, and a positioner drops an invisible child.
+    function test_an_unknown_size_leaves_the_subtitle_empty() {
+        const bare = make({ name: "document-34", icon: "application-pdf", subtitle: "" })
+        const full = make({ name: "document-34", icon: "application-pdf", subtitle: "PDF \u00b7 25.3 MB" })
+        compare(findChild(bare, "cardSubtitle").text, "")
+        compare(findChild(full, "cardSubtitle").text, "PDF \u00b7 25.3 MB")
+        // The line is drawn only when it has something to say. Asserted on the
+        // BINDING's input rather than on `visible`: reading visible on an item
+        // outside a shown window reports effective visibility, which is false
+        // either way.
+        compare(findChild(bare, "cardSubtitle").text.length > 0, false)
+        bare.destroy()
+        full.destroy()
+    }
+
+    // The informative part of a filename is the end, and a card in a bubble is
+    // narrow.
+    function test_a_long_name_elides_its_middle_not_its_suffix() {
+        const card = make({
+            name: "a-very-long-report-name-that-runs-on-2026-11-01-final.pdf",
+            subtitle: "PDF \u00b7 25.3 MB"
+        })
+        card.width = 160
+        const name = findChild(card, "cardName")
+        compare(name.elide, Text.ElideMiddle)
+        compare(name.maximumLineCount, 1)
+        card.destroy()
+    }
+
+    function test_the_kind_icon_is_a_tinted_mask() {
+        // A full-colour icon ignores `color` and shows dark on the highlighted
+        // bubble, which is why every card icon is masked.
+        const card = make({ name: "x.pdf", icon: "application-pdf", subtitle: "PDF" })
+        const icon = findChild(card, "iconItem")
+        verify(icon !== null, "the card has no icon")
+        compare(icon.source.toString().indexOf("application-pdf") >= 0, true)
+        compare(icon.isMask, true)
+        card.destroy()
+    }
+}

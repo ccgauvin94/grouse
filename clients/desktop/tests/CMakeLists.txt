@@ -53,6 +53,11 @@ configure_file(qml/tst_recipesdialog.qml.in
 set(MYDAY_UI_URL "file://${CMAKE_CURRENT_SOURCE_DIR}/../ui")
 configure_file(qml/tst_mydaypage.qml.in
     ${CMAKE_CURRENT_BINARY_DIR}/qml/tst_mydaypage.qml @ONLY)
+# AttachmentCard: same baked-in ui/ import URL; it takes its data as properties,
+# so no Mgr stub is involved.
+set(CARD_UI_URL "file://${CMAKE_CURRENT_SOURCE_DIR}/../ui")
+configure_file(qml/tst_attachmentcard.qml.in
+    ${CMAKE_CURRENT_BINARY_DIR}/qml/tst_attachmentcard.qml @ONLY)
 # Plain QML tests pass through unchanged (no placeholders).
 configure_file(qml/tst_combobox.qml
     ${CMAKE_CURRENT_BINARY_DIR}/qml/tst_combobox.qml COPYONLY)
