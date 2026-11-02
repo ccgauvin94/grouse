@@ -237,6 +237,20 @@ pub struct Item {
     /// second row for the same prompt, with a position from a different counter.
     #[serde(default)]
     pub attachments: u32,
+    /// `ItemKind::User` only: the files that rode this prompt, BY NAME.
+    ///
+    /// `attachments` is a count over images and files together, so a prompt
+    /// whose file was silently dropped looked identical to one that worked.
+    /// This is the row's own record of what it carried: name, mime, bytes, the
+    /// server-side path and the sha256 that path is derived from.
+    ///
+    /// A row echoed locally carries these from send time. A row REPLAYED from
+    /// the server does not — goose stores the rendered prompt (inlined text or
+    /// a `resource_link` stub), not our record — so a replayed attachment shows
+    /// as its text. Acceptable for now; the compromise is recorded in
+    /// docs/TRANSCRIPT_MODEL.md.
+    #[serde(default)]
+    pub files: Vec<crate::attachments::UploadedFile>,
     /// Images the row carries, as `data:<mime>;base64,<data>` URIs the client
     /// renders directly: the pixels goose REPLAYS (a prompt echo re-delivered
     /// by `session/load`) as `ContentBlock::Image` chunks. The core flattening
@@ -569,7 +583,7 @@ pub trait GrouseUnstableListener: Send + Sync {
 /// "send_prompt/set_config_option/tool queries queue until ready, then flush
 /// in order").
 enum PendingIntent {
-    SendPrompt(Prompt, Option<SendExpect>, String),
+    SendPrompt(Prompt, Vec<crate::attachments::UploadedFile>, Option<SendExpect>, String),
     SetConfig(String, String),
 }
 
@@ -1280,6 +1294,16 @@ impl Core {
     /// (fallback: the displayed session), queues per session until that chat's
     /// owner can accept it. A turn in another chat never blocks this one.
     pub fn send_prompt(&self, prompt: Prompt, expect: Option<SendExpect>) {
+        self.send_prompt_inner(prompt, Vec::new(), expect);
+    }
+
+    /// The single funnel both public send entry points go through.
+    fn send_prompt_inner(
+        &self,
+        prompt: Prompt,
+        files: Vec<crate::attachments::UploadedFile>,
+        expect: Option<SendExpect>,
+    ) {
         // Rescale outbound images BEFORE routing or queueing: one transform
         // covers the wire payload, the echoed row and the transcripts, no
         // matter which path the prompt takes from here.
@@ -1292,7 +1316,7 @@ impl Core {
             .map(|exp| exp.session_id.clone())
             .or_else(|| self.active_session_id())
         else {
-            self.queue_prompt(prompt, expect);
+            self.queue_prompt(prompt, files, expect);
             return;
         };
         // An id the core has never opened is a stale UI reference, not a
@@ -1304,15 +1328,15 @@ impl Core {
             return;
         }
         let Some(owner) = self.owner_for(&target) else {
-            self.queue_prompt(prompt, expect);
+            self.queue_prompt(prompt, files, expect);
             return;
         };
         let busy = self.inner.state.lock().in_flight.contains(&target);
         if busy || !owner.accepts_prompt() {
-            self.queue_prompt(prompt, expect);
+            self.queue_prompt(prompt, files, expect);
             return;
         }
-        self.spawn_prompt(owner, target, prompt);
+        self.spawn_prompt(owner, target, prompt, files);
     }
 
     /// Send a prompt with files attached.
@@ -1354,7 +1378,7 @@ impl Core {
                     }
                 }
             }
-            this.send_prompt(with_links(prompt, uploaded), expect);
+            this.send_prompt_inner(with_links(prompt, uploaded.clone()), uploaded, expect);
         });
     }
 
@@ -2702,8 +2726,9 @@ impl Core {
         &self,
         session: &str,
         prompt: Prompt,
+        files: Vec<crate::attachments::UploadedFile>,
         expect: Option<SendExpect>,
-    ) -> Result<(), (Prompt, Option<SendExpect>)> {
+    ) -> Result<(), (Prompt, Vec<crate::attachments::UploadedFile>, Option<SendExpect>)> {
         if let Some(exp) = &expect {
             if exp.session_id != session {
                 // A mis-keyed queue entry: drop it rather than route it to a
@@ -2712,7 +2737,7 @@ impl Core {
             }
         }
         let Some(owner) = self.owner_for(session) else {
-            return Err((prompt, expect));
+            return Err((prompt, files, expect));
         };
         let busy = {
             let state = self.inner.state.lock();
@@ -2726,14 +2751,14 @@ impl Core {
                     .is_some_and(|b| b.page.is_some())
         };
         if busy || !owner.accepts_prompt() {
-            return Err((prompt, expect));
+            return Err((prompt, files, expect));
         }
-        self.spawn_prompt(owner, session.to_string(), prompt);
+        self.spawn_prompt(owner, session.to_string(), prompt, files);
         Ok(())
     }
 
     /// Park a prompt until the displayed chat's owner can accept it.
-    fn queue_prompt(&self, prompt: Prompt, expect: Option<SendExpect>) {
+    fn queue_prompt(&self, prompt: Prompt, files: Vec<crate::attachments::UploadedFile>, expect: Option<SendExpect>) {
         let mut state = self.inner.state.lock();
         let id = state.next_pending_id.to_string();
         state.next_pending_id += 1;
@@ -2746,7 +2771,7 @@ impl Core {
             .pending
             .entry(key)
             .or_default()
-            .push_back(PendingIntent::SendPrompt(prompt, expect, id));
+            .push_back(PendingIntent::SendPrompt(prompt, files, expect, id));
     }
 
     fn try_set_config(&self, config_id: String, value: String) -> Result<(), (String, String)> {
@@ -2768,6 +2793,7 @@ impl Core {
         owner: Arc<dyn crate::session::ChatEndpoint>,
         session_id: String,
         prompt: Prompt,
+        files: Vec<crate::attachments::UploadedFile>,
     ) {
         let params = crate::session::prompt_params(&prompt, &owner.wire_id(&session_id));
         let core = self.clone();
@@ -2785,7 +2811,7 @@ impl Core {
         let attachments = crate::prompt_attachments(&prompt);
         let images = crate::prompt_image_uris(&prompt);
         if text.is_some() || attachments > 0 || !images.is_empty() {
-            store.echo_prompt(text.as_deref().unwrap_or(""), attachments, images);
+            store.echo_prompt(text.as_deref().unwrap_or(""), attachments, files, images);
         }
         // A new turn's runs are a fresh worklist for the summarizer.
         self.inner.state.lock().turn_runs.remove(&session_id);
@@ -3235,19 +3261,19 @@ impl Core {
                         break;
                     }
                 }
-                PendingIntent::SendPrompt(prompt, expect, id) => {
+                PendingIntent::SendPrompt(prompt, files, expect, id) => {
                     let target = expect
                         .as_ref()
                         .map(|exp| exp.session_id.clone())
                         .or_else(|| self.active_session_id());
                     let Some(target) = target else {
-                        self.requeue("", PendingIntent::SendPrompt(prompt, expect, id));
+                        self.requeue("", PendingIntent::SendPrompt(prompt, files, expect, id));
                         break;
                     };
-                    if let Err((prompt, expect)) =
-                        self.try_send_prompt_for(&target, prompt, expect)
+                    if let Err((prompt, files, expect)) =
+                        self.try_send_prompt_for(&target, prompt, files, expect)
                     {
-                        self.requeue("", PendingIntent::SendPrompt(prompt, expect, id));
+                        self.requeue("", PendingIntent::SendPrompt(prompt, files, expect, id));
                         break;
                     }
                 }
@@ -3281,10 +3307,11 @@ impl Core {
                 intent
             };
             match intent {
-                PendingIntent::SendPrompt(prompt, expect, id) => {
-                    if let Err((prompt, expect)) = self.try_send_prompt_for(&key, prompt, expect)
+                PendingIntent::SendPrompt(prompt, files, expect, id) => {
+                    if let Err((prompt, files, expect)) =
+                        self.try_send_prompt_for(&key, prompt, files, expect)
                     {
-                        self.requeue(&key, PendingIntent::SendPrompt(prompt, expect, id));
+                        self.requeue(&key, PendingIntent::SendPrompt(prompt, files, expect, id));
                     }
                 }
                 // Config intents are queued globally (key ""); route one that

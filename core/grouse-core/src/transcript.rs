@@ -138,6 +138,10 @@ enum Bubble {
         seq: u32,
         /// User rows only: attachments that rode the prompt (see `Item::attachments`).
         attachments: u32,
+        /// User rows only: files that rode the prompt, BY NAME. `attachments`
+        /// is a count (images included), which is why an attach that silently
+        /// delivered nothing looked exactly like one that worked.
+        files: Vec<crate::attachments::UploadedFile>,
         /// Images the row carries as data URIs (see `Item::images`): a prompt's
         /// own pixels from the send-time echo, or chunks the server replayed.
         images: Vec<String>,
@@ -202,6 +206,7 @@ impl Bubble {
                 text,
                 seq,
                 attachments,
+                files,
                 images,
                 ..
             } => Item {
@@ -216,6 +221,7 @@ impl Bubble {
                 text: text.clone(),
                 seq: *seq,
                 attachments: *attachments,
+                files: files.clone(),
                 images: images.clone(),
                 ..empty_item()
             },
@@ -290,8 +296,9 @@ fn empty_item() -> Item {
         steps: Vec::new(),
         seq: 0,
         attachments: 0,
+        files: Vec::new(),
         images: Vec::new(),
-        
+
         message_id: String::new(),
     }
 }
@@ -765,6 +772,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
                 thought: matches!(it.kind, ItemKind::Thought),
                 seq: it.seq,
                 attachments: it.attachments,
+                files: it.files.clone(),
                 images: it.images.clone(),
             })
         }
@@ -1028,6 +1036,7 @@ impl TranscriptStore {
                     thought,
                     seq,
                     attachments: 0,
+                    files: Vec::new(),
                     images: image
                         .map(|u| std::iter::once(u.to_string()).collect())
                         .unwrap_or_default(),
@@ -1109,7 +1118,13 @@ impl TranscriptStore {
     /// message id), [`Self::append_chunk`] adopts this row instead of appending
     /// a duplicate. Closing the live stream is what makes the reply that
     /// follows its own row rather than an extension of the previous turn.
-    pub fn echo_prompt(&self, text: &str, attachments: u32, images: Vec<String>) {
+    pub fn echo_prompt(
+        &self,
+        text: &str,
+        attachments: u32,
+        files: Vec<crate::attachments::UploadedFile>,
+        images: Vec<String>,
+    ) {
         // An attachment-only prompt still needs its row; an empty prompt with
         // no attachments is the one case with nothing to show.
         if text.is_empty() && attachments == 0 {
@@ -1141,6 +1156,7 @@ impl TranscriptStore {
                 thought: false,
                 seq,
                 attachments,
+                files: files.clone(),
                 images: images.clone(),
             });
             let idx = st.bubbles.len() - 1;
@@ -2221,6 +2237,7 @@ impl TranscriptStore {
                         thought: m.role == "thought",
                         seq,
                         attachments: 0,
+                        files: Vec::new(),
                         images: Vec::new(),
                         
                     });
@@ -2315,6 +2332,36 @@ mod tests {
             speak_events: Arc::new(Mutex::new(Vec::new())),
         };
         (Box::new(l), i)
+    }
+
+    /// A prompt that carried an uploaded file must say WHICH file. The count in
+    /// `attachments` cannot: it covers images and files together, so a prompt
+    /// whose file was silently dropped looked identical to one that worked.
+    #[test]
+    fn an_echoed_prompt_names_the_files_it_uploaded() {
+        let (listener, _) = listener();
+        let store = TranscriptStore::new(listener);
+        store.echo_prompt(
+            "what does this say?",
+            1,
+            vec![crate::attachments::UploadedFile {
+                name: "report.pdf".into(),
+                mime: "application/pdf".into(),
+                bytes: 1234,
+                path: "/workspace/attachments/abc123-report.pdf".into(),
+                sha256: "abc123".into(),
+            }],
+            Vec::new(),
+        );
+        let items = store.rich_transcript();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].files.len(), 1, "the row must carry its file record");
+        assert_eq!(items[0].files[0].name, "report.pdf");
+        assert_eq!(items[0].files[0].bytes, 1234);
+        assert_eq!(items[0].files[0].path, "/workspace/attachments/abc123-report.pdf");
+        // The legacy count still covers images + files, so a UI drawn against
+        // the old field keeps working.
+        assert_eq!(items[0].attachments, 1);
     }
 
     /// A listener that records the speak stream instead of the item ops.
@@ -2549,7 +2596,7 @@ mod tests {
         let (l, _i_evts) = listener();
         let store = TranscriptStore::new(l);
         store.append_chunk("agent", "an answer", Some("m1"), false);
-        store.echo_prompt("a question", 0, Vec::new());
+        store.echo_prompt("a question", 0, Vec::new(), Vec::new());
         store.tool_call("shell", "{}", "t1", ToolCallKind::Plain);
 
         let seqs: Vec<u32> = store.rich_transcript().iter().map(|i| i.seq).collect();
@@ -2703,7 +2750,7 @@ mod tests {
     fn an_attachment_only_prompt_gets_a_row() {
         let (l, _i_evts) = listener();
         let store = TranscriptStore::new(l);
-        store.echo_prompt("", 2, Vec::new());
+        store.echo_prompt("", 2, Vec::new(), Vec::new());
         let items = store.rich_transcript();
         assert_eq!(items.len(), 1, "{items:?}");
         assert_eq!(items[0].kind, ItemKind::User);
@@ -3158,6 +3205,7 @@ mod tests {
             steps: Vec::new(),
             seq: 0,
             attachments: 0,
+            files: Vec::new(),
             images: Vec::new(),
             message_id: String::new(),
         }
@@ -3397,6 +3445,7 @@ mod tests {
                 steps: Vec::new(),
                 seq: 0,
                 attachments: 0,
+                files: Vec::new(),
                 images: Vec::new(),
                 message_id: String::new(),
             },
@@ -3414,6 +3463,7 @@ mod tests {
                 steps: Vec::new(),
                 seq: 0,
                 attachments: 0,
+                files: Vec::new(),
                 images: Vec::new(),
                 message_id: String::new(),
             },
@@ -3427,6 +3477,7 @@ mod tests {
                 app_key: String::new(),
                 seq: 0,
                 attachments: 0,
+                files: Vec::new(),
                 images: Vec::new(),
                 message_id: String::new(),
                 calls: vec![
@@ -3520,7 +3571,7 @@ mod tests {
         let (l, _evts) = listener();
         let store = TranscriptStore::new(l);
         store.set_session("roam:Phaethon:s1");
-        store.echo_prompt("huh. I can use the remote", 0, Vec::new());
+        store.echo_prompt("huh. I can use the remote", 0, Vec::new(), Vec::new());
         store.tool_call("Bash", "ha state", "t7", ToolCallKind::Plain);
         store.append_chunk("agent", "It works because…", Some("m_a1"), false);
         store.run_ended("end_turn");
@@ -3987,7 +4038,7 @@ mod tests {
     fn an_echoed_prompt_is_adopted_when_the_server_names_it() {
         let (l, _) = listener();
         let store = TranscriptStore::new(l);
-        store.echo_prompt("what time is it", 0, Vec::new());
+        store.echo_prompt("what time is it", 0, Vec::new(), Vec::new());
         assert_eq!(store.transcript().len(), 1);
 
         // goose never sends our own prompt live; a replay names it. The named
@@ -4013,8 +4064,8 @@ mod tests {
     fn two_echoed_prompts_are_two_rows() {
         let (l, _) = listener();
         let store = TranscriptStore::new(l);
-        store.echo_prompt("first", 0, Vec::new());
-        store.echo_prompt("second", 0, Vec::new());
+        store.echo_prompt("first", 0, Vec::new(), Vec::new());
+        store.echo_prompt("second", 0, Vec::new(), Vec::new());
         assert_eq!(store.transcript().len(), 2);
         // The oldest echo is adopted first (the server names prompts in order).
         store.append_chunk("user", "first", Some("m1"), false);
@@ -4026,7 +4077,7 @@ mod tests {
     fn a_cached_echo_is_adopted_after_a_paint() {
         let (l, _) = listener();
         let store = TranscriptStore::new(l);
-        store.echo_prompt("hello", 0, Vec::new());
+        store.echo_prompt("hello", 0, Vec::new(), Vec::new());
         let items = store.rich_transcript();
 
         let (l, _) = listener();
@@ -4048,7 +4099,7 @@ mod tests {
         store.echo_prompt(
             "what is this",
             1,
-            vec!["data:image/png;base64,AAA".to_string()],
+            Vec::new(), vec!["data:image/png;base64,AAA".to_string()],
         );
         // The server's replay re-delivers the text (which ADOPTS the echo row)
         // then the image chunk with the full payload.
@@ -4070,7 +4121,7 @@ mod tests {
         let (l, _) = listener();
         let store = TranscriptStore::new(l);
         // attachment-only echo: empty text, a row nonetheless
-        store.echo_prompt("", 1, vec!["data:image/jpeg;base64,BBB".to_string()]);
+        store.echo_prompt("", 1, Vec::new(), vec!["data:image/jpeg;base64,BBB".to_string()]);
         // No text chunk comes back for it; the image chunk must adopt the echo
         // row (echo text "" matches the missing text), not open a duplicate.
         store.append_image("user", "data:image/jpeg;base64,BBB", Some("m2"));

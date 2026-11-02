@@ -1101,6 +1101,7 @@ mod tests {
             output: String::new(),
             seq: 0,
             attachments: 0,
+            files: Vec::new(),
             images: Vec::new(),
             message_id: String::new(),
             status: String::new(),
