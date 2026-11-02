@@ -33,6 +33,7 @@ use crate::transcript::TranscriptStore;
 
 uniffi::setup_scaffolding!();
 
+mod attachments;
 pub mod cache;
 pub mod capi;
 pub mod imgrescale;
@@ -411,11 +412,28 @@ pub enum PromptBlock {
         data: String,
     },
     /// `text` and `blob` are mutually exclusive; `blob` is base64.
+    ///
+    /// NOTE: goose DROPS this block when it carries a `blob` (no `else` in
+    /// `convert_acp_prompt_to_message`). Upload through the attachments
+    /// extension and send [`PromptBlock::Link`] instead -- see
+    /// `attachments.rs`.
     Resource {
         uri: String,
         mime_type: String,
         text: Option<String>,
         blob: Option<String>,
+    },
+    /// A `resource_link`: a URI the SERVER resolves.
+    ///
+    /// A `file://` URI pointing at something on goose's own disk is inlined by
+    /// the server when the file is text, and handed over as an opaque path stub
+    /// when it is not. That asymmetry is the feature: a text file arrives as
+    /// its contents with no bytes on the wire, and a PDF arrives as a path the
+    /// agent can act on with its own tools.
+    Link {
+        uri: String,
+        name: String,
+        mime_type: String,
     },
 }
 
@@ -759,6 +777,28 @@ struct CoreInner {
     /// mode auto — see `tasks.rs`). Dropped on any failed call, which is what
     /// recovers from a server restart and from goose evicting the session.
     tasks_session: Mutex<Option<String>>,
+}
+
+/// A file the app wants to attach, read on demand.
+///
+/// The bytes stay on the app's side of the boundary: the core pulls them one
+/// chunk at a time, so a 100 MB file costs one chunk of memory rather than two
+/// copies of the whole file (one in the app, one in Rust). The app therefore
+/// owns only what only it can do -- resolving a content URI or a native path
+/// and handing back bytes -- while every protocol rule stays in
+/// `attachments.rs`.
+#[uniffi::export(with_foreign)]
+pub trait FileSource: Send + Sync {
+    /// The name the file is shown and stored under.
+    fn name(&self) -> String;
+    /// MIME type, best effort; the server sniffs when this is wrong.
+    fn mime(&self) -> String;
+    /// Total bytes. Must be the real length: the server checks it at commit.
+    fn size(&self) -> u64;
+    /// Bytes at `offset`, at most `len`. A SHORT read means end of file; the
+    /// core refuses to continue on one, because that is an app bug and a
+    /// half-uploaded file must never look complete.
+    fn read(&self, offset: u64, len: u32) -> Vec<u8>;
 }
 
 /// The stable interface (CONTRACT §3).
@@ -1273,6 +1313,49 @@ impl Core {
             return;
         }
         self.spawn_prompt(owner, target, prompt);
+    }
+
+    /// Send a prompt with files attached.
+    ///
+    /// The files upload first -- chunked, through the `attachments` extension --
+    /// and the prompt then carries one `resource_link` per file. It never
+    /// carries the bytes: goose DROPS a `resource` block whose contents are a
+    /// blob, which is why "attach a PDF" used to show a chip and deliver
+    /// nothing (see `attachments.rs`).
+    ///
+    /// If any upload fails, NOTHING is sent and the failure is raised as an
+    /// alert. A prompt that silently lost its attachments is the failure this
+    /// path exists to remove.
+    pub fn send_prompt_with_files(
+        &self,
+        prompt: Prompt,
+        files: Vec<Arc<dyn FileSource>>,
+        expect: Option<SendExpect>,
+    ) {
+        // The image policy runs here too, before any routing, so one transform
+        // still covers the wire payload, the echoed row and the transcript.
+        let prompt = self.apply_image_policy(prompt);
+        if files.is_empty() {
+            self.send_prompt(prompt, expect);
+            return;
+        }
+        let this = self.clone();
+        crate::roam::runtime().spawn(async move {
+            let mut uploaded = Vec::with_capacity(files.len());
+            for file in files {
+                let name = file.name();
+                match this.upload_one(file).await {
+                    Ok(done) => uploaded.push(done),
+                    Err(message) => {
+                        this.alert(format!(
+                            "could not attach {name}: {message} — the message was NOT sent"
+                        ));
+                        return;
+                    }
+                }
+            }
+            this.send_prompt(with_links(prompt, uploaded), expect);
+        });
     }
 
     /// `session/cancel` (a notification; never waits for a reply).
@@ -2048,6 +2131,108 @@ impl Core {
         }
         *self.inner.tasks_session.lock() = Some(wire.clone());
         Ok((conn, wire))
+    }
+
+    // -- File ingest plumbing (`attachments.rs` holds the pure half) --------
+
+    /// One deterministic attachments tool call, on the same hidden `auto`-mode
+    /// session the My Day calls use. Reusing it is deliberate: that session is
+    /// already created, already in auto (goose refuses app tool calls in any
+    /// other mode) and is never prompted, so it costs nothing to share.
+    async fn attachment_call<F: Fn(&str) -> Value>(&self, build: F) -> Result<Value, String> {
+        let (conn, wire) = self.tasks_wire().await?;
+        let reply =
+            crate::session::request(conn.as_ref(), "_goose/unstable/tools/call", build(&wire))
+                .await;
+        match reply {
+            Ok(reply) => {
+                if crate::tasks::is_error(&reply) {
+                    *self.inner.tasks_session.lock() = None;
+                    Err(crate::tasks::content_text(&reply))
+                } else {
+                    Ok(reply)
+                }
+            }
+            Err(e) => {
+                *self.inner.tasks_session.lock() = None;
+                Err(e.to_string())
+            }
+        }
+    }
+
+    /// Upload one file: begin, chunk, commit. Returns where the server put it.
+    async fn upload_one(
+        &self,
+        file: Arc<dyn FileSource>,
+    ) -> Result<crate::attachments::UploadedFile, String> {
+        use base64::Engine as _;
+
+        let name = file.name();
+        let mime = file.mime();
+        let size = file.size();
+        if size > crate::attachments::MAX_BYTES {
+            return Err(format!(
+                "{} bytes exceeds the {} byte limit",
+                size,
+                crate::attachments::MAX_BYTES
+            ));
+        }
+
+        let begun = self
+            .attachment_call(|wire| crate::attachments::begin_params(wire, &name, &mime, size))
+            .await?;
+        let upload_id = tool_json_field(&begun, "uploadId")
+            .ok_or_else(|| "the server returned no uploadId".to_string())?;
+
+        for (offset, len) in
+            crate::attachments::chunk_plan(size, crate::attachments::CHUNK_BYTES)
+        {
+            let bytes = file.read(offset, len as u32);
+            // A short read is the app failing to produce what it promised.
+            // Refuse rather than upload a truncated file that commits clean.
+            if bytes.len() != len {
+                return Err(format!(
+                    "read {} of {} bytes at offset {offset}",
+                    bytes.len(),
+                    len
+                ));
+            }
+            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            self.attachment_call(|wire| {
+                crate::attachments::chunk_params(wire, &upload_id, offset, &data)
+            })
+            .await?;
+        }
+
+        let committed = self
+            .attachment_call(|wire| crate::attachments::commit_params(wire, &upload_id))
+            .await?;
+        let blob = tool_json_payload(&committed)
+            .ok_or_else(|| "the server returned no commit result".to_string())?;
+        let path = blob
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "the commit result had no path".to_string())?
+            .to_string();
+        Ok(crate::attachments::UploadedFile {
+            name: blob
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&name)
+                .to_string(),
+            mime: blob
+                .get("mime")
+                .and_then(Value::as_str)
+                .unwrap_or(&mime)
+                .to_string(),
+            bytes: blob.get("bytes").and_then(Value::as_u64).unwrap_or(size),
+            path,
+            sha256: blob
+                .get("sha256")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        })
     }
 
     /// One deterministic tool call. Any failure drops the cached hidden session:
@@ -3650,6 +3835,44 @@ fn prompt_image_uris(prompt: &Prompt) -> Vec<String> {
             },
         )
         .collect()
+}
+
+/// The JSON object a `tools/call` reply carries in its text block.
+///
+/// The attachments extension answers every tool with one `text` block holding
+/// JSON, so this is the one place that unwrapping lives.
+fn tool_json_payload(reply: &Value) -> Option<Value> {
+    reply
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|blocks| {
+            blocks
+                .iter()
+                .find_map(|block| block.get("text").and_then(Value::as_str))
+        })
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+}
+
+fn tool_json_field(reply: &Value, key: &str) -> Option<String> {
+    tool_json_payload(reply)?
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Append one `resource_link` per uploaded file.
+///
+/// Links go AFTER the text: the question first, then what it is about, which is
+/// how a person reads an email with attachments.
+fn with_links(prompt: Prompt, uploaded: Vec<crate::attachments::UploadedFile>) -> Prompt {
+    if uploaded.is_empty() {
+        return prompt;
+    }
+    let mut prompt = prompt;
+    for file in &uploaded {
+        prompt.blocks.push(crate::attachments::link_block(file));
+    }
+    prompt
 }
 
 /// The core is the dispatch host for the main connection: display ids are the

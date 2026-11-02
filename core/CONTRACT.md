@@ -331,6 +331,23 @@ Rules:
   never become "the message did not send". `set_image_rescale(bool)` /
   `image_rescale()` are a UI preference (default **ON**), persisted
   client-side; the core only applies it.
+- **A file is UPLOADED, never inlined** (§3.4). goose's prompt converter drops a
+  `resource` block whose contents are a base64 `blob` — no placeholder, no error
+  — so a client that puts the bytes in the prompt shows a chip and delivers
+  nothing. `send_prompt_with_files(prompt, files, expect)` therefore uploads
+  each file first, chunked (8 MiB raw per chunk, ~10.7 MiB base64, which clears
+  every transport hop including the 16 MiB HTTP-POST cap), through the
+  `attachments` extension on the same hidden `auto`-mode session the My Day
+  calls use, and only then sends the prompt with one `PromptBlock::Link`
+  (`{type:"resource_link"}`) per file. The server resolves a `file://` URI
+  itself: a text file is inlined as its contents (no bytes on the wire), a
+  binary becomes an opaque path stub the agent acts on with its own tools.
+  **A failed upload sends nothing** and raises `Alert` — a prompt that silently
+  lost its attachments is the exact failure this path removes. App-side, a file
+  is a `FileSource` (name/mime/size + `read(offset, len)`), so the bytes are
+  pulled one chunk at a time and never held whole on either side of the
+  boundary. Images keep the inline path unchanged.
+
 - **A replayed thought never becomes a row of its own.** goose re-sends the
   reasoning trail on every `session/load`, but such a row would double the trail
   and carries no stable id to reconcile by. The core holds it as the thinking of

@@ -205,6 +205,16 @@ pub(crate) fn prompt_params(prompt: &Prompt, wire_id: &str) -> Value {
                 }
                 json!({ "type": "resource", "resource": resource })
             }
+            PromptBlock::Link {
+                uri,
+                name,
+                mime_type,
+            } => json!({
+                "type": "resource_link",
+                "uri": uri,
+                "name": name,
+                "mimeType": mime_type,
+            }),
         })
         .collect::<Vec<_>>();
     json!({ "sessionId": wire_id, "prompt": blocks })
