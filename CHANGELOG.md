@@ -6,6 +6,34 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.59] - 2026-11-01
+
+### Added
+
+- **Attach any file, and the agent actually receives it.** Files are uploaded to
+  goose's `attachments` extension and the prompt carries a `resource_link` instead
+  of the bytes. This is a bug fix wearing a feature's clothes: goose silently
+  DROPS a `resource` content block whose contents are a base64 `blob` — no
+  placeholder, no error — so attaching a PDF showed a chip, echoed "1
+  attachment", and delivered nothing. The server resolves the link itself: a text
+  file is inlined as its contents (no bytes on the wire), a PDF/docx/xlsx becomes
+  a path the agent reads with its own tools, and extraction happens server-side.
+- **Prompt rows name the files they carried.** `Item.files` records name, MIME,
+  size, server path and sha256, so an attachment is identifiable rather than a
+  count.
+- **Streaming upload.** The app hands the core a `FileSource` and the core pulls
+  8 MiB at a time, so a 100 MB file never exists whole in either language. The
+  desktop, being a local app, passes paths instead and the core opens them.
+- **Desktop attachments work at all** for non-text files. The desktop had the same
+  bug in its own shape (it read the file and sent a blob); it now uploads by path.
+
+### Changed
+
+- Text files attached on the desktop are uploaded rather than inlined client-side.
+  Same result at the model, one code path instead of two.
+- A prompt whose upload fails is NOT sent, and says so. A message that silently
+  lost an attachment is the failure this release removes.
+
 ## [0.2.58] - 2026-11-01
 
 ### Added
