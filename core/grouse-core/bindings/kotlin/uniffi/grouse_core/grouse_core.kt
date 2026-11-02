@@ -1053,6 +1053,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_send_prompt_with_files(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_send_prompt_with_paths(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_sessions(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_set_config_option(
@@ -1337,6 +1339,8 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_method_core_send_prompt_inner(`ptr`: Long,`prompt`: RustBuffer.ByValue,`files`: RustBuffer.ByValue,`expect`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_send_prompt_with_files(`ptr`: Long,`prompt`: RustBuffer.ByValue,`files`: RustBuffer.ByValue,`expect`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_core_send_prompt_with_paths(`ptr`: Long,`prompt`: RustBuffer.ByValue,`paths`: RustBuffer.ByValue,`expect`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_sessions(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1687,6 +1691,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_send_prompt_with_files() and 0xFFFF) != 20223) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_core_send_prompt_with_paths() and 0xFFFF) != 47101) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_sessions() and 0xFFFF) != 51807) {
@@ -2724,6 +2731,20 @@ public interface CoreInterface {
      */
     fun `sendPromptWithFiles`(`prompt`: Prompt, `files`: List<FileSource>, `expect`: SendExpect?)
     
+    /**
+     * Send a prompt with files attached, named by LOCAL PATH.
+     *
+     * For clients that share the core's filesystem (the desktop). Android's
+     * files are `content://` URIs and go through
+     * [`Core::send_prompt_with_files`] with its own `FileSource`. The protocol
+     * is identical -- only where the bytes come from differs.
+     *
+     * A path that cannot be opened aborts the whole send with an alert, for
+     * the same reason a failed upload does: a message that silently lost an
+     * attachment is worse than one that refused.
+     */
+    fun `sendPromptWithPaths`(`prompt`: Prompt, `paths`: List<kotlin.String>, `expect`: SendExpect?)
+    
     fun `sessions`(): List<SessionSummary>
     
     /**
@@ -3528,6 +3549,33 @@ open class Core: Disposable, AutoCloseable, CoreInterface
         
         FfiConverterTypePrompt.lower(`prompt`),
         FfiConverterSequenceTypeFileSource.lower(`files`),
+        FfiConverterOptionalTypeSendExpect.lower(`expect`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Send a prompt with files attached, named by LOCAL PATH.
+     *
+     * For clients that share the core's filesystem (the desktop). Android's
+     * files are `content://` URIs and go through
+     * [`Core::send_prompt_with_files`] with its own `FileSource`. The protocol
+     * is identical -- only where the bytes come from differs.
+     *
+     * A path that cannot be opened aborts the whole send with an alert, for
+     * the same reason a failed upload does: a message that silently lost an
+     * attachment is worse than one that refused.
+     */override fun `sendPromptWithPaths`(`prompt`: Prompt, `paths`: List<kotlin.String>, `expect`: SendExpect?)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_send_prompt_with_paths(
+        it,
+        
+        FfiConverterTypePrompt.lower(`prompt`),
+        FfiConverterSequenceString.lower(`paths`),
         FfiConverterOptionalTypeSendExpect.lower(`expect`),_status)
 }
     }
