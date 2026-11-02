@@ -494,6 +494,21 @@ private fun UserBubble(m: ChatMessage) {
                                 indication = null,
                             ) { zoomed = img.dataB64 })
                 }
+                // What rode this prompt, as cards: name, kind and size. Drawn
+                // above the text because a message that is nothing but an
+                // attachment should still read as something, and the bubble used
+                // to carry a bare count that said "1 attachment" whether or not
+                // anything actually reached the server.
+                if (m.files.isNotEmpty()) Column(Modifier.padding(horizontal = 2.dp, vertical = 2.dp)) {
+                    m.files.forEach { f ->
+                        AttachmentCard(
+                            f,
+                            modifier = Modifier.padding(bottom = 4.dp),
+                            container = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.10f),
+                            content = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                }
                 if (m.text.isNotBlank())
                     Box(Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) {
                         // Long-press selects; tap copies the whole message.

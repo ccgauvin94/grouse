@@ -76,6 +76,71 @@ pub(crate) fn commit_params(wire: &str, upload_id: &str) -> Value {
     tool_params(wire, "attachment_commit", json!({ "uploadId": upload_id }))
 }
 
+/// An extension for a MIME type, without the dot. `""` when there is no honest
+/// answer, which is the case for `application/octet-stream` (a provider that
+/// would not classify its own file).
+pub(crate) fn extension_for(mime: &str) -> &'static str {
+    match mime.split(';').next().unwrap_or("").trim() {
+        "application/pdf" => "pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        "application/vnd.oasis.opendocument.text" => "odt",
+        "application/vnd.oasis.opendocument.spreadsheet" => "ods",
+        "application/msword" => "doc",
+        "application/vnd.ms-excel" => "xls",
+        "application/rtf" => "rtf",
+        "application/epub+zip" => "epub",
+        "application/json" => "json",
+        "application/zip" => "zip",
+        "application/gzip" => "gz",
+        "application/x-tar" => "tar",
+        "text/plain" => "txt",
+        "text/markdown" => "md",
+        "text/csv" => "csv",
+        "text/html" => "html",
+        "text/xml" => "xml",
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/heic" => "heic",
+        "audio/mpeg" => "mp3",
+        "audio/mp4" => "m4a",
+        "audio/wav" | "audio/x-wav" => "wav",
+        "video/mp4" => "mp4",
+        _ => "",
+    }
+}
+
+/// Give a name an extension when it has none, from the MIME the picker reported.
+///
+/// Android's Storage Access Framework hands back `DISPLAY_NAME`, which for some
+/// providers is a bare `document-513` with no suffix at all. That name is what
+/// the agent sees in the `resource_link`, so an extensionless one costs it a
+/// `file`/`head -c` probe to work out what it is holding, and it makes the
+/// attachment unreadable in a chat bubble ("document-513" plus a generic icon).
+/// The MIME is the authority here; nothing guesses from content.
+///
+/// A name that already has an extension is returned untouched -- the picker is
+/// right far more often than a MIME map, and `report.v2.final.pdf` must not
+/// become `report.v2.final.pdf.pdf`.
+pub fn named_with_extension(name: &str, mime: &str) -> String {
+    let has_ext = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .rsplit_once('.')
+        .map(|(stem, ext)| !stem.is_empty() && !ext.is_empty() && ext.len() <= 8)
+        .unwrap_or(false);
+    let ext = extension_for(mime);
+    if has_ext || ext.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}.{ext}")
+    }
+}
+
 /// `(offset, len)` for each chunk of `total` bytes.
 ///
 /// Pure, and tested at the boundaries that actually occur: an empty file, an
@@ -304,6 +369,35 @@ mod tests {
             assert_eq!(offset, expected);
             expected += len as u64;
         }
+    }
+
+    #[test]
+    fn a_name_without_an_extension_borrows_one_from_the_mime() {
+        // What Android's SAF actually hands back for some providers: no suffix.
+        assert_eq!(
+            named_with_extension("document-513", "application/pdf"),
+            "document-513.pdf"
+        );
+        assert_eq!(
+            named_with_extension("document-34", "application/octet-stream"),
+            "document-34",
+            "an unclassified file gets no invented suffix"
+        );
+    }
+
+    #[test]
+    fn a_name_with_an_extension_is_never_doubled() {
+        assert_eq!(named_with_extension("report.pdf", "application/pdf"), "report.pdf");
+        // A picker that says .txt for a text file outranks the MIME map.
+        assert_eq!(named_with_extension("notes.txt", "application/pdf"), "notes.txt");
+        assert_eq!(named_with_extension("a.b.final.pdf", "application/pdf"), "a.b.final.pdf");
+        // A leading dot is a hidden file, not an extension.
+        assert_eq!(named_with_extension(".env", "text/plain"), ".env.txt");
+        // Long tails are not extensions (`reading 1.2.3` style names).
+        assert_eq!(
+            named_with_extension("patch.20261101T2100", "application/octet-stream"),
+            "patch.20261101T2100"
+        );
     }
 
     #[test]

@@ -2824,11 +2824,16 @@ class ConnectionManager private constructor(context: Context) {
             // row itself is authoritative, and the text-matching pixel queue
             // below is only the fallback for an older core library.
             val coreImages = dataUriBlocks(item.images)
-            val att = if (coreImages.isEmpty()) attachmentsFor(item) else null
+            // The core's own record of the files a prompt carried: name, MIME and
+            // size, which is what a bubble captions and what a replayed row still
+            // knows. The send-time FileBlock queue is only a fallback (a prompt
+            // echoed by an older core library carries a count, not records).
+            val coreFiles = item.files.map { AttachedFile(it.name, it.mime, it.bytes.toLong()) }
+            val att = if (coreImages.isEmpty() || coreFiles.isEmpty()) attachmentsFor(item) else null
             listOf(item.id to ChatMessage(
                 itemRole(item.kind), item.text, id = appIdFor(item.id),
                 images = coreImages.ifEmpty { att?.first ?: emptyList() },
-                files = att?.second ?: emptyList(),
+                files = coreFiles.ifEmpty { att?.second?.map { it.toAttachedFile() } ?: emptyList() },
                 // EVERY row carries its position. Omitting it here left all
                 // text at seq 0, which the ordered insert then placed ABOVE the
                 // first tool row — the transcript read as nothing but tool calls.

@@ -6,6 +6,30 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.60] - 2026-11-01
+
+### Added
+
+- **An attached file looks like a file.** The composer chip and the sent bubble
+  both draw a card: an icon chosen by kind (PDF, document, spreadsheet,
+  presentation, image, audio, video, archive, code, text), the file's name, and
+  its size. Before this an attachment was a chip reading just the name — and,
+  once sent, nothing at all: the bubble carried a count
+  (`Item.attachments`) that said "1 attachment" whether or not anything reached
+  the server.
+- **The bubble's cards survive a reload.** They are drawn from the row's own
+  record (`Item.files`: name, MIME, bytes) rather than from a client-side queue,
+  so a replayed chat still says what it carried.
+
+### Fixed
+
+- **A file whose picker name has no extension gets one from its MIME.**
+  Android's SAF hands back `document-513` for some providers, which the agent
+  then had to identify by content (`file`, `head -c`) and which read as an
+  unnamed blob in a bubble; it is now stored and linked as `document-513.pdf`.
+  The picker's own name always wins when it has a suffix — this only fills a
+  hole.
+
 ## [0.2.59] - 2026-11-01
 
 ### Added

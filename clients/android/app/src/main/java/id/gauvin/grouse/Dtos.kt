@@ -44,6 +44,8 @@ data class FileBlock(
     val name: String,
     val mimeType: String,
     val uri: android.net.Uri,
+    /** From the provider, for the chip's size; -1 when it will not report one. */
+    val bytes: Long = -1,
 )
 
 /** One choice in a tool-approval request (allow_once / allow_always / reject_*). */
@@ -289,7 +291,11 @@ data class ChatMessage(
     val role: String,
     val text: String,
     val images: List<ImageBlock> = emptyList(),
-    val files: List<FileBlock> = emptyList(),
+    // Files that rode this prompt, for the bubble's attachment cards. The core's
+    // own record (AttachedFile, built from Item.files) is preferred because it
+    // survives a reload; the send-time FileBlocks are only a fallback for an
+    // older core library that carried a count but no records.
+    val files: List<AttachedFile> = emptyList(),
     // Extra detail for a "tool" message: the tool's rawInput (command/args) — Desktop shows this,
     // Grouse was discarding it and only keeping the title. Unused by other roles.
     val detail: String = "",

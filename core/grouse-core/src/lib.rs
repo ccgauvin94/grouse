@@ -2222,8 +2222,11 @@ impl Core {
     ) -> Result<crate::attachments::UploadedFile, String> {
         use base64::Engine as _;
 
-        let name = file.name();
         let mime = file.mime();
+        // The picker's name can be extensionless (`document-513`), which the
+        // agent then has to identify by content and a bubble cannot caption.
+        // MIME is the authority; see attachments::named_with_extension.
+        let name = crate::attachments::named_with_extension(&file.name(), &mime);
         let size = file.size();
         if size > crate::attachments::MAX_BYTES {
             return Err(format!(

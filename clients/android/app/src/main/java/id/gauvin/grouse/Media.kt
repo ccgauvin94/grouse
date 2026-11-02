@@ -20,5 +20,13 @@ fun readImage(context: Context, uri: Uri): ImageBlock? = runCatching {
  */
 fun readFile(context: Context, uri: Uri, name: String): FileBlock? = runCatching {
     val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
-    FileBlock(name, mime, uri)
+    // Ask the provider for the size so the chip can say "25.3 MB" before the
+    // upload starts. -1 = it will not say, which the chip renders as no size
+    // rather than a wrong one. The core re-reads the size from the same source
+    // when it streams, so this is display only.
+    val bytes = runCatching {
+        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)
+            ?.use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else -1L } ?: -1L
+    }.getOrDefault(-1L)
+    FileBlock(name, mime, uri, bytes)
 }.getOrNull()

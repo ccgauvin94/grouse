@@ -892,23 +892,34 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                     }
                 }
 
-                if (attachments.isNotEmpty() || cm.draftFiles.isNotEmpty()) Row(Modifier.padding(vertical = 4.dp)) {
-                    attachments.forEachIndexed { i, _ ->
-                        AssistChip(onClick = { attachments.removeAt(i) },
-                            label = { Text("image ${i + 1}") },
-                            trailingIcon = { Icon(Icons.Filled.Close, contentDescription = "remove",
-                                modifier = Modifier.size(16.dp)) },
-                            modifier = Modifier.padding(end = 6.dp))
+                // Scrolls sideways rather than clipping: three cards already
+                // exceed a phone's width, and a card that is cut off hides the
+                // size — which is half the reason it is a card.
+                if (attachments.isNotEmpty() || cm.draftFiles.isNotEmpty()) Row(
+                    Modifier.padding(vertical = 4.dp).horizontalScroll(rememberScrollState())) {
+                    // An image is a pick too, so it gets the same card; its size
+                    // is the base64 payload's, which is what will actually go on
+                    // the wire (the original bytes were ~3/4 of it).
+                    attachments.forEachIndexed { i, img ->
+                        AttachmentCard(
+                            AttachedFile(
+                                "image ${i + 1}",
+                                img.mimeType,
+                                (img.dataB64.length.toLong() * 3) / 4,
+                            ),
+                            modifier = Modifier.padding(end = 6.dp).widthIn(max = 240.dp),
+                            onRemove = { attachments.removeAt(i) },
+                        )
                     }
+                    // A picked file shows the same card the sent bubble will:
+                    // icon by kind, name, and size, so what is about to go is
+                    // identifiable before it is uploaded rather than a name alone.
                     cm.draftFiles.forEachIndexed { i, f ->
-                        AssistChip(onClick = { cm.draftFiles.removeAt(i) },
-                            label = { Text(f.name, maxLines = 1,
-                                overflow = TextOverflow.Ellipsis) },
-                            leadingIcon = { Icon(Icons.Filled.InsertDriveFile, contentDescription = null,
-                                modifier = Modifier.size(16.dp)) },
-                            trailingIcon = { Icon(Icons.Filled.Close, contentDescription = "remove",
-                                modifier = Modifier.size(16.dp)) },
-                            modifier = Modifier.padding(end = 6.dp))
+                        AttachmentCard(
+                            f.toAttachedFile(),
+                            modifier = Modifier.padding(end = 6.dp).widthIn(max = 240.dp),
+                            onRemove = { cm.draftFiles.removeAt(i) },
+                        )
                     }
                 }
 
