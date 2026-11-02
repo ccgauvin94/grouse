@@ -1050,6 +1050,8 @@ Kirigami.Page {
                 readonly property string messageOutput: model.output ? model.output : ""
                 readonly property string messageStatus: model.status ? model.status : ""
                 readonly property var messageImages: model.images ? model.images : []
+                // Non-image attachments: {name, kind, icon, size, subtitle}
+                readonly property var messageFiles: model.files ? model.files : []
                 readonly property string messageUsage: model.usage ? String(model.usage) : ""
                 readonly property string messageChartData: model.chartData ? String(model.chartData) : ""
                 readonly property string messageAppHtml: model.appHtml ? String(model.appHtml) : ""
@@ -1273,6 +1275,64 @@ Kirigami.Page {
                                                 color: Kirigami.Theme.highlightedTextColor
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+                        // The files that rode this prompt, as cards: icon, name,
+                        // kind and size. Drawn from the core's own record, so a
+                        // replayed row still shows them — this bubble used to
+                        // show NOTHING for a non-image attachment, because the
+                        // send-time chip queue was only ever populated for
+                        // prompts that also carried blocks.
+                        Column {
+                            id: userFiles
+                            visible: mdel.messageFiles.length > 0
+                            width: parent.width
+                            spacing: Kirigami.Units.smallSpacing
+                            Repeater {
+                                model: mdel.messageFiles
+                                delegate: Rectangle {
+                                    width: userFiles.width
+                                    height: cardRow.implicitHeight + 12
+                                    radius: 8
+                                    // A tint of the bubble's own text colour, so
+                                    // the card sits ON the highlighted bubble
+                                    // without a second palette entry.
+                                    color: Qt.rgba(1, 1, 1, 0.14)
+                                    Row {
+                                        id: cardRow
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+                                        spacing: 8
+                                        Kirigami.Icon {
+                                            source: modelData.icon
+                                            implicitWidth: 20
+                                            implicitHeight: 20
+                                            isMask: true
+                                            color: Kirigami.Theme.highlightedTextColor
+                                        }
+                                        Controls.Label {
+                                            text: modelData.name
+                                            elide: Text.ElideMiddle
+                                            width: cardRow.width - 28
+                                            color: Kirigami.Theme.highlightedTextColor
+                                        }
+                                    }
+                                    // The kind · size line rides under the name,
+                                    // so a long name loses the middle rather than
+                                    // the size.
+                                    Controls.Label {
+                                        anchors.left: cardRow.left
+                                        anchors.leftMargin: 28
+                                        anchors.top: cardRow.bottom
+                                        text: modelData.subtitle
+                                        font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.8))
+                                        opacity: 0.75
+                                        color: Kirigami.Theme.highlightedTextColor
                                     }
                                 }
                             }
@@ -2070,7 +2130,8 @@ Kirigami.Page {
                 Repeater {
                     model: page.pendingFiles
                     Rectangle {
-                        height: Kirigami.Units.gridUnit * 2.5
+                        id: pendingChip
+                        height: Kirigami.Units.gridUnit * 3
                         width: (page.isImageFile(modelData) ? 60 : 24)
                                + 170 + Kirigami.Units.gridUnit * 1.25
                                + Kirigami.Units.smallSpacing * 5
@@ -2078,6 +2139,14 @@ Kirigami.Page {
                         color: Kirigami.Theme.alternateBackgroundColor
                         border.color: Kirigami.Theme.disabledTextColor
                         border.width: 1
+                        // Same classification the sent bubble uses, so the chip
+                        // you pick is the card you end up seeing: the icon
+                        // follows the file's kind and the size is on the line
+                        // below, rather than a generic sheet icon and a bare
+                        // name. Declared here (not on the Row) because the
+                        // children read it as `pendingChip.card`.
+                        readonly property var card: page.isImageFile(modelData)
+                            ? ({}) : Mgr.attachmentCard(modelData)
                         Row {
                             anchors.fill: parent
                             anchors.margins: Kirigami.Units.smallSpacing
@@ -2092,16 +2161,28 @@ Kirigami.Page {
                             }
                             Kirigami.Icon {
                                 visible: !page.isImageFile(modelData)
-                                source: "text-x-generic"
+                                source: page.isImageFile(modelData) ? "" : pendingChip.card.icon
                                 implicitWidth: 24
                                 implicitHeight: 24
                                 anchors.verticalCenter: parent.verticalCenter
                             }
-                            Controls.Label {
-                                text: page.fileBaseName(modelData)
+                            Column {
                                 width: 170
-                                elide: Text.ElideRight
                                 anchors.verticalCenter: parent.verticalCenter
+                                spacing: 0
+                                Controls.Label {
+                                    text: page.fileBaseName(modelData)
+                                    width: parent.width
+                                    elide: Text.ElideRight
+                                }
+                                Controls.Label {
+                                    visible: !page.isImageFile(modelData)
+                                    text: page.isImageFile(modelData) ? "" : pendingChip.card.subtitle
+                                    width: parent.width
+                                    elide: Text.ElideRight
+                                    opacity: 0.7
+                                    font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.8))
+                                }
                             }
                             Controls.Button {
                                 id: removeThumb

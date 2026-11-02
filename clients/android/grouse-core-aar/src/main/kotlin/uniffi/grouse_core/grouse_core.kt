@@ -5620,10 +5620,13 @@ data class Item (
      * server-side path and the sha256 that path is derived from.
      *
      * A row echoed locally carries these from send time. A row REPLAYED from
-     * the server does not — goose stores the rendered prompt (inlined text or
-     * a `resource_link` stub), not our record — so a replayed attachment shows
-     * as its text. Acceptable for now; the compromise is recorded in
-     * docs/TRANSCRIPT_MODEL.md.
+     * the server has only what goose stored — the rendered prompt — so the
+     * record is RECOVERED from goose's own link stub
+     * (`attachments::split_links`): the name comes back exactly, the MIME is
+     * derived from the name, and `bytes` is 0 because the stub carries no size
+     * (a UI shows a kind without a size rather than a made-up one). A text file
+     * is inlined by goose instead of stubbed, so a replayed one has no record
+     * at all — it displays as its contents, which is what it was.
      */
     var `files`: List<UploadedFile>
     , 

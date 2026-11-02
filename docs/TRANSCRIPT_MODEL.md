@@ -107,10 +107,25 @@ copy the transcript, and the cache saved from it, holds no record of what was
 asked, and a reopen that trusts the cache shows the replies with the questions
 missing. `spawn_prompt` therefore appends the prompt to the store as a `user`
 item — its text when it has one, and an empty caption for an attachment-only
-prompt. The item carries only the attachment COUNT (`attachments`); the client
-matches its own pixels to the row by that count. Gate the match on the count: a
-later text-only prompt can share its text with an earlier attachment prompt and
-must not inherit its pixels.
+prompt. Images ride the row as data URIs (`images`) and uploaded files as
+records (`files`: name, MIME, bytes, server path, sha256) — the record is why a
+bubble can name what it carried instead of saying "1 attachment".
+
+**A replayed attachment is recovered, not lost.** goose stores the rendered
+prompt, so a file comes back as its own link stub:
+
+```
+--- Resource link (not inlined) ---
+{"name":"document 513.pdf","uri":"file:///workspace/attachments/d155-document513.pdf"}
+---
+```
+
+The core splits that out at ingest (`attachments::split_links`): the stub leaves
+the message text, the file becomes a `files` entry (name verbatim, MIME from the
+name, `bytes: 0` = unknown), and the row renders as a card instead of a JSON
+object. A text file is INLINED by goose (`# <path>` + a fenced copy), so a
+replayed text attachment has no record — it shows as its contents, which is
+exactly what was sent.
 
 A `Tool` row may also carry `steps`: the child tool calls a SUBAGENT made under
 a delegate (goose forwards them as `_meta.toolNotification`; subagent sessions

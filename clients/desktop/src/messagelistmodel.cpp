@@ -31,6 +31,7 @@ QHash<int, QByteArray> MessageListModel::roleNames() const
         {StatusRole, "status"},
         {ToolCallIdRole, "toolCallId"},
         {ImagesRole, "images"},
+        {FilesRole, "files"},
         {UsageRole, "usage"},
         {ChartDataRole, "chartData"},
         {AppHtmlRole, "appHtml"},
@@ -60,6 +61,7 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
     case StatusRole: return m.value("status");
     case ToolCallIdRole: return m.value("toolCallId");
     case ImagesRole: return m.value("images");
+    case FilesRole: return m.value("files");
     case UsageRole: return m.value("usage");
     case ChartDataRole: return m.value("chartData");
     case AppHtmlRole: return m.value("appHtml");

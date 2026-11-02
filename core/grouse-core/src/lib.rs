@@ -245,10 +245,13 @@ pub struct Item {
     /// server-side path and the sha256 that path is derived from.
     ///
     /// A row echoed locally carries these from send time. A row REPLAYED from
-    /// the server does not — goose stores the rendered prompt (inlined text or
-    /// a `resource_link` stub), not our record — so a replayed attachment shows
-    /// as its text. Acceptable for now; the compromise is recorded in
-    /// docs/TRANSCRIPT_MODEL.md.
+    /// the server has only what goose stored — the rendered prompt — so the
+    /// record is RECOVERED from goose's own link stub
+    /// (`attachments::split_links`): the name comes back exactly, the MIME is
+    /// derived from the name, and `bytes` is 0 because the stub carries no size
+    /// (a UI shows a kind without a size rather than a made-up one). A text file
+    /// is inlined by goose instead of stubbed, so a replayed one has no record
+    /// at all — it displays as its contents, which is what it was.
     #[serde(default)]
     pub files: Vec<crate::attachments::UploadedFile>,
     /// Images the row carries, as `data:<mime>;base64,<data>` URIs the client
@@ -2222,11 +2225,11 @@ impl Core {
     ) -> Result<crate::attachments::UploadedFile, String> {
         use base64::Engine as _;
 
+        // The name is carried through VERBATIM: it is the user's, and it is what
+        // the transcript captions and the link shows. The server keeps a
+        // sanitised name for the path only (attachments-mcp rule 5).
+        let name = file.name();
         let mime = file.mime();
-        // The picker's name can be extensionless (`document-513`), which the
-        // agent then has to identify by content and a bubble cannot caption.
-        // MIME is the authority; see attachments::named_with_extension.
-        let name = crate::attachments::named_with_extension(&file.name(), &mime);
         let size = file.size();
         if size > crate::attachments::MAX_BYTES {
             return Err(format!(

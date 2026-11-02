@@ -11,6 +11,8 @@
 #include "roamlistmodel.h"
 #include "sessionlistmodel.h"
 
+#include <cmath>
+
 #include <QDateTime>
 #include <QDir>
 #include <QDesktopServices>
@@ -859,15 +861,26 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks,
                                  {"name", QFileInfo(b.value("resource").toMap()
                                                     .value("uri").toString()).fileName()}};
     }
-    for (const QString &path : files)
-        shown << QVariantMap{{"image", false}, {"url", path},
-                             {"name", QFileInfo(path).fileName()}};
+    // A file by PATH: this is only the fallback (an older core library that
+    // reports a count but no records) — the row's cards normally come from the
+    // core's own `files`, which is what a replayed transcript still has.
+    for (const QString &path : files) {
+        const QFileInfo info(path);
+        shown << QVariantMap{{"image", false},
+                             {"url", path},
+                             {"name", info.fileName()},
+                             {"mime", QMimeDatabase().mimeTypeForFile(path).name()},
+                             {"bytes", info.size()}};
+    }
     const bool sameChatBusy = m_prompting && m_promptingSessionId == m_currentSessionId;
     if (ready && !sameChatBusy) {
         // Thumbnails are matched back onto the row the core echoes, so they are queued
         // only at the moment the prompt actually goes out — queueing them earlier put a
-        // second copy in the map every time a parked send was drained.
-        if (!blocks.isEmpty() && !shown.isEmpty())
+        // second copy in the map every time a parked send was drained. `files` counts
+        // too: a prompt with ONLY a non-image attachment produces no blocks, and the
+        // blocks-only guard is why an attached PDF showed up in the transcript as
+        // nothing at all on this client.
+        if ((!blocks.isEmpty() || !files.isEmpty()) && !shown.isEmpty())
             m_pendingAttachments[text].append(shown);
         m_prompting = true;
         m_promptingSessionId = m_currentSessionId;
@@ -1180,6 +1193,125 @@ QStringList Manager::attachmentPaths(const QVariantList &paths)
         out << path;
     }
     return out;
+}
+
+/// The kind of a file, for the second line of an attachment card. MIME first
+/// (authoritative), the name's suffix second — the stub recovered from a replay
+/// carries a name only. Must agree with the Android client's mapping, which is
+/// why it is a table rather than a per-call decision.
+namespace {
+QString attachmentKind(const QString &mime, const QString &name)
+{
+    const QString m = mime.toLower();
+    const QString ext = name.section(QLatin1Char('.'), -1).toLower();
+    if (m == QLatin1String("application/pdf") || ext == QLatin1String("pdf"))
+        return QStringLiteral("PDF");
+    if (m.contains(QLatin1String("wordprocessingml")) || m == QLatin1String("application/msword")
+        || m.contains(QLatin1String("opendocument.text"))
+        || QStringList{"doc", "docx", "odt", "rtf", "pages"}.contains(ext))
+        return QStringLiteral("Document");
+    if (m.contains(QLatin1String("spreadsheetml")) || m == QLatin1String("application/vnd.ms-excel")
+        || m.contains(QLatin1String("opendocument.spreadsheet")) || m == QLatin1String("text/csv")
+        || QStringList{"xls", "xlsx", "ods", "csv", "numbers"}.contains(ext))
+        return QStringLiteral("Spreadsheet");
+    if (m.contains(QLatin1String("presentationml")) || m == QLatin1String("application/vnd.ms-powerpoint")
+        || m.contains(QLatin1String("opendocument.presentation"))
+        || QStringList{"ppt", "pptx", "odp", "key"}.contains(ext))
+        return QStringLiteral("Presentation");
+    if (m.startsWith(QLatin1String("image/")))
+        return QStringLiteral("Image");
+    if (m.startsWith(QLatin1String("audio/")))
+        return QStringLiteral("Audio");
+    if (m.startsWith(QLatin1String("video/")))
+        return QStringLiteral("Video");
+    if (m.contains(QLatin1String("zip")) || m.contains(QLatin1String("gzip"))
+        || m.contains(QLatin1String("tar"))
+        || QStringList{"zip", "gz", "tar", "7z", "rar", "bz2", "xz"}.contains(ext))
+        return QStringLiteral("Archive");
+    if (m.contains(QLatin1String("json")) || m.contains(QLatin1String("javascript"))
+        || m.contains(QLatin1String("xml")) || m.contains(QLatin1String("html"))
+        || QStringList{"json", "js", "ts", "xml", "html", "css", "py", "rs", "cpp", "sh", "yaml", "yml"}.contains(ext))
+        return QStringLiteral("Code");
+    if (m.startsWith(QLatin1String("text/")) || QStringList{"txt", "md", "log"}.contains(ext))
+        return QStringLiteral("Text");
+    return QStringLiteral("File");
+}
+
+/// The Freedesktop icon for the same classification (Kirigami.Icon takes theme names).
+QString attachmentIcon(const QString &mime, const QString &name)
+{
+    const QString kind = attachmentKind(mime, name);
+    if (kind == QLatin1String("PDF"))
+        return QStringLiteral("application-pdf");
+    if (kind == QLatin1String("Document"))
+        return QStringLiteral("x-office-document");
+    if (kind == QLatin1String("Spreadsheet"))
+        return QStringLiteral("x-office-spreadsheet");
+    if (kind == QLatin1String("Presentation"))
+        return QStringLiteral("x-office-presentation");
+    if (kind == QLatin1String("Image"))
+        return QStringLiteral("image-x-generic");
+    if (kind == QLatin1String("Audio"))
+        return QStringLiteral("audio-x-generic");
+    if (kind == QLatin1String("Video"))
+        return QStringLiteral("video-x-generic");
+    if (kind == QLatin1String("Archive"))
+        return QStringLiteral("application-x-archive");
+    if (kind == QLatin1String("Code"))
+        return QStringLiteral("text-x-script");
+    if (kind == QLatin1String("Text"))
+        return QStringLiteral("text-x-generic");
+    return QStringLiteral("application-octet-stream");
+}
+
+/// "812 B" / "106 KB" / "25.3 MB", rounding the way the phone does: one decimal
+/// only while it says something. `<= 0` is "unknown" — a replayed stub knows no
+/// size, and a card that prints 0 B for a 26 MB deck is worse than one that
+/// prints nothing.
+QString humanBytes(qint64 bytes)
+{
+    if (bytes <= 0)
+        return QString();
+    if (bytes < 1024)
+        return QStringLiteral("%1 B").arg(bytes);
+    static const char *units[] = {"KB", "MB", "GB", "TB"};
+    double value = bytes / 1024.0;
+    int unit = 0;
+    while (value >= 1024.0 && unit < 3) {
+        value /= 1024.0;
+        unit++;
+    }
+    const bool whole = qFuzzyCompare(value, std::floor(value));
+    const QString number = (value >= 100.0 || whole) ? QString::number(value, 'f', 0)
+                                                     : QString::number(value, 'f', 1);
+    return QStringLiteral("%1 %2").arg(number, QString::fromLatin1(units[unit]));
+}
+
+/// One file as the card needs it: name, kind, icon and size label.
+QVariantMap fileCard(const QString &name, const QString &mime, qint64 bytes)
+{
+    const QString kind = attachmentKind(mime, name);
+    const QString size = humanBytes(bytes);
+    return QVariantMap{{"name", name},
+                       {"kind", kind},
+                       {"icon", attachmentIcon(mime, name)},
+                       {"size", size},
+                       // "PDF · 106 KB", or the kind alone when the size is unknown
+                       {"subtitle", size.isEmpty() ? kind : QStringLiteral("%1 · %2").arg(kind, size)}};
+}
+
+} // namespace
+
+QVariantMap Manager::attachmentCard(const QString &path) const
+{
+    const QFileInfo info(path);
+    if (!info.exists())
+        return QVariantMap{{"name", info.fileName()},
+                           {"kind", QStringLiteral("File")},
+                           {"icon", QStringLiteral("application-octet-stream")},
+                           {"size", QString()},
+                           {"subtitle", QStringLiteral("File")}};
+    return fileCard(info.fileName(), QMimeDatabase().mimeTypeForFile(path).name(), info.size());
 }
 
 void Manager::cancelTurn()
@@ -3107,18 +3239,48 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
     // gated on the count, because a later text-only prompt can repeat an
     // earlier attachment prompt's text and must not inherit its thumbnails.
     if (role == QLatin1String("user")) {
+        // ONE consumption of the send-time queue per row (it is keyed by prompt
+        // text and consumed in order, so asking twice would starve the next
+        // row): used only for what the core did not record.
+        const auto queued = attachmentsForItem(
+            id, text, item.value(QStringLiteral("attachments")).toInt());
+
         const auto uris = item.value(QStringLiteral("images")).toArray();
         QVariantList images;
         if (!uris.isEmpty()) {
             for (const auto &uri : uris)
                 images << QVariantMap{{"image", true}, {"url", uri.toString()}};
-            row["images"] = images;
         } else {
-            const auto queued = attachmentsForItem(
-                id, text, item.value(QStringLiteral("attachments")).toInt());
-            if (!queued.isEmpty())
-                row["images"] = queued;
+            for (const auto &v : queued)
+                if (v.toMap().value("image").toBool())
+                    images << v;
         }
+        if (!images.isEmpty())
+            row["images"] = images;
+
+        // The files that rode this prompt, from the CORE's record (name, MIME,
+        // bytes) — not from the send-time queue, which is per-session state a
+        // reload does not have. The queue is the fallback for an older core
+        // library and for a row that predates the record.
+        QVariantList cards;
+        const auto recorded = item.value(QStringLiteral("files")).toArray();
+        for (const auto &f : recorded) {
+            const QJsonObject o = f.toObject();
+            cards << fileCard(o.value(QStringLiteral("name")).toString(),
+                              o.value(QStringLiteral("mime")).toString(),
+                              static_cast<qint64>(o.value(QStringLiteral("bytes")).toDouble()));
+        }
+        if (cards.isEmpty()) {
+            for (const auto &v : queued) {
+                const QVariantMap m = v.toMap();
+                if (m.value("image").toBool() || !m.contains("mime"))
+                    continue;
+                cards << fileCard(m.value("name").toString(), m.value("mime").toString(),
+                                  m.value("bytes").toLongLong());
+            }
+        }
+        if (!cards.isEmpty())
+            row["files"] = cards;
     }
     ensureRowHtml(row);
     return row;

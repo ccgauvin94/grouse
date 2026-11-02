@@ -76,71 +76,6 @@ pub(crate) fn commit_params(wire: &str, upload_id: &str) -> Value {
     tool_params(wire, "attachment_commit", json!({ "uploadId": upload_id }))
 }
 
-/// An extension for a MIME type, without the dot. `""` when there is no honest
-/// answer, which is the case for `application/octet-stream` (a provider that
-/// would not classify its own file).
-pub(crate) fn extension_for(mime: &str) -> &'static str {
-    match mime.split(';').next().unwrap_or("").trim() {
-        "application/pdf" => "pdf",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
-        "application/vnd.oasis.opendocument.text" => "odt",
-        "application/vnd.oasis.opendocument.spreadsheet" => "ods",
-        "application/msword" => "doc",
-        "application/vnd.ms-excel" => "xls",
-        "application/rtf" => "rtf",
-        "application/epub+zip" => "epub",
-        "application/json" => "json",
-        "application/zip" => "zip",
-        "application/gzip" => "gz",
-        "application/x-tar" => "tar",
-        "text/plain" => "txt",
-        "text/markdown" => "md",
-        "text/csv" => "csv",
-        "text/html" => "html",
-        "text/xml" => "xml",
-        "image/png" => "png",
-        "image/jpeg" => "jpg",
-        "image/webp" => "webp",
-        "image/gif" => "gif",
-        "image/heic" => "heic",
-        "audio/mpeg" => "mp3",
-        "audio/mp4" => "m4a",
-        "audio/wav" | "audio/x-wav" => "wav",
-        "video/mp4" => "mp4",
-        _ => "",
-    }
-}
-
-/// Give a name an extension when it has none, from the MIME the picker reported.
-///
-/// Android's Storage Access Framework hands back `DISPLAY_NAME`, which for some
-/// providers is a bare `document-513` with no suffix at all. That name is what
-/// the agent sees in the `resource_link`, so an extensionless one costs it a
-/// `file`/`head -c` probe to work out what it is holding, and it makes the
-/// attachment unreadable in a chat bubble ("document-513" plus a generic icon).
-/// The MIME is the authority here; nothing guesses from content.
-///
-/// A name that already has an extension is returned untouched -- the picker is
-/// right far more often than a MIME map, and `report.v2.final.pdf` must not
-/// become `report.v2.final.pdf.pdf`.
-pub fn named_with_extension(name: &str, mime: &str) -> String {
-    let has_ext = name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(name)
-        .rsplit_once('.')
-        .map(|(stem, ext)| !stem.is_empty() && !ext.is_empty() && ext.len() <= 8)
-        .unwrap_or(false);
-    let ext = extension_for(mime);
-    if has_ext || ext.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name}.{ext}")
-    }
-}
-
 /// `(offset, len)` for each chunk of `total` bytes.
 ///
 /// Pure, and tested at the boundaries that actually occur: an empty file, an
@@ -157,6 +92,123 @@ pub(crate) fn chunk_plan(total: u64, chunk: usize) -> Vec<(u64, usize)> {
         offset += len;
     }
     plan
+}
+
+/// goose's own rendering of a `resource_link` it did NOT inline.
+///
+/// Verbatim from `crates/goose/src/acp/server.rs` (confirmed in the shipped
+/// binary): `format!("\n\n--- Resource link (not inlined) ---\n{}\n---", …)`.
+/// The client cannot choose this text, which is why recognising it is the only
+/// way back to the file a replayed prompt carried: the server stores the
+/// RENDERED prompt, not our record.
+const LINK_MARKER: &str = "--- Resource link (not inlined) ---";
+
+/// A MIME type guessed from a name's suffix. Only used to label a file recovered
+/// from a replay (the link stub carries a name and a URI, no MIME).
+pub(crate) fn mime_for_name(name: &str) -> String {
+    let ext = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let mime = match ext.as_str() {
+        "pdf" => "application/pdf",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "doc" => "application/msword",
+        "xls" => "application/vnd.ms-excel",
+        "odt" => "application/vnd.oasis.opendocument.text",
+        "rtf" => "application/rtf",
+        "epub" => "application/epub+zip",
+        "txt" | "log" => "text/plain",
+        "md" => "text/markdown",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "xml" => "text/xml",
+        "json" => "application/json",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "tar" => "application/x-tar",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "heic" => "image/heic",
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        _ => "application/octet-stream",
+    };
+    mime.to_string()
+}
+
+/// Split a RE-READ user message into its visible text and the files it carried.
+///
+/// A prompt we echoed at send time keeps its own file record (`Item.files`), but
+/// one the server replays has only what goose stored: the rendered prompt. For a
+/// file that means the link stub, so the bubble used to show a JSON object where
+/// the attachment had been — and, worse, said nothing at all about it being an
+/// attachment.
+///
+/// Returns the text unchanged (`files` empty) when the marker is absent or the
+/// JSON does not parse, so a malformed stub degrades to what the old clients
+/// showed rather than eating the message.
+///
+/// The recovered record has no size (`bytes: 0`) and no hash: the stub carries
+/// neither, and inventing one would make a card claim a figure nothing measured.
+pub(crate) fn split_links(text: &str) -> (String, Vec<UploadedFile>) {
+    if !text.contains(LINK_MARKER) {
+        return (text.to_string(), Vec::new());
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let mut kept: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut files: Vec<UploadedFile> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let is_stub = lines[i].trim() == LINK_MARKER
+            && i + 2 < lines.len()
+            && lines[i + 2].trim() == "---";
+        if is_stub {
+            if let Some(file) = link_from_stub(lines[i + 1]) {
+                files.push(file);
+                i += 3;
+                continue;
+            }
+        }
+        kept.push(lines[i]);
+        i += 1;
+    }
+    if files.is_empty() {
+        return (text.to_string(), Vec::new());
+    }
+    (kept.join("\n").trim().to_string(), files)
+}
+
+/// One `{"name":…,"uri":…}` line, as an `UploadedFile`. `None` when it is not
+/// that shape — a `file:` URI is required, because anything else is not a path
+/// this client ever uploaded.
+fn link_from_stub(line: &str) -> Option<UploadedFile> {
+    let value: Value = serde_json::from_str(line.trim()).ok()?;
+    let name = value.get("name")?.as_str()?.trim().to_string();
+    let uri = value.get("uri")?.as_str()?;
+    if name.is_empty() || !uri.starts_with("file://") {
+        return None;
+    }
+    Some(UploadedFile {
+        mime: mime_for_name(&name),
+        name,
+        // Unknown after a replay: the stub stores neither. UIs show a kind
+        // without a size rather than a made-up one.
+        bytes: 0,
+        // Still percent-encoded, exactly as it was sent (see `file_uri`); the
+        // path is an identifier here, not something a UI prints.
+        path: uri.trim_start_matches("file://").to_string(),
+        sha256: String::new(),
+    })
 }
 
 /// A `file://` URI for a server-side path.
@@ -371,40 +423,71 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_name_without_an_extension_borrows_one_from_the_mime() {
-        // What Android's SAF actually hands back for some providers: no suffix.
-        assert_eq!(
-            named_with_extension("document-513", "application/pdf"),
-            "document-513.pdf"
-        );
-        assert_eq!(
-            named_with_extension("document-34", "application/octet-stream"),
-            "document-34",
-            "an unclassified file gets no invented suffix"
-        );
-    }
 
-    #[test]
-    fn a_name_with_an_extension_is_never_doubled() {
-        assert_eq!(named_with_extension("report.pdf", "application/pdf"), "report.pdf");
-        // A picker that says .txt for a text file outranks the MIME map.
-        assert_eq!(named_with_extension("notes.txt", "application/pdf"), "notes.txt");
-        assert_eq!(named_with_extension("a.b.final.pdf", "application/pdf"), "a.b.final.pdf");
-        // A leading dot is a hidden file, not an extension.
-        assert_eq!(named_with_extension(".env", "text/plain"), ".env.txt");
-        // Long tails are not extensions (`reading 1.2.3` style names).
-        assert_eq!(
-            named_with_extension("patch.20261101T2100", "application/octet-stream"),
-            "patch.20261101T2100"
-        );
-    }
 
     #[test]
     fn file_uri_escapes_what_would_break_parsing() {
         assert_eq!(file_uri("/workspace/a.pdf"), "file:///workspace/a.pdf");
         assert_eq!(file_uri("/a b/c#1.pdf"), "file:///a%20b/c%231.pdf");
         assert_eq!(file_uri("/a%20b"), "file:///a%2520b");
+    }
+
+    /// The exact bytes goose renders, taken from a live replay of a prompt that
+    /// carried two files (see the phone session 20261102_39).
+    const REPLAYED: &str = "\n\n--- Resource link (not inlined) ---\n\
+        {\"name\":\"document-513\",\"uri\":\"file:///workspace/attachments/d155f4940515d168-document-513\"}\n---";
+
+    #[test]
+    fn a_replayed_stub_becomes_a_file_and_leaves_no_json() {
+        let (text, files) = split_links(REPLAYED);
+        assert_eq!(text, "", "the stub was the whole message");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "document-513");
+        assert_eq!(files[0].path, "/workspace/attachments/d155f4940515d168-document-513");
+        assert_eq!(files[0].bytes, 0, "a replay knows no size -- do not invent one");
+        assert_eq!(files[0].sha256, "");
+    }
+
+    #[test]
+    fn a_stub_after_real_text_keeps_the_text() {
+        // What a prompt with a message AND a file re-reads as.
+        let raw = format!("look at this{REPLAYED}");
+        let (text, files) = split_links(&raw);
+        assert_eq!(text, "look at this");
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn two_stubs_in_one_message_are_two_files() {
+        let raw = format!("{REPLAYED}\n\n{REPLAYED}");
+        let (text, files) = split_links(&raw);
+        assert_eq!(text, "", "both stubs removed, leaving nothing but whitespace");
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn ordinary_text_is_untouched() {
+        // The marker is what makes this safe: no client can produce the string
+        // accidentally, and a message that merely MENTIONS a link keeps its
+        // words (a JSON line outside a stub is not a file).
+        let prose = "here is a link: file:///workspace/attachments/x-report.pdf\nand more";
+        assert_eq!(split_links(prose), (prose.to_string(), Vec::new()));
+        let broken = "--- Resource link (not inlined) ---\nnot json\n---";
+        assert_eq!(split_links(broken), (broken.to_string(), Vec::new()));
+        // A stub whose URI is not a file: path is not something we uploaded.
+        let remote = "--- Resource link (not inlined) ---\n\
+            {\"name\":\"a.pdf\",\"uri\":\"https://example.com/a.pdf\"}\n---";
+        assert_eq!(split_links(remote), (remote.to_string(), Vec::new()));
+    }
+
+    #[test]
+    fn a_recovered_name_still_classifies() {
+        // The card picks its icon from the MIME, and the stub carries none: the
+        // suffix is all there is, and a nameless blob would show a generic icon.
+        assert_eq!(mime_for_name("document-513.pdf"), "application/pdf");
+        assert_eq!(mime_for_name("Q3 report (final).XLSX"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        assert_eq!(mime_for_name("no-suffix"), "application/octet-stream");
     }
 
     #[test]

@@ -6,6 +6,35 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.61] - 2026-11-02
+
+### Added
+
+- **The desktop draws attachment cards too**, from the same record the phone
+  does (`Item.files`): icon by kind, name, and `kind · size`. Before this a
+  non-image attachment on the desktop was invisible in the transcript — the
+  send-time chip queue was only populated for prompts that carried inline
+  blocks, so a PDF that uploaded perfectly showed up as nothing at all.
+- **A replayed chat shows its attachments again.** goose stores the *rendered*
+  prompt, so an attachment comes back as its own link stub — a JSON object where
+  the message had been, and nothing saying a file was attached. The core now
+  splits the stub out at ingest: the row shows the user's message and a file
+  card (name recovered exactly, kind from the name, no size — the stub carries
+  none). A file-carrying prompt also adopts its own echo now, which it previously
+  could not (the stub text never matched what the user typed), so a reopened
+  thread no longer lists the same question twice.
+
+### Fixed
+
+- **The name in the card is YOUR file name, not our sanitised one.** The upload
+  server rewrites a name to be safe on disk (`Q3 report (final).pdf` →
+  `Q3-report-final-.pdf`, spaces to dashes) and was reporting that form back, so
+  every client captioned a file the user never named. The rename is now confined
+  to the path: `commit` returns the picker's name verbatim, and the transcript,
+  the card and the `resource_link` all use it.
+- Nothing is renamed any more on the way in, which also retires 0.2.60's
+  extension-appending: a file called `document 513` stays `document 513`.
+
 ## [0.2.60] - 2026-11-01
 
 ### Added

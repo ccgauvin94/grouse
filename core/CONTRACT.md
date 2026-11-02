@@ -348,6 +348,15 @@ Rules:
   pulled one chunk at a time and never held whole on either side of the
   boundary. Images keep the inline path unchanged.
 
+- **A file's NAME is display data; only its PATH is sanitised.** The
+  `attachments` server writes `<sha16>-<sanitised name>` on disk (it must: the
+  name is client-supplied and a name is not an address) but reports the name the
+  picker gave, verbatim, as `name` — and that is what `Item.files` keeps, what the
+  link block shows and what a bubble captions. Reporting the sanitised form is
+  how `Q3 report (final).pdf` became `Q3-report-final-.pdf` in every client. A
+  replayed row recovers the name from goose's link stub
+  (`attachments::split_links`), with no size: the stub carries none.
+
 - **A replayed thought never becomes a row of its own.** goose re-sends the
   reasoning trail on every `session/load`, but such a row would double the trail
   and carries no stable id to reconcile by. The core holds it as the thinking of

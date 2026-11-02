@@ -962,8 +962,14 @@ impl TranscriptStore {
                     // that row, so the replayed one is the row. Identity first.
                     if let Some((echo_text, echo_uid)) = st.pending_echo.front().cloned() {
                         let at = st.bubbles.iter().position(|b| bubble_uid(b) == echo_uid);
+                        // A prompt that carried a FILE comes back as goose's
+                        // link stub, not as the text the user typed, so an exact
+                        // comparison would refuse to adopt its own echo and the
+                        // question would appear twice. Compare against what the
+                        // user actually wrote.
+                        let replayed = crate::attachments::split_links(text.unwrap_or("")).0;
                         match at {
-                            Some(idx) if echo_text == text.unwrap_or("") => {
+                            Some(idx) if echo_text == replayed => {
                                 st.pending_echo.pop_front();
                                 if let Bubble::Text { id, .. } = &mut st.bubbles[idx] {
                                     *id = mid.to_string();
@@ -1028,15 +1034,23 @@ impl TranscriptStore {
                     None => st.new_uid(),
                 };
                 let seq = st.new_seq();
+                // A replayed user row carries goose's rendered prompt: its text
+                // plus a link stub per file. Split them so the bubble shows the
+                // message and a card, not a JSON object (see split_links).
+                let (opening, carried) = if role == "user" {
+                    crate::attachments::split_links(text.unwrap_or(""))
+                } else {
+                    (text.unwrap_or("").to_string(), Vec::new())
+                };
                 st.bubbles.push(Bubble::Text {
                     id: message_id.unwrap_or("").to_string(),
                     uid,
                     role: role.to_string(),
-                    text: text.unwrap_or("").to_string(),
+                    text: opening,
                     thought,
                     seq,
                     attachments: 0,
-                    files: Vec::new(),
+                    files: carried,
                     images: image
                         .map(|u| std::iter::once(u.to_string()).collect())
                         .unwrap_or_default(),
@@ -1054,11 +1068,25 @@ impl TranscriptStore {
                     text: acc,
                     thought: t,
                     images,
+                    files,
                     ..
                 } = &mut st.bubbles[idx]
                 {
                     if let Some(chunk) = text {
-                        acc.push_str(chunk);
+                        // A user chunk can BE a link stub (the rendered prompt
+                        // arrives as more than one block): strip it and record
+                        // the file, rather than appending JSON to the message.
+                        if role == "user" {
+                            let (clean, carried) = crate::attachments::split_links(chunk);
+                            acc.push_str(&clean);
+                            for file in carried {
+                                if !files.iter().any(|f| f.path == file.path) {
+                                    files.push(file);
+                                }
+                            }
+                        } else {
+                            acc.push_str(chunk);
+                        }
                     }
                     if let Some(img) = image {
                         if !images.iter().any(|u| u == img) {
@@ -2362,6 +2390,54 @@ mod tests {
         // The legacy count still covers images + files, so a UI drawn against
         // the old field keeps working.
         assert_eq!(items[0].attachments, 1);
+    }
+
+    /// A REPLAYED attachment must come back as an attachment.
+    ///
+    /// goose stores the rendered prompt, so a prompt whose bytes went up as a
+    /// file re-reads as goose's own link stub — a JSON object where the message
+    /// was. Measured on the first real upload (session 20261102_39): the row
+    /// stored exactly this, and nothing in the transcript said "attachment".
+    #[test]
+    fn a_replayed_attachment_becomes_a_card_not_json() {
+        let (listener, _) = listener();
+        let store = TranscriptStore::new(listener);
+        store.append_chunk(
+            "user",
+            "\n\n--- Resource link (not inlined) ---\n\
+             {\"name\":\"document 513.pdf\",\"uri\":\"file:///workspace/attachments/d155-document%20513.pdf\"}\n---",
+            Some("msg-1"),
+            false,
+        );
+        let items = store.rich_transcript();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "", "the stub is not the user's message");
+        assert_eq!(items[0].files.len(), 1);
+        assert_eq!(items[0].files[0].name, "document 513.pdf");
+        assert_eq!(items[0].files[0].mime, "application/pdf");
+        assert_eq!(items[0].files[0].bytes, 0, "a replay cannot know the size");
+    }
+
+    /// The stub is what the server sends back for a file-carrying prompt, so
+    /// recognition must not depend on it arriving as its own chunk: a prompt
+    /// with text AND a file arrives as more than one block.
+    #[test]
+    fn a_stub_appended_to_real_text_is_still_recognised() {
+        let (listener, _) = listener();
+        let store = TranscriptStore::new(listener);
+        store.append_chunk("user", "what does this say?", Some("msg-1"), false);
+        store.append_chunk(
+            "user",
+            "\n\n--- Resource link (not inlined) ---\n\
+             {\"name\":\"a.docx\",\"uri\":\"file:///workspace/attachments/beef-a.docx\"}\n---",
+            Some("msg-1"),
+            false,
+        );
+        let items = store.rich_transcript();
+        assert_eq!(items.len(), 1, "one prompt, one row");
+        assert_eq!(items[0].text, "what does this say?");
+        assert_eq!(items[0].files.len(), 1);
+        assert_eq!(items[0].files[0].name, "a.docx");
     }
 
     /// A listener that records the speak stream instead of the item ops.

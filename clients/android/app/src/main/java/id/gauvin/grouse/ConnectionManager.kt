@@ -2828,7 +2828,13 @@ class ConnectionManager private constructor(context: Context) {
             // size, which is what a bubble captions and what a replayed row still
             // knows. The send-time FileBlock queue is only a fallback (a prompt
             // echoed by an older core library carries a count, not records).
-            val coreFiles = item.files.map { AttachedFile(it.name, it.mime, it.bytes.toLong()) }
+            val coreFiles = item.files.map {
+                // 0 bytes is "unknown", not "empty": a row recovered from a
+                // replayed link stub has a name and a path but no size, because
+                // the stub carries none. A card with no size beats a card that
+                // claims a 26 MB deck is empty.
+                AttachedFile(it.name, it.mime, if (it.bytes == 0uL) -1L else it.bytes.toLong())
+            }
             val att = if (coreImages.isEmpty() || coreFiles.isEmpty()) attachmentsFor(item) else null
             listOf(item.id to ChatMessage(
                 itemRole(item.kind), item.text, id = appIdFor(item.id),

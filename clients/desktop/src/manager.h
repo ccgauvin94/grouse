@@ -246,6 +246,11 @@ public:
      *  raw image data with no file behind it (a copied screenshot from a browser) is written
      *  to a temp PNG first, because an attachment is a file path end to end. */
     Q_INVOKABLE QStringList clipboardAttachmentFiles();
+    /** One attached file as the card a composer chip or a bubble draws:
+     *  {name, kind, icon, size, subtitle}. The classification lives in C++ so
+     *  the composer and the transcript cannot disagree, and so a QML delegate
+     *  never formats a byte count. */
+    Q_INVOKABLE QVariantMap attachmentCard(const QString &path) const;
     Q_INVOKABLE void cancelTurn();
     /** Compact the conversation history (goose /compact command). */
     Q_INVOKABLE void compactConversation();

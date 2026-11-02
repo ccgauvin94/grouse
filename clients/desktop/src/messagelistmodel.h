@@ -36,6 +36,9 @@ public:
         StatusRole,        // "status"
         ToolCallIdRole,    // "toolCallId"
         ImagesRole,        // "images"   — local thumbnail URLs for a sent image attachment
+        FilesRole,         // "files"    — non-image attachments: {name, kind, size} for the
+                           //              bubble's file cards (the core's own record, so a
+                           //              replayed row still shows them)
         UsageRole,         // "usage"    — per-message tok/s + cost label (message_usage)
         ChartDataRole,     // "chartData" — Chart.js-style spec JSON for a chart bubble
         AppHtmlRole,       // "appHtml"  — fetched MCP-App template HTML
