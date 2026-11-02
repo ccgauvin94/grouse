@@ -57,6 +57,13 @@ public:
         void (*grouse_flush_caches)(void *h);
         void (*grouse_send_prompt)(void *h, const char *prompt_json,
                                    const char *expect_json, char **out_err);
+        // Attachments by local path: the core uploads them to the server and
+        // the prompt carries a resource_link per file. Needed because goose
+        // DROPS a `resource` block whose contents are a base64 blob.
+        void (*grouse_send_prompt_with_paths)(void *h, const char *prompt_json,
+                                              const char *paths_json,
+                                              const char *expect_json,
+                                              char **out_err);
         void (*grouse_cancel)(void *h);
         void (*grouse_set_config_option)(void *h, const char *config_id,
                                          const char *value, char **out_err);

@@ -133,6 +133,113 @@ pub(crate) fn link_block(file: &UploadedFile) -> PromptBlock {
     }
 }
 
+/// A file on the client's OWN disk.
+///
+/// The desktop is a local app, so its attachments are paths and the core can
+/// open them itself -- which keeps that client's whole C ABI addition to one
+/// function taking a JSON array of paths, instead of a callback vtable. Android
+/// resolves `content://` URIs and cannot do that, so it implements
+/// [`crate::FileSource`] instead. The upload protocol above is identical either
+/// way; only "where do the bytes come from" differs.
+pub struct PathFileSource {
+    path: std::path::PathBuf,
+    name: String,
+    mime: String,
+    size: u64,
+    /// Open handle plus the offset it sits at. Re-opened when the caller asks
+    /// for a position before it, which is what a retry after a dropped socket
+    /// looks like -- the same rule the Android source follows.
+    handle: std::sync::Mutex<Option<(std::fs::File, u64)>>,
+}
+
+impl PathFileSource {
+    pub fn open(path: impl Into<std::path::PathBuf>) -> Result<Self, String> {
+        let path = path.into();
+        let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+        if !meta.is_file() {
+            return Err("not a regular file".to_string());
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".to_string());
+        let mime = match path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("pdf") => "application/pdf",
+            Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            Some("txt") => "text/plain",
+            Some("md") => "text/markdown",
+            Some("csv") => "text/csv",
+            Some("json") => "application/json",
+            Some("png") => "image/png",
+            Some("jpg") | Some("jpeg") => "image/jpeg",
+            _ => "application/octet-stream",
+        }
+        .to_string();
+        Ok(Self {
+            path,
+            name,
+            mime,
+            size: meta.len(),
+            handle: std::sync::Mutex::new(None),
+        })
+    }
+}
+
+impl crate::FileSource for PathFileSource {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    fn mime(&self) -> String {
+        self.mime.clone()
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn read(&self, offset: u64, len: u32) -> Vec<u8> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut guard = match self.handle.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let needs_open = match guard.as_ref() {
+            Some((_, position)) => offset < *position,
+            None => true,
+        };
+        if needs_open {
+            let Ok(file) = std::fs::File::open(&self.path) else {
+                return Vec::new();
+            };
+            *guard = Some((file, 0));
+        }
+        let Some((file, position)) = guard.as_mut() else {
+            return Vec::new();
+        };
+        if *position != offset && file.seek(SeekFrom::Start(offset)).is_err() {
+            return Vec::new();
+        }
+        let mut buf = vec![0u8; len as usize];
+        let mut filled = 0;
+        while filled < buf.len() {
+            match file.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(_) => break,
+            }
+        }
+        *position = offset + filled as u64;
+        buf.truncate(filled);
+        buf
+    }
+}
+
 /// One file, landed on the server. This is what the app gets back from an
 /// upload and what the transcript records, so it is a flat record rather than
 /// anything borrowed from the upload machinery.

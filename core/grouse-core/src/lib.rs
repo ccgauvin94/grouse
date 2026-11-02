@@ -1382,6 +1382,37 @@ impl Core {
         });
     }
 
+    /// Send a prompt with files attached, named by LOCAL PATH.
+    ///
+    /// For clients that share the core's filesystem (the desktop). Android's
+    /// files are `content://` URIs and go through
+    /// [`Core::send_prompt_with_files`] with its own `FileSource`. The protocol
+    /// is identical -- only where the bytes come from differs.
+    ///
+    /// A path that cannot be opened aborts the whole send with an alert, for
+    /// the same reason a failed upload does: a message that silently lost an
+    /// attachment is worse than one that refused.
+    pub fn send_prompt_with_paths(
+        &self,
+        prompt: Prompt,
+        paths: Vec<String>,
+        expect: Option<SendExpect>,
+    ) {
+        let mut sources: Vec<Arc<dyn FileSource>> = Vec::with_capacity(paths.len());
+        for path in &paths {
+            match crate::attachments::PathFileSource::open(path) {
+                Ok(source) => sources.push(Arc::new(source)),
+                Err(error) => {
+                    self.alert(format!(
+                        "could not attach {path}: {error} — the message was NOT sent"
+                    ));
+                    return;
+                }
+            }
+        }
+        self.send_prompt_with_files(prompt, sources, expect);
+    }
+
     /// `session/cancel` (a notification; never waits for a reply).
     pub fn cancel(&self) {
         let Some(display) = self.active_session_id() else {

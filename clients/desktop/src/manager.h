@@ -689,8 +689,9 @@ private:
     /// A message that must wait: for the running turn to end, or for a session bound.
     /// `sessionId` is the chat it was TYPED in — draining it into whatever chat happens
     /// to be on screen is how a reply once streamed into the wrong conversation.
-    struct PendingSend { QString text; QVariantList images; QString sessionId; int id = 0; };
-    void dispatchSend(const QString &text, const QVariantList &blocks);
+    struct PendingSend { QString text; QVariantList images; QStringList files; QString sessionId; int id = 0; };
+    void dispatchSend(const QString &text, const QVariantList &blocks,
+                      const QStringList &files = {});
     void enqueue(const PendingSend &p);
     void flushQueue();
     /// Point the displayed-chat turn state at `sessionId` (busy + steer key).
@@ -703,6 +704,9 @@ private:
     void releaseTurnForLostWire(const QString &lostSessionId);
     /** Turn local file paths into ACP prompt content blocks (image vs embedded resource). */
     QVariantList buildAttachmentBlocks(const QVariantList &paths);
+    /// Paths that must be UPLOADED rather than inlined: everything that is
+    /// not an image. goose drops a `resource` block carrying a blob.
+    QStringList attachmentPaths(const QVariantList &paths);
     /** Coalesce messagesChanged emissions while a turn streams (see m_updateTimer). */
     void requestMessagesUpdate();
     QString activeSessionId() const;

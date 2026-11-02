@@ -825,10 +825,15 @@ void Manager::sendPrompt(const QString &text, const QVariantList &images)
     const QString expectJson = m_currentSessionId.isEmpty()
         ? QString() : QStringLiteral("{\"session_id\":\"%1\"}").arg(m_currentSessionId);
 
-    dispatchSend(text.trimmed(), buildAttachmentBlocks(images));
+    // Images still ride inline (goose renders those); everything else is a
+    // PATH the core uploads, because goose DROPS a `resource` block whose
+    // contents are a base64 blob -- which is what an attached PDF used to be.
+    dispatchSend(text.trimmed(), buildAttachmentBlocks(images),
+                 attachmentPaths(images));
 }
 
-void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
+void Manager::dispatchSend(const QString &text, const QVariantList &blocks,
+                           const QStringList &files)
 {
     const QString expectJson = m_currentSessionId.isEmpty()
         ? QString() : QStringLiteral("{\"session_id\":\"%1\"}").arg(m_currentSessionId);
@@ -854,6 +859,9 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
                                  {"name", QFileInfo(b.value("resource").toMap()
                                                     .value("uri").toString()).fileName()}};
     }
+    for (const QString &path : files)
+        shown << QVariantMap{{"image", false}, {"url", path},
+                             {"name", QFileInfo(path).fileName()}};
     const bool sameChatBusy = m_prompting && m_promptingSessionId == m_currentSessionId;
     if (ready && !sameChatBusy) {
         // Thumbnails are matched back onto the row the core echoes, so they are queued
@@ -869,8 +877,29 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
         char *err = nullptr;
         const QByteArray prompt = promptJson(text, blocks).toUtf8();
         const QByteArray expect = expectJson.toUtf8();
-        m_bridge->api().grouse_send_prompt(m_bridge->handle(), prompt.constData(),
-                                           expectJson.isEmpty() ? nullptr : expect.constData(), &err);
+        if (files.isEmpty()) {
+            m_bridge->api().grouse_send_prompt(
+                m_bridge->handle(), prompt.constData(),
+                expectJson.isEmpty() ? nullptr : expect.constData(), &err);
+        } else if (m_bridge->api().grouse_send_prompt_with_paths) {
+            QJsonArray arr;
+            for (const QString &path : files)
+                arr.append(path);
+            const QByteArray paths =
+                QJsonDocument(arr).toJson(QJsonDocument::Compact);
+            m_bridge->api().grouse_send_prompt_with_paths(
+                m_bridge->handle(), prompt.constData(), paths.constData(),
+                expectJson.isEmpty() ? nullptr : expect.constData(), &err);
+        } else {
+            // An older libgrouse_core: say so rather than silently dropping the
+            // attachment, which is the bug this whole path exists to remove.
+            m_bridge->api().grouse_send_prompt(
+                m_bridge->handle(), prompt.constData(),
+                expectJson.isEmpty() ? nullptr : expect.constData(), &err);
+            if (!err)
+                onError(QStringLiteral("this core cannot attach files "
+                                       "(grouse_send_prompt_with_paths missing)"), false);
+        }
         if (err) {
             onError(QString::fromUtf8(err), false);
             m_bridge->api().grouse_string_free(err);
@@ -881,7 +910,7 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks)
         // to be the user's explicit choice — the Steer button on the queued card
         // (steerQueued) — and not a side effect of pressing send while a reply streams
         // (Android parity). flushQueue sends it when the turn ends.
-        enqueue({text, blocks});
+        enqueue({text, blocks, files, m_currentSessionId, 0});
         if (!ready && !secretKey().isEmpty())
             connectToServer();
     }
@@ -1031,7 +1060,7 @@ void Manager::flushQueue()
         return;
     const PendingSend p = m_pendingQueue.takeAt(idx);
     emit queuedChanged();
-    dispatchSend(p.text, p.images);
+    dispatchSend(p.text, p.images, p.files);
 }
 
 namespace {
@@ -1115,28 +1144,40 @@ QVariantList Manager::buildAttachmentBlocks(const QVariantList &paths)
         const QString path = v.toString();
         if (path.isEmpty())
             continue;
+        const QString mime = mimeDb.mimeTypeForFile(path).name();
+        if (!mime.startsWith(QLatin1String("image/")))
+            continue;   // uploaded by path -- see attachmentPaths()
         QFile f(path);
         if (!f.open(QIODevice::ReadOnly))
             continue;
         const QByteArray data = f.readAll();
         f.close();
-        const QString mime = mimeDb.mimeTypeForFile(path).name();
-        const QString uri = QUrl::fromLocalFile(path).toString();
-        if (mime.startsWith(QLatin1String("image/"))) {
-            QString b64 = QString::fromLatin1(data.toBase64());
-            b64.remove(QLatin1Char('\n')).remove(QLatin1Char('\r'));
-            out << QVariantMap{{"type", "image"}, {"mimeType", mime}, {"data", b64}};
-        } else if (isTextishMime(mime)) {
-            out << QVariantMap{{"type", "resource"},
-                               {"resource", QVariantMap{{"uri", uri}, {"mimeType", mime},
-                                                        {"text", QString::fromUtf8(data)}}}};
-        } else {
-            QString b64 = QString::fromLatin1(data.toBase64());
-            b64.remove(QLatin1Char('\n')).remove(QLatin1Char('\r'));
-            out << QVariantMap{{"type", "resource"},
-                               {"resource", QVariantMap{{"uri", uri}, {"mimeType", mime},
-                                                        {"blob", b64}}}};
-        }
+        QString b64 = QString::fromLatin1(data.toBase64());
+        b64.remove(QLatin1Char('\n')).remove(QLatin1Char('\r'));
+        out << QVariantMap{{"type", "image"}, {"mimeType", mime}, {"data", b64}};
+        // NOTHING else becomes a block. A `resource` block carrying a base64
+        // `blob` is DROPPED by goose with no placeholder and no error, so the
+        // file goes through attachmentPaths() and is uploaded instead; the core
+        // then appends a `resource_link` that the server resolves itself.
+    }
+    return out;
+}
+
+QStringList Manager::attachmentPaths(const QVariantList &paths)
+{
+    // Everything that is not an image: the core opens these itself (it shares
+    // this machine's filesystem), uploads them chunked, and appends a
+    // `resource_link` per file. The alternative -- inlining the bytes as a
+    // `resource` block -- is silently dropped by goose.
+    QStringList out;
+    QMimeDatabase mimeDb;
+    for (const auto &v : paths) {
+        const QString path = v.toString();
+        if (path.isEmpty() || !QFileInfo::exists(path))
+            continue;
+        if (mimeDb.mimeTypeForFile(path).name().startsWith(QLatin1String("image/")))
+            continue;
+        out << path;
     }
     return out;
 }

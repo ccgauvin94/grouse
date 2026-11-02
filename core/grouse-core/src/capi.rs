@@ -46,7 +46,7 @@ use crate::{
 /// The desktop refuses a library whose value it does not expect — a mismatch is
 /// a callback called with the wrong arity (a garbage pointer), not a compile
 /// error, so it must be caught at load time.
-pub const GROUSE_ABI_VERSION: u32 = 7;
+pub const GROUSE_ABI_VERSION: u32 = 8;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
@@ -774,6 +774,48 @@ pub extern "C" fn grouse_send_prompt(h: *mut c_void, prompt_json: *const c_char,
     };
     catch_unwind(AssertUnwindSafe(|| handle(h).core.send_prompt(prompt, expect))).unwrap_or_else(|_| {
         set_err(out_err, "panic in grouse_send_prompt");
+    });
+}
+
+/// `send_prompt` with attachments, named as local paths.
+///
+/// The desktop shares this machine's filesystem, so it hands over paths and the
+/// core opens them; that keeps the ABI addition to one symbol instead of a
+/// callback vtable. The upload itself is identical to the uniffi path -- files
+/// go to the server chunked and the prompt carries a `resource_link` each,
+/// because goose drops a `resource` block whose contents are a blob.
+///
+/// `paths_json` is a JSON array of strings. `out_err` is set (and must be freed
+/// with [`grouse_string_free`]) on failure; an unopenable path aborts the send.
+#[no_mangle]
+pub extern "C" fn grouse_send_prompt_with_paths(
+    h: *mut c_void,
+    prompt_json: *const c_char,
+    paths_json: *const c_char,
+    expect_json: *const c_char,
+    out_err: *mut *mut c_char,
+) {
+    if !out_err.is_null() {
+        unsafe { *out_err = std::ptr::null_mut() };
+    }
+    let Some(prompt) = c_json_in::<Prompt>(prompt_json) else {
+        set_err(out_err, "invalid Prompt JSON");
+        return;
+    };
+    let Some(paths) = c_json_in::<Vec<String>>(paths_json) else {
+        set_err(out_err, "invalid paths JSON");
+        return;
+    };
+    let expect: Option<SendExpect> = if expect_json.is_null() {
+        None
+    } else {
+        c_json_in::<SendExpect>(expect_json)
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        handle(h).core.send_prompt_with_paths(prompt, paths, expect)
+    }))
+    .unwrap_or_else(|_| {
+        set_err(out_err, "panic in grouse_send_prompt_with_paths");
     });
 }
 
