@@ -1949,8 +1949,10 @@ class ConnectionManager private constructor(context: Context) {
         val blocks = mutableListOf<PromptBlock>()
         if (text.isNotBlank()) blocks.add(PromptBlock.Text(text))
         images.forEach { img -> blocks.add(PromptBlock.Image(img.mimeType, img.dataB64)) }
-        files.forEach { f -> blocks.add(PromptBlock.Resource(f.name, f.mimeType, f.text, f.blobB64)) }
-        if (blocks.isEmpty()) {
+        // Files deliberately add NO block here. The core uploads each one and
+        // appends its own `resource_link`; a `resource` block with a blob is
+        // dropped by goose without a word, which is the bug this replaced.
+        if (blocks.isEmpty() && files.isEmpty()) {
             if (expect != null) inFlight.remove(expect)
             if (expect == null || expect == currentSession.value) {
                 busy.value = false
@@ -1966,7 +1968,25 @@ class ConnectionManager private constructor(context: Context) {
         replyStarted = false
         main.removeCallbacks(thinkingFiller)
         if (voiceState.value != VoiceState.IDLE) main.postDelayed(thinkingFiller, THINKING_FILLER_MS)
-        core.sendPrompt(Prompt(blocks), expect?.let { SendExpect(it) })
+        val prompt = Prompt(blocks)
+        val exp = expect?.let { SendExpect(it) }
+        if (files.isEmpty()) {
+            core.sendPrompt(prompt, exp)
+        } else {
+            // Streaming sources: the core pulls 8 MiB at a time, so a 100 MB
+            // file never exists as a whole in either language.
+            val sources = files.mapNotNull { f ->
+                runCatching {
+                    UriFileSource(appContext.contentResolver, f.uri, f.name, f.mimeType)
+                }.getOrNull()
+            }
+            if (sources.isEmpty()) {
+                noteApp("app: every attachment source failed to open — sending text only")
+                core.sendPrompt(prompt, exp)
+            } else {
+                core.sendPromptWithFiles(prompt, sources, exp)
+            }
+        }
     }
 
     /** Send once connected — used by notification replies, which may arrive disconnected. */

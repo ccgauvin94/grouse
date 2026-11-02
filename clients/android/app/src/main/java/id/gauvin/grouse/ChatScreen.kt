@@ -278,6 +278,13 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                 if (i >= 0) c.getString(i) else null
             }
         }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/') ?: "file"
+        // Persist the read grant: the send may be QUEUED behind a running turn,
+        // and a transient grant dies with the activity. Without this a queued
+        // message's upload would fail to open its own file.
+        runCatching {
+            ctx.contentResolver.takePersistableUriPermission(
+                uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
         readFile(ctx, uri, name)?.let(cm.draftFiles::add)
     }
     var showComposer by remember { mutableStateOf(false) }

@@ -770,6 +770,18 @@ internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod20 : com.s
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod21 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`method`: RustBuffer.ByValue,`message`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfaceFileSourceMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceFileSourceMethod1 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceFileSourceMethod2 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: LongByReference,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceFileSourceMethod3 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`offset`: Long,`len`: Int,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onStatus", "onSessions", "onItem", "onUsage", "onRunEnded", "onSpeak", "onConfig", "onPermissionRequest", "onSessionTouched", "onProjects", "onRoamPeerStatus", "onRoamSessions", "onPeerNewSession", "onActiveRun", "onCommands", "onSessionOpenFailed", "onTasks", "onReplayProgress")
 internal open class UniffiVTableCallbackInterfaceCoreListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -922,6 +934,34 @@ internal open class UniffiVTableCallbackInterfaceGrouseUnstableListener(
     }
 
 }
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "name", "mime", "size", "read")
+internal open class UniffiVTableCallbackInterfaceFileSource(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `name`: UniffiCallbackInterfaceFileSourceMethod0? = null,
+    @JvmField internal var `mime`: UniffiCallbackInterfaceFileSourceMethod1? = null,
+    @JvmField internal var `size`: UniffiCallbackInterfaceFileSourceMethod2? = null,
+    @JvmField internal var `read`: UniffiCallbackInterfaceFileSourceMethod3? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `name`: UniffiCallbackInterfaceFileSourceMethod0? = null,
+        `mime`: UniffiCallbackInterfaceFileSourceMethod1? = null,
+        `size`: UniffiCallbackInterfaceFileSourceMethod2? = null,
+        `read`: UniffiCallbackInterfaceFileSourceMethod3? = null,
+    ): UniffiVTableCallbackInterfaceFileSource(`uniffiFree`,`uniffiClone`,`name`,`mime`,`size`,`read`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceFileSource) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `name` = other.`name`
+        `mime` = other.`mime`
+        `size` = other.`size`
+        `read` = other.`read`
+    }
+
+}
 
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
@@ -1009,6 +1049,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_send_prompt(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_send_prompt_inner(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_core_send_prompt_with_files(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_sessions(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_set_config_option(
@@ -1038,6 +1082,14 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_grouse_core_checksum_method_core_unarchive_session(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_window(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_filesource_name(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_filesource_mime(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_filesource_size(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_filesource_read(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_add_extension(
     ): Int
@@ -1211,6 +1263,7 @@ internal object UniffiLib {
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "grouse_core"))
+        uniffiCallbackInterfaceFileSource.register(this)
         uniffiCallbackInterfaceCoreListener.register(this)
         uniffiCallbackInterfaceGrouseUnstableListener.register(this)
         
@@ -1281,6 +1334,10 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_grouse_core_fn_method_core_send_prompt(`ptr`: Long,`prompt`: RustBuffer.ByValue,`expect`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_core_send_prompt_inner(`ptr`: Long,`prompt`: RustBuffer.ByValue,`files`: RustBuffer.ByValue,`expect`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_core_send_prompt_with_files(`ptr`: Long,`prompt`: RustBuffer.ByValue,`files`: RustBuffer.ByValue,`expect`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_grouse_core_fn_method_core_sessions(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_set_config_option(`ptr`: Long,`configId`: RustBuffer.ByValue,`value`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1310,6 +1367,20 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_method_core_unarchive_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_window(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_grouse_core_fn_clone_filesource(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_grouse_core_fn_free_filesource(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_init_callback_vtable_filesource(`vtable`: UniffiVTableCallbackInterfaceFileSource,
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_filesource_name(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_grouse_core_fn_method_filesource_mime(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_grouse_core_fn_method_filesource_size(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_grouse_core_fn_method_filesource_read(`ptr`: Long,`offset`: Long,`len`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_clone_grouseunstable(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -1612,6 +1683,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_send_prompt() and 0xFFFF) != 30000) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_grouse_core_checksum_method_core_send_prompt_inner() and 0xFFFF) != 61075) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_core_send_prompt_with_files() and 0xFFFF) != 20223) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_grouse_core_checksum_method_core_sessions() and 0xFFFF) != 51807) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1655,6 +1732,18 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_window() and 0xFFFF) != 53063) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_filesource_name() and 0xFFFF) != 47624) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_filesource_mime() and 0xFFFF) != 49088) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_filesource_size() and 0xFFFF) != 32765) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_filesource_read() and 0xFFFF) != 10066) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_add_extension() and 0xFFFF) != 24761) {
@@ -2278,6 +2367,25 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
     }
 }
 
+/**
+ * @suppress
+ */
+public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
+    override fun read(buf: ByteBuffer): ByteArray {
+        val len = buf.getInt()
+        val byteArr = ByteArray(len)
+        buf.get(byteArr)
+        return byteArr
+    }
+    override fun allocationSize(value: ByteArray): ULong {
+        return 4UL + value.size.toULong()
+    }
+    override fun write(value: ByteArray, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        buf.put(value)
+    }
+}
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -2595,6 +2703,26 @@ public interface CoreInterface {
      * owner can accept it. A turn in another chat never blocks this one.
      */
     fun `sendPrompt`(`prompt`: Prompt, `expect`: SendExpect?)
+    
+    /**
+     * The single funnel both public send entry points go through.
+     */
+    fun `sendPromptInner`(`prompt`: Prompt, `files`: List<UploadedFile>, `expect`: SendExpect?)
+    
+    /**
+     * Send a prompt with files attached.
+     *
+     * The files upload first -- chunked, through the `attachments` extension --
+     * and the prompt then carries one `resource_link` per file. It never
+     * carries the bytes: goose DROPS a `resource` block whose contents are a
+     * blob, which is why "attach a PDF" used to show a chip and deliver
+     * nothing (see `attachments.rs`).
+     *
+     * If any upload fails, NOTHING is sent and the failure is raised as an
+     * alert. A prompt that silently lost its attachments is the failure this
+     * path exists to remove.
+     */
+    fun `sendPromptWithFiles`(`prompt`: Prompt, `files`: List<FileSource>, `expect`: SendExpect?)
     
     fun `sessions`(): List<SessionSummary>
     
@@ -3360,6 +3488,52 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     
     
 
+    
+    /**
+     * The single funnel both public send entry points go through.
+     */override fun `sendPromptInner`(`prompt`: Prompt, `files`: List<UploadedFile>, `expect`: SendExpect?)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_send_prompt_inner(
+        it,
+        
+        FfiConverterTypePrompt.lower(`prompt`),
+        FfiConverterSequenceTypeUploadedFile.lower(`files`),
+        FfiConverterOptionalTypeSendExpect.lower(`expect`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Send a prompt with files attached.
+     *
+     * The files upload first -- chunked, through the `attachments` extension --
+     * and the prompt then carries one `resource_link` per file. It never
+     * carries the bytes: goose DROPS a `resource` block whose contents are a
+     * blob, which is why "attach a PDF" used to show a chip and deliver
+     * nothing (see `attachments.rs`).
+     *
+     * If any upload fails, NOTHING is sent and the failure is raised as an
+     * alert. A prompt that silently lost its attachments is the failure this
+     * path exists to remove.
+     */override fun `sendPromptWithFiles`(`prompt`: Prompt, `files`: List<FileSource>, `expect`: SendExpect?)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_send_prompt_with_files(
+        it,
+        
+        FfiConverterTypePrompt.lower(`prompt`),
+        FfiConverterSequenceTypeFileSource.lower(`files`),
+        FfiConverterOptionalTypeSendExpect.lower(`expect`),_status)
+}
+    }
+    
+    
+
     override fun `sessions`(): List<SessionSummary> {
             return FfiConverterSequenceTypeSessionSummary.lift(
     callWithHandle {
@@ -3652,6 +3826,449 @@ public object FfiConverterTypeCore: FfiConverter<Core, Long> {
     override fun allocationSize(value: Core) = 8UL
 
     override fun write(value: Core, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
+ * A file the app wants to attach, read on demand.
+ *
+ * The bytes stay on the app's side of the boundary: the core pulls them one
+ * chunk at a time, so a 100 MB file costs one chunk of memory rather than two
+ * copies of the whole file (one in the app, one in Rust). The app therefore
+ * owns only what only it can do -- resolving a content URI or a native path
+ * and handing back bytes -- while every protocol rule stays in
+ * `attachments.rs`.
+ */
+public interface FileSource {
+    
+    /**
+     * The name the file is shown and stored under.
+     */
+    fun `name`(): kotlin.String
+    
+    /**
+     * MIME type, best effort; the server sniffs when this is wrong.
+     */
+    fun `mime`(): kotlin.String
+    
+    /**
+     * Total bytes. Must be the real length: the server checks it at commit.
+     */
+    fun `size`(): kotlin.ULong
+    
+    /**
+     * Bytes at `offset`, at most `len`. A SHORT read means end of file; the
+     * core refuses to continue on one, because that is an app bug and a
+     * half-uploaded file must never look complete.
+     */
+    fun `read`(`offset`: kotlin.ULong, `len`: kotlin.UInt): kotlin.ByteArray
+    
+    companion object
+}
+
+/**
+ * A file the app wants to attach, read on demand.
+ *
+ * The bytes stay on the app's side of the boundary: the core pulls them one
+ * chunk at a time, so a 100 MB file costs one chunk of memory rather than two
+ * copies of the whole file (one in the app, one in Rust). The app therefore
+ * owns only what only it can do -- resolving a content URI or a native path
+ * and handing back bytes -- while every protocol rule stays in
+ * `attachments.rs`.
+ */
+open class FileSourceImpl: Disposable, AutoCloseable, FileSource
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_grouse_core_fn_free_filesource(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_grouse_core_fn_clone_filesource(handle, status)
+        }
+    }
+
+    
+    /**
+     * The name the file is shown and stored under.
+     */override fun `name`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_filesource_name(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * MIME type, best effort; the server sniffs when this is wrong.
+     */override fun `mime`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_filesource_mime(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Total bytes. Must be the real length: the server checks it at commit.
+     */override fun `size`(): kotlin.ULong {
+            return FfiConverterULong.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_filesource_size(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Bytes at `offset`, at most `len`. A SHORT read means end of file; the
+     * core refuses to continue on one, because that is an app bug and a
+     * half-uploaded file must never look complete.
+     */override fun `read`(`offset`: kotlin.ULong, `len`: kotlin.UInt): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_filesource_read(
+        it,
+        
+        FfiConverterULong.lower(`offset`),
+        FfiConverterUInt.lower(`len`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceFileSource {
+    internal object `name`: UniffiCallbackInterfaceFileSourceMethod0 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeFileSource.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`name`(
+                )
+            }
+            val writeReturn = { value: kotlin.String -> uniffiOutReturn.setValue(FfiConverterString.lower(value)) }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+    internal object `mime`: UniffiCallbackInterfaceFileSourceMethod1 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeFileSource.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`mime`(
+                )
+            }
+            val writeReturn = { value: kotlin.String -> uniffiOutReturn.setValue(FfiConverterString.lower(value)) }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+    internal object `size`: UniffiCallbackInterfaceFileSourceMethod2 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: LongByReference,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeFileSource.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`size`(
+                )
+            }
+            val writeReturn = { value: kotlin.ULong -> uniffiOutReturn.setValue(FfiConverterULong.lower(value)) }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+    internal object `read`: UniffiCallbackInterfaceFileSourceMethod3 {
+        override fun callback(`uniffiHandle`: Long,`offset`: Long,`len`: Int,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeFileSource.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`read`(
+                    FfiConverterULong.lift(`offset`),
+                    FfiConverterUInt.lift(`len`),
+                )
+            }
+            val writeReturn = { value: kotlin.ByteArray -> uniffiOutReturn.setValue(FfiConverterByteArray.lower(value)) }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeFileSource.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeFileSource.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceFileSource.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `name`,
+        `mime`,
+        `size`,
+        `read`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_grouse_core_fn_init_callback_vtable_filesource(vtable)
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFileSource: FfiConverter<FileSource, Long> {
+    internal val handleMap = UniffiHandleMap<FileSource>()
+
+    override fun lower(value: FileSource): Long {
+        if (value is FileSourceImpl) {
+             // Rust-implemented object.  Clone the handle and return it
+            return value.uniffiCloneHandle()
+         } else {
+            // Kotlin object, generate a new vtable handle and return that.
+            return handleMap.insert(value)
+         }
+    }
+
+    override fun lift(value: Long): FileSource {
+        if ((value and 1.toLong()) == 0.toLong()) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return FileSourceImpl(UniffiWithHandle, value)
+        } else {
+            // Kotlin-generated handle, get the object from the handle map
+            return handleMap.remove(value)
+        }
+    }
+
+    override fun read(buf: ByteBuffer): FileSource {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: FileSource) = 8UL
+
+    override fun write(value: FileSource, buf: ByteBuffer) {
         buf.putLong(lower(value))
     }
 }
@@ -4947,6 +5564,22 @@ data class Item (
     var `attachments`: kotlin.UInt
     , 
     /**
+     * `ItemKind::User` only: the files that rode this prompt, BY NAME.
+     *
+     * `attachments` is a count over images and files together, so a prompt
+     * whose file was silently dropped looked identical to one that worked.
+     * This is the row's own record of what it carried: name, mime, bytes, the
+     * server-side path and the sha256 that path is derived from.
+     *
+     * A row echoed locally carries these from send time. A row REPLAYED from
+     * the server does not — goose stores the rendered prompt (inlined text or
+     * a `resource_link` stub), not our record — so a replayed attachment shows
+     * as its text. Acceptable for now; the compromise is recorded in
+     * docs/TRANSCRIPT_MODEL.md.
+     */
+    var `files`: List<UploadedFile>
+    , 
+    /**
      * Images the row carries, as `data:<mime>;base64,<data>` URIs the client
      * renders directly: the pixels goose REPLAYS (a prompt echo re-delivered
      * by `session/load`) as `ContentBlock::Image` chunks. The core flattening
@@ -5004,6 +5637,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.read(buf),
             FfiConverterSequenceTypeSubagentStep.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterSequenceTypeUploadedFile.read(buf),
             FfiConverterSequenceString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterUInt.read(buf),
@@ -5023,6 +5657,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.allocationSize(value.`summary`) +
             FfiConverterSequenceTypeSubagentStep.allocationSize(value.`steps`) +
             FfiConverterUInt.allocationSize(value.`attachments`) +
+            FfiConverterSequenceTypeUploadedFile.allocationSize(value.`files`) +
             FfiConverterSequenceString.allocationSize(value.`images`) +
             FfiConverterString.allocationSize(value.`messageId`) +
             FfiConverterUInt.allocationSize(value.`seq`)
@@ -5041,6 +5676,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterString.write(value.`summary`, buf)
             FfiConverterSequenceTypeSubagentStep.write(value.`steps`, buf)
             FfiConverterUInt.write(value.`attachments`, buf)
+            FfiConverterSequenceTypeUploadedFile.write(value.`files`, buf)
             FfiConverterSequenceString.write(value.`images`, buf)
             FfiConverterString.write(value.`messageId`, buf)
             FfiConverterUInt.write(value.`seq`, buf)
@@ -5933,6 +6569,64 @@ public object FfiConverterTypeTranscriptWindow: FfiConverterRustBuffer<Transcrip
 
 
 /**
+ * One file, landed on the server. This is what the app gets back from an
+ * upload and what the transcript records, so it is a flat record rather than
+ * anything borrowed from the upload machinery.
+ */
+data class UploadedFile (
+    var `name`: kotlin.String
+    , 
+    var `mime`: kotlin.String
+    , 
+    var `bytes`: kotlin.ULong
+    , 
+    var `path`: kotlin.String
+    , 
+    var `sha256`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUploadedFile: FfiConverterRustBuffer<UploadedFile> {
+    override fun read(buf: ByteBuffer): UploadedFile {
+        return UploadedFile(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UploadedFile) = (
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterString.allocationSize(value.`mime`) +
+            FfiConverterULong.allocationSize(value.`bytes`) +
+            FfiConverterString.allocationSize(value.`path`) +
+            FfiConverterString.allocationSize(value.`sha256`)
+    )
+
+    override fun write(value: UploadedFile, buf: ByteBuffer) {
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterString.write(value.`mime`, buf)
+            FfiConverterULong.write(value.`bytes`, buf)
+            FfiConverterString.write(value.`path`, buf)
+            FfiConverterString.write(value.`sha256`, buf)
+    }
+}
+
+
+
+/**
  * Connection lifecycle (CONTRACT §3.3).
  */
 sealed class ConnectionStatus {
@@ -6230,12 +6924,37 @@ sealed class PromptBlock {
     
     /**
      * `text` and `blob` are mutually exclusive; `blob` is base64.
+     *
+     * NOTE: goose DROPS this block when it carries a `blob` (no `else` in
+     * `convert_acp_prompt_to_message`). Upload through the attachments
+     * extension and send [`PromptBlock::Link`] instead -- see
+     * `attachments.rs`.
      */
     data class Resource(
         val `uri`: kotlin.String, 
         val `mimeType`: kotlin.String, 
         val `text`: kotlin.String?, 
         val `blob`: kotlin.String?) : PromptBlock()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * A `resource_link`: a URI the SERVER resolves.
+     *
+     * A `file://` URI pointing at something on goose's own disk is inlined by
+     * the server when the file is text, and handed over as an opaque path stub
+     * when it is not. That asymmetry is the feature: a text file arrives as
+     * its contents with no bytes on the wire, and a PDF arrives as a path the
+     * agent can act on with its own tools.
+     */
+    data class Link(
+        val `uri`: kotlin.String, 
+        val `name`: kotlin.String, 
+        val `mimeType`: kotlin.String) : PromptBlock()
         
     {
         
@@ -6272,6 +6991,11 @@ public object FfiConverterTypePromptBlock : FfiConverterRustBuffer<PromptBlock>{
                 FfiConverterOptionalString.read(buf),
                 FfiConverterOptionalString.read(buf),
                 )
+            4 -> PromptBlock.Link(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
     }
@@ -6302,6 +7026,15 @@ public object FfiConverterTypePromptBlock : FfiConverterRustBuffer<PromptBlock>{
                 + FfiConverterOptionalString.allocationSize(value.`blob`)
             )
         }
+        is PromptBlock.Link -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`uri`)
+                + FfiConverterString.allocationSize(value.`name`)
+                + FfiConverterString.allocationSize(value.`mimeType`)
+            )
+        }
     }
 
     override fun write(value: PromptBlock, buf: ByteBuffer) {
@@ -6323,6 +7056,13 @@ public object FfiConverterTypePromptBlock : FfiConverterRustBuffer<PromptBlock>{
                 FfiConverterString.write(value.`mimeType`, buf)
                 FfiConverterOptionalString.write(value.`text`, buf)
                 FfiConverterOptionalString.write(value.`blob`, buf)
+                Unit
+            }
+            is PromptBlock.Link -> {
+                buf.putInt(4)
+                FfiConverterString.write(value.`uri`, buf)
+                FfiConverterString.write(value.`name`, buf)
+                FfiConverterString.write(value.`mimeType`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -6744,6 +7484,144 @@ public object FfiConverterTypeTranscriptOp : FfiConverterRustBuffer<TranscriptOp
                 buf.putInt(6)
                 FfiConverterString.write(value.`oldestId`, buf)
                 FfiConverterBoolean.write(value.`hasOlder`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
+ * Progress/outcome of one upload, as the UI needs it: bytes moved, and enough
+ * to name the file in a chip.
+ */
+sealed class UploadEvent {
+    
+    /**
+     * `sent` of `total`; `total` is 0 when the client did not know the size.
+     */
+    data class Progress(
+        val `id`: kotlin.String, 
+        val `name`: kotlin.String, 
+        val `sent`: kotlin.ULong, 
+        val `total`: kotlin.ULong) : UploadEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Done(
+        val `id`: kotlin.String, 
+        val `file`: uniffi.grouse_core.UploadedFile) : UploadEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Failed(
+        val `id`: kotlin.String, 
+        val `name`: kotlin.String, 
+        val `message`: kotlin.String) : UploadEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUploadEvent : FfiConverterRustBuffer<UploadEvent>{
+    override fun read(buf: ByteBuffer): UploadEvent {
+        return when(buf.getInt()) {
+            1 -> UploadEvent.Progress(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterULong.read(buf),
+                FfiConverterULong.read(buf),
+                )
+            2 -> UploadEvent.Done(
+                FfiConverterString.read(buf),
+                FfiConverterTypeUploadedFile.read(buf),
+                )
+            3 -> UploadEvent.Failed(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: UploadEvent): ULong = when(value) {
+        is UploadEvent.Progress -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterString.allocationSize(value.`name`)
+                + FfiConverterULong.allocationSize(value.`sent`)
+                + FfiConverterULong.allocationSize(value.`total`)
+            )
+        }
+        is UploadEvent.Done -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterTypeUploadedFile.allocationSize(value.`file`)
+            )
+        }
+        is UploadEvent.Failed -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterString.allocationSize(value.`name`)
+                + FfiConverterString.allocationSize(value.`message`)
+            )
+        }
+    }
+
+    override fun write(value: UploadEvent, buf: ByteBuffer) {
+        when(value) {
+            is UploadEvent.Progress -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`id`, buf)
+                FfiConverterString.write(value.`name`, buf)
+                FfiConverterULong.write(value.`sent`, buf)
+                FfiConverterULong.write(value.`total`, buf)
+                Unit
+            }
+            is UploadEvent.Done -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`id`, buf)
+                FfiConverterTypeUploadedFile.write(value.`file`, buf)
+                Unit
+            }
+            is UploadEvent.Failed -> {
+                buf.putInt(3)
+                FfiConverterString.write(value.`id`, buf)
+                FfiConverterString.write(value.`name`, buf)
+                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -7721,6 +8599,34 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeFileSource: FfiConverterRustBuffer<List<FileSource>> {
+    override fun read(buf: ByteBuffer): List<FileSource> {
+        val len = buf.getInt()
+        return List<FileSource>(len) {
+            FfiConverterTypeFileSource.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FileSource>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeFileSource.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FileSource>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFileSource.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeConfigChoice: FfiConverterRustBuffer<List<ConfigChoice>> {
     override fun read(buf: ByteBuffer): List<ConfigChoice> {
         val len = buf.getInt()
@@ -7963,6 +8869,34 @@ public object FfiConverterSequenceTypeToolCall: FfiConverterRustBuffer<List<Tool
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeToolCall.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeUploadedFile: FfiConverterRustBuffer<List<UploadedFile>> {
+    override fun read(buf: ByteBuffer): List<UploadedFile> {
+        val len = buf.getInt()
+        return List<UploadedFile>(len) {
+            FfiConverterTypeUploadedFile.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<UploadedFile>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeUploadedFile.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<UploadedFile>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeUploadedFile.write(it, buf)
         }
     }
 }

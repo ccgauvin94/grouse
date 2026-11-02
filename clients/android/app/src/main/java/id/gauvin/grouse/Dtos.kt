@@ -31,12 +31,19 @@ data class ConfigOption(
 /** An image to attach to a prompt (base64 payload + mime). */
 data class ImageBlock(val mimeType: String, val dataB64: String)
 
-/** A non-image file attached to a prompt (uri + mime + one of text/blob). */
+/**
+ * A non-image file attached to a prompt.
+ *
+ * Holds the SAF URI, never the bytes. goose DROPS a `resource` content block
+ * whose contents are a base64 `blob` (no `else` in its prompt converter), so
+ * inlining a file is what made "attach a PDF" show a chip and deliver nothing.
+ * The core uploads the file to the server instead and the prompt then carries a
+ * `resource_link`; extraction happens server-side, so the app never parses it.
+ */
 data class FileBlock(
     val name: String,
     val mimeType: String,
-    val text: String? = null,
-    val blobB64: String? = null,
+    val uri: android.net.Uri,
 )
 
 /** One choice in a tool-approval request (allow_once / allow_always / reject_*). */
