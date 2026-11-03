@@ -9,6 +9,7 @@ import android.os.Looper
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import kotlin.concurrent.thread
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -388,13 +389,34 @@ class ConnectionManager private constructor(context: Context) {
                     is uniffi.grouse_core.FileEvent.Saved -> event.path
                     is uniffi.grouse_core.FileEvent.Failed -> event.path
                 }
-                fileDownloads[path] = when (event) {
+                when (event) {
                     is uniffi.grouse_core.FileEvent.Progress ->
-                        FileDownload("downloading", event.received.toLong(), event.total.toLong(), "", "")
-                    is uniffi.grouse_core.FileEvent.Saved ->
-                        FileDownload("saved", event.bytes.toLong(), event.bytes.toLong(), event.localPath, "")
+                        fileDownloads[path] =
+                            FileDownload("downloading", event.received.toLong(), event.total.toLong(), "", "")
+                    is uniffi.grouse_core.FileEvent.Saved -> {
+                        // The core wrote it into app-private storage (the only
+                        // place it can write without permissions). Hand it to
+                        // the user's Downloads folder so it is visible in Files
+                        // and outlives the app; the private copy is then dead
+                        // weight and goes.
+                        val bytes = event.bytes.toLong()
+                        fileDownloads[path] =
+                            FileDownload("saved", bytes, bytes, event.localPath, "")
+                        val name = event.name
+                        val mime = event.mime
+                        val local = event.localPath
+                        thread {
+                            val exported = exportToDownloads(appContext, name, mime, local)
+                            if (exported != null) {
+                                runCatching { java.io.File(local).delete() }
+                                main.post {
+                                    fileDownloads[path] = FileDownload("saved", bytes, bytes, exported, "")
+                                }
+                            }
+                        }
+                    }
                     is uniffi.grouse_core.FileEvent.Failed ->
-                        FileDownload("failed", 0, 0, "", event.message)
+                        fileDownloads[path] = FileDownload("failed", 0, 0, "", event.message)
                 }
             }
         }

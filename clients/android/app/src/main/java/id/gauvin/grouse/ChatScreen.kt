@@ -1825,7 +1825,17 @@ private fun TurnLogDialog(cm: ConnectionManager, onDismiss: () -> Unit) {
  */
 @Composable
 internal fun SharedFileRow(cm: ConnectionManager, m: ChatMessage, ctx: Context) {
-    val file = m.files.firstOrNull() ?: return
+    // A row the core called a share but sent no reference for: paint the caption
+    // rather than nothing. An invisible row is indistinguishable from a bug, and
+    // that is exactly how a missing card read when this was first tested.
+    val file = m.files.firstOrNull() ?: run {
+        Text(
+            m.text.ifBlank { "shared file" },
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        )
+        return
+    }
     val state = cm.fileDownloads[file.path]
     val phase = state?.state ?: "idle"
     val busy = phase == "downloading"
@@ -1834,7 +1844,8 @@ internal fun SharedFileRow(cm: ConnectionManager, m: ChatMessage, ctx: Context) 
         busy && (state?.total ?: 0) > 0 ->
             "downloading ${((state!!.received * 100) / state.total).toInt()}%"
         busy -> "downloading…"
-        ready -> "saved · tap to open"
+        ready -> if (state?.localPath?.startsWith("content://") == true)
+            "saved to Downloads · tap to open" else "saved · tap to open"
         phase == "failed" -> state?.message?.takeIf { it.isNotBlank() } ?: "could not fetch"
         else -> attachmentSubtitle(file)
     }
@@ -1890,15 +1901,21 @@ internal fun SharedFileRow(cm: ConnectionManager, m: ChatMessage, ctx: Context) 
 private fun openLocalFile(ctx: Context, path: String, mime: String) {
     if (path.isEmpty()) return
     runCatching {
-        val uri = androidx.core.content.FileProvider.getUriForFile(
-            ctx, "${ctx.packageName}.fileprovider", java.io.File(path))
+        // A share exported to Downloads is already a public content:// URI (see
+        // exportToDownloads); the private ones still come through FileProvider.
+        val uri = if (path.startsWith("content://")) {
+            android.net.Uri.parse(path)
+        } else {
+            androidx.core.content.FileProvider.getUriForFile(
+                ctx, "${ctx.packageName}.fileprovider", java.io.File(path))
+        }
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, mime.ifBlank { "application/octet-stream" })
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         ctx.startActivity(Intent.createChooser(intent, "Open"))
     }.onFailure {
-        Toast.makeText(ctx, "no app can open ${'$'}{path.substringAfterLast('/')}",
+        Toast.makeText(ctx, "no app can open " + path.substringAfterLast('/'),
             Toast.LENGTH_SHORT).show()
     }
 }

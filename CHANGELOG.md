@@ -23,6 +23,17 @@ All notable changes to Grouse are recorded here. The format is based on
   extension; they only share from the attachments directory, so a
   prompt-injected agent cannot hand you the container's keys.
 
+### Changed
+
+- **Android: a downloaded share lands in `Downloads/Grouse`, not in the app's
+  private data.** The core has to write somewhere it can write unaided, so it
+  still fetches into `filesDir/files/`; the client now copies the finished file
+  into the public Downloads collection through MediaStore (a pending row until
+  the bytes are complete, so a half-written installer can never be opened) and
+  deletes the private copy. The card says "saved to Downloads" and opens the
+  public URI. Below API 29 the public directory needs a storage permission, so
+  those devices keep the private copy and the FileProvider path.
+
 ### Fixed
 
 - **A chat opens at its bottom, and the jump-to-bottom arrow gets there in one

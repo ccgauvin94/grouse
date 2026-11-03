@@ -229,7 +229,7 @@ impl GrouseUnstable {
         self.call(
             &*conn,
             "_goose/unstable/session/extensions/remove",
-            json!({"sessionId": session_id, "extensionKey": extension_key}),
+            json!({"sessionId": session_id, "extensionKey": extension_key_of(&extension_key)}),
         );
     }
 
@@ -916,6 +916,30 @@ impl GrouseUnstable {
     }
 }
 
+/// The KEY goose files a session extension under, from the NAME the transcript
+/// and the tools sheet show.
+///
+/// `remove_session_extension` matches `ExtensionConfig::key()`, which goose
+/// derives with its own `name_to_key` (lowercase; alphanumerics, `_` and `-`
+/// kept; whitespace dropped; anything else as `_`). A client that passes the
+/// display name — "Attachments", "Extension Manager" — is answered
+/// `Invalid params: Extension 'Attachments' not found`, and the toggle looks
+/// broken even though the server is behaving. Normalising HERE keeps that rule
+/// in one place instead of asking every UI to lowercase its labels.
+pub(crate) fn extension_key_of(name: &str) -> String {
+    let mut key = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            key.push(c.to_ascii_lowercase());
+        } else if c.is_whitespace() {
+            continue;
+        } else {
+            key.push('_');
+        }
+    }
+    key
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1530,6 +1554,48 @@ mod tests {
             &[("_goose/unstable/session/extensions/remove",
                json!({"sessionId": "s1", "extensionKey": "extensionmanager"}))],
         );
+    }
+
+    /// The tools sheet shows display names; the server keys the session list by
+    /// goose's `name_to_key`. Passing the name straight through is what made the
+    /// Attachments toggle answer "Extension 'Attachments' not found".
+    #[test]
+    fn session_extensions_remove_normalises_a_display_name_to_its_key() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        stub.set_session("s1");
+        stub.script(vec![Ok(Value::Null), Ok(Value::Null), Ok(Value::Null)]);
+        let (g, _rec) = harness(stub.clone());
+
+        g.session_extensions_remove("s1".to_string(), "Attachments".to_string());
+        g.session_extensions_remove("s1".to_string(), "Extension Manager".to_string());
+        g.session_extensions_remove("s1".to_string(), "Top Of Mind".to_string());
+
+        assert_calls(
+            &stub,
+            &[
+                (
+                    "_goose/unstable/session/extensions/remove",
+                    json!({"sessionId": "s1", "extensionKey": "attachments"}),
+                ),
+                (
+                    "_goose/unstable/session/extensions/remove",
+                    json!({"sessionId": "s1", "extensionKey": "extensionmanager"}),
+                ),
+                (
+                    "_goose/unstable/session/extensions/remove",
+                    json!({"sessionId": "s1", "extensionKey": "topofmind"}),
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn extension_key_of_mirrors_goose_name_to_key() {
+        assert_eq!(extension_key_of("Attachments"), "attachments");
+        assert_eq!(extension_key_of("Extension Manager"), "extensionmanager");
+        assert_eq!(extension_key_of("attachments"), "attachments");
+        assert_eq!(extension_key_of("a.b/c"), "a_b_c");
     }
 
     #[test]
