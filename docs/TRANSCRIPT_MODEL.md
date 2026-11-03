@@ -96,9 +96,21 @@ round-trips through the cache.
 | toolgroup | — | — | — | — | children | the run's framing |
 | chart | title | chart spec | — | — | — |
 | mcpapp | title | app input | — | `<ext>\|<uri>` | — |
+| file | the file's NAME | its MIME | — | — | — (`files[0]` is the reference) |
 
 `id` is the server's `message_id` for text, or the `tool_call_id` for tool-ish
 rows. A `toolgroup`'s id is its first child's id.
+
+**A `file` row is a REFERENCE, not a payload.** It is emitted when a tool call
+is `attachments__attachment_share` (recognised from `_meta.goose.toolCall.toolName`
+and the call's arguments — never from the model's prose), and its `files[0]` is
+`{name, mime, bytes, path, sha256}` where `path` is the SERVER-side file. The
+bytes are never in the item: a tool result carrying a blob is stored verbatim in
+the session, re-sent on every replay and shown to the model (measured: a 1 MiB
+PDF ≈ 350k context tokens), and the item is cached and replayed. A client fetches
+on demand (`Core::fetch_file`, `on_file` for progress/outcome) and keeps the copy
+under `<cache>/files/<digest16>-<name>`; a share row never joins a tool run, so a
+shared file cannot be folded away into a collapsed chip.
 
 **The core echoes the prompt it sends.** goose does not send a
 `user_message_chunk` for a prompt *we* sent — the prompt next crosses the wire in
@@ -348,7 +360,7 @@ opposite and is safe to splice: it is strictly older than everything held.)
 
 ```rust
 // uniffi records/enums on the contract; the C ABI carries the same shape as JSON.
-pub enum ItemKind { User, Agent, Thought, Tool, ToolGroup, Chart, McpApp, Error }
+pub enum ItemKind { User, Agent, Thought, Tool, ToolGroup, Chart, McpApp, File, Error }
 
 pub struct ToolCall {
     pub id: String, pub title: String, pub detail: String,

@@ -247,6 +247,19 @@ keep them when extending the core.
   signal is the open FAILING (grouse#19) — that is where a cached id is dropped, never
   "it was not in the list".
 
+- **A file the server shares is a REFERENCE in the transcript, and its bytes are
+  pulled on demand.** `ItemKind::File` rows carry `{name, mime, bytes, path,
+  sha256}` and never the payload; `Core::fetch_file` chunks
+  `attachments__attachment_read` (512 KiB — roam's `RoamCodec::MAX_FRAME_BYTES`
+  is 1 MiB and *drops* overflow) into `<cache>/files/<digest16>-<name>`. Putting
+  the bytes in the transcript is what must not happen: a tool result with an
+  embedded blob is stored verbatim in `sessions.db`, re-sent on every replay and
+  shown to the model (1 MiB ≈ 350k context tokens). Three server-side traps:
+  goose **drops `resource_link` in tool results**, **Code Mode hides tool results
+  entirely** (the only call is `execute javascript`, empty content), and a
+  client-initiated `tools/call` needs an `auto`-mode session — so the fetch runs
+  on a per-endpoint hidden session (`_meta.hidden` + `set_mode auto`), never on
+  the user's chat.
 - **Trust boundary** for `content`/`output`/`appHtml`/chart specs: the core
   never escapes server-provided content; every UI must treat it as untrusted at
   its rendering surface and sanitize or sandbox any HTML/JS renderer. See

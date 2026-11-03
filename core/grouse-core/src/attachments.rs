@@ -42,6 +42,21 @@ pub const CHUNK_BYTES: usize = 8 * 1024 * 1024;
 /// message the UI can show, instead of after a partial upload.
 pub const MAX_BYTES: u64 = 100 * 1024 * 1024;
 
+/// The two tools that bring a file the OTHER way (server -> client).
+pub(crate) const SHARE_TOOL: &str = "attachment_share";
+pub(crate) const READ_TOOL: &str = "attachment_read";
+
+/// Raw bytes asked for per `attachment_read`.
+///
+/// 512 KiB, deliberately far below the upload path's 8 MiB: this direction's
+/// floor is `RoamCodec::MAX_FRAME_BYTES = 1 MiB` (`roam.rs`), and bytes past that
+/// cap are DROPPED until the next newline — an oversized frame is a corrupt
+/// download, not a slow one. 512 KiB base64-encodes to ~683 KiB, leaving the JSON
+/// envelope comfortable room. The WebSocket transport would take far more (32 MiB
+/// measured against the live server); this is the default precisely because the
+/// tighter transport must never bite by accident.
+pub const DOWNLOAD_CHUNK: usize = 512 * 1024;
+
 /// `_goose/unstable/tools/call` params for one attachments tool.
 ///
 /// `extensionName` is REQUIRED by the server's `GooseToolCallRequest` -- the
@@ -379,9 +394,337 @@ pub enum UploadEvent {
     Failed { id: String, name: String, message: String },
 }
 
+/// A file the SERVER handed us, described but not carried.
+///
+/// The transcript stores this and nothing else (`Item.files`): the bytes are
+/// fetched on demand (`Core::fetch_file`). Putting them in the item instead is
+/// what makes a shared PDF cost 4/3 of its size in SQLite, again in every
+/// `session/load` replay, again in each client's transcript cache — and, because
+/// a tool result is shown to the model, tens of thousands of tokens of context on
+/// every turn. Measured 2026-11-03, which is why this type exists.
+#[derive(uniffi::Record, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SharedFile {
+    /// The name to show: the sharer's own, never a sanitised or hashed form.
+    pub name: String,
+    pub mime: String,
+    /// 0 until the share tool's result reports it (the REQUEST carries no size).
+    pub bytes: u64,
+    /// The server-side path. Both the item's identity and the fetch key.
+    pub path: String,
+    /// Empty until the result reports it; then the client cache key.
+    pub sha256: String,
+}
+
+/// Progress and outcome of one server -> client file fetch, as the UI needs it.
+///
+/// Keyed by the SERVER-side `path` (the same value the `ItemKind::File` row
+/// carries) rather than by request order: several rows can be fetching at once,
+/// and a chat can be reopened mid-fetch.
+#[derive(
+    uniffi::Enum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize,
+)]
+pub enum FileEvent {
+    /// `received` of `total` bytes; `total` is 0 when the server did not say.
+    Progress {
+        path: String,
+        name: String,
+        received: u64,
+        total: u64,
+    },
+    /// Finished and landed in the client's cache.
+    Saved {
+        path: String,
+        name: String,
+        mime: String,
+        bytes: u64,
+        local_path: String,
+    },
+    Failed {
+        path: String,
+        name: String,
+        message: String,
+    },
+}
+
+/// One `attachment_read` window, decoded.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ReadChunk {
+    pub offset: u64,
+    pub total: u64,
+    pub data: Vec<u8>,
+}
+
+/// A shared file, recovered from the tool CALL rather than its result.
+///
+/// The call is the only trustworthy source: `raw_input` is structured and the
+/// model never reformats it, while the result is a text payload the model may
+/// paraphrase in what it says next. Recognising the tool name is likewise exact —
+/// `_meta.goose.toolCall.toolName` carries `<extension>__<tool>` verbatim (the
+/// extension itself is normalised, so the suffix is what we match).
+pub(crate) fn share_from_call(
+    tool_name: &str,
+    raw_input: &Value,
+) -> Option<SharedFile> {
+    let tool = tool_name.trim();
+    if tool.is_empty() || !tool.ends_with(SHARE_TOOL) {
+        return None;
+    }
+    // Guard the separator: a tool literally named `xxxattachment_share` is not ours.
+    let prefixed = tool.len() > SHARE_TOOL.len()
+        && tool[..tool.len() - SHARE_TOOL.len()].ends_with("__");
+    if !prefixed {
+        return None;
+    }
+    let path = raw_input.get("path").and_then(Value::as_str)?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let name = raw_input
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| file_name(path));
+    let mime = raw_input
+        .get("mime")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| mime_for_name(&name));
+    Some(SharedFile {
+        name,
+        mime,
+        bytes: 0,
+        path: path.to_string(),
+        sha256: String::new(),
+    })
+}
+
+/// The last path segment, which is what a card shows when no name was given.
+pub(crate) fn file_name(path: &str) -> String {
+    path.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .trim()
+        .to_string()
+}
+
+/// Fill the facts only the RESULT knows (size, digest, canonical mime).
+///
+/// A result that is not the expected envelope changes nothing: a failed share
+/// still leaves a card naming the file, and the fetch reports its own error.
+pub(crate) fn apply_share_result(file: &mut SharedFile, payload: &Value) {
+    if let Some(bytes) = payload.get("bytes").and_then(Value::as_u64) {
+        if bytes > 0 {
+            file.bytes = bytes;
+        }
+    }
+    if let Some(sha) = payload.get("sha256").and_then(Value::as_str) {
+        if !sha.trim().is_empty() {
+            file.sha256 = sha.trim().to_string();
+        }
+    }
+    // The NAME: a share call often carries only `path`, and a stored file is
+    // `<sha16>-<name>` — the hash is not a filename. So the result wins whenever
+    // the call's name was merely the path's last segment, and never when the
+    // sharer named it explicitly.
+    if let Some(name) = payload
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        if file.name.is_empty() || file.name == file_name(&file.path) {
+            file.name = name.to_string();
+        }
+    }
+    if let Some(mime) = payload
+        .get("mime")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        if file.mime.is_empty() || file.mime == "application/octet-stream" {
+            file.mime = mime.to_string();
+        }
+    }
+}
+
+/// A safe on-disk name for a downloaded file.
+///
+/// The client writes what the server named, minus anything a path cannot hold.
+/// A name of only separators or dots is not a name, so it becomes `file` rather
+/// than a traversal or a hidden file.
+pub(crate) fn safe_file_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ' ' | '(' | ')') {
+            out.push(ch);
+        } else {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches(['.', '-', ' ']).to_string();
+    if trimmed.is_empty() {
+        "file".to_string()
+    } else {
+        trimmed.chars().take(120).collect()
+    }
+}
+
+/// `_goose/unstable/tools/call` params for one window of a shared file.
+pub(crate) fn read_params(wire: &str, path: &str, offset: u64, length: usize) -> Value {
+    tool_params(
+        wire,
+        READ_TOOL,
+        json!({ "path": path, "offset": offset, "length": length }),
+    )
+}
+
+/// Decode an `attachment_read` reply into a window.
+///
+/// Strict about `offset`: the caller assembles the file by appending, so a chunk
+/// that arrives out of place must fail loudly rather than produce a file that
+/// looks whole and is not.
+pub(crate) fn parse_read(payload: &Value) -> Result<ReadChunk, String> {
+    let offset = payload
+        .get("offset")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "the server returned no offset".to_string())?;
+    let total = payload
+        .get("total")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "the server returned no total".to_string())?;
+    let data = payload
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "the server returned no data".to_string())?;
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|e| format!("chunk is not valid base64: {e}"))?;
+    Ok(ReadChunk {
+        offset,
+        total,
+        data: bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn share(args: serde_json::Value) -> Option<SharedFile> {
+        share_from_call("attachments__attachment_share", &args)
+    }
+
+    #[test]
+    fn a_share_call_is_recognised_from_its_arguments() {
+        let file = share(serde_json::json!({"path": "/workspace/attachments/q3.pdf"})).unwrap();
+        // No explicit name: the path's last segment, and a mime derived from it.
+        assert_eq!(file.name, "q3.pdf");
+        assert_eq!(file.mime, "application/pdf");
+        assert_eq!(file.path, "/workspace/attachments/q3.pdf");
+        // The request carries neither size nor digest; the result fills them.
+        assert_eq!(file.bytes, 0);
+        assert!(file.sha256.is_empty());
+    }
+
+    #[test]
+    fn an_explicit_name_and_mime_win_over_the_path() {
+        let file = share(serde_json::json!({
+            "path": "/workspace/attachments/aa11bb22cc33dd44-report-final.pdf",
+            "name": "Q3 report (final).pdf",
+            "mime": "application/pdf",
+        }))
+        .unwrap();
+        assert_eq!(file.name, "Q3 report (final).pdf");
+    }
+
+    #[test]
+    fn only_the_attachments_share_tool_counts_as_a_share() {
+        let args = serde_json::json!({"path": "/workspace/attachments/x.pdf"});
+        assert!(share_from_call("attachments__attachment_read", &args).is_none());
+        assert!(share_from_call("probefiles__attachment_share", &args).is_some());
+        // A tool whose name merely ENDS with the string, with no `__`, is not ours.
+        assert!(share_from_call("myattachment_share", &args).is_none());
+        assert!(share_from_call("", &args).is_none());
+    }
+
+    #[test]
+    fn a_share_without_a_path_is_not_a_share() {
+        assert!(share(serde_json::json!({})).is_none());
+        assert!(share(serde_json::json!({"path": "   "})).is_none());
+    }
+
+    #[test]
+    fn the_result_fills_the_size_and_digest() {
+        let mut file = share(serde_json::json!({"path": "/workspace/attachments/q3.pdf"})).unwrap();
+        apply_share_result(
+            &mut file,
+            &serde_json::json!({"bytes": 193, "sha256": "abc123", "mime": "application/pdf"}),
+        );
+        assert_eq!(file.bytes, 193);
+        assert_eq!(file.sha256, "abc123");
+    }
+
+    #[test]
+    fn the_result_renames_a_path_derived_name_but_never_an_explicit_one() {
+        // Path-derived (`<sha16>-<name>`): the server's canonical name wins.
+        let mut derived = share(serde_json::json!({
+            "path": "/workspace/attachments/aa11bb22cc33dd44-report.pdf"}))
+        .unwrap();
+        apply_share_result(&mut derived, &serde_json::json!({"name": "report.pdf"}));
+        assert_eq!(derived.name, "report.pdf");
+
+        // Explicit: the sharer's own words stand, whatever the server says.
+        let mut explicit = share(serde_json::json!({
+            "path": "/workspace/attachments/aa11bb22cc33dd44-report.pdf",
+            "name": "Q3 final.pdf"}))
+        .unwrap();
+        apply_share_result(&mut explicit, &serde_json::json!({"name": "report.pdf"}));
+        assert_eq!(explicit.name, "Q3 final.pdf");
+    }
+
+    #[test]
+    fn a_bad_share_result_changes_nothing() {
+        let mut file = share(serde_json::json!({"path": "/workspace/attachments/q3.pdf"})).unwrap();
+        let before = file.clone();
+        apply_share_result(&mut file, &serde_json::json!({"unexpected": true}));
+        assert_eq!(file, before);
+    }
+
+    #[test]
+    fn a_downloaded_name_is_safe_to_write() {
+        assert_eq!(safe_file_name("Q3 report (final).pdf"), "Q3 report (final).pdf");
+        assert_eq!(safe_file_name("../../etc/passwd"), "etc-passwd");
+        assert_eq!(safe_file_name(".."), "file");
+        assert_eq!(safe_file_name(""), "file");
+        // Bounded: a 400-character server name cannot become a 400-character path.
+        assert!(safe_file_name(&"a".repeat(400)).len() <= 120);
+    }
+
+    #[test]
+    fn a_read_reply_decodes_to_its_window() {
+        use base64::Engine as _;
+        let data = base64::engine::general_purpose::STANDARD.encode(b"hello");
+        let chunk = parse_read(&serde_json::json!({
+            "offset": 5, "total": 10, "data": data})).unwrap();
+        assert_eq!(chunk.offset, 5);
+        assert_eq!(chunk.total, 10);
+        assert_eq!(chunk.data, b"hello");
+    }
+
+    #[test]
+    fn a_read_reply_missing_its_offset_is_refused() {
+        // Assembling by append, a chunk with no position could silently reorder
+        // the file. Refuse rather than guess.
+        assert!(parse_read(&serde_json::json!({"total": 3, "data": "aGk="})).is_err());
+        assert!(parse_read(&serde_json::json!({"offset": 0, "total": 3})).is_err());
+        assert!(parse_read(&serde_json::json!({"offset": 0, "total": 3, "data": "!!"})).is_err());
+    }
 
     #[test]
     fn params_carry_the_extension_and_the_prefixed_tool_name() {

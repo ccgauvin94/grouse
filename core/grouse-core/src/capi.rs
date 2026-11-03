@@ -46,7 +46,7 @@ use crate::{
 /// The desktop refuses a library whose value it does not expect — a mismatch is
 /// a callback called with the wrong arity (a garbage pointer), not a compile
 /// error, so it must be caught at load time.
-pub const GROUSE_ABI_VERSION: u32 = 8;
+pub const GROUSE_ABI_VERSION: u32 = 9;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
@@ -233,6 +233,9 @@ pub struct GrouseCoreListener {
     /// END; ABI 7.
     pub on_replay_progress:
         Option<extern "C" fn(*mut c_void, *const c_char, i64, i64, i32)>,
+    /// A shared file's download as JSON (`FileEvent`: `progress` / `saved` /
+    /// `failed`), keyed by the server-side path. Appended at the END; ABI 9.
+    pub on_file: Option<extern "C" fn(*mut c_void, *const c_char)>,
 }
 
 /// Bridges the core's typed listener traits to the installed C table. The raw
@@ -520,6 +523,16 @@ impl CoreListener for CoreCallbackForwarder {
         };
     }    fn on_tasks(&self, tasks: String) {
         unsafe { cb_str1(table_fn!(self, on_tasks), self.user_data, &tasks) };
+    }
+    fn on_file(&self, event: crate::attachments::FileEvent) {
+        let p = c_json(&event);
+        unsafe {
+            let table = &*self.table;
+            if let Some(f) = table.on_file {
+                f(self.user_data, p);
+            }
+            grouse_string_free(p);
+        }
     }
     fn on_replay_progress(&self, session_id: String, loaded: i64, total: i64, done: bool) {
         unsafe {
@@ -817,6 +830,43 @@ pub extern "C" fn grouse_send_prompt_with_paths(
     .unwrap_or_else(|_| {
         set_err(out_err, "panic in grouse_send_prompt_with_paths");
     });
+}
+
+/// Fetch a file the server shared into this client's cache.
+///
+/// The other half of an `ItemKind::File` row: the row carries a reference
+/// (`files[0].path` + `sha256`), this pulls the bytes in chunks and reports on
+/// `on_file`. Idempotent by digest, so a second tap costs no round trip.
+#[no_mangle]
+pub extern "C" fn grouse_fetch_file(
+    h: *mut c_void,
+    session_id: *const c_char,
+    path: *const c_char,
+    name: *const c_char,
+    mime: *const c_char,
+    sha256: *const c_char,
+    out_err: *mut *mut c_char,
+) {
+    if !out_err.is_null() {
+        unsafe { *out_err = std::ptr::null_mut() };
+    }
+    let (Some(session_id), Some(path), Some(name)) = (
+        unsafe { c_param(session_id) }.map(str::to_string),
+        unsafe { c_param(path) }.map(str::to_string),
+        unsafe { c_param(name) }.map(str::to_string),
+    ) else {
+        set_err(out_err, "session_id, path and name are required");
+        return;
+    };
+    let mime = unsafe { c_param(mime) }.unwrap_or_default().to_string();
+    let sha256 = unsafe { c_param(sha256) }.unwrap_or_default().to_string();
+    let core = handle(h);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        core.core.fetch_file(session_id, path, name, mime, sha256);
+    }));
+    if result.is_err() {
+        set_err(out_err, "panic in grouse_fetch_file");
+    }
 }
 
 #[no_mangle]

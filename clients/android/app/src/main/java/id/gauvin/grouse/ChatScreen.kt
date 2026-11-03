@@ -5,6 +5,7 @@ package id.gauvin.grouse
 import id.gauvin.grouse.ui.theme.GrouseShapes
 import id.gauvin.grouse.ui.theme.statusColors
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Base64
@@ -51,6 +52,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
@@ -829,7 +832,14 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                                     // `live` is what lets a running step's chip pulse: it is this
                                     // CHAT's turn, and a chip in a finished chat must not animate.
                                     is ChatItem.Tools -> ToolChipGroup(item.items, live = cm.busy.value)
-                                    is ChatItem.Msg -> {
+                                    // A file the SERVER shared draws as a card: name,
+                                    // type and size came with the tool call, the bytes
+                                    // did not (a blob in a tool result would be stored in
+                                    // the session and replayed on every open). Tapping
+                                    // fetches it; tapping a fetched one opens it.
+                                    is ChatItem.Msg -> if (item.m.role == "file") {
+                                        SharedFileRow(cm, item.m, ctx)
+                                    } else {
                                         val pinned = item.m.role == "mcpapp" &&
                                             item.m.appKey.isNotEmpty() && item.m.appKey == pins
                                         MessageBubble(
@@ -1801,4 +1811,94 @@ private fun TurnLogDialog(cm: ConnectionManager, onDismiss: () -> Unit) {
             }
         },
     )
+}
+
+
+/**
+ * A file the SERVER shared, as a card in the transcript.
+ *
+ * The transcript carries a REFERENCE — name, type, size, digest, server path —
+ * and never the bytes: a blob in a tool result is stored in the session, re-sent
+ * on every replay and shown to the model (measured: a 1 MiB PDF is ~350k tokens
+ * of context per turn). So the card is the download. `cm.fileDownloads` is the
+ * state, keyed by the server path, which is what the core reports on.
+ */
+@Composable
+internal fun SharedFileRow(cm: ConnectionManager, m: ChatMessage, ctx: Context) {
+    val file = m.files.firstOrNull() ?: return
+    val state = cm.fileDownloads[file.path]
+    val phase = state?.state ?: "idle"
+    val busy = phase == "downloading"
+    val ready = phase == "saved"
+    val label = when {
+        busy && (state?.total ?: 0) > 0 ->
+            "downloading ${((state!!.received * 100) / state.total).toInt()}%"
+        busy -> "downloading…"
+        ready -> "saved · tap to open"
+        phase == "failed" -> state?.message?.takeIf { it.isNotBlank() } ?: "could not fetch"
+        else -> attachmentSubtitle(file)
+    }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth().widthIn(max = 420.dp)
+            .padding(vertical = 2.dp)
+            .clickable {
+                if (busy) return@clickable
+                if (ready) openLocalFile(ctx, state!!.localPath, file.mime)
+                else cm.fetchFile(file)
+            }
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    attachmentIcon(file.mime, file.name),
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodyMedium)
+                    Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (phase == "failed") MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.outline)
+                }
+                Spacer(Modifier.width(8.dp))
+                if (busy) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.6.dp)
+                else Icon(
+                    if (ready) Icons.AutoMirrored.Filled.OpenInNew else Icons.Filled.Download,
+                    contentDescription = if (ready) "open" else "download",
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+            if (busy && (state?.total ?: 0) > 0) {
+                Spacer(Modifier.height(6.dp))
+                LinearProgressIndicator(
+                    progress = { (state!!.received.toFloat() / state.total.toFloat()).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(2.dp),
+                )
+            }
+        }
+    }
+}
+
+/** Hand a downloaded file to whatever app handles its type. */
+private fun openLocalFile(ctx: Context, path: String, mime: String) {
+    if (path.isEmpty()) return
+    runCatching {
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            ctx, "${ctx.packageName}.fileprovider", java.io.File(path))
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mime.ifBlank { "application/octet-stream" })
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        ctx.startActivity(Intent.createChooser(intent, "Open"))
+    }.onFailure {
+        Toast.makeText(ctx, "no app can open ${'$'}{path.substringAfterLast('/')}",
+            Toast.LENGTH_SHORT).show()
+    }
 }

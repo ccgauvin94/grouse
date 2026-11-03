@@ -49,6 +49,29 @@ data class AttachedFile(
     val mime: String,
     /** -1 when the provider would not report a size (the label then omits it). */
     val bytes: Long,
+    /**
+     * SERVER-side path, for a file the server shared ([ItemKind.FILE]); empty for
+     * a file this device attached. It is the fetch key: `ConnectionManager.fetchFile`
+     * sends it back and the core streams the bytes.
+     */
+    val path: String = "",
+    /** Content digest, when the server reported one. Makes a re-fetch free. */
+    val sha256: String = "",
+)
+
+/**
+ * One server-shared file's download: idle (absent from the map) → downloading →
+ * saved, or failed with the server's own message. Keyed by the SERVER path, which
+ * is what the core reports on.
+ */
+data class FileDownload(
+    /** downloading | saved | failed */
+    val state: String,
+    val received: Long,
+    val total: Long,
+    /** Where it landed locally (saved only). */
+    val localPath: String,
+    val message: String,
 )
 
 /** A send-time pick, as the card the composer and the bubble both draw. */

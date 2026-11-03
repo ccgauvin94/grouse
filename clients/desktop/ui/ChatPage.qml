@@ -401,6 +401,24 @@ Kirigami.Page {
     // real user scrolls (drag/flick), never on the programmatic ListView reset
     // that follows each messagesChanged — so a reset can't silently unpin us.
     property bool pinnedToEnd: true
+    // Shared-file downloads, keyed by the SERVER-side path (the same value the
+    // core keys its `on_file` events on). `{state, received, total, localPath,
+    // failure}`; absent means idle. A reopened chat starts empty on purpose: the
+    // core's cache is the record, and the first tap reports `saved` instantly.
+    property var fileDownloads: ({})
+    function fileState(path) {
+        return page.fileDownloads[path] || ({})
+    }
+    function fileCardInfo(path, name, mime, bytes) {
+        // One source for icon/kind/size formatting (the same helper the composer
+        // chips use), so a server file reads like any other file.
+        return Mgr.serverFileCard(name || path, mime || "", bytes || 0)
+    }
+    function downloadFile(row, path, name, mime, sha) {
+        page.fileDownloads[path] = { state: "downloading", received: 0, total: 0 }
+        page.fileDownloads = Object.assign({}, page.fileDownloads)
+        Mgr.fetchFile(Mgr.currentSessionId, path, name, mime, sha || "")
+    }
 
     Connections {
         target: Mgr
@@ -428,6 +446,31 @@ Kirigami.Page {
             chatInput.text = text
             chatInput.cursorPosition = text.length
             chatInput.focus = true
+        }
+        function onFileEvent(json) {
+            var ev = null
+            try { ev = JSON.parse(json) } catch (e) { return }
+            if (!ev || !ev.path) return
+            var now = page.fileDownloads[ev.path] || ({})
+            var next = Object.assign({}, now)
+            if (ev.Progress !== undefined) {
+                next.state = "downloading"
+                next.received = ev.Progress.received
+                next.total = ev.Progress.total
+            } else if (ev.Saved !== undefined) {
+                next.state = "saved"
+                next.localPath = ev.Saved.local_path
+                next.received = ev.Saved.bytes
+                next.total = ev.Saved.bytes
+                next.failure = ""
+            } else if (ev.Failed !== undefined) {
+                next.state = "failed"
+                next.failure = ev.Failed.message
+            } else {
+                return
+            }
+            page.fileDownloads[ev.path] = next
+            page.fileDownloads = Object.assign({}, page.fileDownloads)
         }
         // Entering a thread chat re-reads the task lists: the panel above the
         // transcript is this thread's rows, and they may have moved since My Day
@@ -1128,6 +1171,16 @@ Kirigami.Page {
                 readonly property bool isError: mdel.messageRole === "error"
                 readonly property bool isChart: mdel.messageRole === "chart"
                 readonly property bool isMcpApp: mdel.messageRole === "mcpapp"
+                // A file the SERVER shared: the row is a reference, and the card
+                // is also the download (see FileCard.qml).
+                readonly property bool isFile: mdel.messageRole === "file"
+                readonly property var fileRef: mdel.messageFiles.length > 0 ? mdel.messageFiles[0] : ({})
+                readonly property var fileMeta: mdel.isFile
+                    ? page.fileCardInfo(String(fileRef.path || ""), String(fileRef.name || ""),
+                                        String(fileRef.mime || ""), Number(fileRef.size || 0))
+                    : ({})
+                readonly property var fileProgress: mdel.isFile
+                    ? page.fileState(String(fileRef.path || "")) : ({})
                 // True when QtWebEngine was compiled in: MCP Apps render inline
                 // (AppView) instead of the browser-handoff chip.
                 readonly property bool inlineApps: Mgr.inlineAppsEnabled()
@@ -1206,6 +1259,7 @@ Kirigami.Page {
                      : mdel.isThought ? thoughtBlock.implicitHeight
                      : mdel.isChart ? mdel.chartH + mdel.pad * 2
                      : mdel.isMcpApp ? mcpAppChip.implicitHeight
+                     : mdel.isFile ? fileCard.implicitHeight
                      : errorBanner.implicitHeight
 
                 // The selectable bubble text under the cursor (user or agent).
@@ -1989,6 +2043,35 @@ Kirigami.Page {
                             opacity: 0.7
                             font.italic: true
                         }
+                    }
+                }
+
+                // ---------------- shared file card ----------------
+                // A file the SERVER shared: name, type and size came down with
+                // the tool call; the bytes did not (a blob in a tool result is
+                // stored in the session, replayed on every open and shown to the
+                // model). The card is the download.
+                FileCard {
+                    id: fileCard
+                    visible: mdel.isFile
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.leftMargin: mdel.gap
+                    width: Math.min(mdel.maxW, 440)
+                    fileName: String(mdel.fileMeta.name || mdel.messageText)
+                    icon: String(mdel.fileMeta.icon || "application-octet-stream")
+                    subtitle: String(mdel.fileMeta.subtitle || "")
+                    phase: String(mdel.fileProgress.state || "idle")
+                    received: Number(mdel.fileProgress.received || 0)
+                    total: Number(mdel.fileProgress.total || 0)
+                    failure: String(mdel.fileProgress.failure || "")
+                    onDownloadRequested: page.downloadFile(
+                        mdel, String(mdel.fileRef.path || ""), String(mdel.fileRef.name || ""),
+                        String(mdel.fileRef.mime || ""), String(mdel.fileRef.sha256 || ""))
+                    onOpenRequested: {
+                        const local = String(mdel.fileProgress.localPath || "")
+                        if (local.length > 0)
+                            Qt.openUrlExternally("file://" + local)
                     }
                 }
 

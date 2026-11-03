@@ -142,6 +142,13 @@ pub trait CoreListener {
     // event so none of them has to infer completion. Emitted for every replay
     // (a normal open starts at 0 of N); `Quick` replays say nothing beyond that.
     fn on_replay_progress(&self, session_id: String, loaded: i64, total: i64, done: bool);
+    // A SHARED file's download (server -> client). Keyed by the SERVER-side
+    // `path` — the same value in an `ItemKind::File` row's `files[0].path` — so
+    // several rows can fetch at once and a reopened chat has no request order to
+    // reconstruct. Shapes: `Progress { path, name, received, total }`,
+    // `Saved { path, name, mime, bytes, local_path }`,
+    // `Failed { path, name, message }`.
+    fn on_file(&self, event: FileEvent);
 }
 ```
 
@@ -226,7 +233,7 @@ second promotion of the same id is a core-side no-op.
 channel; the legacy `on_transcript` / `on_stream` surface is deleted.
 
 ```rust
-pub enum ItemKind { User, Agent, Thought, Tool, ToolGroup, Chart, McpApp, Error }
+pub enum ItemKind { User, Agent, Thought, Tool, ToolGroup, Chart, McpApp, File, Error }
 
 pub struct SubagentStep { name, detail }
 
@@ -347,6 +354,21 @@ Rules:
   is a `FileSource` (name/mime/size + `read(offset, len)`), so the bytes are
   pulled one chunk at a time and never held whole on either side of the
   boundary. Images keep the inline path unchanged.
+- **A file the SERVER shares travels the other way as a REFERENCE, never bytes.**
+  When a tool call is `attachments__attachment_share` — recognised from
+  `_meta.goose.toolCall.toolName` + its arguments, not from the model's prose —
+  the core emits an `ItemKind::File` row carrying `files[0] = {name, mime, bytes,
+  path, sha256}` and fetches nothing. `fetch_file(...)` then pulls the bytes on
+  demand (`attachments__attachment_read`, 512 KiB chunks, hidden `auto`-mode
+  session per endpoint) and reports on `on_file`; the local copy is
+  content-addressed under `<cache>/files/`. **Why it is not in the transcript:**
+  measured 2026-11-03 against the live server, a tool result carrying a blob is
+  stored verbatim in `sessions.db`, re-sent on every `session/load` replay, and
+  shown to the model — a 1 MiB PDF is ~350k tokens of context per turn. The
+  reference costs ~200 bytes and the bytes are pulled once per device.
+  (goose also DROPS `resource_link` blocks inside tool results, and with Code
+  Mode on — `code_execution` — a tool result never reaches the client at all:
+  the only visible call is `execute javascript` with empty content.)
 
 - **A file's NAME is display data; only its PATH is sanitised.** The
   `attachments` server writes `<sha16>-<sanitised name>` on disk (it must: the

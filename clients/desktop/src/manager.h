@@ -251,6 +251,12 @@ public:
      *  the composer and the transcript cannot disagree, and so a QML delegate
      *  never formats a byte count. */
     Q_INVOKABLE QVariantMap attachmentCard(const QString &path) const;
+    /// The same {name, kind, icon, size, subtitle} for a file that lives on the
+    /// SERVER (a shared file's card, before it is downloaded). One source for
+    /// icon and size formatting, so a downloaded file and a local one cannot
+    /// disagree about what they are.
+    Q_INVOKABLE QVariantMap serverFileCard(const QString &name, const QString &mime,
+                                           qint64 bytes) const;
     Q_INVOKABLE void cancelTurn();
     /** Compact the conversation history (goose /compact command). */
     Q_INVOKABLE void compactConversation();
@@ -388,6 +394,13 @@ public:
     /// Ask the core for older items (docs/TRANSCRIPT_MODEL.md). Outcomes arrive
     /// as `on_item` Upserts + a refreshed `Window`; there is no client buffer.
     Q_INVOKABLE void loadOlder(int count);
+    /// Fetch a file the SERVER shared (an ItemKind::File row) into this client's
+    /// cache. The core pulls it in chunks and reports on `fileEvent`; the local
+    /// path is what the card opens. Idempotent by digest, so a second tap or a
+    /// reopened chat costs no round trip.
+    Q_INVOKABLE void fetchFile(const QString &sessionId, const QString &path,
+                               const QString &name, const QString &mime,
+                               const QString &sha256);
 
     /** The displayed chat's parked-message count (NOT every chat's: the queue is
      *  per-chat, and a card for another conversation's message would be a lie). */
@@ -525,6 +538,8 @@ public:
     void coreOnExport(const QString &data);
     /** The My Day lists arrived (both sections in one JSON document). */
     void coreOnTasks(const QString &json);
+    /// A shared file's download event, as the core's `FileEvent` JSON.
+    void coreOnFile(const QString &json);
 
 public slots:
     /// A full replay's progress (`on_replay_progress`): the Reload bar's numbers
@@ -589,6 +604,8 @@ signals:
     void skillsChanged();
     /** The My Day lists (or their error/loading state) changed. */
     void tasksChanged();
+    /** A shared file's download progressed or finished (`FileEvent` JSON). */
+    void fileEvent(const QString &json);
     /** My Day took the chat area, or gave it back. */
     void myDayVisibleChanged();
     /** The on-screen chat became (or stopped being) a thread chat. */

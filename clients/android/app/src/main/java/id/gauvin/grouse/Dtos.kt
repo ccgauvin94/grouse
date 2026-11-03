@@ -347,6 +347,8 @@ internal fun itemRole(kind: uniffi.grouse_core.ItemKind): String = when (kind) {
     uniffi.grouse_core.ItemKind.THOUGHT -> "thought"
     uniffi.grouse_core.ItemKind.ERROR -> "error"
     uniffi.grouse_core.ItemKind.TOOL, uniffi.grouse_core.ItemKind.TOOL_GROUP -> "tool"
+    // A file the server shared: its own row, never a tool chip.
+    uniffi.grouse_core.ItemKind.FILE -> "file"
     uniffi.grouse_core.ItemKind.CHART -> "chart"
     uniffi.grouse_core.ItemKind.MCP_APP -> "mcpapp"
 }

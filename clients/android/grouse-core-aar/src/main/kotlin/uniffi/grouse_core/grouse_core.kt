@@ -704,6 +704,9 @@ internal interface UniffiCallbackInterfaceCoreListenerMethod16 : com.sun.jna.Cal
 internal interface UniffiCallbackInterfaceCoreListenerMethod17 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`loaded`: Long,`total`: Long,`done`: Byte,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfaceCoreListenerMethod18 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`data`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
@@ -782,7 +785,7 @@ internal interface UniffiCallbackInterfaceFileSourceMethod2 : com.sun.jna.Callba
 internal interface UniffiCallbackInterfaceFileSourceMethod3 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`offset`: Long,`len`: Int,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "onStatus", "onSessions", "onItem", "onUsage", "onRunEnded", "onSpeak", "onConfig", "onPermissionRequest", "onSessionTouched", "onProjects", "onRoamPeerStatus", "onRoamSessions", "onPeerNewSession", "onActiveRun", "onCommands", "onSessionOpenFailed", "onTasks", "onReplayProgress")
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onStatus", "onSessions", "onItem", "onUsage", "onRunEnded", "onSpeak", "onConfig", "onPermissionRequest", "onSessionTouched", "onProjects", "onRoamPeerStatus", "onRoamSessions", "onPeerNewSession", "onActiveRun", "onCommands", "onSessionOpenFailed", "onTasks", "onReplayProgress", "onFile")
 internal open class UniffiVTableCallbackInterfaceCoreListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
     @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
@@ -804,6 +807,7 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
     @JvmField internal var `onSessionOpenFailed`: UniffiCallbackInterfaceCoreListenerMethod15? = null,
     @JvmField internal var `onTasks`: UniffiCallbackInterfaceCoreListenerMethod16? = null,
     @JvmField internal var `onReplayProgress`: UniffiCallbackInterfaceCoreListenerMethod17? = null,
+    @JvmField internal var `onFile`: UniffiCallbackInterfaceCoreListenerMethod18? = null,
 ) : Structure() {
     class UniffiByValue(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -826,7 +830,8 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
         `onSessionOpenFailed`: UniffiCallbackInterfaceCoreListenerMethod15? = null,
         `onTasks`: UniffiCallbackInterfaceCoreListenerMethod16? = null,
         `onReplayProgress`: UniffiCallbackInterfaceCoreListenerMethod17? = null,
-    ): UniffiVTableCallbackInterfaceCoreListener(`uniffiFree`,`uniffiClone`,`onStatus`,`onSessions`,`onItem`,`onUsage`,`onRunEnded`,`onSpeak`,`onConfig`,`onPermissionRequest`,`onSessionTouched`,`onProjects`,`onRoamPeerStatus`,`onRoamSessions`,`onPeerNewSession`,`onActiveRun`,`onCommands`,`onSessionOpenFailed`,`onTasks`,`onReplayProgress`,), Structure.ByValue
+        `onFile`: UniffiCallbackInterfaceCoreListenerMethod18? = null,
+    ): UniffiVTableCallbackInterfaceCoreListener(`uniffiFree`,`uniffiClone`,`onStatus`,`onSessions`,`onItem`,`onUsage`,`onRunEnded`,`onSpeak`,`onConfig`,`onPermissionRequest`,`onSessionTouched`,`onProjects`,`onRoamPeerStatus`,`onRoamSessions`,`onPeerNewSession`,`onActiveRun`,`onCommands`,`onSessionOpenFailed`,`onTasks`,`onReplayProgress`,`onFile`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceCoreListener) {
         `uniffiFree` = other.`uniffiFree`
@@ -849,6 +854,7 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
         `onSessionOpenFailed` = other.`onSessionOpenFailed`
         `onTasks` = other.`onTasks`
         `onReplayProgress` = other.`onReplayProgress`
+        `onFile` = other.`onFile`
     }
 
 }
@@ -1006,6 +1012,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_grouse_core_checksum_method_core_delete_session(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_disconnect(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_core_fetch_file(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_flush_caches(
     ): Int
@@ -1205,6 +1213,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_corelistener_on_replay_progress(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_corelistener_on_file(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstablelistener_on_recipe_params(
@@ -1293,6 +1303,8 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_method_core_delete_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_disconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_core_fetch_file(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`path`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`mime`: RustBuffer.ByValue,`sha256`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_flush_caches(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1624,6 +1636,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_disconnect() and 0xFFFF) != 29396) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_grouse_core_checksum_method_core_fetch_file() and 0xFFFF) != 6068) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_grouse_core_checksum_method_core_flush_caches() and 0xFFFF) != 885) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1690,7 +1705,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_send_prompt_inner() and 0xFFFF) != 61075) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_send_prompt_with_files() and 0xFFFF) != 20223) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_send_prompt_with_files() and 0xFFFF) != 18391) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_send_prompt_with_paths() and 0xFFFF) != 47101) {
@@ -1919,6 +1934,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_replay_progress() and 0xFFFF) != 38008) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_corelistener_on_file() and 0xFFFF) != 46644) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export() and 0xFFFF) != 3482) {
@@ -2555,6 +2573,32 @@ public interface CoreInterface {
     fun `disconnect`()
     
     /**
+     * Send a prompt with files attached.
+     *
+     * The files upload first -- chunked, through the `attachments` extension --
+     * and the prompt then carries one `resource_link` per file. It never
+     * carries the bytes: goose DROPS a `resource` block whose contents are a
+     * blob, which is why "attach a PDF" used to show a chip and deliver
+     * nothing (see `attachments.rs`).
+     *
+     * If any upload fails, NOTHING is sent and the failure is raised as an
+     * alert. A prompt that silently lost its attachments is the failure this
+     * path exists to remove.
+     * Fetch a file the server shared, into this client's file cache.
+     *
+     * The other half of `ItemKind::File`: the row carries a reference, this
+     * pulls the bytes. Chunked over the SAME deterministic `tools/call` channel
+     * the upload path uses (so nothing enters the conversation, the session
+     * store or the replay), `attachments::DOWNLOAD_CHUNK` bytes at a time.
+     *
+     * Idempotent by DIGEST: the local name starts with the sha256, so tapping a
+     * file twice — or reopening a chat and tapping again — finds the finished
+     * copy and reports `Saved` without a round trip. Progress and the outcome
+     * arrive on `CoreListener::on_file`, keyed by the server-side `path`.
+     */
+    fun `fetchFile`(`sessionId`: kotlin.String, `path`: kotlin.String, `name`: kotlin.String, `mime`: kotlin.String, `sha256`: kotlin.String)
+    
+    /**
      * Persist every open transcript NOW: the main session's and each roam
      * peer's.
      *
@@ -2716,19 +2760,6 @@ public interface CoreInterface {
      */
     fun `sendPromptInner`(`prompt`: Prompt, `files`: List<UploadedFile>, `expect`: SendExpect?)
     
-    /**
-     * Send a prompt with files attached.
-     *
-     * The files upload first -- chunked, through the `attachments` extension --
-     * and the prompt then carries one `resource_link` per file. It never
-     * carries the bytes: goose DROPS a `resource` block whose contents are a
-     * blob, which is why "attach a PDF" used to show a chip and deliver
-     * nothing (see `attachments.rs`).
-     *
-     * If any upload fails, NOTHING is sent and the failure is raised as an
-     * alert. A prompt that silently lost its attachments is the failure this
-     * path exists to remove.
-     */
     fun `sendPromptWithFiles`(`prompt`: Prompt, `files`: List<FileSource>, `expect`: SendExpect?)
     
     /**
@@ -3108,6 +3139,47 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     UniffiLib.uniffi_grouse_core_fn_method_core_disconnect(
         it,
         _status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Send a prompt with files attached.
+     *
+     * The files upload first -- chunked, through the `attachments` extension --
+     * and the prompt then carries one `resource_link` per file. It never
+     * carries the bytes: goose DROPS a `resource` block whose contents are a
+     * blob, which is why "attach a PDF" used to show a chip and deliver
+     * nothing (see `attachments.rs`).
+     *
+     * If any upload fails, NOTHING is sent and the failure is raised as an
+     * alert. A prompt that silently lost its attachments is the failure this
+     * path exists to remove.
+     * Fetch a file the server shared, into this client's file cache.
+     *
+     * The other half of `ItemKind::File`: the row carries a reference, this
+     * pulls the bytes. Chunked over the SAME deterministic `tools/call` channel
+     * the upload path uses (so nothing enters the conversation, the session
+     * store or the replay), `attachments::DOWNLOAD_CHUNK` bytes at a time.
+     *
+     * Idempotent by DIGEST: the local name starts with the sha256, so tapping a
+     * file twice — or reopening a chat and tapping again — finds the finished
+     * copy and reports `Saved` without a round trip. Progress and the outcome
+     * arrive on `CoreListener::on_file`, keyed by the server-side `path`.
+     */override fun `fetchFile`(`sessionId`: kotlin.String, `path`: kotlin.String, `name`: kotlin.String, `mime`: kotlin.String, `sha256`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_fetch_file(
+        it,
+        
+        FfiConverterString.lower(`sessionId`),
+        FfiConverterString.lower(`path`),
+        FfiConverterString.lower(`name`),
+        FfiConverterString.lower(`mime`),
+        FfiConverterString.lower(`sha256`),_status)
 }
     }
     
@@ -3527,20 +3599,7 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     
     
 
-    
-    /**
-     * Send a prompt with files attached.
-     *
-     * The files upload first -- chunked, through the `attachments` extension --
-     * and the prompt then carries one `resource_link` per file. It never
-     * carries the bytes: goose DROPS a `resource` block whose contents are a
-     * blob, which is why "attach a PDF" used to show a chip and deliver
-     * nothing (see `attachments.rs`).
-     *
-     * If any upload fails, NOTHING is sent and the failure is raised as an
-     * alert. A prompt that silently lost its attachments is the failure this
-     * path exists to remove.
-     */override fun `sendPromptWithFiles`(`prompt`: Prompt, `files`: List<FileSource>, `expect`: SendExpect?)
+    override fun `sendPromptWithFiles`(`prompt`: Prompt, `files`: List<FileSource>, `expect`: SendExpect?)
         = 
     callWithHandle {
     uniffiRustCall() { _status ->
@@ -5627,6 +5686,11 @@ data class Item (
      * (a UI shows a kind without a size rather than a made-up one). A text file
      * is inlined by goose instead of stubbed, so a replayed one has no record
      * at all — it displays as its contents, which is what it was.
+     *
+     * `ItemKind::File` rows carry the file the SERVER shared here too — same
+     * five fields, opposite direction. The item is a reference: `path` is the
+     * server-side key a client hands to `Core::fetch_file`, and `sha256` is what
+     * makes a second fetch free.
      */
     var `files`: List<UploadedFile>
     , 
@@ -6432,6 +6496,81 @@ public object FfiConverterTypeSessionSummary: FfiConverterRustBuffer<SessionSumm
 
 
 /**
+ * A file the SERVER handed us, described but not carried.
+ *
+ * The transcript stores this and nothing else (`Item.files`): the bytes are
+ * fetched on demand (`Core::fetch_file`). Putting them in the item instead is
+ * what makes a shared PDF cost 4/3 of its size in SQLite, again in every
+ * `session/load` replay, again in each client's transcript cache — and, because
+ * a tool result is shown to the model, tens of thousands of tokens of context on
+ * every turn. Measured 2026-11-03, which is why this type exists.
+ */
+data class SharedFile (
+    /**
+     * The name to show: the sharer's own, never a sanitised or hashed form.
+     */
+    var `name`: kotlin.String
+    , 
+    var `mime`: kotlin.String
+    , 
+    /**
+     * 0 until the share tool's result reports it (the REQUEST carries no size).
+     */
+    var `bytes`: kotlin.ULong
+    , 
+    /**
+     * The server-side path. Both the item's identity and the fetch key.
+     */
+    var `path`: kotlin.String
+    , 
+    /**
+     * Empty until the result reports it; then the client cache key.
+     */
+    var `sha256`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSharedFile: FfiConverterRustBuffer<SharedFile> {
+    override fun read(buf: ByteBuffer): SharedFile {
+        return SharedFile(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: SharedFile) = (
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterString.allocationSize(value.`mime`) +
+            FfiConverterULong.allocationSize(value.`bytes`) +
+            FfiConverterString.allocationSize(value.`path`) +
+            FfiConverterString.allocationSize(value.`sha256`)
+    )
+
+    override fun write(value: SharedFile, buf: ByteBuffer) {
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterString.write(value.`mime`, buf)
+            FfiConverterULong.write(value.`bytes`, buf)
+            FfiConverterString.write(value.`path`, buf)
+            FfiConverterString.write(value.`sha256`, buf)
+    }
+}
+
+
+
+/**
  * One tool call a SUBAGENT made on behalf of a delegate call.
  *
  * goose does not expose subagent sessions over ACP (`ACP_VISIBLE_SESSION_TYPES`
@@ -6826,6 +6965,162 @@ public object FfiConverterTypeConnectionStatus : FfiConverterRustBuffer<Connecti
 
 
 /**
+ * Progress and outcome of one server -> client file fetch, as the UI needs it.
+ *
+ * Keyed by the SERVER-side `path` (the same value the `ItemKind::File` row
+ * carries) rather than by request order: several rows can be fetching at once,
+ * and a chat can be reopened mid-fetch.
+ */
+sealed class FileEvent {
+    
+    /**
+     * `received` of `total` bytes; `total` is 0 when the server did not say.
+     */
+    data class Progress(
+        val `path`: kotlin.String, 
+        val `name`: kotlin.String, 
+        val `received`: kotlin.ULong, 
+        val `total`: kotlin.ULong) : FileEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * Finished and landed in the client's cache.
+     */
+    data class Saved(
+        val `path`: kotlin.String, 
+        val `name`: kotlin.String, 
+        val `mime`: kotlin.String, 
+        val `bytes`: kotlin.ULong, 
+        val `localPath`: kotlin.String) : FileEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Failed(
+        val `path`: kotlin.String, 
+        val `name`: kotlin.String, 
+        val `message`: kotlin.String) : FileEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFileEvent : FfiConverterRustBuffer<FileEvent>{
+    override fun read(buf: ByteBuffer): FileEvent {
+        return when(buf.getInt()) {
+            1 -> FileEvent.Progress(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterULong.read(buf),
+                FfiConverterULong.read(buf),
+                )
+            2 -> FileEvent.Saved(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterULong.read(buf),
+                FfiConverterString.read(buf),
+                )
+            3 -> FileEvent.Failed(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: FileEvent): ULong = when(value) {
+        is FileEvent.Progress -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`path`)
+                + FfiConverterString.allocationSize(value.`name`)
+                + FfiConverterULong.allocationSize(value.`received`)
+                + FfiConverterULong.allocationSize(value.`total`)
+            )
+        }
+        is FileEvent.Saved -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`path`)
+                + FfiConverterString.allocationSize(value.`name`)
+                + FfiConverterString.allocationSize(value.`mime`)
+                + FfiConverterULong.allocationSize(value.`bytes`)
+                + FfiConverterString.allocationSize(value.`localPath`)
+            )
+        }
+        is FileEvent.Failed -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`path`)
+                + FfiConverterString.allocationSize(value.`name`)
+                + FfiConverterString.allocationSize(value.`message`)
+            )
+        }
+    }
+
+    override fun write(value: FileEvent, buf: ByteBuffer) {
+        when(value) {
+            is FileEvent.Progress -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`path`, buf)
+                FfiConverterString.write(value.`name`, buf)
+                FfiConverterULong.write(value.`received`, buf)
+                FfiConverterULong.write(value.`total`, buf)
+                Unit
+            }
+            is FileEvent.Saved -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`path`, buf)
+                FfiConverterString.write(value.`name`, buf)
+                FfiConverterString.write(value.`mime`, buf)
+                FfiConverterULong.write(value.`bytes`, buf)
+                FfiConverterString.write(value.`localPath`, buf)
+                Unit
+            }
+            is FileEvent.Failed -> {
+                buf.putInt(3)
+                FfiConverterString.write(value.`path`, buf)
+                FfiConverterString.write(value.`name`, buf)
+                FfiConverterString.write(value.`message`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
  * The kind of a rich transcript [`Item`] (docs/TRANSCRIPT_MODEL.md). One
  * variant per thing a client draws, so a chart stays a chart and an MCP app
  * keeps its identity through replay and restart.
@@ -6840,6 +7135,13 @@ enum class ItemKind {
     TOOL_GROUP,
     CHART,
     MCP_APP,
+    /**
+     * A file the SERVER shared (`attachments__attachment_share`). Carries the
+     * reference in `files` and never the bytes — the client fetches them with
+     * `Core::fetch_file`, so the transcript, the session store and every replay
+     * stay small (see `attachments::SharedFile`).
+     */
+    FILE,
     ERROR;
 
     
@@ -7788,6 +8090,17 @@ public interface CoreListener {
      */
     fun `onReplayProgress`(`sessionId`: kotlin.String, `loaded`: kotlin.Long, `total`: kotlin.Long, `done`: kotlin.Boolean)
     
+    /**
+     * A shared file's download: progress, then the local path or the failure.
+     *
+     * `path` is the SERVER-side path — the same value in the `ItemKind::File`
+     * row's `files[0].path` — so a UI can key its per-row state on it without
+     * tracking request order. Every client must implement it (a no-op is
+     * fine); the
+     * parity ledger demands a disposition per client (`listener.on_file`).
+     */
+    fun `onFile`(`event`: FileEvent)
+    
     companion object
 }
 
@@ -8025,6 +8338,18 @@ internal object uniffiCallbackInterfaceCoreListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
+    internal object `onFile`: UniffiCallbackInterfaceCoreListenerMethod18 {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeCoreListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onFile`(
+                    FfiConverterTypeFileEvent.lift(`event`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
 
     internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
@@ -8059,6 +8384,7 @@ internal object uniffiCallbackInterfaceCoreListener {
         `onSessionOpenFailed`,
         `onTasks`,
         `onReplayProgress`,
+        `onFile`,
     )
 
     // Registers the foreign callback with the Rust side.

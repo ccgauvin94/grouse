@@ -64,6 +64,12 @@ public:
                                               const char *paths_json,
                                               const char *expect_json,
                                               char **out_err);
+        // Fetch a file the SERVER shared (an ItemKind::File row) into this
+        // client's cache. Chunked by the core; progress and the local path
+        // arrive on `on_file`.
+        void (*grouse_fetch_file)(void *h, const char *session_id, const char *path,
+                                  const char *name, const char *mime,
+                                  const char *sha256, char **out_err);
         void (*grouse_cancel)(void *h);
         void (*grouse_set_config_option)(void *h, const char *config_id,
                                          const char *value, char **out_err);
@@ -261,5 +267,8 @@ struct GrouseCoreListener {
     // counts messages ingested, `total` is the server's messageCount (0 when
     // unknown) — the Reload bar's two numbers. ABI 7.
     void (*on_replay_progress)(void *, const char *, long long, long long, int);
+    // A shared file's download as JSON (`FileEvent`: progress / saved / failed),
+    // keyed by the server-side path. Appended last; ABI 9.
+    void (*on_file)(void *, const char *);
 };
 }

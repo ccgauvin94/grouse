@@ -34,6 +34,11 @@ use crate::transcript::TranscriptStore;
 uniffi::setup_scaffolding!();
 
 mod attachments;
+
+// The file-ingest types are part of the PUBLIC surface — they are fields of
+// `Item`, listener payloads and (for a shared file) the fetch key — so they are
+// re-exported rather than left inside the module that happens to implement them.
+pub use attachments::{FileEvent, SharedFile, UploadedFile};
 pub mod cache;
 pub mod capi;
 pub mod imgrescale;
@@ -167,6 +172,11 @@ pub enum ItemKind {
     ToolGroup,
     Chart,
     McpApp,
+    /// A file the SERVER shared (`attachments__attachment_share`). Carries the
+    /// reference in `files` and never the bytes — the client fetches them with
+    /// `Core::fetch_file`, so the transcript, the session store and every replay
+    /// stay small (see `attachments::SharedFile`).
+    File,
     Error,
 }
 
@@ -255,6 +265,11 @@ pub struct Item {
     /// (a UI shows a kind without a size rather than a made-up one). A text file
     /// is inlined by goose instead of stubbed, so a replayed one has no record
     /// at all — it displays as its contents, which is what it was.
+    ///
+    /// `ItemKind::File` rows carry the file the SERVER shared here too — same
+    /// five fields, opposite direction. The item is a reference: `path` is the
+    /// server-side key a client hands to `Core::fetch_file`, and `sha256` is what
+    /// makes a second fetch free.
     #[serde(default)]
     pub files: Vec<crate::attachments::UploadedFile>,
     /// Images the row carries, as `data:<mime>;base64,<data>` URIs the client
@@ -530,6 +545,15 @@ pub trait CoreListener: Send + Sync {
     /// full replay to describe. One `done` per reload is the client's signal to
     /// put the bar away, so it does not have to infer completion.
     fn on_replay_progress(&self, session_id: String, loaded: i64, total: i64, done: bool);
+
+    /// A shared file's download: progress, then the local path or the failure.
+    ///
+    /// `path` is the SERVER-side path — the same value in the `ItemKind::File`
+    /// row's `files[0].path` — so a UI can key its per-row state on it without
+    /// tracking request order. Every client must implement it (a no-op is
+    /// fine); the
+    /// parity ledger demands a disposition per client (`listener.on_file`).
+    fn on_file(&self, event: crate::attachments::FileEvent);
 }
 
 /// Unstable events (CONTRACT §5). Retiring with `grouse-unstable`.
@@ -797,6 +821,13 @@ struct CoreInner {
     /// mode auto — see `tasks.rs`). Dropped on any failed call, which is what
     /// recovers from a server restart and from goose evicting the session.
     tasks_session: Mutex<Option<String>>,
+    /// Hidden sessions (one per endpoint) that server -> client file fetches run
+    /// on: `_meta.hidden`, `session/set_mode auto`. A deterministic `tools/call`
+    /// is refused on a chat session in approve/smart_approve mode ("app tool
+    /// calls require auto mode"), and a download must never depend on the mode
+    /// the user picked for that conversation. Keyed by the endpoint's label ("" =
+    /// the main wire) — a roam chat's files live on that peer's filesystem.
+    file_sessions: Mutex<HashMap<String, String>>,
 }
 
 /// A file the app wants to attach, read on demand.
@@ -895,6 +926,7 @@ impl Core {
                 active_peer_label,
                 self_ref: std::sync::OnceLock::new(),
                 tasks_session: Mutex::new(None),
+                file_sessions: Mutex::new(HashMap::new()),
             }),
         });
         let _ = core.inner.self_ref.set(Arc::downgrade(&core));
@@ -1356,6 +1388,49 @@ impl Core {
     /// If any upload fails, NOTHING is sent and the failure is raised as an
     /// alert. A prompt that silently lost its attachments is the failure this
     /// path exists to remove.
+    /// Fetch a file the server shared, into this client's file cache.
+    ///
+    /// The other half of `ItemKind::File`: the row carries a reference, this
+    /// pulls the bytes. Chunked over the SAME deterministic `tools/call` channel
+    /// the upload path uses (so nothing enters the conversation, the session
+    /// store or the replay), `attachments::DOWNLOAD_CHUNK` bytes at a time.
+    ///
+    /// Idempotent by DIGEST: the local name starts with the sha256, so tapping a
+    /// file twice — or reopening a chat and tapping again — finds the finished
+    /// copy and reports `Saved` without a round trip. Progress and the outcome
+    /// arrive on `CoreListener::on_file`, keyed by the server-side `path`.
+    pub fn fetch_file(
+        &self,
+        session_id: String,
+        path: String,
+        name: String,
+        mime: String,
+        sha256: String,
+    ) {
+        let this = self.clone();
+        crate::roam::runtime().spawn(async move {
+            let display = session_id.clone();
+            let report = this
+                .download_one(&display, &path, &name, &sha256)
+                .await;
+            let event = match report {
+                Ok((local, bytes)) => crate::attachments::FileEvent::Saved {
+                    path,
+                    name,
+                    mime,
+                    bytes,
+                    local_path: local.to_string_lossy().to_string(),
+                },
+                Err(message) => crate::attachments::FileEvent::Failed {
+                    path,
+                    name,
+                    message,
+                },
+            };
+            this.inner.listener.on_file(event);
+        });
+    }
+
     pub fn send_prompt_with_files(
         &self,
         prompt: Prompt,
@@ -2149,6 +2224,52 @@ impl Core {
     /// refuses app tool calls in every other mode. Nothing is ever prompted on
     /// it — it exists to host deterministic tool calls, so its context stays
     /// empty — which is why trading its mode away costs nothing.
+    /// The hidden session a file fetch runs on for `owner`'s endpoint.
+    ///
+    /// Built exactly like the My Day task session (`_meta.hidden` + mode auto),
+    /// because goose refuses a client-initiated `tools/call` on any session whose
+    /// mode is not auto — with a message that reads like a permissions problem
+    /// ("app tool calls require auto mode"). A download is not part of the
+    /// conversation, so it must not borrow the conversation's mode.
+    async fn file_wire(&self, owner: &Arc<dyn crate::session::ChatEndpoint>) -> Result<String, String> {
+        let key = owner.label().unwrap_or_default();
+        if let Some(wire) = self.inner.file_sessions.lock().get(&key).cloned() {
+            return Ok(wire);
+        }
+        let cwd = self
+            .inner
+            .state
+            .lock()
+            .last_config
+            .clone()
+            .map(|c| c.cwd)
+            .unwrap_or_default();
+        let reply = owner
+            .request(
+                "session/new",
+                crate::tasks::new_session_params(&cwd),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let wire = reply
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "session/new returned no session id".to_string())?
+            .to_string();
+        owner
+            .request(
+                "session/set_mode",
+                crate::tasks::set_mode_params(&wire, "auto"),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        self.inner
+            .file_sessions
+            .lock()
+            .insert(key, wire.clone());
+        Ok(wire)
+    }
+
     async fn tasks_wire(&self) -> Result<(Arc<crate::spine::Conn>, String), String> {
         let conn = self
             .inner
@@ -2219,6 +2340,124 @@ impl Core {
                 Err(e.to_string())
             }
         }
+    }
+
+    /// Pull one file: windows until `total`, then land it atomically.
+    ///
+    /// The owner is the chat's OWN endpoint, not the main wire: a file shared in
+    /// a roam chat lives on that peer's filesystem, and `attachments__attachment_read`
+    /// has to run there.
+    async fn download_one(
+        &self,
+        display: &str,
+        path: &str,
+        name: &str,
+        sha256: &str,
+    ) -> Result<(PathBuf, u64), String> {
+        let local = self.local_file_path(display, path, name, sha256);
+        // A finished copy is the whole answer: the name is content-addressed, so
+        // an existing file IS this file.
+        if let Ok(meta) = local.metadata() {
+            if meta.len() > 0 {
+                return Ok((local, meta.len()));
+            }
+        }
+        let owner = self
+            .owner_for(display)
+            .ok_or_else(|| "no connection for that chat".to_string())?;
+        // Deterministic calls run on the endpoint's hidden session, not the chat's
+        // (see `file_wire`): the chat may be in approve mode, which refuses them.
+        let wire = match self.file_wire(&owner).await {
+            Ok(wire) => wire,
+            Err(e) => {
+                self.inner
+                    .file_sessions
+                    .lock()
+                    .remove(&owner.label().unwrap_or_default());
+                return Err(e);
+            }
+        };
+        if let Some(parent) = local.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("cache dir: {e}"))?;
+        }
+        let mut data: Vec<u8> = Vec::new();
+        loop {
+            let params = crate::attachments::read_params(
+                &wire,
+                path,
+                data.len() as u64,
+                crate::attachments::DOWNLOAD_CHUNK,
+            );
+            let reply = owner
+                .request("_goose/unstable/tools/call", params)
+                .await
+                .map_err(|e| e.to_string())?;
+            if crate::tasks::is_error(&reply) {
+                // The hidden session is the usual casualty of a server restart or
+                // an evicted session: drop it so the next tap rebuilds it.
+                self.inner
+                    .file_sessions
+                    .lock()
+                    .remove(&owner.label().unwrap_or_default());
+                return Err(crate::tasks::content_text(&reply));
+            }
+            let payload = tool_json_payload(&reply)
+                .ok_or_else(|| "the server returned no chunk".to_string())?;
+            let chunk = crate::attachments::parse_read(&payload)?;
+            // Appending by offset: a window out of place would silently reorder
+            // the file, so refuse instead of assembling garbage.
+            if chunk.offset != data.len() as u64 {
+                return Err(format!(
+                    "chunk arrived at offset {} while {} bytes were held",
+                    chunk.offset,
+                    data.len()
+                ));
+            }
+            data.extend_from_slice(&chunk.data);
+            if data.len() as u64 > crate::attachments::MAX_BYTES {
+                return Err(format!(
+                    "file exceeds the {} byte limit",
+                    crate::attachments::MAX_BYTES
+                ));
+            }
+            self.inner
+                .listener
+                .on_file(crate::attachments::FileEvent::Progress {
+                    path: path.to_string(),
+                    name: name.to_string(),
+                    received: data.len() as u64,
+                    total: chunk.total,
+                });
+            if chunk.data.is_empty() || data.len() as u64 >= chunk.total {
+                break;
+            }
+        }
+        // Written to a temp name then renamed: a half-written file that EXISTS
+        // would be reported as a finished download on the next tap.
+        let temp = local.with_extension("part");
+        std::fs::write(&temp, &data).map_err(|e| format!("write: {e}"))?;
+        std::fs::rename(&temp, &local).map_err(|e| format!("land: {e}"))?;
+        let bytes = data.len() as u64;
+        Ok((local, bytes))
+    }
+
+    /// Where a fetched file lives: content-addressed by digest when the item
+    /// knows it, else by the server path, plus the safe name.
+    fn local_file_path(&self, display: &str, path: &str, name: &str, sha256: &str) -> PathBuf {
+        use std::hash::{Hash, Hasher};
+        let key = if sha256.len() >= 16 {
+            sha256[..16].to_string()
+        } else {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            display.hash(&mut hasher);
+            path.hash(&mut hasher);
+            format!("{:016x}", hasher.finish())
+        };
+        self.inner
+            .cache
+            .dir()
+            .join("files")
+            .join(format!("{key}-{}", crate::attachments::safe_file_name(name)))
     }
 
     /// Upload one file: begin, chunk, commit. Returns where the server put it.
@@ -4186,6 +4425,7 @@ mod tests {
 
     impl CoreListener for Events {
         fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
+    fn on_file(&self, _: crate::attachments::FileEvent) {}
         fn on_status(&self, _: ConnectionStatus) {}
         fn on_sessions(&self, _: Vec<SessionSummary>) {}
         fn on_item(&self, _: TranscriptOp) {}
@@ -4226,6 +4466,9 @@ mod tests {
     struct ArcListener(Arc<dyn CoreListener>);
 
     impl CoreListener for ArcListener {
+        fn on_file(&self, event: crate::attachments::FileEvent) {
+            self.0.on_file(event);
+        }
         fn on_replay_progress(&self, s: String, l: i64, t: i64, d: bool) {
             self.0.on_replay_progress(s, l, t, d);
         }

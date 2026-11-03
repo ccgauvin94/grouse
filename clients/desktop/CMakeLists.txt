@@ -84,6 +84,7 @@ qt_add_resources(grouse-desktop "app"
         ui/MyDayPage.qml
         ui/ChartBubble.qml
         ui/AttachmentCard.qml
+        ui/FileCard.qml
         ui/AppView.qml
         ui/ConnectDialog.qml
         ui/SettingsDialog.qml

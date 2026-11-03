@@ -1,0 +1,114 @@
+import QtQuick
+import QtTest
+import "@CARD_UI_URL@"
+
+// The shared-file card, instantiated directly. Its STATES are the contract: the
+// transcript carries a reference and no bytes, so the card is also the download
+// and must report idle / downloading / saved / failed without ever claiming a
+// file it does not have. A binding TypeError here would be invisible inside a
+// ListView delegate.
+TestCase {
+    id: tc
+    name: "FileCard"
+    width: 640
+    height: 400
+
+    Component {
+        id: cardComp
+        FileCard { }
+    }
+
+    property var card: null
+
+    // One card per test, destroyed in cleanup(): a case that fails a compare
+    // must not leave its item behind, or QuickTest waits on it forever.
+    function make(props) {
+        tc.card = cardComp.createObject(tc, props || {})
+        verify(tc.card !== null, "FileCard failed to instantiate")
+        return tc.card
+    }
+
+    function cleanup() {
+        if (tc.card) {
+            tc.card.destroy()
+            tc.card = null
+        }
+    }
+
+    function test_name_and_subtitle_come_from_the_reference() {
+        const card = make({
+            fileName: "Q3 report (final).pdf",
+            icon: "application-pdf",
+            subtitle: "PDF \u00b7 106 KB",
+        })
+        const name = findChild(card, "cardName")
+        const subtitle = findChild(card, "cardSubtitle")
+        compare(name.text, "Q3 report (final).pdf")
+        compare(subtitle.text, "PDF \u00b7 106 KB")
+        compare(card.phase, "idle", "a fresh card has nothing yet")
+    }
+
+    function test_downloading_replaces_the_subtitle_with_progress() {
+        // A second line that never changes would waste the space the download
+        // needs to say how far along it is.
+        const card = make({
+            fileName: "video.mp4",
+            subtitle: "Video \u00b7 40 MB",
+            phase: "downloading",
+            received: 10,
+            total: 40,
+        })
+        compare(card.progress, 0.25, "the card turns bytes into a fraction")
+        compare(findChild(card, "cardProgressFill").width, findChild(card, "cardProgress").width * 0.25)
+        verify(card.showsProgress, "the bar is shown while fetching")
+        const subtitle = findChild(card, "cardSubtitle")
+        compare(subtitle.text, "downloading 25%")
+    }
+
+    function test_progress_without_a_total_does_not_divide_by_zero() {
+        const card = make({ fileName: "x.bin", phase: "downloading", received: 5, total: 0 })
+        compare(card.progress, 0)
+    }
+
+    function test_saved_offers_to_open_and_failure_keeps_the_reason() {
+        const saved = make({ fileName: "a.pdf", phase: "saved" })
+        compare(findChild(saved, "cardSubtitle").text, "saved \u00b7 open")
+        saved.destroy()
+
+        const failed = make({ fileName: "a.pdf", phase: "failed", failure: "no such file" })
+        compare(findChild(failed, "cardSubtitle").text, "no such file")
+        failed.destroy()
+    }
+
+    function test_a_tap_means_fetch_or_open_never_both() {
+        // One tap, one meaning. Driving `activate()` (what the MouseArea calls)
+        // rather than simulating a click: a synthetic click in QuickTest needs a
+        // real window and hangs headless, and the decision is the part worth
+        // pinning anyway.
+        const card = make({ fileName: "a.pdf", phase: "idle" })
+        let downloads = 0
+        let opens = 0
+        card.downloadRequested.connect(function() { downloads += 1 })
+        card.openRequested.connect(function() { opens += 1 })
+        card.activate()
+        compare(downloads, 1, "an idle card downloads")
+        compare(opens, 0)
+
+        card.phase = "saved"
+        card.activate()
+        compare(opens, 1, "a saved card opens instead of re-fetching")
+        compare(downloads, 1, "and does not fetch again")
+    }
+
+    function test_a_downloading_card_does_nothing_on_a_tap() {
+        // A second tap mid-fetch would start a second download of the same bytes.
+        const card = make({ fileName: "a.pdf", phase: "downloading", received: 1, total: 4 })
+        let downloads = 0
+        card.downloadRequested.connect(function() { downloads += 1 })
+        card.activate()
+        // A second tap mid-fetch would start a second fetch for the same bytes.
+        compare(downloads, 0, "a tap while fetching is a no-op")
+        verify(!findChild(card, "cardAction").enabled, "and the button says so")
+        verify(!findChild(card, "cardAction").enabled, "and so is the button")
+    }
+}

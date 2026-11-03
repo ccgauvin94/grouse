@@ -3,4 +3,8 @@
      lands in shared storage and is dropped when the app is cleaned up. -->
 <paths>
     <cache-path name="captures" path="captures/" />
+    <!-- Files the server SHARED, fetched on demand by the core into
+         filesDir/files/ (see ItemKind.FILE). A card opens one by handing this
+         provider's content URI to whatever app handles the type. -->
+    <files-path name="shared_files" path="files/" />
 </paths>

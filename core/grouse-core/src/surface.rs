@@ -164,6 +164,7 @@ unit_enum_surface!(
     ToolGroup,
     Chart,
     McpApp,
+    File,
     Error,
 );
 
@@ -192,6 +193,7 @@ pub static LISTENER_EVENTS: &[&str] = &[
     "listener.on_session_open_failed",
     "listener.on_tasks",
     "listener.on_replay_progress",
+    "listener.on_file",
 ];
 
 /// Every id in the inventory, in one list. What the checker reads.
@@ -242,8 +244,8 @@ mod tests {
             (STEP_FIELDS, 2),
             (FILE_FIELDS, 5),
             (TRANSCRIPT_OPS, 6),
-            (ITEM_KINDS, 8),
-            (LISTENER_EVENTS, 18),
+            (ITEM_KINDS, 9),
+            (LISTENER_EVENTS, 19),
         ] {
             assert_eq!(group.len(), n, "{} changed size: {:?}", group.len(), group);
         }

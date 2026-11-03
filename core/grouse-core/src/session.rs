@@ -285,6 +285,24 @@ pub(crate) fn content_image_uri(
     }
 }
 
+/// The shared file a tool call announces, if it announces one.
+///
+/// `_meta.goose.toolCall.toolName` is the tool's own `<extension>__<tool>` name,
+/// sent verbatim by the server, and `rawInput` is the call's arguments — neither
+/// is model prose, so both are safe to key a card on.
+fn share_from_tool_call(
+    tc: &agent_client_protocol::schema::v1::ToolCall,
+) -> Option<crate::attachments::SharedFile> {
+    let tool_name = tc
+        .meta
+        .as_ref()?
+        .get("goose")?
+        .pointer("/toolCall/toolName")?
+        .as_str()?;
+    let raw_input = tc.raw_input.clone().unwrap_or(serde_json::Value::Null);
+    crate::attachments::share_from_call(tool_name, &raw_input)
+}
+
 /// Map a wire `ToolCall` to the contract's `ToolCallKind` plus the tool's
 /// command detail.
 pub(crate) fn tool_call_kind(tc: &ToolCall) -> (ToolCallKind, String) {
@@ -998,6 +1016,7 @@ mod tests {
     }
 
     impl CoreListener for Recorder {
+    fn on_file(&self, _: crate::attachments::FileEvent) {}
         fn on_status(&self, _: ConnectionStatus) {}
         fn on_sessions(&self, _: Vec<SessionSummary>) {}
         fn on_item(&self, op: TranscriptOp) {
@@ -1829,6 +1848,14 @@ pub(crate) fn dispatch(
         SessionUpdate::ToolCall(tool) => {
             if host.accepts_chat(&key) {
                 let id = tool.tool_call_id.to_string();
+                // A SHARE is not a step in a loop: it becomes its own card, and the
+                // rest of the tool machinery (runs, summaries, the chip group) is
+                // skipped for it. Recognising it from the CALL (meta + arguments)
+                // is what keeps the card out of the model's prose.
+                if let Some(file) = share_from_tool_call(&tool) {
+                    store.shared_file(&file, &id);
+                    return;
+                }
                 let (kind, detail) = tool_call_kind(&tool);
                 store.tool_call(&tool.title, &detail, &id, kind);
                 // The end-of-turn summarizer labels the turn's plain runs.
@@ -2108,6 +2135,7 @@ impl SessionHub {
 pub(crate) struct NullListener;
 
 impl crate::CoreListener for NullListener {
+    fn on_file(&self, _: crate::attachments::FileEvent) {}
     fn on_status(&self, _: crate::ConnectionStatus) {}
     fn on_sessions(&self, _: Vec<crate::SessionSummary>) {}
     fn on_item(&self, _: crate::TranscriptOp) {}
@@ -2143,6 +2171,11 @@ impl SessionGate {
 }
 
 impl crate::CoreListener for SessionGate {
+    fn on_file(&self, event: crate::attachments::FileEvent) {
+        // Not painting: a fetch was started by a row in THIS chat, so it is
+        // forwarded whatever is on screen (a background fetch must not stall).
+        self.inner.on_file(event);
+    }
     fn on_status(&self, status: crate::ConnectionStatus) {
         self.inner.on_status(status);
     }

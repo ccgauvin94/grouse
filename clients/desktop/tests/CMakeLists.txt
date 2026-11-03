@@ -58,6 +58,10 @@ configure_file(qml/tst_mydaypage.qml.in
 set(CARD_UI_URL "file://${CMAKE_CURRENT_SOURCE_DIR}/../ui")
 configure_file(qml/tst_attachmentcard.qml.in
     ${CMAKE_CURRENT_BINARY_DIR}/qml/tst_attachmentcard.qml @ONLY)
+# FileCard: the shared-file card. Same baked-in ui/ import URL, same reason, and
+# the same property-only interface (no Mgr stub).
+configure_file(qml/tst_filecard.qml.in
+    ${CMAKE_CURRENT_BINARY_DIR}/qml/tst_filecard.qml @ONLY)
 # Plain QML tests pass through unchanged (no placeholders).
 configure_file(qml/tst_combobox.qml
     ${CMAKE_CURRENT_BINARY_DIR}/qml/tst_combobox.qml COPYONLY)

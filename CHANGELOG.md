@@ -6,6 +6,23 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **The agent can hand you a file, in the chat.** A tool that shares one
+  (`attachments__attachment_share`) now produces a card in the transcript with
+  the file's name, type and size, and tapping it downloads the file and opens it
+  — no Nextcloud link, no pasted path. The card carries a **reference only**: the
+  bytes are pulled on demand in 512 KiB chunks over the ACP connection that is
+  already open, so nothing enters the conversation. That is a measurement, not a
+  preference — a tool result containing an embedded file does reach the client,
+  but goose stores it verbatim in the session, re-sends it on every replay and
+  shows it to the model (a 1 MiB PDF would cost ~350k tokens of context per
+  turn), while the card costs ~200 bytes. Downloads land content-addressed in the
+  client's cache, so a second tap — or reopening the chat — costs no round trip.
+  `attachment_share` / `attachment_read` are new tools on the `attachments`
+  extension; they only share from the attachments directory, so a
+  prompt-injected agent cannot hand you the container's keys.
+
 ### Fixed
 
 - **A chat opens at its bottom, and the jump-to-bottom arrow gets there in one

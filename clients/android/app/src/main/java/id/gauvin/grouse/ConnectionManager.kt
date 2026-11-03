@@ -378,6 +378,26 @@ class ConnectionManager private constructor(context: Context) {
         override fun onReplayProgress(sessionId: String, loaded: Long, total: Long, done: Boolean) {
             main.post { onCoreReplayProgress(sessionId, loaded.toInt(), total.toInt(), done) }
         }
+        // A file the SERVER shared, downloading into this device's cache. The
+        // transcript only ever carried the reference (see ItemKind.FILE), so this
+        // is the only place the bytes arrive.
+        override fun onFile(event: uniffi.grouse_core.FileEvent) {
+            main.post {
+                val path = when (event) {
+                    is uniffi.grouse_core.FileEvent.Progress -> event.path
+                    is uniffi.grouse_core.FileEvent.Saved -> event.path
+                    is uniffi.grouse_core.FileEvent.Failed -> event.path
+                }
+                fileDownloads[path] = when (event) {
+                    is uniffi.grouse_core.FileEvent.Progress ->
+                        FileDownload("downloading", event.received.toLong(), event.total.toLong(), "", "")
+                    is uniffi.grouse_core.FileEvent.Saved ->
+                        FileDownload("saved", event.bytes.toLong(), event.bytes.toLong(), event.localPath, "")
+                    is uniffi.grouse_core.FileEvent.Failed ->
+                        FileDownload("failed", 0, 0, "", event.message)
+                }
+            }
+        }
     }, appContext.filesDir.absolutePath)
     private val unstable = GrouseUnstable(object : GrouseUnstableListener {
         override fun onExport(data: String) { main.post { exportData.value = data } }
@@ -2613,6 +2633,22 @@ class ConnectionManager private constructor(context: Context) {
     /** Older items collected during a loadOlder, prepended as one batch on Window. */
     private val olderPending = mutableListOf<Pair<String, ChatMessage>>()
     private var loadingOlder = false
+    /**
+     * Server-shared files being downloaded, keyed by the SERVER-side path (what
+     * the core keys `onFile` on). Absent means idle — a reopened chat starts
+     * empty on purpose, because the core's cache is the record: the first tap
+     * reports `saved` without a round trip.
+     */
+    val fileDownloads = androidx.compose.runtime.mutableStateMapOf<String, FileDownload>()
+
+    /** Fetch a shared file (an `ItemKind.FILE` row) into this device's cache. */
+    fun fetchFile(file: AttachedFile) {
+        val sid = currentSession.value ?: return
+        if (file.path.isEmpty()) return
+        fileDownloads[file.path] = FileDownload("downloading", 0, file.bytes.coerceAtLeast(0), "", "")
+        core.fetchFile(sid, file.path, file.name, file.mime, file.sha256)
+    }
+
     /** True while the core can still emit items older than the painted window. */
     val itemHasOlder = mutableStateOf(false)
     /** True while a scroll-back is waiting on the core — which, past what this device
@@ -2807,6 +2843,15 @@ class ConnectionManager private constructor(context: Context) {
                                 seq = c.seq.toInt(),
                                 stepId = item.id)
         }
+        // A file the server shared: a card, not a tool chip. `files` carries the
+        // reference (name, MIME, bytes, server path, digest) and never the bytes.
+        ItemKind.FILE -> listOf(item.id to ChatMessage(
+            "file", item.text, detail = item.detail, status = item.status,
+            files = item.files.map {
+                AttachedFile(it.name, it.mime, if (it.bytes > 0uL) it.bytes.toLong() else -1L,
+                             path = it.path, sha256 = it.sha256)
+            },
+            id = appIdFor(item.id), seq = item.seq.toInt()))
         ItemKind.CHART -> listOf(item.id to ChatMessage(
             "chart", item.detail, id = appIdFor(item.id), seq = item.seq.toInt()))
         ItemKind.MCP_APP -> listOf(item.id to ChatMessage(

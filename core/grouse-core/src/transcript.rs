@@ -48,6 +48,9 @@ struct ToolRow {
     steps: Vec<crate::SubagentStep>,
     /// Transcript position (see `Item::seq`).
     seq: u32,
+    /// `ItemKind::File` rows only: the reference the server shared. The bytes are
+    /// never here (see `attachments::SharedFile`); a client fetches them.
+    file: Option<crate::attachments::SharedFile>,
 }
 
 impl ToolRow {
@@ -61,6 +64,7 @@ impl ToolRow {
             status: "in_progress".to_string(),
             app_key: String::new(),
             spec: String::new(),
+            file: None,
             thought: String::new(),
             steps: Vec::new(),
             seq: 0,
@@ -225,6 +229,27 @@ impl Bubble {
                 images: images.clone(),
                 ..empty_item()
             },
+            Bubble::Tool(r, _) if r.file.is_some() => {
+                let file = r.file.clone().expect("guarded by the arm");
+                Item {
+                    id: r.tool_call_id.clone(),
+                    kind: ItemKind::File,
+                    // The card's caption and its subtitle. The MIME rides `detail`
+                    // because a card picks an icon from it.
+                    text: file.name.clone(),
+                    detail: file.mime.clone(),
+                    status: r.status.clone(),
+                    files: vec![crate::attachments::UploadedFile {
+                        name: file.name,
+                        mime: file.mime,
+                        bytes: file.bytes,
+                        path: file.path,
+                        sha256: file.sha256,
+                    }],
+                    seq: r.seq,
+                    ..empty_item()
+                }
+            }
             Bubble::Tool(r, label) => Item {
                 id: r.tool_call_id.clone(),
                 kind: ItemKind::Tool,
@@ -731,6 +756,7 @@ fn call_to_row(c: &ToolCall) -> ToolRow {
         status: c.status.clone(),
         app_key: String::new(),
         spec: String::new(),
+        file: None,
         thought: c.thought.clone(),
         steps: Vec::new(),
         seq: 0,
@@ -785,6 +811,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
                 status: it.status.clone(),
                 app_key: String::new(),
                 spec: String::new(),
+                file: None,
                 thought: it.thought.clone(),
                 steps: it.steps.clone(),
                 seq: it.seq,
@@ -801,6 +828,31 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
                 ))
             }
         }
+        // A cached File row is a reference to something on the SERVER, so it
+        // restores as one: the client re-offers the download rather than showing
+        // a file it does not have.
+        ItemKind::File => Some(Bubble::Tool(
+            ToolRow {
+                title: it.text.clone(),
+                detail: it.detail.clone(),
+                tool_call_id: it.id.clone(),
+                output: String::new(),
+                status: it.status.clone(),
+                app_key: String::new(),
+                spec: String::new(),
+                file: it.files.first().map(|f| crate::attachments::SharedFile {
+                    name: f.name.clone(),
+                    mime: f.mime.clone(),
+                    bytes: f.bytes,
+                    path: f.path.clone(),
+                    sha256: f.sha256.clone(),
+                }),
+                thought: it.thought.clone(),
+                steps: Vec::new(),
+                seq: it.seq,
+            },
+            String::new(),
+        )),
         ItemKind::Chart => Some(Bubble::Chart(ToolRow {
             title: it.text.clone(),
             detail: String::new(),
@@ -808,6 +860,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
             output: String::new(),
             status: it.status.clone(),
             app_key: String::new(),
+            file: None,
             // The item's `detail` is the spec for a chart.
             spec: it.detail.clone(),
             thought: it.thought.clone(),
@@ -822,6 +875,7 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
             status: it.status.clone(),
             app_key: it.app_key.clone(),
             spec: String::new(),
+            file: None,
             thought: it.thought.clone(),
             steps: Vec::new(),
             seq: it.seq,
@@ -1219,6 +1273,49 @@ impl TranscriptStore {
     ///
     /// A tool call breaks the text stream: the next chunk starts a fresh
     /// bubble.
+    /// A file the server SHARED: its own row, never a tool chip.
+    ///
+    /// A share is not a step in a loop — it is something handed to the reader — so
+    /// it is pushed as a standalone bubble: it cannot be collapsed into a run,
+    /// and a following tool call starts a new step rather than joining it (see
+    /// the `LastRow` match in `tool_call`). The row starts `in_progress`; the
+    /// share tool's result completes it with the true size and digest
+    /// (`apply_share_result`).
+    pub fn shared_file(&self, file: &crate::attachments::SharedFile, tool_call_id: &str) {
+        let ops = {
+            let mut st = self.state.lock();
+            st.anchor_merge(tool_call_id);
+            let mut ops = Vec::new();
+            if st.supersede_provisional() {
+                ops.push(TranscriptOp::Reset {
+                    session_id: st.session_id.clone(),
+                });
+            }
+            // A share ends the text stream, exactly as a tool call does.
+            if let Some(prev) = st.stream_idx {
+                if let Some(b) = st.bubbles.get(prev) {
+                    ops.push(TranscriptOp::Upsert { item: b.item() });
+                }
+            }
+            let thought = st.take_thoughts(&mut ops);
+            let mut row = ToolRow::new(&file.name, &file.mime, tool_call_id);
+            row.seq = st.new_seq();
+            row.thought = thought;
+            row.file = Some(file.clone());
+            let row_id = row.tool_call_id.clone();
+            st.bubbles.push(Bubble::Tool(row, String::new()));
+            let idx = st.bubbles.len() - 1;
+            st.tool_by_id.insert(row_id, idx);
+            ops.push(TranscriptOp::Upsert {
+                item: st.bubbles[idx].item(),
+            });
+            st.trim();
+            st.stream_idx = None;
+            ops
+        };
+        self.emit_ops(ops);
+    }
+
     pub fn tool_call(&self, title: &str, detail: &str, tool_call_id: &str, kind: ToolCallKind) {
         let ops = {
             let mut st = self.state.lock();
@@ -1254,6 +1351,8 @@ impl TranscriptStore {
             let row_id = row.tool_call_id.clone();
             let plain = matches!(&kind, ToolCallKind::Plain);
             let last = st.bubbles.last().map(|b| match b {
+                // A share is not a step in this loop: the next call opens its own.
+                Bubble::Tool(r, _) if r.file.is_some() => LastRow::Other,
                 Bubble::Tool(..) => LastRow::Tool,
                 Bubble::ToolGroup(..) => LastRow::Group,
                 _ => LastRow::Other,
@@ -1420,7 +1519,17 @@ impl TranscriptStore {
                 let found = match &mut st.bubbles[idx] {
                     Bubble::Tool(r, _) if r.tool_call_id == id => {
                         r.status = status.to_string();
-                        apply_output(&mut r.output, output, live);
+                        if let Some(file) = r.file.as_mut() {
+                            // The share tool's result is the only place the true
+                            // size and digest exist; the call carried just a path.
+                            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(output) {
+                                crate::attachments::apply_share_result(file, &payload);
+                            }
+                            // A file row shows its card, not the tool's chatter.
+                            r.output.clear();
+                        } else {
+                            apply_output(&mut r.output, output, live);
+                        }
                         true
                     }
                     Bubble::Chart(r) | Bubble::McpApp(r) if r.tool_call_id == id => {
@@ -2245,6 +2354,7 @@ impl TranscriptStore {
                             status: String::new(),
                             app_key: String::new(),
                             spec: String::new(),
+                            file: None,
                             thought: String::new(),
                             steps: Vec::new(),
                         },
@@ -2362,6 +2472,82 @@ mod tests {
         (Box::new(l), i)
     }
 
+    fn shared(path: &str, name: &str) -> crate::attachments::SharedFile {
+        crate::attachments::SharedFile {
+            name: name.into(),
+            mime: "application/pdf".into(),
+            bytes: 0,
+            path: path.into(),
+            sha256: String::new(),
+        }
+    }
+
+    /// A file the server SHARED is a card of its own, not a tool chip.
+    ///
+    /// It is something handed to the reader, so it must not be collapsed into a
+    /// run with the calls around it, and its caption is the file's name rather
+    /// than the tool's title.
+    #[test]
+    fn a_shared_file_becomes_its_own_card() {
+        let (listener, _) = listener();
+        let store = TranscriptStore::new(listener);
+        store.tool_call("Read the report", "", "call_1", ToolCallKind::Plain);
+        store.shared_file(&shared("/workspace/attachments/aa11-report.pdf", "report.pdf"), "call_2");
+        let items = store.rich_transcript();
+        let files: Vec<&Item> = items.iter().filter(|i| i.kind == ItemKind::File).collect();
+        assert_eq!(files.len(), 1, "one share, one card");
+        let card = files[0];
+        assert_eq!(card.text, "report.pdf", "the caption is the FILE's name");
+        assert_eq!(card.detail, "application/pdf");
+        assert_eq!(card.files.len(), 1);
+        assert_eq!(card.files[0].path, "/workspace/attachments/aa11-report.pdf");
+        // Not swallowed by the group above it (or by the next call).
+        assert!(
+            !items.iter().any(|i| i.kind == ItemKind::ToolGroup),
+            "a share must not join a run"
+        );
+    }
+
+    /// The share tool's result is the only place the true size and digest exist.
+    #[test]
+    fn a_share_result_fills_the_card_and_stays_out_of_its_output() {
+        let (listener, _) = listener();
+        let store = TranscriptStore::new(listener);
+        store.shared_file(&shared("/workspace/attachments/aa11-report.pdf", "report.pdf"), "call_9");
+        store.tool_update(
+            "call_9",
+            "completed",
+            r#"{"bytes":193,"sha256":"deadbeef","path":"/workspace/attachments/aa11-report.pdf"}"#,
+            false,
+        );
+        let card = store
+            .rich_transcript()
+            .into_iter()
+            .find(|i| i.kind == ItemKind::File)
+            .expect("the card survives its update");
+        assert_eq!(card.files[0].bytes, 193);
+        assert_eq!(card.files[0].sha256, "deadbeef");
+        assert_eq!(card.status, "completed");
+        // The card draws a file, not the tool's JSON chatter.
+        assert_eq!(card.output, "");
+    }
+
+    /// A cached File row restores as a File row (the cache IS the reference).
+    #[test]
+    fn a_file_item_round_trips_through_the_cache_shape() {
+        let (listener, _) = listener();
+        let store = TranscriptStore::new(listener);
+        store.shared_file(&shared("/workspace/attachments/aa11-report.pdf", "report.pdf"), "call_3");
+        let item = store
+            .rich_transcript()
+            .into_iter()
+            .find(|i| i.kind == ItemKind::File)
+            .unwrap();
+        let rebuilt = super::bubble_from_item(&item).expect("a File item rebuilds");
+        assert_eq!(rebuilt.item().kind, ItemKind::File);
+        assert_eq!(rebuilt.item().files[0].name, "report.pdf");
+    }
+
     /// A prompt that carried an uploaded file must say WHICH file. The count in
     /// `attachments` cannot: it covers images and files together, so a prompt
     /// whose file was silently dropped looked identical to one that worked.
@@ -2451,6 +2637,7 @@ mod tests {
     }
 
     impl CoreListener for TestListener {
+    fn on_file(&self, _: crate::attachments::FileEvent) {}
         fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
         fn on_status(&self, _status: ConnectionStatus) {}
         fn on_sessions(&self, _sessions: Vec<SessionSummary>) {}

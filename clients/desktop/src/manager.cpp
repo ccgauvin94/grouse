@@ -1314,6 +1314,11 @@ QVariantMap Manager::attachmentCard(const QString &path) const
     return fileCard(info.fileName(), QMimeDatabase().mimeTypeForFile(path).name(), info.size());
 }
 
+QVariantMap Manager::serverFileCard(const QString &name, const QString &mime, qint64 bytes) const
+{
+    return fileCard(name, mime, bytes);
+}
+
 void Manager::cancelTurn()
 {
     // Stop means stop HERE: discarding another chat's parked message because you stopped
@@ -2673,6 +2678,39 @@ void Manager::reactTask(const QString &id, const QString &reaction)
     m_bridge->api().grouse_task_react(m_bridge->handle(), i.constData(), r.constData());
 }
 
+void Manager::coreOnFile(const QString &json)
+{
+    // The card keys its own state on the server-side path, so the raw event is
+    // enough: QML parses the three shapes and updates that one row.
+    emit fileEvent(json);
+}
+
+void Manager::fetchFile(const QString &sessionId, const QString &path,
+                        const QString &name, const QString &mime,
+                        const QString &sha256)
+{
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    if (path.isEmpty()) {
+        onError(QStringLiteral("this file has no server path to fetch"), false);
+        return;
+    }
+    const QByteArray sid = sessionId.toUtf8();
+    const QByteArray p = path.toUtf8();
+    const QByteArray n = name.toUtf8();
+    const QByteArray mt = mime.toUtf8();
+    const QByteArray sha = sha256.toUtf8();
+    char *err = nullptr;
+    m_bridge->api().grouse_fetch_file(m_bridge->handle(), sid.constData(), p.constData(),
+                                      n.constData(), mt.constData(), sha.constData(), &err);
+    if (err) {
+        const QString message = QString::fromUtf8(err);
+        m_bridge->api().grouse_string_free(err);
+        // Not a background failure: the user just tapped this card.
+        onError(message, false);
+    }
+}
+
 void Manager::coreOnTasks(const QString &json)
 {
     // Verbatim, for a page that renders nothing to be compared against the wire;
@@ -3199,6 +3237,27 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
                            {"html", ""}, {"calls", calls}, {"status", status},
                            {"summary", summary}, {"stepThought", stepThought},
                            {"seq", seq}};
+    }
+    if (kind == QLatin1String("File")) {
+        // A file the SERVER shared: a reference (name, mime, size, path, digest)
+        // and never the bytes — the card fetches them on tap (`fetchFile`), so the
+        // transcript, the cache and every replay stay small.
+        QVariantList files;
+        for (const QJsonValue &fv : item.value(QStringLiteral("files")).toArray()) {
+            const QJsonObject f = fv.toObject();
+            files << QVariantMap{
+                {"name", f.value(QStringLiteral("name")).toString()},
+                {"mime", f.value(QStringLiteral("mime")).toString()},
+                {"kind", "file"},
+                // qreal on purpose: a byte count must not be abbreviated by the
+                // delegate, and a QVariantMap round-trip keeps it exact to 2^53.
+                {"size", f.value(QStringLiteral("bytes")).toDouble()},
+                {"path", f.value(QStringLiteral("path")).toString()},
+                {"sha256", f.value(QStringLiteral("sha256")).toString()}};
+        }
+        return QVariantMap{{"id", id}, {"role", "file"}, {"text", text},
+                           {"html", ""}, {"detail", detail}, {"files", files},
+                           {"status", status}, {"seq", seq}};
     }
     if (kind == QLatin1String("Chart")) {
         return QVariantMap{{"id", id}, {"role", "chart"}, {"text", ""},
