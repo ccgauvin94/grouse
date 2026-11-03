@@ -1,0 +1,31 @@
+# Client parity ratchet.
+#
+# `docs/PARITY.md` is the ledger; `scripts/check-parity.py` is the check. It
+# fails when a surface the core exposes is undispositioned by a client, when a
+# `yes:` anchor no longer exists, or when an exclusion was added without moving
+# the pinned counter. No build is needed — it reads source, the ledger and the
+# core's inventory module — so this job is seconds and safe to make required.
+#
+# The checker runs its own self-test first: a ratchet that stopped biting must
+# fail loudly rather than pass everything.
+name: Parity
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ratchet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The checker still catches what it claims to
+        run: python3 scripts/check-parity.py --self-test
+
+      - name: Every client has dispositioned every surface
+        run: python3 scripts/check-parity.py

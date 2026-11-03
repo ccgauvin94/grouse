@@ -299,6 +299,7 @@ just test          # cargo test  --manifest-path core/Cargo.toml
 just desktop       # cd clients/desktop && ./build-flatpak.sh
 just android-libs  # ./scripts/build-android-libs.sh   (regenerate .so + uniffi Kotlin)
 just android       # cd clients/android && ./gradlew assembleDebug
+just parity        # docs/PARITY.md ratchet: self-test + the ledger check
 just scan          # gitleaks detect --source .
 ```
 
@@ -473,6 +474,34 @@ change before tagging.
   desktop holds no protocol logic to mirror.
 - Never hardcode a machine-specific path into a shared file.
 
+### Client parity — the ratchet (docs/PARITY.md)
+
+- **A feature may not exist in one client alone.** Either it lands in every
+  client, or it is recorded as an exclusion with a reason in `docs/PARITY.md`.
+  "Nobody got to it" is not a disposition. The phone does not go first.
+- **The inventory comes from the core, not from the doc.**
+  `core/grouse-core/src/surface.rs` enumerates every client-visible record
+  field, transcript op, item kind and listener callback, and is compile-guarded:
+  it destructures `Item`/`ToolCall`/`SubagentStep`/`UploadedFile` with no `..`
+  rest and matches `TranscriptOp`/`ItemKind` with no `_` arm, so a new field or
+  variant breaks the core build until it is added there. The compile error is
+  the ratchet's first tooth — do not silence it with `..`.
+- **`python3 scripts/check-parity.py`** (CI: `.github/workflows/parity.yml`,
+  locally `just parity`) then requires a ledger row per surface per ACTIVE
+  client. Active is discovered from the tree, so the day `clients/cli` gains
+  sources it demands a column with no edit to the checker.
+- **A `yes:` cell is evidence**: `file#token`, relative to that client's root,
+  and the checker greps for the token — renaming a handler breaks its own row
+  instead of quietly retiring it. **An `excluded:` cell moves the pinned
+  `excluded = N` count**; the number can be lowered for free and raised only on
+  purpose, which is what makes opting a client out a reviewable act.
+- **Pure-chrome work adds a `ui.*` row** in the same commit. Those rows are
+  free-form (no compiler knows your chip exists) and are the one part of the
+  ledger that rests on the reviewer rather than on CI.
+- Adding a `fn on_*` to `CoreListener` is caught too: the trait gives every
+  callback a default, so `surface.rs`'s `LISTENER_EVENTS` is hand-kept and the
+  checker parses the trait out of `lib.rs` and fails if the two disagree.
+
 ## Important Files
 
 |File|Role|
@@ -485,6 +514,8 @@ change before tagging.
 |`core/grouse-core/src/capi.rs`|The `grouse_*` C ABI the desktop dlopens — the same core surface as uniffi, hand-written. Add a symbol here and to `corebridge.cpp` together.|
 |`clients/desktop/src/corebridge.{h,cpp}`|The desktop's only wire path: resolve `grouse_*`, install `GrouseCoreListener`, marshal events onto the Qt main thread.|
 |`core/grouse-roam-core/src/capi.rs`|C ABI for the roam transport (`grc_*` symbols) — the convention `capi.rs` above follows. No in-tree consumer today.|
+|`docs/PARITY.md`, `scripts/check-parity.py`|The client-parity ledger and its ratchet — a surface the core exposes must be implemented or explicitly excluded in every client, with a source anchor as evidence.|
+|`core/grouse-core/src/surface.rs`|The compile-guarded inventory of everything a client renders (record fields, transcript ops, item kinds, listener callbacks). Add a field to `Item` and this build tells you.|
 |`core/Cargo.toml`|The only Cargo workspace (members: `grouse-core`, `grouse-roam-core`, `grouse-unstable`). Release profile: `opt-level = "z"`, `codegen-units = 1`, `strip`, `lto`, `panic = "unwind"` (uniffi catch_unwind must turn panics into foreign exceptions).|
 |`docs/TRANSCRIPT_MODEL.md`, `docs/NOTIFICATIONS.md`|The core's item stream (ops, windowing, item ids) and the push envelope + notification policy.|
 |`Justfile`|Top-level build/test/scan entrypoints (see Development Commands).|

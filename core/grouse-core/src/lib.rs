@@ -42,6 +42,9 @@ pub mod roam;
 mod session;
 pub mod speak;
 pub mod spine;
+/// The client-visible surface as data — the parity ratchet's inventory
+/// (`docs/PARITY.md`). Not protocol: it changes nothing at runtime.
+pub mod surface;
 mod summarize;
 mod tasks;
 pub mod transcript;

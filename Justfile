@@ -41,6 +41,12 @@ android-release:
 publish-apk slug:
     ./scripts/publish-apk.sh {{slug}}
 
+# The client parity ratchet: every surface the core exposes must be implemented
+# or explicitly excluded in every client (docs/PARITY.md). Runs in CI too.
+parity:
+    python3 scripts/check-parity.py --self-test
+    python3 scripts/check-parity.py
+
 # Scan for committed secrets.
 scan:
     gitleaks detect --source .

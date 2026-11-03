@@ -6,6 +6,18 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **A parity ratchet: no client may grow a surface the other does not have.**
+  `docs/PARITY.md` is the ledger, `scripts/check-parity.py` is the check, and
+  `core/grouse-core/src/surface.rs` is the inventory — compile-guarded, so
+  adding a field to `Item`, an op to `TranscriptOp` or a callback to
+  `CoreListener` breaks the core build until the ledger dispositions it. A
+  `yes:` cell must cite a real token in that client's source; an `excluded:`
+  needs a reason and moves a pinned counter. `Item.files` shipped on the phone
+  and was invisible on the desktop for a release with every test green — this
+  is the test that would have failed.
+
 ## [0.2.61] - 2026-11-02
 
 ### Added
