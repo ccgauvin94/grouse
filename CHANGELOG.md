@@ -8,6 +8,30 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed
 
+- **A chat opens at its bottom, and the jump-to-bottom arrow gets there in one
+  press — on both clients.** "Going to the bottom" was a one-shot scroll in each
+  client, but the end of a transcript moves afterwards: a new row is inserted at
+  the newest position (which pushes the reader up one message), the newest bubble
+  measures itself only when it is first composed (markdown re-parse, code blocks,
+  attachment cards, images), the waiting bubble appears on send, and the keyboard
+  resizes the viewport. So the scroll landed on the end as it was *estimated* at
+  that instant, which is why an opened chat sat a message short of the bottom, why
+  the arrow sometimes needed two presses (the first spent the distance that had
+  appeared since the last measurement), and why sending while at the bottom left
+  the new message below the fold. Both clients now treat "at the bottom" as a
+  mode driven from the list's own layout: Android follows on every change to the
+  item count / newest row's measured size / viewport height and decides whether to
+  keep following when a scroll *settles*; the desktop re-pins in bounded passes
+  and stops only when a pass lands at the end with the content height unchanged
+  (the old loop stopped at the first `atYEnd` sample, which is also true while the
+  transcript is still short). Also: sending pins on both clients, the desktop's
+  jump button is now offered whenever the view is not at the end (it used to need
+  two viewports of overscroll), and its per-chat scroll memory stores the distance
+  from the end rather than `contentY` — the core fills history in pages, so the
+  same reading position is a different absolute offset on every open.
+  Opening at the *first unread* message is still not possible: neither client nor
+  the core tracks a read marker, so the choice is the very bottom.
+
 - **The desktop's bundled core can no longer be stale.** Found while chasing "the
   desktop isn't rescaling images": `core/target/release/libgrouse_core.so` on the
   build host was from 2026-10-29 07:41, seven hours before the outbound image

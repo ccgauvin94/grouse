@@ -474,6 +474,30 @@ change before tagging.
   desktop holds no protocol logic to mirror.
 - Never hardcode a machine-specific path into a shared file.
 
+### Scroll is a mode, not a one-shot (both clients)
+
+- **"Go to the bottom" must be re-asserted from the list's own layout, never issued once.**
+  The end of a transcript moves after any scroll: a new row is inserted at the newest
+  position (which pushes the reader up one message), the newest bubble measures itself only
+  when first composed (markdown re-parse, code blocks, attachment cards, decoded images), the
+  waiting bubble appears on send, and the keyboard resizes the viewport. A single
+  `positionViewAtEnd()` / `scrollToItem(0)` therefore lands on the end as it was *estimated*
+  at that instant, which is what made an opened chat settle a message short of the bottom,
+  made the jump-to-bottom arrow need two presses (the first spent the distance that had
+  appeared since the last measurement), and left a sent message below the fold.
+  Android (`ChatScreen.kt`) follows on every change to the item count / the newest row's
+  measured size / the viewport height, and decides whether to keep following on a scroll's
+  **settle**, not its start — reading the start lets the pin read its own programmatic scroll
+  as "the reader took over" and then nothing recovers. The desktop (`ChatPage.qml`) pins in
+  bounded passes and stops only when a pass lands at the end **with the content height
+  unchanged**; stopping at the first `atYEnd` sample is wrong because that is also true while
+  the transcript is still short. Sending pins on both clients.
+- **The desktop's per-chat scroll memory stores the DISTANCE FROM THE END, not `contentY`.**
+  The core fills history in pages, so the same reading position is a different absolute
+  offset on every open; restoring the old number landed near — but not at — the previous spot.
+- Opening at the *first unread* message is not possible: neither client nor the core keeps a
+  read marker. The bottom is the only honest target today.
+
 ### Client parity — the ratchet (docs/PARITY.md)
 
 - **A feature may not exist in one client alone.** Either it lands in every

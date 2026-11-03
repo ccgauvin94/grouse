@@ -310,6 +310,17 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
             listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
         }
     }
+    // FOLLOWING is a mode, and it is the only thing that keeps a chat at its bottom.
+    //
+    // A one-shot scroll cannot: rows are inserted at index 0 (each insert pushes the reader up
+    // a message), the newest bubble measures itself only when first composed (markdown
+    // re-parse, code blocks, attachment cards, images), the waiting bubble comes and goes, and
+    // the keyboard resizes the viewport. Every one of those moves the end AFTER the scroll ran
+    // — which is why an opened chat settled a message short of the bottom, and why the
+    // jump-to-bottom arrow sometimes needed two presses: the first press spent the distance
+    // that had appeared since the last measurement. So the list is driven from its own LAYOUT
+    // (below) rather than from the arrival of messages.
+    var follow by remember(cm.currentSession.value) { mutableStateOf(true) }
 
     // Scroll-back: ask the core for older items when the oldest end nears. With
     // reverseLayout the oldest is the LAST index; the batch is prepended to the
@@ -326,6 +337,9 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
     LaunchedEffect(shouldLoadOlder) { if (shouldLoadOlder) cm.loadOlder() }
 
     fun reallySend() {
+        // Sending is the reader asking to see the reply: follow it even if they had scrolled
+        // up to re-read something first. (The desktop pins on send for the same reason.)
+        follow = true
         cm.send(input.trim(), attachments.toList(), cm.draftFiles.toList())
         input = ""; attachments.clear(); cm.draftFiles.clear()
     }
@@ -339,32 +353,40 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
         reallySend()
     }
 
-    // Stay pinned to the bottom (index 0) as messages stream in / arrive — unless the user scrolled up.
-    // Driven off snapshotFlow so per-token text growth doesn't recompose the whole ChatScreen (this
-    // used to read the last message's length in the composable body). Instant scrollToItem avoids
-    // restarting a scroll animation on every token.
+    // The follower: re-pin on every layout change while following. The values are the three
+    // things that move the end without any scroll — rows arriving/leaving, the newest row
+    // growing as it lays out, and the viewport resizing — so streaming text, a late image and
+    // an opening keyboard are all just another emission. Not keyed on `messages` content: that
+    // recomposed the whole screen per token (this used to read the last message's text length
+    // in the composable body).
     LaunchedEffect(listState) {
-        snapshotFlow { cm.messages.size to (cm.messages.lastOrNull()?.text?.length ?: 0) }
-            .collect { if (atBottom) listState.scrollToItem(0) }
-    }
-    // Opening/switching a session, or swapping in a genuinely different transcript after a
-    // replay, must land on the NEWEST message (index 0 with reverseLayout) and STAY there
-    // while the history paints. A single scrollToItem(0) is not enough: rows arrive in
-    // batches, every insert at index 0 pushes the anchored row uplist, and the reader ended
-    // up a few messages short of the bottom. The loop exits as soon as the transcript stops
-    // growing, or the moment the reader takes over. (Identical Rebuilds never touch
-    // `messages`, so a plain re-render still preserves the reading position.)
-    LaunchedEffect(cm.currentSession.value, cm.replayDoneTick.value) {
-        var lastSize = -1
-        var stableTicks = 0
-        while (stableTicks < 3) {
-            listState.scrollToItem(0)
-            delay(32)
-            val size = cm.messages.size
-            stableTicks = if (size == lastSize) stableTicks + 1 else 0
-            lastSize = size
-            if (!atBottom) break
+        snapshotFlow {
+            val info = listState.layoutInfo
+            Triple(
+                info.totalItemsCount,
+                info.visibleItemsInfo.firstOrNull { it.index == 0 }?.size ?: -1,
+                info.viewportSize.height,
+            )
+        }.collect {
+            if (follow && !listState.isScrollInProgress) listState.scrollToItem(0)
         }
+    }
+    // What decisions follow is the SETTLE, not the start: at the newest row means keep
+    // following, a drag that stopped anywhere above it means don't. Reading the start instead
+    // would let the pin above unpin itself — it scrolls too — and then nothing recovers.
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { moving ->
+            if (!moving) follow = atBottom
+        }
+    }
+    // Opening a session, or swapping in a fresh transcript after a replay, starts at the newest
+    // row and stays there while the core fills the window in. The follower does the pinning;
+    // this only arms it, so it now holds through the background backfill (600ms a page) instead
+    // of giving up after three quiet ticks. (Identical Rebuilds never touch `messages`, so a
+    // plain re-render still preserves the reading position.)
+    LaunchedEffect(cm.currentSession.value, cm.replayDoneTick.value) {
+        follow = true
+        listState.scrollToItem(0)
     }
 
     cm.elicitations.firstOrNull()?.let { e ->
@@ -847,7 +869,10 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                             }
                         }
                         if (!atBottom) SmallFloatingActionButton(
-                            onClick = { scope.launch { listState.animateScrollToItem(0) } },
+                            // follow = true first: the animation lands on the end as it is
+                            // measured NOW, and the follower finishes the trip if a row
+                            // measured after that moved it again.
+                            onClick = { follow = true; scope.launch { listState.animateScrollToItem(0) } },
                             modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp)
                         ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "scroll to bottom") }
                     }
@@ -868,9 +893,9 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                     hint = reloadHint,
                     onPullUp = {
                         if (atBottom) cm.refreshCurrent()
-                        else scope.launch { listState.animateScrollToItem(0) }
+                        else { follow = true; scope.launch { listState.animateScrollToItem(0) } }
                     },
-                    onTail = { scope.launch { listState.animateScrollToItem(0) } },
+                    onTail = { follow = true; scope.launch { listState.animateScrollToItem(0) } },
                     onReloadFromStart = { cm.reloadCurrentFromStart() },
                 )
 

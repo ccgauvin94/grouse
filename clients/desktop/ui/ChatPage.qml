@@ -381,9 +381,11 @@ Kirigami.Page {
     readonly property real queuedCardBorderAlpha: 0.16
     readonly property real queuedBadgeFillAlpha: 0.18
 
-    // Per-conversation scroll memory (sessionId -> contentY): lets a user leave
-    // a chat scrolled up, switch away, and return to the same spot. First open
-    // of a chat in this app session starts at the bottom instead.
+    // Per-conversation scroll memory (sessionId -> distance from the end): lets a
+    // user leave a chat scrolled up, switch away, and return to the same spot. A
+    // distance rather than contentY because the core fills history in pages, so
+    // the same reading position is a different absolute offset on every open.
+    // First open of a chat in this app session starts at the bottom instead.
     property var scrollMem: ({})
     property string scrollSession: ""
     property bool pendingRestore: false
@@ -452,20 +454,22 @@ Kirigami.Page {
         return out
     }
 
-    // Scroll to the end only when the user is already pinned there, and defer
-    // the jump so it lands after the model has relaid out. Auto-scrolling on
-    // every chunk both fought the user's manual scroll and snapped to a stale
-    // contentHeight (which read as a random scroll-up while at the bottom).
+    // Scroll to the end only when the user is already pinned there. The jump is
+    // deferred (so it lands after the model has relaid out) and repeated until it
+    // converges — see pinToEnd, which is the only thing that ever positions the
+    // view at the end. Auto-scrolling on every chunk would fight a manual scroll,
+    // and a single deferred jump snaps to the contentHeight measured BEFORE the
+    // last rows were realized (that was the "opens a few messages short of the
+    // bottom" bug).
     function keepScrolled() {
-        if (pinnedToEnd) {
-            Qt.callLater(function() { list.positionViewAtEnd() })
-        }
+        if (pinnedToEnd)
+            page.pinToEnd()
     }
 
     function handleSessionSwitch() {
         // Remember where the outgoing chat was scrolled before the model swaps.
         if (scrollSession.length > 0 && list.contentHeight > 0)
-            scrollMem[scrollSession] = list.contentY
+            scrollMem[scrollSession] = list.contentHeight - list.height - list.contentY
         scrollSession = Mgr.currentSessionId
         // Rebuild the provider/model pickers for the chat being opened. They were only
         // ever rebuilt on a config/providers event, so after a switch they kept showing
@@ -502,20 +506,57 @@ Kirigami.Page {
         Mgr.loadOlder(40)
     }
 
-    /// Re-pin the view to the newest message until the list really reports it is at the
-    /// end. One positionViewAtEnd() is not enough: delegates are realized and measured
-    /// lazily (and recycled), so contentHeight keeps growing AFTER the jump and the chat
-    /// opened a few messages short of the bottom. Bounded so a layout that never settles
-    /// cannot spin here — and pendingFirstScroll is always cleared on the way out, since
-    /// it also gates scroll-back (maybeLoadOlder).
-    function pinToEnd(attempts) {
-        if (list.atYEnd || attempts <= 0) {
+    /// Re-pin the view to the newest message until a pass lands at the end with the content
+    /// height unchanged.
+    ///
+    /// One positionViewAtEnd() is not enough, and "call it again until atYEnd" is not either.
+    /// Delegates are realized and measured lazily (recycled rows are only estimates until they
+    /// are shown), images decode after their row exists, and the waiting bubble appears on
+    /// send — so contentHeight keeps growing AFTER the jump. And atYEnd is ALSO true while the
+    /// transcript is still short, which is why the old loop cleared pendingFirstScroll
+    /// immediately and the chat then settled a few messages short of the bottom (the visible
+    /// symptom: a chat opening just above the end, and the jump button needing two presses —
+    /// the first spent the distance that had appeared since the last measurement).
+    /// Convergence therefore needs both halves: at the end AND the height has stopped moving.
+    ///
+    /// Bounded so a layout that never settles cannot spin, and pendingFirstScroll is always
+    /// cleared on the way out because it also gates scroll-back (maybeLoadOlder).
+    property bool pinning: false
+    property real pinHeight: -1
+    function pinToEnd() {
+        if (page.pinning)
+            return      // the running chain re-reads the layout on its next pass
+        if (!page.pinnedToEnd || list.height <= 0)
+            return
+        page.pinning = true
+        page.pinHeight = -1
+        page.pinPass(0)
+    }
+    function pinPass(attempt) {
+        if (!page.pinnedToEnd || attempt >= 40) {
+            page.pinning = false
+            page.pinHeight = -1
             page.pendingFirstScroll = false
             return
         }
         Qt.callLater(function() {
+            if (!page.pinnedToEnd) {
+                page.pinning = false
+                page.pinHeight = -1
+                return
+            }
+            const before = list.contentHeight
             list.positionViewAtEnd()
-            page.pinToEnd(attempts - 1)
+            const h = list.contentHeight
+            const settled = list.atYEnd && h === before && h === page.pinHeight
+            page.pinHeight = h
+            if (settled) {
+                page.pinning = false
+                page.pinHeight = -1
+                page.pendingFirstScroll = false
+                return
+            }
+            page.pinPass(attempt + 1)
         })
     }
 
@@ -542,14 +583,21 @@ Kirigami.Page {
             }
             page.scrollApplyAttempts = 0
             if (page.pendingFirstScroll) {
-                list.positionViewAtEnd()
-                page.pinToEnd(24)
+                page.pinToEnd()
             } else if (page.pendingRestore) {
                 page.pendingRestore = false
-                const y = page.scrollMem[page.scrollSession]
-                if (y !== undefined) {
-                    const maxY = Math.max(0, list.contentHeight - list.height)
-                    list.contentY = Math.min(y, maxY)
+                // Stored as the DISTANCE FROM THE END, not as contentY: the core fills the
+                // history in pages, so the same reading position is a different absolute
+                // offset on every open and restoring the old number landed near — but not at
+                // — wherever the user had been.
+                const d = page.scrollMem[page.scrollSession]
+                if (d !== undefined) {
+                    if (d <= 1) {
+                        page.pinnedToEnd = true
+                        page.pinToEnd()
+                    } else {
+                        list.contentY = Math.max(0, list.contentHeight - list.height - d)
+                    }
                 }
             }
         })
@@ -961,7 +1009,13 @@ Kirigami.Page {
                 page.maybeLoadOlder()
             }
             onCountChanged: page.applySessionScroll()
-            onContentHeightChanged: page.applySessionScroll()
+            // The end moves as rows measure and images decode: every height change while
+            // pinned is one more pass of the pin (pinToEnd is a no-op if a chain is running).
+            onContentHeightChanged: {
+                page.applySessionScroll()
+                if (page.pinnedToEnd)
+                    page.pinToEnd()
+            }
             onHeightChanged: page.applySessionScroll()
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
             // A bounded cache with recycling, not "keep everything realized".
@@ -1975,17 +2029,20 @@ Kirigami.Page {
                 id: jumpToBottomButton
                 icon.name: "go-down"
                 display: Controls.AbstractButton.IconOnly
-                visible: !list.atYEnd && (list.contentHeight - list.contentY) > list.height * 2
+                visible: !list.atYEnd
                 z: 2
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 anchors.rightMargin: Kirigami.Units.largeSpacing + Kirigami.Units.gridUnit * 1.5
                 anchors.bottomMargin: Kirigami.Units.largeSpacing
                 onClicked: {
+                    // Pin first, then let pinToEnd converge: an animation would land on the
+                    // end as it is measured at this instant, and a row that measures after
+                    // that leaves the reader short of it (the "press it twice" bug).
                     pinnedToEnd = true
-                    list.positionViewAtEnd()
+                    page.pinToEnd()
                     if (page.scrollSession.length > 0)
-                        page.scrollMem[page.scrollSession] = list.contentHeight
+                        page.scrollMem[page.scrollSession] = 0
                 }
             }
 
@@ -2577,9 +2634,10 @@ Kirigami.Page {
         chatInput.clear()
         page.pendingFiles = []
         chatInput.focus = true
-        // Sending means the user wants to be at the bottom to see the reply.
+        // Sending means the user wants to be at the bottom to see the reply — and the new
+        // row plus the waiting bubble both change the content height after the jump.
         pinnedToEnd = true
-        Qt.callLater(function() { list.positionViewAtEnd() })
+        page.pinToEnd()
     }
     function resetInput() {
         Mgr.newChat()

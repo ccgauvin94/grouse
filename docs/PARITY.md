@@ -137,3 +137,4 @@ excluded = 8
 | `listener.on_replay_progress` | yes: ConnectionManager.kt#override fun onReplayProgress | yes: src/corebridge.cpp#cb_on_replay_progress |
 | `ui.chat-attachment-card` | yes: Files.kt#AttachmentCard | yes: ui/AttachmentCard.qml#objectName: "cardName" |
 | `ui.my-day` | yes: MyDayScreen.kt#MyDayScreen | yes: ui/MyDayPage.qml#objectName: "myDayCardBody" |
+| `ui.chat-scroll-pinned` | yes: ChatScreen.kt#var follow by remember | yes: ui/ChatPage.qml#function pinPass |
