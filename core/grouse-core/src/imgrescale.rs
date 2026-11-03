@@ -25,6 +25,34 @@ pub const MAX_EDGE: u32 = 1600;
 /// visually-presentable quality does.
 pub const JPEG_QUALITY: u32 = 80;
 
+/// Apply the policy to every image block of a prompt, in place.
+///
+/// Returns `(changed, passthrough)`: how many images were shrunk, and how many
+/// could not be decoded (their original bytes ride the prompt — compression
+/// must never become "the message did not send", so the caller only alerts).
+///
+/// Takes the prompt rather than the individual blocks because this is the one
+/// hook both clients share: the desktop's `promptJson()` and the phone's uniffi
+/// `Prompt` deserialize into the same type, so a test here covers both wire
+/// shapes (see `the_desktop_prompt_json_takes_the_same_policy`).
+pub fn apply(prompt: &mut crate::Prompt) -> (usize, usize) {
+    let (mut changed, mut passthrough) = (0usize, 0usize);
+    for block in prompt.blocks.iter_mut() {
+        if let crate::PromptBlock::Image { mime_type, data } = block {
+            match rescale(mime_type, data) {
+                Ok(Some(r)) => {
+                    *mime_type = r.mime_type;
+                    *data = r.data;
+                    changed += 1;
+                }
+                Ok(None) => {}
+                Err(_) => passthrough += 1,
+            }
+        }
+    }
+    (changed, passthrough)
+}
+
 /// The rescale decision for one image block.
 #[derive(Debug, PartialEq)]
 pub struct Rescaled {
@@ -182,6 +210,38 @@ mod tests {
         assert!(rescale("image/jpeg", "!!!not base64!!!").is_err());
         // Valid base64 but not an image: decode failure → passthrough.
         assert_eq!(rescale("image/jpeg", &base64_encode(b"plain text")).unwrap(), None);
+    }
+
+    /// The DESKTOP's wire shape, byte for byte: `manager.cpp`'s `promptJson()`
+    /// emits `{"blocks":[{"Text":{"text":…}},{"Image":{"mime_type":…,"data":…}}]}`.
+    /// The policy lives in the core precisely so both clients get it — this is
+    /// the test that says so, instead of a claim in a comment.
+    #[test]
+    fn the_desktop_prompt_json_takes_the_same_policy() {
+        let big = jpeg_b64(4000, 3000, [10, 20, 30]);
+        let json = format!(
+            r#"{{"blocks":[{{"Text":{{"text":"what is this"}}}},{{"Image":{{"mime_type":"image/jpeg","data":"{big}"}}}}]}}"#
+        );
+        let mut prompt: crate::Prompt = serde_json::from_str(&json).expect("desktop prompt JSON");
+        let (changed, passthrough) = apply(&mut prompt);
+        assert_eq!((changed, passthrough), (1, 0), "one image, none unreadable");
+        let crate::PromptBlock::Image { mime_type, data } = &prompt.blocks[1] else {
+            panic!("block order changed: {:?}", prompt.blocks[1]);
+        };
+        assert_eq!(mime_type, "image/jpeg");
+        assert!(data.len() < big.len(), "the block still carries the original bytes");
+        let decoded = image::load_from_memory(&base64_decode(data).unwrap()).unwrap();
+        assert_eq!(decoded.dimensions(), (1600, 1200));
+        // The text block is untouched.
+        let crate::PromptBlock::Text { text } = &prompt.blocks[0] else { panic!() };
+        assert_eq!(text, "what is this");
+    }
+
+    #[test]
+    fn a_prompt_with_no_images_is_untouched() {
+        let mut prompt: crate::Prompt =
+            serde_json::from_str(r#"{"blocks":[{"Text":{"text":"hi"}}]}"#).unwrap();
+        assert_eq!(apply(&mut prompt), (0, 0));
     }
 
     #[test]

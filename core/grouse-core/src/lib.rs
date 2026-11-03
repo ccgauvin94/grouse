@@ -3759,28 +3759,14 @@ impl Core {
         if !self.inner.image_rescale.load(std::sync::atomic::Ordering::Relaxed) {
             return prompt;
         }
-        let mut changed = 0usize;
-        let mut passthrough = 0usize;
-        for block in prompt.blocks.iter_mut() {
-            if let PromptBlock::Image { mime_type, data } = block {
-                match crate::imgrescale::rescale(mime_type, data) {
-                    Ok(Some(r)) => {
-                        *mime_type = r.mime_type;
-                        *data = r.data;
-                        changed += 1;
-                    }
-                    Ok(None) => {}
-                    Err(_) => passthrough += 1,
-                }
-            }
-        }
+        let (_changed, passthrough) = crate::imgrescale::apply(&mut prompt);
         if passthrough > 0 {
             // Distinguishing "why is this image 4 MB" is worth one line: an
-            // unreadable format rode the prompt unrescaled.
+            // unreadable format rode the prompt unrescaled. A prompt where
+            // every image was shrunk says nothing — that is the point.
             self.alert(format!(
                 "sent {passthrough} image(s) in their original size (format not rescalable)"
             ));
-            let _ = changed; // changed-only prompts are silent — that is the point
         }
         prompt
     }

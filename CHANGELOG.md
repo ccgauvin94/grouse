@@ -6,6 +6,17 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **The desktop's bundled core can no longer be stale.** Found while chasing "the
+  desktop isn't rescaling images": `core/target/release/libgrouse_core.so` on the
+  build host was from 2026-10-29 07:41, seven hours before the outbound image
+  policy landed, so it exported neither `grouse_set_image_rescale` nor
+  `grouse_send_prompt_with_paths` — a bundle built from it would have shipped a
+  desktop with no image rescaling and no file attachments, and nothing in the app
+  would have said so. `build-flatpak.sh` now asserts those symbols exist and that
+  the lib is newer than every `core/**/*.rs`.
+
 ### Added
 
 - **A parity ratchet: no client may grow a surface the other does not have.**
@@ -17,6 +28,10 @@ All notable changes to Grouse are recorded here. The format is based on
   needs a reason and moves a pinned counter. `Item.files` shipped on the phone
   and was invisible on the desktop for a release with every test green — this
   is the test that would have failed.
+- **The image policy is testable on its own** (`imgrescale::apply`), with a test
+  that feeds it the exact `{"blocks":[{"Image":{"mime_type":…,"data":…}}]}` JSON
+  the desktop's `promptJson()` emits — so "the policy covers both clients" is a
+  test rather than a comment.
 
 ## [0.2.61] - 2026-11-02
 

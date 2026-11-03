@@ -33,3 +33,6 @@ flatpak-repo/
 # Release signing material (keystore + passwords env). Kept in-tree for local
 # release builds; must never be committed. See clients/android/app/build.gradle.kts.
 .signing/
+
+# QSettings written by a container run with HOME inside the tree (ctest/xvfb).
+clients/desktop/.config/

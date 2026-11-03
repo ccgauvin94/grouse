@@ -124,6 +124,15 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
   what renders the thumbnails).
 - Recipe sessions that declare parameters hard-fail unless
   `clientCapabilities._meta.goose.recipeParameterRequests` is true.
+- **The bundled core is a build artifact and can be stale — `build-flatpak.sh` now refuses one.**
+  Measured 2026-11-02: `core/target/release/libgrouse_core.so` was from 2026-10-29 07:41, seven
+  hours BEFORE the outbound image policy landed, so it exported neither `grouse_set_image_rescale`
+  nor `grouse_send_prompt_with_paths` — and a bundle built from it would have had no image
+  rescaling (phone photos riding the prompt at full size) and no file attachments, with the UI
+  showing nothing wrong. The script now asserts the three sentinel symbols exist and that the lib
+  is newer than every `core/**/*.rs`; both failures name the rebuild command. This is the desktop
+  twin of the Android "the committed `.so` is what ships" landmine, so treat a stale lib the same
+  way: rebuild the core, then the client.
 - **TLS is the core's, and this client asks it not to verify.**
   `Manager::serverConfigJson()` sends `accept_invalid_certs = true` (historical:
   goosed used a self-signed cert, we are tailnet-only and authed by the

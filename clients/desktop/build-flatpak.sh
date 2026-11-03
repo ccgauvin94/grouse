@@ -51,7 +51,28 @@ CORE_MANIFEST="../../core/Cargo.toml"
 distrobox enter kde-build -- bash -lc \
     "cd '$PWD' && cargo build --release --manifest-path '${CORE_MANIFEST}' -p grouse-core"
 mkdir -p grouse-core-prebuild
-cp ../../core/target/release/libgrouse_core.so grouse-core-prebuild/
+# A STALE core here ships a desktop with an old engine behind a new UI, and
+# nothing in the app says so. Measured 2026-11-02: the lib on disk was from
+# 2026-10-29 07:41 — 7h before the outbound image policy landed — so it lacked
+# both `grouse_set_image_rescale` and `grouse_send_prompt_with_paths`, and any
+# bundle built from it silently had no image rescaling and no file attachments.
+# A current core (built above) satisfies this check; if the build above no-ops
+# because the toolchain is missing, this is what stops the bundle.
+CORE_LIB=../../core/target/release/libgrouse_core.so
+for sym in grouse_set_image_rescale grouse_send_prompt_with_paths grouse_abi_version; do
+    if ! nm -D "$CORE_LIB" 2>/dev/null | grep -q " T $sym$"; then
+        echo "ERROR: $CORE_LIB does not export $sym — it predates the current core." >&2
+        echo "       rebuild: distrobox enter kde-build -- bash -lc \"cargo build --release --manifest-path core/Cargo.toml -p grouse-core\"" >&2
+        exit 1
+    fi
+done
+# And it must be newer than every core source file, or cargo never ran.
+STALE=$(find ../../core -name '*.rs' -newer "$CORE_LIB" -not -path '*/target/*' | head -1)
+if [ -n "$STALE" ]; then
+    echo "ERROR: $CORE_LIB is older than $STALE — the bundle would ship a stale core." >&2
+    exit 1
+fi
+cp "$CORE_LIB" grouse-core-prebuild/
 
 echo "== Building $APP_ID =="
 # The builder's module cache can MISS changes to the `type: dir` source (observed:
