@@ -59,6 +59,16 @@ QString dueLabel(const QString &iso, const QDate &today);
 /// "wakes in 6h" / "wakes tomorrow 05:00" for a snooze's `until`.
 QString wakeLabel(const QString &iso, const QDateTime &now);
 
+/// "added 17:36" / "added yesterday" / "added Mon" / "added Oct 24" — the timeline
+/// anchor under a row, from the server's `first_seen` (or a task's `created_at`).
+///
+/// Three ages, because one format does not fit all: the clock for today, the
+/// weekday for this week, the date for anything older. The stamps are UTC and the
+/// reader is local, so the branch is chosen on the LOCAL day. `now` is injected for
+/// the same reason `dueLabel`'s day is: a function that reads the clock inside can
+/// only be tested against the day it was written.
+QString stampLabel(const QString &iso, const QString &prefix, const QDateTime &now);
+
 /// Whether a row is asleep right now. A snooze whose `until` has passed reads as
 /// open — the server wakes it on its next rank pass — and an unparseable stamp
 /// reads as snoozed, because keeping a row quiet is the safe direction.
@@ -72,8 +82,9 @@ QDateTime nextMorning(const QDateTime &now);
 /// file, and the full path list belongs in the chat, not in a meta line.
 QString artifactsLabel(const QStringList &paths);
 
-/// The one-line meta strip under a row: wake time (when snoozed), thread, due,
-/// kind. Empty segments are dropped rather than joined into " ·  · ".
+/// The one-line meta strip under a row: wake time (when snoozed), when it was
+/// added, thread, due, kind. Empty segments are dropped rather than joined into
+/// " ·  · ".
 QString metaLine(const QVariantMap &row, bool snoozed, const QDate &today,
                  const QDateTime &now);
 

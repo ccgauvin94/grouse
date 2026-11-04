@@ -1851,6 +1851,12 @@ class ConnectionManager private constructor(context: Context) {
                 // older server's `{slug, title}` down to this string), so there is nothing
                 // shape-dependent left to do here.
                 thread = o["thread"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                // The stamps My Day's timeline is drawn from (ISO instants, UTC). The
+                // core keeps them in its projection; a server older than the field just
+                // sends nothing, which reads as "no date" rather than as "today".
+                firstSeen = o["first_seen"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                lastSeen = o["last_evidence"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                closedAt = o["closed_at"]?.jsonPrimitive?.contentOrNull.orEmpty(),
             )
         }
     }

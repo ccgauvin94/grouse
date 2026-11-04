@@ -183,7 +183,14 @@ fn section(result: Result<String, String>, project: fn(&mut Value)) -> (Value, O
 /// snoozed item is still open, just quiet), so without this field a snoozed row
 /// arrives looking exactly like an awake one — which is why the first cut of the
 /// tab made Snooze look like it did nothing at all.
-const KEPT_FIELDS: [&str; 11] = [
+///
+/// The three stamps are kept so My Day can read as a timeline rather than a pile:
+/// `first_seen` is when the item was added (the row's own "added" line),
+/// `last_evidence` is the freshest sighting of it (a re-raised loop is old news
+/// with new news attached), and `closed_at` is when it left the board. All three
+/// were always on the wire — `state_items` answers `SELECT *` — they were simply
+/// dropped here, which is why nothing on screen had a date.
+const KEPT_FIELDS: [&str; 14] = [
     "id",
     "kind",
     "state",
@@ -195,6 +202,9 @@ const KEPT_FIELDS: [&str; 11] = [
     "confidence",
     "resolution",
     "snooze_until",
+    "first_seen",
+    "last_evidence",
+    "closed_at",
 ];
 
 fn slim(items: &mut Value) {
@@ -422,7 +432,8 @@ mod tests {
             "detail":"short","owner":"other:Mazdak","due_at":null,"salience":0.5,
             "confidence":0.8,"resolution":null,"dedupe_key":"k","sources":["nc_mail"],
             "evidence":[{"source":"nc_mail","at":"2026-10-27T13:06:57Z","text":"a long quote"}],
-            "meta":{},"thread_id":"thr_1",
+            "meta":{},"thread_id":"thr_1","first_seen":"2026-10-26T09:00:00Z",
+            "last_evidence":"2026-10-27T13:06:57Z","closed_at":null,
             "thread":{"slug":"chami-billing","title":"chami billing"}}]"#;
         let got: Value =
             serde_json::from_str(&envelope(Ok(raw.to_string()), Ok("[]".to_string()), Ok("[]".to_string()))).unwrap();
@@ -430,6 +441,11 @@ mod tests {
         assert_eq!(row["title"], "Ship it");
         // An OLDER server's `{slug, title}` still renders: the label is the title.
         assert_eq!(row["thread"], "chami billing");
+        // Kept: the stamps the timeline is drawn from. They were on the wire all
+        // along (state_items answers SELECT *), so a row with no date was a
+        // projection bug, not a server one.
+        assert_eq!(row["first_seen"], "2026-10-26T09:00:00Z");
+        assert_eq!(row["last_evidence"], "2026-10-27T13:06:57Z");
         // Dropped: the tab never renders these, and they are the payload's bulk.
         assert!(row.get("evidence").is_none());
         assert!(row.get("dedupe_key").is_none());

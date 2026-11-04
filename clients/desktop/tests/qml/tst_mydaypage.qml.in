@@ -55,12 +55,78 @@ TestCase {
         compare(model.length, 5)          // header + 3 rows + the unlabelled loop
         compare(model[0].type, "header")
         compare(model[0].open, true)
-        compare(model[1].type, "task")    // handed-over work sorts first
-        compare(model[1].row.id, "tsk_a")
-        compare(model[2].type, "item")
+        // NEWEST FIRST: the group is a timeline of when rows were added, so the item
+        // added today leads and the one added a month ago trails — handed-over work no
+        // longer jumps the queue just for being a task.
+        compare(model[1].row.id, "itm_b")
+        compare(model[2].row.id, "tsk_a")
+        compare(model[2].type, "task")
+        compare(model[3].row.id, "itm_a")
         // A lone label never collapses: its row is in the same sequence, always.
         const lone = model.filter((e) => e.row && e.row.id === "itm_c")
         compare(lone.length, 1)
+        page.destroy()
+    }
+
+    // A row behind a thread header is painted narrower than a row that stands on its
+    // own. The flag alone would not prove that — the delegate is what moves — so this
+    // also reads the laid-out x of both cards and requires the grouped one to be in.
+    function findLoaderWithRowId(item, id, out) {
+        const kids = item.children || []
+        for (let i = 0; i < kids.length; i++) {
+            const kid = kids[i]
+            if (kid.entry !== undefined && kid.entry.row !== undefined
+                    && kid.entry.row.id === id)
+                out.push(kid)
+            findLoaderWithRowId(kid, id, out)
+        }
+        return out
+    }
+
+    function test_groupedRowsAreIndentedUnderTheirHeader() {
+        const page = makePage()
+        // The unlabelled loop has no header, so it can never be nested.
+        const loneEntry = page.entryModel.filter((e) => e.row && e.row.id === "itm_c")
+        compare(loneEntry.length, 1)
+        compare(loneEntry[0].indented, false)
+
+        page.toggleLabel("chami-billing")
+        wait(100)
+        const grouped = page.entryModel.filter(
+            (e) => e.type !== "header" && e.label === "chami-billing")
+        compare(grouped.length, 3)          // the handed-over task + two loops
+        for (let i = 0; i < grouped.length; i++)
+            compare(grouped[i].indented, true)
+
+        const lone = findLoaderWithRowId(page, "itm_c", [])
+        const nested = findLoaderWithRowId(page, "tsk_a", [])
+        compare(lone.length, 1)
+        compare(nested.length, 1)
+        verify(nested[0].x > lone[0].x,
+               "the grouped card is not in from the header: " + nested[0].x + " vs " + lone[0].x)
+        page.destroy()
+    }
+
+    // The page paints a TIMELINE: rows carry the stamp the assistant added them with,
+    // so the order has to be that stamp or the dates read as noise. A row with no
+    // stamp at all sorts last rather than to the top (epoch zero would do that).
+    function test_rowsAreOrderedNewestFirst() {
+        const page = makePage()
+        const ids = page.inPlayRows.map((r) => r.row.id)
+        compare(ids, ["itm_b", "tsk_a", "itm_c", "itm_a"])
+        page.destroy()
+    }
+
+    function test_aRowWithNoStampSortsLast() {
+        const page = makePage()
+        // The lone item is the only one whose group has no header; give it no stamp and
+        // it must not lead the list.
+        compare(page.stampValue({ kind: "item", row: {} }), -Infinity)
+        compare(page.stampValue({ kind: "item", row: { firstSeen: "nope" } }), -Infinity)
+        verify(page.stampValue({ kind: "item", row: { firstSeen: "2026-11-03T15:00:00Z" } }) > 0)
+        // A task's key is when it was handed over, not when it was last touched.
+        verify(page.stampValue({ kind: "task", row: { createdAt: "2026-10-30T15:00:00Z" } })
+               > page.stampValue({ kind: "item", row: { firstSeen: "2026-10-20T15:00:00Z" } }))
         page.destroy()
     }
 

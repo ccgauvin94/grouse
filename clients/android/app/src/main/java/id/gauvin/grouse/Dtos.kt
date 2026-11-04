@@ -96,6 +96,15 @@ data class TaskItem(
      *  empty when it has none. A LABEL, not a container: one thread can hold several items
      *  over its life, and nothing in the server keys on it. */
     val thread: String = "",
+    /** When the assistant added this to the board (ISO instant, UTC). This is the row's
+     *  timeline anchor: `addedLabel` turns it into "added 07:21" / "added Mon". It was
+     *  always on the wire — the core simply dropped it, which is why no row had a date. */
+    val firstSeen: String = "",
+    /** The freshest sighting of this row. A re-raised loop is an old row with new news
+     *  attached, so `firstSeen` alone would date it wrongly; shown only when it moved. */
+    val lastSeen: String = "",
+    /** When it left the board (ISO instant); blank while it is open. */
+    val closedAt: String = "",
 )
 
 /** Work the assistant handed over — assistant-state's `task` row, not an item.
@@ -120,7 +129,10 @@ data class AgentTask(
     val artifacts: List<String> = emptyList(),
     val createdAt: String = "",
     val updatedAt: String = "",
-)
+) {
+    /** The row's timeline anchor — when the work was handed over. */
+    val addedStamp: String get() = createdAt
+}
 
 /** One `tasks` row, or null when it has no id (a row without one cannot be keyed
  *  or opened, so it is dropped rather than painted under a made-up key). Pure, so

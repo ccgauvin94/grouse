@@ -54,7 +54,24 @@ Kirigami.Page {
                 continue
             rows.push({ kind: "item", row: open[i], label: open[i].thread || "" })
         }
+        // Newest first, because the list is a TIMELINE of what the assistant added.
+        // The server orders by salience, which answers a different question ("what
+        // matters most"); with the date printed on every row, the sequence has to be
+        // the sort order or the page reads as dates scattered at random. The sort is
+        // stable, so rows with no stamp keep the order they arrived in.
+        rows.sort(function (a, b) { return page.stampValue(b) - page.stampValue(a) })
         return rows
+    }
+
+    /// A row's sort key: when it entered the board. An absent or unparseable stamp
+    /// sorts LAST (-Infinity, not 0 — epoch zero would float undated rows to the top).
+    function stampValue(entry) {
+        const iso = entry.kind === "task" ? (entry.row.createdAt || "")
+                                          : (entry.row.firstSeen || "")
+        if (!iso)
+            return Number.NEGATIVE_INFINITY
+        const ms = Date.parse(iso)
+        return isNaN(ms) ? Number.NEGATIVE_INFINITY : ms
     }
 
     /// The painted sequence: a header for a thread that holds more than one entry,
@@ -83,8 +100,11 @@ Kirigami.Page {
                 out.push({ type: "header", label: grp.label, count: grp.entries.length, open: open })
             if (!collapsible || open) {
                 for (let k = 0; k < grp.entries.length; k++) {
+                    // `indented` is painted, not just bookkeeping: a row behind a header
+                    // sits in from the START edge so the group reads as a group instead
+                    // of as siblings of its own chevron. A lone row never moves.
                     out.push({ type: grp.entries[k].kind, row: grp.entries[k].row,
-                               label: grp.label })
+                               label: grp.label, indented: collapsible })
                 }
             }
         }
@@ -97,6 +117,22 @@ Kirigami.Page {
     property var entryModel: page.entries()
     property var inPlayRows: page.inPlay()
 
+    /// "Recently done" has to mean it: the server's order for a closed row is by
+    /// salience, which says nothing about when it closed.
+    function doneRows() {
+        const rows = Mgr.myDayDone.slice()
+        rows.sort(function (a, b) { return doneStamp(b) - doneStamp(a) })
+        return rows
+    }
+
+    function doneStamp(row) {
+        const iso = row.closedAt || row.firstSeen || ""
+        if (!iso)
+            return Number.NEGATIVE_INFINITY
+        const ms = Date.parse(iso)
+        return isNaN(ms) ? Number.NEGATIVE_INFINITY : ms
+    }
+
     function snoozedRows() {
         const out = []
         const open = Mgr.myDayOpen
@@ -106,6 +142,7 @@ Kirigami.Page {
         return out
     }
     property var snoozedModel: page.snoozedRows()
+    property var doneModel: page.doneRows()
 
     /// Send My Day's one-liner into the assistant thread and clear the box.
     function sendAssistant(field) {
@@ -436,6 +473,9 @@ Kirigami.Page {
             function artifactsLine(row) {
                 const parts = []
                 parts.push((row.state || "") === "review" ? qsTr("ready for review") : qsTr("working"))
+                const started = Mgr.stampLabel(row.createdAt || "", "started")
+                if (started.length > 0)
+                    parts.push(started)
                 const thread = Mgr.threadName(row.thread || "")
                 if (thread.length > 0)
                     parts.push(thread)
@@ -479,8 +519,14 @@ Kirigami.Page {
             }
         }
         Controls.Label {
-            visible: (doneRow.row.resolution || "").length > 0
-            text: doneRow.row.resolution || ""
+            // "booked it · closed yesterday" — the resolution line is the answer to
+            // "how did that end", the stamp is the answer to "when".
+            readonly property string closed: Mgr.stampLabel(doneRow.row.closedAt
+                                                            || doneRow.row.firstSeen || "", "closed")
+            visible: (doneRow.row.resolution || "").length > 0 || closed.length > 0
+            text: [(doneRow.row.resolution || ""), closed].filter(function (p) {
+                return p.length > 0
+            }).join(" · ")
             textFormat: Text.PlainText
             elide: Text.ElideRight
             color: Kirigami.Theme.disabledTextColor
@@ -615,6 +661,7 @@ Kirigami.Page {
                         // property — a nested component would shadow `modelData`.
                         property var entry: modelData
                         Layout.fillWidth: true
+                        Layout.leftMargin: entry.indented === true ? Theme.spacing.s5 : 0
                         sourceComponent: entry.type === "header" ? threadHeaderComp
                                        : entry.type === "task" ? taskCardComp
                                        : itemCardComp
@@ -654,11 +701,11 @@ Kirigami.Page {
 
                 SectionHeader {
                     title: qsTr("Recently done")
-                    count: Mgr.myDayDone.length
-                    visible: Mgr.myDayDone.length > 0
+                    count: page.doneModel.length
+                    visible: page.doneModel.length > 0
                 }
                 Repeater {
-                    model: Mgr.myDayDone
+                    model: page.doneModel
                     delegate: Loader {
                         property var entry: modelData
                         Layout.fillWidth: true

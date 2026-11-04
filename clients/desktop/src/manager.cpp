@@ -2630,6 +2630,11 @@ QString Manager::rowMeta(const QVariantMap &row, bool snoozed) const
     return MyDay::metaLine(row, snoozed, QDate::currentDate(), QDateTime::currentDateTime());
 }
 
+QString Manager::stampLabel(const QString &iso, const QString &prefix) const
+{
+    return MyDay::stampLabel(iso, prefix, QDateTime::currentDateTime());
+}
+
 void Manager::snoozeTaskToMorning(const QString &id)
 {
     // UTC with a Z suffix: `nextMorning` is LOCAL 05:00, and the server reads a naive

@@ -7,6 +7,7 @@
 
 #include "myday.h"
 
+#include <QLocale>
 #include <QTest>
 
 class TestMyDay : public QObject
@@ -37,6 +38,7 @@ private slots:
     void threadName_flattensSlugs();
     void threadTitle_prefixesTheThread();
     void artifactsLabel_countsAndNamesOne();
+    void stampLabel_choosesAnAgePerUnit();
     void metaLine_dropsEmptySegments();
 };
 
@@ -232,6 +234,47 @@ void TestMyDay::artifactsLabel_countsAndNamesOne()
              QStringLiteral("2 files · deck.pdf"));
 }
 
+void TestMyDay::stampLabel_choosesAnAgePerUnit()
+{
+    // The timeline anchor. Every expected string that depends on the machine's zone
+    // is COMPUTED from the stamp the same way the implementation does, so the test
+    // pins which branch ran rather than which timezone CI is in.
+    const QDateTime now = QDateTime::fromString(QStringLiteral("2026-11-03T17:00:00Z"),
+                                                Qt::ISODate);
+
+    // Today reads as the clock — and it is the LOCAL clock, because the store writes UTC.
+    const QString same = QStringLiteral("2026-11-03T16:05:00Z");
+    const QString clock =
+        QDateTime::fromString(same, Qt::ISODate).toLocalTime().time().toString(QStringLiteral("HH:mm"));
+    QCOMPARE(MyDay::stampLabel(same, QStringLiteral("added"), now),
+             QStringLiteral("added ") + clock);
+
+    QCOMPARE(MyDay::stampLabel("2026-11-02T15:00:00Z", QStringLiteral("added"), now),
+             QStringLiteral("added yesterday"));
+
+    // Within the week: a weekday places it better than a date.
+    const QDate twoDaysAgo(2026, 11, 1);
+    QCOMPARE(MyDay::stampLabel("2026-11-01T15:00:00Z", QStringLiteral("added"), now),
+             QStringLiteral("added ")
+                 + QLocale().dayName(twoDaysAgo.dayOfWeek(), QLocale::ShortFormat));
+
+    // Older: the date, and the year only when it is a different year.
+    QCOMPARE(MyDay::stampLabel("2026-10-24T15:00:00Z", QStringLiteral("added"), now),
+             QStringLiteral("added ") + QLocale().toString(QDate(2026, 10, 24),
+                                                            QStringLiteral("MMM d")));
+    QCOMPARE(MyDay::stampLabel("2025-12-30T15:00:00Z", QStringLiteral("added"), now),
+             QStringLiteral("added ") + QLocale().toString(QDate(2025, 12, 30),
+                                                            QStringLiteral("MMM d, yyyy")));
+
+    // The verb belongs to the caller: a closed row says when it closed.
+    QCOMPARE(MyDay::stampLabel("2026-11-02T15:00:00Z", QStringLiteral("closed"), now),
+             QStringLiteral("closed yesterday"));
+
+    // No stamp, no text — the meta line must not gain a dangling "added ".
+    QCOMPARE(MyDay::stampLabel(QString(), QStringLiteral("added"), now), QString());
+    QCOMPARE(MyDay::stampLabel("not a date", QStringLiteral("added"), now), QString());
+}
+
 void TestMyDay::metaLine_dropsEmptySegments()
 {
     const QDate today(2026, 10, 30);
@@ -253,6 +296,17 @@ void TestMyDay::metaLine_dropsEmptySegments()
     asleep["snoozeUntil"] = QStringLiteral("2026-10-30T18:00:00Z");
     QCOMPARE(MyDay::metaLine(asleep, true, today, now),
              QStringLiteral("wakes in 6h · Chami billing · due in 7d · waiting_on"));
+
+    // The timeline anchor leads, so the stamps line up down the list instead of
+    // trailing each row by a different amount. It sits after a wake time, because
+    // "when it comes back" outranks "when it arrived".
+    QVariantMap stamped = full;
+    stamped["firstSeen"] = QStringLiteral("2026-10-29T18:00:00Z");
+    QCOMPARE(MyDay::metaLine(stamped, false, today, now),
+             QStringLiteral("added yesterday · Chami billing · due in 7d · waiting_on"));
+    stamped["snoozeUntil"] = QStringLiteral("2026-10-30T18:00:00Z");
+    QCOMPARE(MyDay::metaLine(stamped, true, today, now),
+             QStringLiteral("wakes in 6h · added yesterday · Chami billing · due in 7d · waiting_on"));
 }
 
 QTEST_MAIN(TestMyDay)

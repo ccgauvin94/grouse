@@ -25,6 +25,25 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Changed
 
+- **My Day is a timeline: every row says when it arrived, and the list is
+  ordered by that.** An item now carries `first_seen` (and a closed one
+  `closed_at`) all the way from assistant-state to the row — they were on the
+  wire from the start and the core's projection dropped them, which is why
+  nothing on screen had a date. Each row prints "added 17:36" for today, "added
+  yesterday", "added Mon" within the week and "added Oct 24" beyond it, a
+  handed-over task says "started …", and a closed one says "closed …". The
+  in-play list and "Recently done" are sorted **newest first** on that stamp:
+  with a date on every row, a salience-ordered list reads as dates scattered at
+  random. Rows with no stamp (an older server) sort last rather than to the top.
+
+- **My Day: the rows inside a thread are indented, on both clients.** A label with
+  more than one entry paints a header, and its cards used to sit flush with that
+  header's own edges — so a group read as a list of siblings of its chevron
+  rather than as contents. A row behind a header now steps in from the start
+  edge (20 dp on Android, one spacing step on the desktop) while keeping its
+  right edge, which is what makes the nesting legible instead of merely
+  narrower. A row with no header never moves.
+
 - **Android: a downloaded share lands in `Downloads/Grouse`, not in the app's
   private data.** The core has to write somewhere it can write unaided, so it
   still fetches into `filesDir/files/`; the client now copies the finished file

@@ -424,9 +424,22 @@ reason this path exists.
   is the only task state a tab has to make loud. A server older than
   assistant-state v4 has no `task_list`, and that shows up as `errors.tasks`
   rather than as an empty section that reads like "nothing was handed over".
+- **Every row carries its own timeline anchors.** `first_seen` (when the
+  assistant added it), `last_evidence` (the freshest sighting — a re-raised loop
+  is an old row with new news attached, so `first_seen` alone would date it
+  wrongly) and `closed_at` (when it left the board; null while open). Tasks carry
+  `created_at` / `updated_at` from the same family. These were always on the wire
+  (`state_items` answers `SELECT *`) and were simply dropped in projection, which
+  is why no row on screen had a date. Both clients print the stamp on the row
+  ("added 17:36" / "added yesterday" / "added Oct 24") and **order the in-play
+  list by it, newest first** — with a date on every row the sequence has to be
+  the sort order, or the page reads as dates scattered at random. The server's
+  own order is by salience, which answers "what matters most" rather than "what
+  happened when"; the clients keep the stamp visible so that reading is not lost.
 - **Rows are slimmed by the core** (`tasks.rs`, `KEPT_FIELDS`): id, kind, state,
   title, detail, owner, `due_at`, salience, confidence, resolution,
-  `snooze_until`, and `thread` — the area's **label** as one string
+  `snooze_until`, `first_seen`, `last_evidence`, `closed_at`, and `thread` — the
+  area's **label** as one string
   (`chami-billing`), dropped when blank. assistant-state's rows
   also carry evidence, provenance and dedupe keys; those stay on the server — they
   are audit trail, not row content, and shipping them made one refresh 82 KB.

@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import id.gauvin.grouse.ui.theme.statusColors
 import java.time.Instant
+import java.time.ZoneId
 
 /**
  * My Day — the Assistant tab, with the always-on thread at the top and the assistant's
@@ -161,7 +162,14 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
             val snoozed = all.filter { it.isSnoozedAt(nowMs) }
             val open = all.filterNot { it.isSnoozedAt(nowMs) }
             val inPlay: List<DayEntry> = handed.map { DayEntry.Run(it) } + open.map { DayEntry.Loop(it) }
-            val groups = inPlay.groupBy { it.thread }.toList()
+            // Newest first, because the list is a TIMELINE of what the assistant added.
+            // The server orders by salience, which answers a different question ("what
+            // matters most"); the row's own stamp answers "what happened when", and with
+            // the date printed on every row the sequence has to be the sort order or the
+            // page reads as dates scattered at random. `groupBy` keeps first appearance,
+            // so a thread group still lands at the position of its freshest row.
+            val timeline = inPlay.sortedByDescending { it.stampMs }
+            val groups = timeline.groupBy { it.thread }.toList()
             val expanded = expandedLabels.split(LABEL_SEP).filter { it.isNotBlank() }.toSet()
 
             item { SectionHeader("Open", inPlay.size) }
@@ -189,11 +197,17 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                     }
                 }
                 if (!collapsible || label in expanded) {
+                    // A row behind a header is painted narrower than a row that stands on
+                    // its own, so the group reads as a group instead of as siblings of its
+                    // own chevron. Only the START edge moves: the cards keep their right
+                    // edge, which is what makes the nesting legible rather than just small.
+                    val nested = if (collapsible) Modifier.padding(start = GROUP_INDENT) else Modifier
                     entries.forEach { entry ->
                         when (entry) {
                             is DayEntry.Run -> item(key = "task:${entry.task.id}") {
                                 HandedRow(
                                     entry.task,
+                                    modifier = nested,
                                     onOpen = {
                                         // The session that did the work has the history —
                                         // go there; fall back to the thread chat when the
@@ -211,6 +225,7 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                                 val t = entry.task
                                 TaskRow(
                                     t,
+                                    modifier = nested,
                                     onDone = { closing = t; closeState = "done"; closeNote = "" },
                                     onDrop = { closing = t; closeState = "dropped"; closeNote = "" },
                                     onSnooze = {
@@ -262,7 +277,9 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                 }
             }
 
-            val done = cm.doneTasks.value
+            // "Recently done" has to MEAN it: the server's own order is by salience,
+            // which for a closed row says nothing about when it closed.
+            val done = cm.doneTasks.value.sortedByDescending { it.doneStampMs() }
             item { SectionHeader("Recently done", done.size) }
             items(done, key = { "done-${it.id}" }) { t -> DoneRow(t) }
             item { Spacer(Modifier.height(24.dp)) }
@@ -404,18 +421,82 @@ private fun AssistantCard(
 private sealed interface DayEntry {
     val thread: String
 
+    /** When it entered the board, as the ISO instant the server stamped it with. */
+    val stamp: String
+
+    /** Sort key. A row without a parseable stamp sorts last rather than first: an
+     *  unknown date is old news, and it must not push today's items down the list. */
+    val stampMs: Long get() = stampMillis(stamp)
+
     data class Run(val task: AgentTask) : DayEntry {
         override val thread: String get() = task.thread
+        override val stamp: String get() = task.createdAt
     }
 
     data class Loop(val task: TaskItem) : DayEntry {
         override val thread: String get() = task.thread
+        override val stamp: String get() = task.firstSeen
     }
+}
+
+/** Epoch millis for a server stamp, or `Long.MIN_VALUE` when there is none or it will
+ *  not parse — so a missing date sorts to the bottom instead of masquerading as 1970. */
+internal fun stampMillis(iso: String): Long {
+    if (iso.isBlank()) return Long.MIN_VALUE
+    return runCatching { Instant.parse(iso) }
+        .recoverCatching { java.time.OffsetDateTime.parse(iso).toInstant() }
+        .recoverCatching { java.time.LocalDateTime.parse(iso).atZone(ZoneId.systemDefault()).toInstant() }
+        .getOrNull()?.toEpochMilli() ?: Long.MIN_VALUE
+}
+
+/** When a closed row left the board — its `closed_at`, or when it was added if the
+ *  server predates that column. */
+internal fun TaskItem.doneStampMs(): Long =
+    stampMillis(closedAt.ifBlank { firstSeen })
+
+/** "added 17:36" / "added yesterday" / "added Mon" / "added Oct 24".
+ *
+ *  A timeline needs a date a person can read at a glance, and one format does not fit
+ *  every age: the clock time is what you want for something that arrived today, the
+ *  weekday for this week, and the date for anything older. The clock and the zone are
+ *  ARGUMENTS so the branches are testable — a label function that reads `Instant.now()`
+ *  internally can only be tested against the day it was written. */
+internal fun stampLabel(
+    iso: String,
+    prefix: String = "added",
+    now: Instant = Instant.now(),
+    zone: ZoneId = ZoneId.systemDefault(),
+): String {
+    if (iso.isBlank()) return ""
+    val at = stampMillis(iso)
+    if (at == Long.MIN_VALUE) return ""
+    val local = Instant.ofEpochMilli(at).atZone(zone)
+    val today = now.atZone(zone).toLocalDate()
+    val day = local.toLocalDate()
+    val days = java.time.temporal.ChronoUnit.DAYS.between(day, today)
+    val locale = java.util.Locale.getDefault()
+    val text = when {
+        // 0 is today; a negative difference is a clock-skewed "future" stamp, which is
+        // still something that just arrived.
+        days <= 0L -> "%02d:%02d".format(local.hour, local.minute)
+        days == 1L -> "yesterday"
+        days < 7L -> day.dayOfWeek.getDisplayName(java.time.format.TextStyle.SHORT, locale)
+        day.year == today.year ->
+            day.month.getDisplayName(java.time.format.TextStyle.SHORT, locale) + " " + day.dayOfMonth
+        else -> day.month.getDisplayName(java.time.format.TextStyle.SHORT, locale) +
+            " " + day.dayOfMonth + ", " + day.year
+    }
+    return "$prefix $text"
 }
 
 /** Separator for the expanded-labels string. A unit separator cannot appear in a
  *  normalised label (those are `[a-z0-9-]`), so parsing can never split one in two. */
 private const val LABEL_SEP = "\u0001"
+
+/** How far a row inside an open thread sits in from the header above it. One step of the
+ *  spacing scale past the card gap: enough to read as nested, not so much that a three-line
+ *  card loses a quarter of its width on a phone. */
+private val GROUP_INDENT = 20.dp
 
 internal fun toggleLabel(csv: String, label: String): String {
     val set = csv.split(LABEL_SEP).filter { it.isNotBlank() }.toSet()
@@ -491,6 +572,7 @@ private fun EmptyRow(text: String) {
 @Composable
 private fun TaskRow(
     t: TaskItem,
+    modifier: Modifier = Modifier,
     snoozed: Boolean = false,
     onDone: () -> Unit,
     onDrop: () -> Unit,
@@ -499,11 +581,14 @@ private fun TaskRow(
 ) {
     val meta = listOfNotNull(
         wakeLabel(t.snoozeUntil).takeIf { snoozed && it.isNotBlank() },
+        // The timeline anchor, first on the line so the stamps line up down the list.
+        stampLabel(t.firstSeen).takeIf { it.isNotBlank() },
         threadName(t.thread).takeIf { it.isNotBlank() },
         dueLabel(t.dueAt).takeIf { it.isNotBlank() },
         t.kind.takeIf { it.isNotBlank() && it != "commitment" },
     ).joinToString(" · ")
     Card(
+        modifier = modifier,
         shape = RoundedCornerShape(12.dp),
         onClick = onOpen,
         // Asleep reads as asleep: a snoozed row sits in its own section AND is muted, so the
@@ -546,14 +631,16 @@ private fun TaskRow(
  *  came back — so the whole card taps through to the session that did the work
  *  rather than offering buttons that would need an intent the core does not have. */
 @Composable
-private fun HandedRow(t: AgentTask, onOpen: () -> Unit) {
+private fun HandedRow(t: AgentTask, modifier: Modifier = Modifier, onOpen: () -> Unit) {
     val reviewing = t.state == "review"
     val meta = listOfNotNull(
         if (reviewing) "ready for review" else "working",
+        stampLabel(t.createdAt, "started").takeIf { it.isNotBlank() },
         t.thread.takeIf { it.isNotBlank() }?.let(::threadName),
         artifactsLabel(t.artifacts),
     ).joinToString(" · ")
     Card(
+        modifier = modifier,
         shape = RoundedCornerShape(12.dp),
         onClick = onOpen,
         colors = if (reviewing) {
@@ -686,9 +773,10 @@ private fun DoneRow(t: TaskItem) {
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        if (t.resolution.isNotBlank()) {
+        val closed = stampLabel(t.closedAt.ifBlank { t.firstSeen }, "closed")
+        if (t.resolution.isNotBlank() || closed.isNotBlank()) {
             Text(
-                t.resolution,
+                listOf(t.resolution, closed).filter { it.isNotBlank() }.joinToString(" · "),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.outline,
                 maxLines = 1,

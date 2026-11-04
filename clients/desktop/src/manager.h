@@ -486,6 +486,10 @@ public:
     Q_INVOKABLE QString artifactsLabel(const QStringList &paths) const;
     Q_INVOKABLE bool rowSnoozed(const QVariantMap &row) const;
     Q_INVOKABLE QString rowMeta(const QVariantMap &row, bool snoozed) const;
+    /// "added 17:36" / "closed yesterday" / "started Mon" — the timeline anchor for a
+    /// row, given the raw stamp and the verb the row wants. Empty when there is no
+    /// stamp, so a caller can just concatenate it.
+    Q_INVOKABLE QString stampLabel(const QString &iso, const QString &prefix) const;
 
     // ---- thread chats (§3.6) ------------------------------------------------
     /** The thread label of the conversation on screen, when it IS a thread chat.

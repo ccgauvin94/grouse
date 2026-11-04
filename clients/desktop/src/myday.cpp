@@ -33,6 +33,11 @@ QVariantMap itemRow(const QJsonObject &o)
     m["resolution"] = str(o, "resolution");
     m["snoozeUntil"] = str(o, "snooze_until");
     m["thread"] = str(o, "thread");
+    // The timeline anchors. `state_items` answers SELECT *, so these were always on
+    // the wire; the core's projection dropped them, and now keeps them.
+    m["firstSeen"] = str(o, "first_seen");
+    m["lastSeen"] = str(o, "last_evidence");
+    m["closedAt"] = str(o, "closed_at");
     return m;
 }
 
@@ -56,6 +61,8 @@ QVariantMap taskRow(const QJsonObject &o)
             artifacts << p;
     }
     m["artifacts"] = artifacts;
+    m["createdAt"] = str(o, "created_at");
+    m["updatedAt"] = str(o, "updated_at");
     return m;
 }
 
@@ -165,6 +172,39 @@ QString wakeLabel(const QString &iso, const QDateTime &now)
                                       : QStringLiteral("wakes tomorrow %1").arg(clock);
 }
 
+QString stampLabel(const QString &iso, const QString &prefix, const QDateTime &now)
+{
+    const QString raw = iso.trimmed();
+    if (raw.isEmpty())
+        return QString();
+    QDateTime at = QDateTime::fromString(raw, Qt::ISODate);
+    if (!at.isValid())
+        return QString();
+    // The stamps are UTC (the store writes `…Z`); the reader is local, so every
+    // branch below is about the LOCAL day and local clock.
+    at = at.toLocalTime();
+    const QDate today = now.date();
+    const QDate day = at.date();
+    // `daysTo(a)` is a - *this, so TODAY is the receiver for the age to come out
+    // positive — the same shape (and the same bug) as dueLabel above.
+    const qint64 days = day.daysTo(today);
+    QString text;
+    if (days <= 0) {
+        // Today, or a clock-skewed future stamp: the clock is what identifies it.
+        text = at.time().toString(QStringLiteral("HH:mm"));
+    } else if (days == 1) {
+        text = QStringLiteral("yesterday");
+    } else if (days < 7) {
+        // Within the week a weekday is easier to place than a date.
+        text = QLocale().dayName(day.dayOfWeek(), QLocale::ShortFormat);
+    } else if (day.year() == today.year()) {
+        text = QLocale().toString(day, QStringLiteral("MMM d"));
+    } else {
+        text = QLocale().toString(day, QStringLiteral("MMM d, yyyy"));
+    }
+    return prefix.isEmpty() ? text : prefix + QLatin1Char(' ') + text;
+}
+
 bool isSnoozed(const QVariantMap &row, const QDateTime &now)
 {
     if (row.value(QStringLiteral("state")).toString() != QLatin1String("snoozed"))
@@ -204,6 +244,12 @@ QString metaLine(const QVariantMap &row, bool snoozed, const QDate &today,
         if (!wake.isEmpty())
             parts << wake;
     }
+    // The timeline anchor goes first (after a wake time), so the stamps line up
+    // down the list instead of trailing every row by a different amount.
+    const QString added = stampLabel(row.value(QStringLiteral("firstSeen")).toString(),
+                                    QStringLiteral("added"), now);
+    if (!added.isEmpty())
+        parts << added;
     const QString thread = threadName(row.value(QStringLiteral("thread")).toString());
     if (!thread.isEmpty())
         parts << thread;

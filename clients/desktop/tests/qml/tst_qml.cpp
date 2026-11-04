@@ -106,18 +106,21 @@ public:
         a["kind"] = "commitment";
         a["state"] = "open";
         a["dueAt"] = "2026-11-06";
+        a["firstSeen"] = "2026-10-01T15:00:00Z";
         m_myDayOpen << a;
         QVariantMap b;
         b["id"] = "itm_b";
         b["title"] = "Call the insurer";
         b["thread"] = "chami-billing";
         b["state"] = "open";
+        b["firstSeen"] = "2026-11-03T15:00:00Z";
         m_myDayOpen << b;
         QVariantMap lone;
         lone["id"] = "itm_c";
         lone["title"] = "A lone loop";
         lone["thread"] = "";
         lone["state"] = "open";
+        lone["firstSeen"] = "2026-10-20T15:00:00Z";
         m_myDayOpen << lone;
         QVariantMap t;
         t["id"] = "tsk_a";
@@ -127,12 +130,15 @@ public:
         t["sessionId"] = "20261030_1";
         t["result"] = "wrote 9 slides";
         t["artifacts"] = QStringList{"/workspace/deck.pdf"};
+        t["createdAt"] = "2026-10-30T15:00:00Z";
         m_myDayHanded << t;
         QVariantMap d;
         d["id"] = "itm_d";
         d["title"] = "Book the flight";
         d["state"] = "done";
         d["resolution"] = "booked it";
+        d["firstSeen"] = "2026-10-05T15:00:00Z";
+        d["closedAt"] = "2026-11-02T15:00:00Z";
         m_myDayDone << d;
         emit tasksChanged();
     }
@@ -172,6 +178,12 @@ public:
     {
         Q_UNUSED(snoozed);
         return row.value(QStringLiteral("dueAt")).toString();
+    }
+    Q_INVOKABLE QString stampLabel(const QString &iso, const QString &prefix) const
+    {
+        // The real format is unit-tested in tst_myday; here it only has to be callable,
+        // so a delegate that renders it can be instantiated without a TypeError.
+        return iso.isEmpty() ? QString() : prefix + QLatin1Char(' ') + iso.left(10);
     }
     Q_INVOKABLE void openThreadChat(const QString &label)
     { record(QStringLiteral("openThreadChat:%1").arg(label)); }
