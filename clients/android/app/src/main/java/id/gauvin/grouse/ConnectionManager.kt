@@ -481,9 +481,14 @@ class ConnectionManager private constructor(context: Context) {
     val doneTasks = mutableStateOf<List<TaskItem>>(emptyList())
     /** Handed-over work: running, or waiting for review (assistant-state `task`). */
     val handedTasks = mutableStateOf<List<AgentTask>>(emptyList())
-    /** `thread label -> session id`, mirrored from the store so the chat screen can ask
-     *  "is the conversation on screen a thread chat?" without parsing prefs per frame. */
-    val threadSessions = mutableStateOf(store.threadSessions)
+    /** `thread label -> session id`, MIRRORED FROM THE CORE on every My Day refresh.
+     *
+     *  Not persisted and never written here: the map lives on the server
+     *  (assistant-state's `thread_sessions`) because a per-device copy forked the
+     *  conversation — measured 2026-11-01, "Thread: Global entry" existed twice, once
+     *  from each client. This is only what the chat screen reads to answer "is the
+     *  conversation on screen a thread chat?"; `core.openThread(label)` is the way in. */
+    val threadSessions = mutableStateOf<Map<String, String>>(emptyMap())
     /** Set when a section failed: "nothing to do" and "could not ask" must not look alike. */
     val tasksError = mutableStateOf<String?>(null)
     /** A refresh is outstanding (spinner on the tab's refresh affordance). */
@@ -1689,74 +1694,38 @@ class ConnectionManager private constructor(context: Context) {
     // globally-enabled extension — assistant-state, k_ir, chatrecall, memory — exactly
     // as any other chat does. Nothing is scoped or faked here.
 
-    /** What a thread chat is titled. Humanised, because a label is a slug (`pnc-low-balance`). */
-    fun threadTitle(label: String): String =
-        "Thread: " + label.replace('-', ' ').replace('_', ' ').trim()
-            .replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
-
     /** The label of the conversation on screen, when that conversation IS a thread chat. */
     val currentThreadLabel: String?
         get() {
             val cur = currentSession.value ?: return null
-            return threadSessions.value.entries.firstOrNull { it.value == cur }?.key
+            val mapped = threadSessions.value.entries.firstOrNull { it.value == cur }?.key
+            if (mapped != null) {
+                pendingThreadLabel = null
+                return mapped
+            }
+            // The freshly created chat is not in the mirror yet (the map arrives on the
+            // next refresh): the label we ASKED for is what it is, until the mirror says
+            // otherwise.
+            return pendingThreadLabel
         }
 
-    /** The mapped session for `label`, or null to mint a fresh one.
+    /** The label whose chat `openThreadChat` just asked the core for.
      *
-     *  Deliberately does NOT validate against `sessions`: a thread chat is filed under
-     *  the assistant project, and the core hides every session in that project from
-     *  this list — so a live thread chat is *never* in it, and checking membership
-     *  would discard the mapping on every second Discuss and create a duplicate chat
-     *  each time. The real staleness signal is the open FAILING (grouse#19), which is
-     *  where the mapping is dropped (`onCoreSessionOpenFailed`). */
-    private fun threadSessionId(label: String): String? = threadSessions.value[label]
-
-    private fun rememberThreadSession(label: String, sid: String) {
-        val next = store.threadSessions + (label to sid)
-        store.threadSessions = next
-        threadSessions.value = next
-    }
-
-    private fun forgetThreadSession(label: String) {
-        val next = store.threadSessions - label
-        store.threadSessions = next
-        threadSessions.value = next
-    }
-
-    /** Drop a mapping whose session the server no longer has. Called from the open
-     *  FAILURE, which is the only signal a thread chat can produce (it is invisible to
-     *  `session/list`), and before that handler's "not the on-screen chat" guard: the
-     *  mapping is stale whether or not this chat happens to be the visible one. */
-    private fun forgetThreadSessionForSession(sid: String) {
-        val label = threadSessions.value.entries.firstOrNull { it.value == sid }?.key ?: return
-        forgetThreadSession(label)
-    }
-
-    /** Open the chat for `label`, creating it the first time. Leaves the composer for the
-     *  caller to prefill; navigation is the caller's too, so this stays testable. */
-    fun openThreadChat(label: String) {
-        val existing = threadSessionId(label)
-        if (existing != null) {
-            openSession(existing)
-            return
-        }
-        pendingThreadLabel = label
-        // Filed under the assistant PROJECT, which is where the persona prompt lives:
-        // goose injects a session's project instructions into its prompts, so a thread
-        // chat answers the way the assistant does without the client pasting anything
-        // in. The core hides the project and its sessions from every chat list — the
-        // way in is My Day's thread groups — which is why the slug comes from the core
-        // rather than a constant of ours.
-        newSession(kind = SessionKind.CHAT, projectId = core.assistantProject())
-    }
-
-    /** Set by `openThreadChat` and consumed when the new session goes live, where its id
-     *  is known: rename it after the thread and record the mapping. */
+     *  The core owns creation now, so this app does not know the new session's id — it
+     *  only knows which area it asked about. The panel needs a label the moment the
+     *  chat opens, and the map arrives on the NEXT refresh, so this stands in until
+     *  then and is cleared as soon as the mirror carries the session. */
     @Volatile private var pendingThreadLabel: String? = null
 
-    private fun adoptThreadSession(sid: String, label: String) {
-        core.renameSession(sid, threadTitle(label))
-        rememberThreadSession(label, sid)
+    /** Open the chat for `label`, creating it the first time — in the CORE, so both
+     *  clients reach the SAME conversation. Leaves the composer for the caller to
+     *  prefill; navigation is the caller's too, so this stays testable. */
+    fun openThreadChat(label: String) {
+        pendingThreadLabel = label
+        core.openThread(label)
+        // One refresh now, so the map is current by the time the chat paints; the
+        // panel's own refresh covers the rest.
+        refreshTasks()
     }
 
     // --- My Day: assistant-state's open loops over a deterministic tool call ---
@@ -1823,6 +1792,15 @@ class ConnectionManager private constructor(context: Context) {
         openTasks.value = parseTasks(root["open"])
         doneTasks.value = parseTasks(root["done"])
         handedTasks.value = parseAgentTasks(root["tasks"])
+        // The thread map, replaced wholesale: it is the CORE's (and the server's), and
+        // this app only mirrors it so the chat screen can name the conversation on
+        // screen. Absent on a core that predates it, which reads as "no conversations
+        // mapped" and falls back to the label the last open asked for.
+        (root["threads"] as? JsonObject)?.let { map ->
+            threadSessions.value = map.entries.mapNotNull { (label, v) ->
+                v.jsonPrimitive.contentOrNull?.takeIf { it.isNotBlank() }?.let { label to it }
+            }.toMap()
+        }
         val errors = root["errors"] as? JsonObject
         tasksError.value = errors?.entries?.joinToString("\n") { (section, msg) ->
             "$section: ${msg.jsonPrimitive.contentOrNull ?: "failed"}"
@@ -2572,12 +2550,6 @@ class ConnectionManager private constructor(context: Context) {
                 core.renameSession(sid, ASSISTANT_TITLE)
                 store.assistantSessionId = sid
             }
-            // A thread chat is renamed and remembered here, where the created session's
-            // id first exists — the caller only knew the LABEL it asked for.
-            pendingThreadLabel?.let { label ->
-                pendingThreadLabel = null
-                adoptThreadSession(sid, label)
-            }
             // Populate the in-chat "N tools" indicator and the per-extension tool lists.
             // MCP-backed extensions come up asynchronously AFTER the session is ready: a
             // tools/list fired here returns only the builtins (measured). Ask again shortly
@@ -2784,7 +2756,8 @@ class ConnectionManager private constructor(context: Context) {
         // A thread chat the server has deleted must not be opened again: drop the
         // mapping so the next Discuss mints a fresh conversation instead of retrying
         // a dead id forever.
-        forgetThreadSessionForSession(sessionId)
+        // A dead thread link is dropped by the CORE (it owns the map): the open failure
+        // is where a cached id is proven stale (grouse#19). Nothing to do here.
         // Same rule for the assistant thread: the cached id is authoritative, so its
         // failure is the ONLY signal that it is gone. Dropping the cache here means the
         // next tap re-resolves it by title — or mints the thread, which is correct once

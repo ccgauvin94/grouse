@@ -828,6 +828,13 @@ struct CoreInner {
     /// the user picked for that conversation. Keyed by the endpoint's label ("" =
     /// the main wire) — a roam chat's files live on that peer's filesystem.
     file_sessions: Mutex<HashMap<String, String>>,
+    /// Every thread label's own conversation, as assistant-state reports it
+    /// (`thread_sessions`, schema v6). Kept here rather than in a client because a
+    /// per-client map FORKED the conversation: measured 2026-11-01, "Thread: Global
+    /// entry" existed twice — 82 and 99 messages, 21 minutes apart, one per device.
+    /// Refreshed with the My Day lists; the label set that needs one is derived from
+    /// those same rows.
+    thread_map: Mutex<std::collections::BTreeMap<String, String>>,
 }
 
 /// A file the app wants to attach, read on demand.
@@ -927,6 +934,7 @@ impl Core {
                 self_ref: std::sync::OnceLock::new(),
                 tasks_session: Mutex::new(None),
                 file_sessions: Mutex::new(HashMap::new()),
+                thread_map: Mutex::new(std::collections::BTreeMap::new()),
             }),
         });
         let _ = core.inner.self_ref.set(Arc::downgrade(&core));
@@ -1074,6 +1082,46 @@ impl Core {
     /// filters on — the value and the filtering are the same decision.
     pub fn assistant_project(&self) -> String {
         crate::session::ASSISTANT_PROJECT.to_string()
+    }
+
+    /// Open `label`'s own conversation, creating it if this is the first time
+    /// (CONTRACT §3.6).
+    ///
+    /// The MAPPING lives on the server (`thread_sessions`), so this is the only way a
+    /// client should open a thread: two devices that each minted their own session
+    /// forked the conversation (2026-11-01: "Thread: Global entry" twice, 82 and 99
+    /// messages). A client that has never refreshed still works — the create path is
+    /// here, not in the UI.
+    pub fn open_thread(&self, label: String) {
+        let label = label.trim().to_string();
+        if label.is_empty() {
+            return;
+        }
+        if let Some(id) = self.inner.thread_map.lock().get(&label).cloned() {
+            self.open_session(id);
+            return;
+        }
+        let this = self.clone();
+        crate::roam::runtime().spawn(async move {
+            match this.create_thread(&label).await {
+                Ok(id) => this.open_session(id),
+                Err(e) => this.alert(format!("could not open the {label} thread ({e})")),
+            }
+        });
+    }
+
+    /// The thread label of the conversation on screen, when it IS a thread chat.
+    ///
+    /// Read from the SAME map the open uses, so a client never has to keep a private
+    /// copy to know which area it is looking at.
+    pub fn current_thread_label(&self) -> String {
+        let Some(current) = self.inner.hub.displayed_key() else { return String::new() };
+        for (label, id) in self.inner.thread_map.lock().iter() {
+            if crate::session::display_id(None, id) == current {
+                return label.clone();
+            }
+        }
+        String::new()
     }
 
     /// `session/new` with `_meta.client` + cwd; replaces the current wire.
@@ -2565,6 +2613,9 @@ impl Core {
 
     /// All three lists in one `on_tasks`. Sent together because the tab paints them
     /// together; separate callbacks would let it show a half-updated set.
+    ///
+    /// The same document carries the thread map, and a refresh is also the moment to
+    /// mint the conversations a new thread has not got yet — see `threads_sync`.
     async fn tasks_refresh_now(&self) {
         let open = self
             .tasks_call(|wire| crate::tasks::open_params(wire, 60))
@@ -2575,9 +2626,132 @@ impl Core {
         let tasks = self
             .tasks_call(|wire| crate::tasks::task_params(wire, 20))
             .await;
+        let labels = crate::tasks::labels(
+            open.as_deref().ok(),
+            tasks.as_deref().ok(),
+        );
+        let (map, mut error) = self.threads_read().await;
+        // Paint first: the lists are the tab, and a first run has several conversations
+        // to create. The re-emit below carries them.
+        self.emit_tasks(&open, &done, &tasks, &map, error.clone());
+        if self.threads_sync(&labels).await {
+            let (map, err) = self.threads_read().await;
+            error = err.or(error);
+            self.emit_tasks(&open, &done, &tasks, &map, error);
+        }
+    }
+
+    fn emit_tasks(
+        &self,
+        open: &Result<String, String>,
+        done: &Result<String, String>,
+        tasks: &Result<String, String>,
+        threads: &std::collections::BTreeMap<String, String>,
+        thread_error: Option<String>,
+    ) {
+        self.inner.listener.on_tasks(crate::tasks::envelope_threads(
+            open.clone(),
+            done.clone(),
+            tasks.clone(),
+            threads,
+            thread_error,
+        ));
+    }
+
+    /// Read the label -> conversation map, replacing the cache when the server answers.
+    ///
+    /// A failed read keeps the previous map: the map is why a tap opens the right chat,
+    /// and a transient refusal must not make every thread look like it has none (which
+    /// is what mints duplicates).
+    async fn threads_read(
+        &self,
+    ) -> (std::collections::BTreeMap<String, String>, Option<String>) {
+        match self
+            .tasks_call(crate::tasks::thread_map_params)
+            .await
+        {
+            Ok(text) => {
+                let map = crate::tasks::parse_threads(&text);
+                *self.inner.thread_map.lock() = map.clone();
+                (map, None)
+            }
+            Err(e) => {
+                let cached = self.inner.thread_map.lock().clone();
+                (cached, Some(e))
+            }
+        }
+    }
+
+    /// Mint the conversation for every label that has none. Returns whether anything
+    /// was created, so the caller re-emits only when the answer moved.
+    ///
+    /// BOUNDED per refresh (`MAX_NEW_THREADS`): a board with twenty new labels must not
+    /// turn one refresh into sixty round trips, and each creation is three (session/new,
+    /// rename, link). The rest converge on the following refreshes.
+    async fn threads_sync(&self, labels: &[String]) -> bool {
+        const MAX_NEW_THREADS: usize = 4;
+        let mut created = false;
+        let mut tried = 0usize;
+        for label in labels {
+            if tried >= MAX_NEW_THREADS {
+                break;
+            }
+            if self.inner.thread_map.lock().contains_key(label) {
+                continue;
+            }
+            tried += 1;
+            // Silent by design: this is background work with a live fallback (the tap
+            // still opens a chat), and the tab shows `errors.threads` when the MAP itself
+            // could not be read. A failure here is retried on the next refresh.
+            if self.create_thread(label).await.is_ok() {
+                created = true;
+            }
+        }
+        created
+    }
+
+    /// Create one thread conversation: `session/new` filed under the assistant project,
+    /// renamed "Thread: <Label>", and recorded in the server-side map.
+    ///
+    /// The name matters: it is what every thread chat has always been called, so the
+    /// sessions created before this map existed keep their identity.
+    async fn create_thread(&self, label: &str) -> Result<String, String> {
+        let conn = self.inner.conn.lock().clone().ok_or("not connected")?;
+        if !conn.is_ready() {
+            return Err("not connected".into());
+        }
+        let project = self.assistant_project();
+        let id = conn
+            .new_session_detached(Some(&project))
+            .await
+            .map_err(|e| e.to_string())?;
+        if id.is_empty() {
+            return Err("session/new returned no id".into());
+        }
+        let title = crate::tasks::thread_title(label);
+        let _ = conn
+            .rpc_async(
+                "_goose/unstable/session/rename",
+                json!({ "sessionId": id, "title": title }),
+            )
+            .await;
+        let wire = id.clone();
+        let name = title.clone();
+        let label_owned = label.to_string();
+        let link = self
+            .tasks_call(move |hidden| {
+                crate::tasks::link_params(hidden, &label_owned, &wire, &name)
+            })
+            .await;
+        // The session exists and is named; without the link the next refresh would mint
+        // another one, so the failure has to come out rather than leave a duplicate seed
+        // behind.
+        link?;
         self.inner
-            .listener
-            .on_tasks(crate::tasks::envelope(open, done, tasks));
+            .thread_map
+            .lock()
+            .insert(label.to_string(), id.clone());
+        Ok(id)
     }
 
     /// A mutation, then a refresh: the UI reflects server state, never a local
@@ -3714,6 +3888,27 @@ impl Core {
     /// An open/resume failed; nothing was substituted (see the listener's
     /// `on_session_open_failed`).
     pub fn on_session_open_failed(&self, session_id: String, message: String) {
+        // A thread's conversation that the server no longer has is a DEAD LINK: drop it
+        // here, in the one place a cached id is proven stale (grouse#19), so the next
+        // refresh mints a fresh conversation instead of opening a dead one forever.
+        // Forgetting it server-side is best effort — the client must hear about the
+        // failure regardless.
+        let dead: Option<String> = {
+            let map = self.inner.thread_map.lock();
+            map.iter()
+                .find(|(_, id)| crate::session::display_id(None, id) == session_id)
+                .map(|(label, _)| label.clone())
+        };
+        if let Some(label) = dead {
+            self.inner.thread_map.lock().remove(&label);
+            let label_owned = label.clone();
+            let this = self.clone();
+            crate::roam::runtime().spawn(async move {
+                let _ = this
+                    .tasks_call(move |wire| crate::tasks::link_params(wire, &label_owned, "", ""))
+                    .await;
+            });
+        }
         self.inner
             .listener
             .on_session_open_failed(session_id, message);

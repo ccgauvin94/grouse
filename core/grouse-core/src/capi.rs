@@ -46,7 +46,7 @@ use crate::{
 /// The desktop refuses a library whose value it does not expect — a mismatch is
 /// a callback called with the wrong arity (a garbage pointer), not a compile
 /// error, so it must be caught at load time.
-pub const GROUSE_ABI_VERSION: u32 = 9;
+pub const GROUSE_ABI_VERSION: u32 = 10;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
@@ -963,6 +963,23 @@ pub extern "C" fn grouse_task_react(h: *mut c_void, id: *const c_char, reaction:
 pub extern "C" fn grouse_assistant_project() -> *mut c_char {
     catch_unwind(AssertUnwindSafe(|| c_str(crate::session::ASSISTANT_PROJECT)))
         .unwrap_or(std::ptr::null_mut())
+}
+
+/// Open (or create) a thread's own conversation — the mapping lives on the server,
+/// so both clients reach the SAME session for a label (CONTRACT §3.6).
+#[no_mangle]
+pub extern "C" fn grouse_open_thread(h: *mut c_void, label: *const c_char) {
+    let Some(label) = (unsafe { c_param(label) }).map(str::to_owned) else { return };
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.open_thread(label))).ok();
+}
+
+/// The thread label of the conversation on screen ("" when it is not a thread chat),
+/// so a client needs no private copy of the map to know which area it is looking at.
+#[no_mangle]
+pub extern "C" fn grouse_current_thread_label(h: *mut c_void) -> *mut c_char {
+    let out = catch_unwind(AssertUnwindSafe(|| handle(h).core.current_thread_label()))
+        .unwrap_or_default();
+    c_str(&out)
 }
 
 #[no_mangle]

@@ -99,7 +99,11 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
   thing, and My Day held 21 entries over 19 labels at the last count). "Discuss"
   opens that thread's own conversation — a real session filed under the assistant
   PROJECT so goose injects the persona, renamed "Thread: <Label>", hidden from every
-  chat list by the core's one filter, and remembered label → session in QSettings.
+  chat list by the core's one filter. The label → session map is the SERVER's
+  (assistant-state `thread_sessions`, schema v6) and rides every `on_tasks` as
+  `threads: {label: sessionId}`; the CORE mints the conversations and
+  `grouse_open_thread` is the only way in — a per-device map forked them (2026-11-01,
+  "Thread: Global entry" twice, 82 and 99 messages).
 - Per-session transcript/tool caches live in `QStandardPaths::CacheLocation`,
   keyed by sessionId. Reconnects use exponential backoff.
 
@@ -142,11 +146,15 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
 - Streaming chat: the server sends HTML; the delegate shows `Text.RichText` only
   once `model.html` is set (at finalize), `Text.PlainText` while streaming —
   RichText re-parses the whole chunk every frame (quadratic).
-- **A thread mapping is a cache, and the open FAILURE is its only invalidation.**
-  Thread chats live in the assistant project, which the core filters out of
-  `session/list` — so a mapping cannot be checked against the sidebar (that check
-  would discard a live chat and mint a duplicate on every second Discuss; the phone
-  had exactly that bug). `coreOnSessionOpenFailed` drops the mapping instead.
+- **A thread mapping is the CORE's, mirrored here, and the open FAILURE is its only
+  invalidation.** Thread chats live in the assistant project, which the core filters
+  out of `session/list`, and the map itself now lives on the SERVER (assistant-state
+  `thread_sessions`) — so neither this client nor the phone writes it: `Mgr` mirrors
+  the `threads` field of every `on_tasks`, and `openThreadChat` is one
+  `grouse_open_thread` call that also creates the chat the first time. That is what
+  stops two devices forking one area's conversation (2026-11-01: "Thread: Global
+  entry" twice, 82 and 99 messages). A dead link is dropped by the CORE at the open
+  failure; `coreOnSessionOpenFailed` only refreshes the panel.
 - **The composer is a surviving QML object, so `newChat()` clears it from the
   Manager.** `draftRequested(text)` is the one-way push into `chatInput`: "" when a
   conversation starts (a draft belongs to the chat it was typed in), a thread's

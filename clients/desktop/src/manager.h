@@ -894,21 +894,15 @@ private:
     /// leave the spinner turning forever; the core also reports the failure, but
     /// only the watchdog guarantees the page stops claiming it is loading.
     QTimer *m_tasksWatchdog = nullptr;
-    /// Set by openThreadChat and consumed when the new session goes live, where
-    /// its id is finally known.
-    QString m_pendingThreadLabel;
-    /// thread label -> session id. A CACHE, not truth: the server owns the
-    /// session, so an entry whose session is gone is dropped when opening it
-    /// FAILS (coreOnSessionOpenFailed) — never by testing it against the session
-    /// list, which no longer contains it (thread chats are filtered out).
+    /// thread label -> session id, MIRRORED from the core on every My Day refresh.
+    /// Never written here and never persisted: the map is the server's
+    /// (assistant-state `thread_sessions`) so both clients converge on one
+    /// conversation per area instead of forking it, and a dead link is dropped by the
+    /// CORE when opening it fails (grouse#19) — never by testing it against the
+    /// session list, which does not contain thread chats at all.
     QHash<QString, QString> m_threadSessions;
 
     void setMyDayVisible(bool v);
-    QString threadSessionId(const QString &label) const;
-    void rememberThreadSession(const QString &label, const QString &sid);
-    void forgetThreadSession(const QString &label);
-    void adoptThreadSession(const QString &sid, const QString &label);
-    void persistThreadSessions();
     /// The always-on thread: a normal chat titled "Assistant", newest wins.
     QString assistantSessionId() const;
     // Pending structured-input forms, oldest first. The core parks ONE request

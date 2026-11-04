@@ -95,6 +95,12 @@ Lists parse(const QString &json)
     out.open = rows(root.value(QLatin1String("open")), false);
     out.done = rows(root.value(QLatin1String("done")), false);
     out.handed = rows(root.value(QLatin1String("tasks")), true);
+    const QJsonObject threads = root.value(QLatin1String("threads")).toObject();
+    for (auto it = threads.begin(); it != threads.end(); ++it) {
+        const QString sid = it.value().toString();
+        if (!it.key().isEmpty() && !sid.isEmpty())
+            out.threads.insert(it.key(), sid);
+    }
 
     // `errors` is per section and omitted entirely when all three succeeded, so
     // an absent map means "nothing to report", not "no sections".

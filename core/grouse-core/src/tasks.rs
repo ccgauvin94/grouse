@@ -105,6 +105,91 @@ pub(crate) fn react_params(wire: &str, id: &str, reaction: &str) -> Value {
     )
 }
 
+/// The thread -> conversation map: `thread_sessions` (assistant-state, schema v6).
+///
+/// This is the ONLY way to find a thread's own chat. `session/list` caps at 50,
+/// excludes 0-message sessions, and the assistant project is filtered out of every
+/// chat list here — so an idle thread conversation is unfindable by name. The map
+/// lives on the server rather than in a client because a per-client map forked the
+/// conversation: measured 2026-11-01, "Thread: Global entry" existed twice (82 and
+/// 99 messages, 21 minutes apart), once from each client.
+pub(crate) fn thread_map_params(wire: &str) -> Value {
+    tool_params(wire, "thread_sessions", json!({}))
+}
+
+/// Record (or forget — an empty session id) the conversation for a label.
+pub(crate) fn link_params(wire: &str, label: &str, session_id: &str, session_name: &str) -> Value {
+    tool_params(
+        wire,
+        "thread_link",
+        json!({ "thread": label, "session_id": session_id, "session_name": session_name }),
+    )
+}
+
+/// `{"threads": {label: sessionId}}` -> the map. A bare map is accepted too: the
+/// tool's own reply nests it, but a future shape that flattens it must not empty
+/// every thread.
+pub(crate) fn parse_threads(text: &str) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return out;
+    };
+    let map = match value.get("threads") {
+        Some(Value::Object(m)) => m,
+        None => match &value {
+            Value::Object(m) => m,
+            _ => return out,
+        },
+        Some(_) => return out,
+    };
+    for (label, id) in map {
+        if let Some(id) = id.as_str() {
+            if !label.trim().is_empty() && !id.trim().is_empty() {
+                out.insert(label.to_string(), id.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// The labels the rows carry, deduped in first-seen order.
+///
+/// Derived from the payload rather than from a separate query: a refresh already has
+/// the rows, and a label the server stopped reporting is one we must not create a
+/// conversation for.
+pub(crate) fn labels(open: Option<&str>, handed: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for text in [open, handed].into_iter().flatten() {
+        let Ok(Value::Array(rows)) = serde_json::from_str::<Value>(text) else {
+            continue;
+        };
+        for row in rows {
+            let Some(label) = row.get("thread").and_then(Value::as_str) else {
+                continue;
+            };
+            let label = label.trim();
+            if !label.is_empty() && !out.iter().any(|seen| seen == label) {
+                out.push(label.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// `nuclera-pricing` -> `Thread: Nuclera pricing`, the name every thread chat carries.
+/// Matches what both clients have always named them, so sessions created before this
+/// map existed keep their identity.
+pub(crate) fn thread_title(label: &str) -> String {
+    let words = label.trim().replace(['-', '_'], " ");
+    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+    if words.is_empty() {
+        return String::new();
+    }
+    let mut chars = words.chars();
+    let first = chars.next().unwrap_or_default().to_uppercase().collect::<String>();
+    format!("Thread: {first}{}", chars.as_str())
+}
+
 /// `session/new` params for the hidden task host, and the mode to put it in.
 ///
 /// `mcpServers: []` is not "no extensions" — the server resolves its own config
@@ -294,6 +379,26 @@ fn slim_task(items: &mut Value) {
 /// for review). It is a different object from an item — an item is a fact that
 /// needs attention, a task is an act with a result — which is why it has its own
 /// key and its own projection rather than being folded into `open`.
+/// `envelope` plus the thread map, which is what lets a client open a thread's own
+/// conversation instead of minting a second one. Additive: a client that predates it
+/// ignores the key, and a server whose map is empty simplifies to the old document.
+pub(crate) fn envelope_threads(
+    open: Result<String, String>,
+    done: Result<String, String>,
+    tasks: Result<String, String>,
+    threads: &std::collections::BTreeMap<String, String>,
+    thread_error: Option<String>,
+) -> String {
+    let mut out: Value = serde_json::from_str(&envelope(open, done, tasks)).unwrap_or_else(|_| json!({}));
+    out["threads"] = json!(threads);
+    if let Some(e) = thread_error {
+        // Same shape as a section failure: the tab shows it rather than pretending
+        // the map is empty, which would read as "no thread has a conversation".
+        out["errors"]["threads"] = Value::String(e);
+    }
+    out.to_string()
+}
+
 pub(crate) fn envelope(
     open: Result<String, String>,
     done: Result<String, String>,
@@ -469,6 +574,76 @@ mod tests {
         for i in 1..4 {
             assert!(got["open"][i].get("thread").is_none(), "row {i} kept a blank thread");
         }
+    }
+
+    #[test]
+    fn the_thread_map_params_name_the_tools_the_server_serves() {
+        assert_eq!(
+            thread_map_params("s1")["name"],
+            "assistantstate__thread_sessions"
+        );
+        assert_eq!(thread_map_params("s1")["extensionName"], EXTENSION);
+        let link = link_params("s1", "nuclera-pricing", "20261104_9", "Thread: Nuclera pricing");
+        assert_eq!(link["name"], "assistantstate__thread_link");
+        assert_eq!(link["arguments"]["thread"], "nuclera-pricing");
+        assert_eq!(link["arguments"]["session_id"], "20261104_9");
+        // An empty id is the FORGET form: the session is gone, so the link is dropped
+        // rather than pointing at a dead id forever.
+        assert_eq!(link_params("s1", "a", "", "")["arguments"]["session_id"], "");
+    }
+
+    #[test]
+    fn the_thread_map_parses_both_shapes_and_drops_junk() {
+        let nested = parse_threads(r#"{"threads": {"a-one": "s1", "b-two": "s2"}}"#);
+        assert_eq!(nested.get("a-one").map(String::as_str), Some("s1"));
+        assert_eq!(nested.len(), 2);
+        // A flattened reply is the same map with one less wrapper.
+        let flat = parse_threads(r#"{"a-one": "s1"}"#);
+        assert_eq!(flat.get("a-one").map(String::as_str), Some("s1"));
+        // Garbage, a missing id and a blank label are all "no mapping", never an
+        // entry a client would try to open.
+        assert!(parse_threads("not json").is_empty());
+        assert!(parse_threads(r#"{"threads": {"a": "", "": "s2", "c": 7}}"#).is_empty());
+    }
+
+    #[test]
+    fn labels_come_from_the_rows_and_keep_their_order() {
+        let open = r#"[{"id":"1","thread":"b-two"},{"id":"2","thread":"  "},
+                       {"id":"3"},{"id":"4","thread":"b-two"},{"id":"5","thread":"a-one"}]"#;
+        let handed = r#"[{"id":"6","thread":"a-one"},{"id":"7","thread":"c-three"}]"#;
+        assert_eq!(
+            labels(Some(open), Some(handed)),
+            vec!["b-two".to_string(), "a-one".to_string(), "c-three".to_string()]
+        );
+        // A section that failed contributes nothing rather than emptying the set.
+        assert_eq!(labels(None, Some(handed)), vec!["a-one".to_string(), "c-three".to_string()]);
+        assert!(labels(None, None).is_empty());
+    }
+
+    #[test]
+    fn a_thread_title_matches_the_name_both_clients_have_always_used() {
+        assert_eq!(thread_title("nuclera-pricing"), "Thread: Nuclera pricing");
+        assert_eq!(thread_title("msu_cryoarm-contract"), "Thread: Msu cryoarm contract");
+        assert_eq!(thread_title("  "), "");
+    }
+
+    #[test]
+    fn the_envelope_carries_the_thread_map_and_its_error() {
+        let mut threads = std::collections::BTreeMap::new();
+        threads.insert("a-one".to_string(), "s1".to_string());
+        let got: Value = serde_json::from_str(&envelope_threads(
+            Ok("[]".to_string()),
+            Ok("[]".to_string()),
+            Ok("[]".to_string()),
+            &threads,
+            Some("not connected".to_string()),
+        ))
+        .unwrap();
+        assert_eq!(got["threads"]["a-one"], "s1");
+        assert_eq!(got["errors"]["threads"], "not connected");
+        // Still the document the tab already paints.
+        assert_eq!(got["open"], json!([]));
+        assert_eq!(got["tasks"], json!([]));
     }
 
     #[test]

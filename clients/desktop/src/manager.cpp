@@ -83,16 +83,10 @@ Manager::Manager(QObject *parent)
     m_tailTimer->setInterval(700);
     connect(m_tailTimer, &QTimer::timeout, this, &Manager::renderTail);
 
-    // Thread label -> session id, so "Discuss" returns to the same conversation
-    // across restarts. A cache: the server owns the sessions, and an entry whose
-    // session is gone is dropped when opening it fails.
-    const QVariantMap threads =
-        m_store.value(QStringLiteral("thread_sessions")).toMap();
-    for (auto it = threads.begin(); it != threads.end(); ++it) {
-        const QString sid = it.value().toString();
-        if (!it.key().isEmpty() && !sid.isEmpty())
-            m_threadSessions.insert(it.key(), sid);
-    }
+    // Thread label -> session id is NOT persisted here: it arrives from the core on
+    // every My Day refresh (coreOnTasks). A per-device copy is what forked a thread's
+    // conversation between clients (2026-11-01: "Thread: Global entry" twice, 82 and
+    // 99 messages, 21 minutes apart).
 
     // The thread label is derived from the CURRENT session, so it changes whenever the
     // current session does — ChatPage's panel binds to it and refreshes on it. One
@@ -1475,64 +1469,20 @@ QString Manager::assistantProject() const
     return m_bridge->takeString(m_bridge->api().grouse_assistant_project());
 }
 
-QString Manager::threadSessionId(const QString &label) const
-{
-    return m_threadSessions.value(label);
-}
-
-void Manager::persistThreadSessions()
-{
-    QVariantMap m;
-    for (auto it = m_threadSessions.begin(); it != m_threadSessions.end(); ++it)
-        m.insert(it.key(), it.value());
-    m_store.setValue(QStringLiteral("thread_sessions"), m);
-}
-
-void Manager::rememberThreadSession(const QString &label, const QString &sid)
-{
-    m_threadSessions.insert(label, sid);
-    persistThreadSessions();
-    emit currentThreadLabelChanged();
-}
-
-void Manager::forgetThreadSession(const QString &label)
-{
-    m_threadSessions.remove(label);
-    persistThreadSessions();
-    emit currentThreadLabelChanged();
-}
-
 QString Manager::currentThreadLabel() const
 {
     if (m_currentSessionId.isEmpty())
         return QString();
-    for (auto it = m_threadSessions.begin(); it != m_threadSessions.end(); ++it) {
+    for (auto it = m_threadSessions.cbegin(); it != m_threadSessions.cend(); ++it) {
         if (it.value() == m_currentSessionId)
             return it.key();
     }
-    return QString();
-}
-
-void Manager::adoptThreadSession(const QString &sid, const QString &label)
-{
-    const QString title = MyDay::threadTitle(label);
-    if (!title.isEmpty() && m_bridge && m_bridge->isAvailable() && m_bridge->api().grouse_rename_session) {
-        const QByteArray s = sid.toUtf8();
-        const QByteArray t = title.toUtf8();
-        m_bridge->api().grouse_rename_session(m_bridge->handle(), s.constData(), t.constData());
-    }
-    rememberThreadSession(label, sid);
-    // A fresh chat has no id in this client until something names it (the core binds
-    // it, the sidebar does not know it yet). Adopting it here is what lets the chat
-    // page paint the thread panel and the sidebar show the conversation as current.
-    if (m_currentSessionId.isEmpty()) {
-        m_currentSessionId = sid;
-        m_currentSessionTitle = title;
-        restoreTurnState(sid);
-        emit queuedChanged();
-        emit currentSessionChanged();
-        emit pinnedAppsChanged();
-    }
+    // The mirror is only what the last refresh carried; the CORE knows which area the
+    // chat on screen is, and it is the thing that opened it.
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_current_thread_label)
+        return QString();
+    return m_bridge->takeString(
+        m_bridge->api().grouse_current_thread_label(m_bridge->handle()));
 }
 
 void Manager::openThreadChat(const QString &label)
@@ -1540,24 +1490,17 @@ void Manager::openThreadChat(const QString &label)
     const QString trimmed = label.trimmed();
     if (trimmed.isEmpty())
         return;
-    const QString existing = threadSessionId(trimmed);
-    if (!existing.isEmpty()) {
-        openSession(existing);
-        // The composer is seeded even on the way back in: the reason a thread chat
-        // exists is to talk about THIS area, and an empty box asks the user to
-        // retype its name.
-        emit draftRequested(QStringLiteral("About the \"%1\" thread: ").arg(trimmed));
-        return;
-    }
-    // No conversation yet: mint one FILED UNDER THE ASSISTANT PROJECT, which is
-    // where the persona prompt lives — goose injects a session's project
-    // instructions into its prompts, so the thread chat answers as the assistant
-    // without this client pasting anything in. The id is not knowable until the
-    // core binds it; `m_pendingThreadLabel` is consumed at Ready.
-    m_pendingThreadLabel = trimmed;
-    m_pendingProjectFiling = assistantProject();
+    // The CORE opens it, creating the conversation the first time: the label -> session
+    // map lives on the server (assistant-state `thread_sessions`), so a second device
+    // lands in the SAME chat. Each client used to keep its own map, which is how one
+    // label ended up with two conversations.
     closeMyDay();
-    newChat();
+    if (m_bridge && m_bridge->isAvailable() && m_bridge->api().grouse_open_thread) {
+        const QByteArray l = trimmed.toUtf8();
+        m_bridge->api().grouse_open_thread(m_bridge->handle(), l.constData());
+    }
+    // Seeded either way: the reason a thread chat exists is to talk about THIS area,
+    // and an empty box asks the user to retype its name.
     emit draftRequested(QStringLiteral("About the \"%1\" thread: ").arg(trimmed));
 }
 
@@ -2217,17 +2160,6 @@ void Manager::coreOnStatus(const QString &json)
         // Tool state must land WITH the session, not on the next toggle: global
         // extension catalog + this session's active tools + attached extensions.
         refreshToolGroups();
-        // A thread chat was just created for a My Day thread ("Discuss"). Its id is
-        // only knowable now: name it after the thread and remember the mapping, so
-        // the next Discuss returns to this conversation instead of minting another.
-        if (!m_pendingThreadLabel.isEmpty()) {
-            const QString sid = activeSessionId();
-            if (!sid.isEmpty()) {
-                const QString label = m_pendingThreadLabel;
-                m_pendingThreadLabel.clear();
-                adoptThreadSession(sid, label);
-            }
-        }
     } else if (s == QStringLiteral("\"Connecting\"") || s == QStringLiteral("Connecting")) {
         setOnline(false);
         setStatus(QStringLiteral("connecting…"));
@@ -2533,20 +2465,8 @@ void Manager::coreOnSessionOpenFailed(const QString &sessionId, const QString &m
     // failure where "reloading…" was, so an open that never loaded is visible
     // instead of looking like an empty conversation.
     setStatus(QStringLiteral("couldn't open that chat — %1").arg(message));
-    // A thread mapping is the one place this client opens a session it cannot see
-    // in any list, so a stale entry has no other way of being noticed: the next
-    // "Discuss" would keep opening a conversation the server has deleted. Forget
-    // it here (the failure is the signal) and let the next tap mint a fresh one.
-    for (auto it = m_threadSessions.begin(); it != m_threadSessions.end();) {
-        if (it.value() == sessionId) {
-            const QString label = it.key();
-            it = m_threadSessions.erase(it);
-            Q_UNUSED(label);
-        } else {
-            ++it;
-        }
-    }
-    persistThreadSessions();
+    // A dead thread link is dropped by the CORE, which owns the map: a failed open is
+    // the one signal a session invisible to every list can produce (grouse#19).
     emit currentThreadLabelChanged();
 }
 
@@ -2727,6 +2647,14 @@ void Manager::coreOnTasks(const QString &json)
     m_myDayDone = lists.done;
     m_myDayHanded = lists.handed;
     m_tasksError = lists.error;
+    // The thread map, replaced wholesale: mirrored from the core, never written here.
+    m_threadSessions.clear();
+    for (auto it = lists.threads.cbegin(); it != lists.threads.cend(); ++it) {
+        const QString sid = it.value().toString();
+        if (!it.key().isEmpty() && !sid.isEmpty())
+            m_threadSessions.insert(it.key(), sid);
+    }
+    emit currentThreadLabelChanged();
     m_tasksLoading = false;
     if (m_tasksWatchdog)
         m_tasksWatchdog->stop();

@@ -38,6 +38,10 @@ struct Lists {
     /// Per-section failure lines ("tasks: no such tool"), joined; empty when all
     /// three succeeded. "Nothing to do" and "could not ask" must not look alike.
     QString error;
+    /// `label -> session id`: each thread's own conversation, as the CORE reports it.
+    /// Mirrored, never written: the map is the server's (assistant-state
+    /// `thread_sessions`) so two clients converge on one chat instead of forking it.
+    QVariantMap threads;
 };
 
 /// Decode `on_tasks`. A document that will not parse yields empty lists and a

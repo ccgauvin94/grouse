@@ -21,6 +21,7 @@ private slots:
     void unreadableReplyIsAnErrorNotAPartialPage();
     void dropsRowsWithoutAnId();
     void artifactsArePathsAndBareStrings();
+    void theThreadMapComesFromTheEnvelope();
 
     // ---- due dates -------------------------------------------------------
     void dueLabel_countsForwardFromToday();
@@ -56,6 +57,7 @@ const char *kEnvelope = R"({
     {"id": "itm_3", "state": "done", "title": "Book the flight",
      "resolution": "booked it"}
   ],
+  "threads": {"chami-billing": "20261104_9", "": "ignored", "lone": ""},
   "tasks": [
     {"id": "tsk_1", "title": "Draft the deck", "state": "review",
      "thread": "chami-billing", "session_id": "20261030_1",
@@ -116,6 +118,18 @@ void TestMyDay::artifactsArePathsAndBareStrings()
     const QStringList paths = l.handed.at(0).toMap().value("artifacts").toStringList();
     QCOMPARE(paths, QStringList({QStringLiteral("/workspace/deck.pdf"),
                                  QStringLiteral("/workspace/model.xlsx")}));
+}
+
+void TestMyDay::theThreadMapComesFromTheEnvelope()
+{
+    // A thread's conversation is found by this map and nothing else: `session/list`
+    // caps at 50, excludes 0-message sessions, and the assistant project is filtered
+    // out of every chat list. Blank labels and blank ids are dropped rather than
+    // painted as a thread with nowhere to go.
+    const MyDay::Lists lists = MyDay::parse(QString::fromUtf8(kEnvelope));
+    QCOMPARE(lists.threads.value(QStringLiteral("chami-billing")).toString(),
+             QStringLiteral("20261104_9"));
+    QCOMPARE(lists.threads.size(), 1);
 }
 
 void TestMyDay::dueLabel_countsForwardFromToday()

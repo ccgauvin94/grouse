@@ -809,6 +809,25 @@ impl Conn {
         self.emit_config(&reply);
         Ok(session_id)
     }
+    /// `session/new` that does NOT adopt the reply.
+    ///
+    /// `live_new_session_async` binds the new session to the connection, which is
+    /// right for a chat the user asked for and wrong for anything created in the
+    /// background: a thread's conversation is minted while the reader may be
+    /// mid-sentence in another chat, and binding it would silently move them.
+    pub(crate) async fn new_session_detached(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<String, AcpError> {
+        let params = session_new_params(&self.inner.config, None, project_id);
+        let reply: Value = self.rpc_async("session/new", params).await?;
+        Ok(reply
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string())
+    }
+
     /// Live-wire `session/load` — same wire-reuse rationale as
     /// `live_new_session_async`. The blocking twin that used to sit here had no
     /// caller once session handling became async end to end.

@@ -98,6 +98,8 @@ defaulting to real verification; roam byte stream). The UI supplies only
 | `task_close(id, state, resolution)` | — | `state` is `done` \| `dropped` \| `expired`; `resolution` is the one line that keeps the next briefing from re-raising it |
 | `task_snooze(id, until, reason)` | — | `until` is an ISO instant |
 | `task_react(id, reaction)` | — | `acted` \| `dismissed` \| `wrong` \| `muted` — assistant-state's only learning signal |
+| `open_thread(label)` | — | §3.6: open that area's own conversation, creating it the first time. The label→session map lives on the SERVER (`assistant-state`'s `thread_sessions`), so two clients reach the SAME chat instead of each minting one |
+| `current_thread_label()` | → `String` | the label of the conversation on screen ("" when it is not a thread chat) — a getter, so a client needs no private copy of the map |
 
 ### 3.2 `CoreListener` — events (core → UI), one method per family
 
@@ -477,6 +479,29 @@ reason this path exists.
   cannot report. So there is no push: clients refresh on tab open, on an explicit
   refresh, and after every action (the core re-reads and re-emits; a UI never
   patches its own list).
+- **A thread's own conversation is found by a map that lives on the SERVER.**
+  `on_tasks` carries `"threads": {label: sessionId}` — assistant-state schema v6's
+  `thread_sessions`, read with `thread_sessions` and written with `thread_link`.
+  This is the ONLY way to find one: `session/list` caps at 50, excludes 0-message
+  sessions, and the assistant project is filtered out of every chat list here, so
+  an idle thread conversation is unfindable by name. It lives on the server
+  because a per-client copy FORKED the conversation — measured 2026-11-01,
+  "Thread: Global entry" existed twice (82 and 99 messages, 21 minutes apart), one
+  per device. Clients therefore mirror the map and open through `open_thread`;
+  nothing in a client writes it.
+- **The core MINTS the conversations, eagerly.** A refresh derives the label set
+  from the rows it just fetched, then creates any that have none:
+  `session/new` filed under the assistant project (`new_session_detached` — it must
+  NOT bind, or a background create would move the reader out of their chat),
+  renamed `Thread: <Label>`, and recorded with `thread_link`. Bounded to four per
+  refresh so a first run cannot turn one refresh into sixty round trips; the rest
+  converge on the following ones. The lists are emitted BEFORE that work and again
+  after it, so opening the tab never waits on session creation. A failed link is
+  retried on the next refresh; a failed MAP read keeps the previous map and
+  reports `errors.threads` rather than looking like "no thread has a chat"
+  (which is what would mint duplicates). A thread whose session will not open is
+  dropped from the map at the open FAILURE — the one place a cached id is proven
+  stale (grouse#19).
 - **A thread gets its own conversation, filed under the assistant project.**
   "Discuss this thread" opens a real session created with
   `_meta.projectId = assistant_project()`, so goose injects the project's

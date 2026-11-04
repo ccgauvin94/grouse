@@ -1009,6 +1009,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_connect_resume(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_current_thread_label(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_delete_session(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_disconnect(
@@ -1032,6 +1034,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_grouse_core_checksum_method_core_open_session(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_open_session_inner(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_core_open_thread(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_ready(
     ): Int
@@ -1300,6 +1304,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_connect_resume(`ptr`: Long,`config`: RustBuffer.ByValue,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_core_current_thread_label(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_delete_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_disconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1323,6 +1329,8 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_method_core_open_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_open_session_inner(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`forceReplay`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_core_open_thread(`ptr`: Long,`label`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_ready(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
@@ -1630,6 +1638,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_connect_resume() and 0xFFFF) != 29319) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_grouse_core_checksum_method_core_current_thread_label() and 0xFFFF) != 7949) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_grouse_core_checksum_method_core_delete_session() and 0xFFFF) != 3698) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1664,6 +1675,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_open_session_inner() and 0xFFFF) != 5683) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_core_open_thread() and 0xFFFF) != 16797) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_ready() and 0xFFFF) != 64347) {
@@ -2562,6 +2576,14 @@ public interface CoreInterface {
     fun `connectResume`(`config`: ServerConfig, `sessionId`: kotlin.String)
     
     /**
+     * The thread label of the conversation on screen, when it IS a thread chat.
+     *
+     * Read from the SAME map the open uses, so a client never has to keep a private
+     * copy to know which area it is looking at.
+     */
+    fun `currentThreadLabel`(): kotlin.String
+    
+    /**
      * Delete a session outright (irreversible); re-lists. If it was the open
      * chat, the transcript view is dropped too.
      */
@@ -2668,6 +2690,18 @@ public interface CoreInterface {
     fun `openSession`(`sessionId`: kotlin.String)
     
     fun `openSessionInner`(`sessionId`: kotlin.String, `forceReplay`: kotlin.Boolean)
+    
+    /**
+     * Open `label`'s own conversation, creating it if this is the first time
+     * (CONTRACT §3.6).
+     *
+     * The MAPPING lives on the server (`thread_sessions`), so this is the only way a
+     * client should open a thread: two devices that each minted their own session
+     * forked the conversation (2026-11-01: "Thread: Global entry" twice, 82 and 99
+     * messages). A client that has never refreshed still works — the create path is
+     * here, not in the UI.
+     */
+    fun `openThread`(`label`: kotlin.String)
     
     /**
      * `ready` ⇔ an open session id exists (CONTRACT §4).
@@ -3114,6 +3148,25 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
+     * The thread label of the conversation on screen, when it IS a thread chat.
+     *
+     * Read from the SAME map the open uses, so a client never has to keep a private
+     * copy to know which area it is looking at.
+     */override fun `currentThreadLabel`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_current_thread_label(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Delete a session outright (irreversible); re-lists. If it was the open
      * chat, the transcript view is dropped too.
      */override fun `deleteSession`(`sessionId`: kotlin.String)
@@ -3351,6 +3404,29 @@ open class Core: Disposable, AutoCloseable, CoreInterface
         
         FfiConverterString.lower(`sessionId`),
         FfiConverterBoolean.lower(`forceReplay`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Open `label`'s own conversation, creating it if this is the first time
+     * (CONTRACT §3.6).
+     *
+     * The MAPPING lives on the server (`thread_sessions`), so this is the only way a
+     * client should open a thread: two devices that each minted their own session
+     * forked the conversation (2026-11-01: "Thread: Global entry" twice, 82 and 99
+     * messages). A client that has never refreshed still works — the create path is
+     * here, not in the UI.
+     */override fun `openThread`(`label`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_open_thread(
+        it,
+        
+        FfiConverterString.lower(`label`),_status)
 }
     }
     

@@ -74,6 +74,11 @@ public:
         void (*grouse_set_config_option)(void *h, const char *config_id,
                                          const char *value, char **out_err);
         void (*grouse_rename_session)(void *h, const char *id, const char *title);
+        // Open (or create) a thread's own conversation and name the one on screen —
+        // the label -> session map lives on the server, so both clients converge on
+        // the same chat (CONTRACT §3.6).
+        void (*grouse_open_thread)(void *h, const char *label);
+        char *(*grouse_current_thread_label)(void *h);
         void (*grouse_archive_session)(void *h, const char *id);
         void (*grouse_unarchive_session)(void *h, const char *id);
         void (*grouse_delete_session)(void *h, const char *id);

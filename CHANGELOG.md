@@ -25,6 +25,26 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Changed
 
+- **A thread now has exactly ONE conversation, and the assistant makes it before
+  you ask.** The label → session map moved to the server (assistant-state
+  `thread_sessions`, schema v6) and rides every My Day refresh as
+  `threads: {label: sessionId}`; the core mints the missing ones — a real session
+  filed under the assistant project, named `Thread: <Label>`, created without
+  binding so it never moves the chat you are reading — and both clients open
+  through it. Two devices used to keep private maps, which forked a conversation
+  between them: on 2026-11-01 "Thread: Global entry" existed twice, 82 and 99
+  messages, 21 minutes apart. A dead link is dropped by the core at the open
+  failure, and a failed map read keeps the previous map rather than pretending no
+  thread has a chat (which is what minted the duplicates).
+- **The assistant's actions now land in the thread they belong to.** A new
+  `thread_note(label, text)` tool appends one line into that area's own
+  conversation — "Closed: the Ramp approval — Heike owns it now" — so opening a
+  thread later reads as a log of what was actually done instead of a blank page.
+  Deterministic and cheap (one row, no model turn), never a substitute for
+  `notify` (that is what reaches you), and declined rather than failed when the
+  thread has no conversation yet. The briefing, morning digest and reconcile
+  sweep all call it.
+
 - **My Day is a timeline: every row says when it arrived, and the list is
   ordered by that.** An item now carries `first_seen` (and a closed one
   `closed_at`) all the way from assistant-state to the row — they were on the
