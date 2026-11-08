@@ -77,6 +77,48 @@ class WireParserTest {
         assertEquals("d", got["description"]!!.jsonPrimitive.content)
     }
 
+    /** The env/secret key NAMES must survive the rewrite.
+     *
+     *  goose's list strips literal env values into secret storage and reports only
+     *  the names (`envKeys`, camelCase). A re-add that drops them starts the server
+     *  with no env at all: Attachments then defaults to `/workspace/attachments`,
+     *  dies on mkdir, and the session ends up with no tools — which is how a toggle
+     *  turned into "this chat has no share tool" (2026-11-06). */
+    @Test
+    fun `a stdio server keeps its env keys across the rewrite`() {
+        val inExt = json(
+            """{"type":"stdio","name":"Attachments","cmd":"python3","args":["run.py"],
+                "envKeys":["ATTACHMENTS_DIR","ATTACHMENTS_IMPORT_ROOTS"]}"""
+        ).jsonObject
+        val got = toExtensionDto(inExt)
+        assertEquals(
+            listOf("ATTACHMENTS_DIR", "ATTACHMENTS_IMPORT_ROOTS"),
+            got["envKeys"]!!.jsonArray.map { it.jsonPrimitive.content },
+        )
+        // The older spelling is read too, and normalised to the wire name.
+        val legacy = json(
+            """{"type":"stdio","name":"A","cmd":"c","env_keys":["X"]}"""
+        ).jsonObject
+        assertEquals(
+            listOf("X"),
+            toExtensionDto(legacy)["envKeys"]!!.jsonArray.map { it.jsonPrimitive.content },
+        )
+    }
+
+    /** A literal `envs` map (when the server does expose values) becomes the add
+     *  method's `{name, value}` list rather than being dropped. */
+    @Test
+    fun `literal env values are carried as name-value pairs`() {
+        val inExt = json(
+            """{"type":"stdio","name":"s","cmd":"c","envs":{"A":"1","B":"2"}}"""
+        ).jsonObject
+        val env = toExtensionDto(inExt)["server"]!!.jsonObject["env"]!!.jsonArray
+        assertEquals(2, env.size)
+        assertEquals("A", env[0].jsonObject["name"]!!.jsonPrimitive.content)
+        assertEquals("1", env[0].jsonObject["value"]!!.jsonPrimitive.content)
+        assertEquals("B", env[1].jsonObject["name"]!!.jsonPrimitive.content)
+    }
+
     @Test
     fun `builtin, platform and mcp pass through unchanged`() {
         for (t in listOf("builtin", "platform", "mcp")) {

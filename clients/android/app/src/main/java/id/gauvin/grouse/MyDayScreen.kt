@@ -76,10 +76,12 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
     // The item being closed, and which way: `done` (it happened) or `dropped` (it does
     // not matter). The note is REQUIRED by the workflow even though the tool accepts an
     // empty one: a closed item with no line is what makes the next briefing re-raise it.
-    // Which thread groups are open. A Set is not Bundle-friendly, so the state is a
-    // separator-joined string; it is only ever read whole, and rememberSaveable keeps a
-    // rotation from collapsing what you just opened.
-    var expandedLabels by rememberSaveable { mutableStateOf("") }
+    // Which thread groups the user CLOSED. Open is the default and the state records the
+    // exceptions: a board that arrives folded behind a chevron is not inline, and a header
+    // showing "N items" is a number you cannot act on. A Set is not Bundle-friendly, so the
+    // state is a separator-joined string; it is only ever read whole, and rememberSaveable
+    // keeps a rotation from folding what you just opened.
+    var collapsedLabels by rememberSaveable { mutableStateOf("") }
     var closing by remember { mutableStateOf<TaskItem?>(null) }
     var closeState by remember { mutableStateOf("done") }
     var closeNote by rememberSaveable { mutableStateOf("") }
@@ -170,7 +172,7 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
             // so a thread group still lands at the position of its freshest row.
             val timeline = inPlay.sortedByDescending { it.stampMs }
             val groups = timeline.groupBy { it.thread }.toList()
-            val expanded = expandedLabels.split(LABEL_SEP).filter { it.isNotBlank() }.toSet()
+            val collapsed = collapsedLabels.split(LABEL_SEP).filter { it.isNotBlank() }.toSet()
 
             item { SectionHeader("Open", inPlay.size) }
             if (inPlay.isEmpty() && cm.tasksError.value == null) {
@@ -183,20 +185,23 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                         ThreadRow(
                             label = label,
                             count = entries.size,
-                            open = label in expanded,
-                            onToggle = { expandedLabels = toggleLabel(expandedLabels, label) },
+                            open = label !in collapsed,
+                            onToggle = { collapsedLabels = toggleLabel(collapsedLabels, label) },
                             onDiscuss = {
                                 // A thread gets its own conversation: same label, own
-                                // session, every globally-enabled tool. The panel above
-                                // that chat paints this thread's rows inline.
+                                // session, every globally-enabled tool, and a seeded
+                                // opening line naming what it holds. The panel above that
+                                // chat paints this thread's rows inline, so the composer
+                                // is left EMPTY — the context is already on screen, and a
+                                // pre-filled prompt is a message you did not write.
                                 cm.openThreadChat(label)
-                                cm.pendingDraft.value = "About the \"$label\" thread: "
+                                cm.pendingDraft.value = ""
                                 toChat()
                             },
                         )
                     }
                 }
-                if (!collapsible || label in expanded) {
+                if (!collapsible || label !in collapsed) {
                     // A row behind a header is painted narrower than a row that stands on
                     // its own, so the group reads as a group instead of as siblings of its
                     // own chevron. Only the START edge moves: the cards keep their right
@@ -239,12 +244,19 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                                         // A labelled loop discusses in its THREAD chat (its own
                                         // session, with the thread's rows above the composer);
                                         // an unlabelled one has no thread to open, so it goes to
-                                        // the assistant thread. Either way the item id rides in
-                                        // the opening line so the model can state_items/state_close
-                                        // on THIS one instead of guessing.
-                                        if (t.thread.isNotBlank()) cm.openThreadChat(t.thread)
-                                        else cm.openAssistant()
-                                        cm.pendingDraft.value = "About item ${t.id} (${t.title.take(80)}): "
+                                        // the assistant thread. The composer is NOT seeded: the
+                                        // thread chat opens with its rows named (the core writes
+                                        // that line when it mints the chat) and the panel shows
+                                        // them live, so a pre-typed prompt only put words in the
+                                        // box that you did not write.
+                                        if (t.thread.isNotBlank()) {
+                                            cm.openThreadChat(t.thread)
+                                            cm.pendingDraft.value = ""
+                                        } else {
+                                            cm.openAssistant()
+                                            cm.pendingDraft.value =
+                                                "About item ${t.id} (${t.title.take(80)}): "
+                                        }
                                         toChat()
                                     },
                                 )
@@ -269,8 +281,17 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                             cm.snoozeTask(t.id, Instant.now().toString(), "brought back from My Day")
                         },
                         onOpen = {
-                            cm.pendingDraft.value = "About item ${t.id} (${t.title.take(80)}): "
-                            cm.openAssistant()
+                            // Same rule as the open list: a labelled row goes to its
+                            // thread chat (which carries its own rows), an unlabelled
+                            // one to the assistant with the item named.
+                            if (t.thread.isNotBlank()) {
+                                cm.openThreadChat(t.thread)
+                                cm.pendingDraft.value = ""
+                            } else {
+                                cm.openAssistant()
+                                cm.pendingDraft.value =
+                                    "About item ${t.id} (${t.title.take(80)}): "
+                            }
                             toChat()
                         },
                     )
@@ -569,15 +590,22 @@ private fun EmptyRow(text: String) {
  *  whole vocabulary the server acts on (close / snooze / it was never real). A snoozed row
  *  is the same card with its wake time in the meta line and Snooze swapped for Wake —
  *  otherwise the two states are indistinguishable, which is the bug this section exists for. */
+/** One open loop, as a card.
+ *
+ *  Shared with the thread chat's panel (`ChatScreen`), which is why it is `internal` and
+ *  why `actions` exists: in My Day the three buttons ARE the vocabulary, but a card shown
+ *  above a conversation is context, and acting on it belongs where the list of everything
+ *  lives. A card that offers buttons in one place and not the other is still one card. */
 @Composable
-private fun TaskRow(
+internal fun TaskRow(
     t: TaskItem,
     modifier: Modifier = Modifier,
     snoozed: Boolean = false,
-    onDone: () -> Unit,
-    onDrop: () -> Unit,
-    onSnooze: () -> Unit,
-    onOpen: () -> Unit,
+    actions: Boolean = true,
+    onDone: () -> Unit = {},
+    onDrop: () -> Unit = {},
+    onSnooze: () -> Unit = {},
+    onOpen: () -> Unit = {},
 ) {
     val meta = listOfNotNull(
         wakeLabel(t.snoozeUntil).takeIf { snoozed && it.isNotBlank() },
@@ -615,12 +643,14 @@ private fun TaskRow(
                 Spacer(Modifier.height(4.dp))
                 Text(meta, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = onDone, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Done") }
-                TextButton(onClick = onSnooze, contentPadding = PaddingValues(horizontal = 8.dp)) {
-                    Text(if (snoozed) "Wake" else "Snooze")
+            if (actions) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDone, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Done") }
+                    TextButton(onClick = onSnooze, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Text(if (snoozed) "Wake" else "Snooze")
+                    }
+                    TextButton(onClick = onDrop, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Not real") }
                 }
-                TextButton(onClick = onDrop, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Not real") }
             }
         }
     }
@@ -631,7 +661,7 @@ private fun TaskRow(
  *  came back — so the whole card taps through to the session that did the work
  *  rather than offering buttons that would need an intent the core does not have. */
 @Composable
-private fun HandedRow(t: AgentTask, modifier: Modifier = Modifier, onOpen: () -> Unit) {
+internal fun HandedRow(t: AgentTask, modifier: Modifier = Modifier, onOpen: () -> Unit = {}) {
     val reviewing = t.state == "review"
     val meta = listOfNotNull(
         if (reviewing) "ready for review" else "working",

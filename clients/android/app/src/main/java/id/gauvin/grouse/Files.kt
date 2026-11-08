@@ -77,6 +77,57 @@ data class FileDownload(
 /** A send-time pick, as the card the composer and the bubble both draw. */
 fun FileBlock.toAttachedFile(): AttachedFile = AttachedFile(name, mimeType, bytes)
 
+/**
+ * The largest server-shared image this app fetches on its own, without a tap.
+ *
+ * A picture in a reply is part of the reply, so it should be there when the
+ * reply lands. A 40 MB photograph is not: it would arrive before the user asked
+ * for anything, on a metered connection, to fill a preview box. Above this the
+ * row stays an ordinary download card and the bytes move on tap.
+ */
+const val INLINE_IMAGE_MAX_BYTES: Long = 8L * 1024 * 1024
+
+/** The raster types both toolkits decode without extra machinery. */
+private val INLINE_IMAGE_MIMES = setOf(
+    "image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp", "image/bmp",
+    "image/heic", "image/heif", "image/avif",
+)
+
+private val INLINE_IMAGE_EXTS = setOf(
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif", "avif",
+)
+
+/**
+ * Whether a server-shared file should paint INLINE in the transcript instead of
+ * arriving as a download chip.
+ *
+ * Deliberately a raster allowlist rather than every `image/…` type: SVG has no
+ * decoder on this platform (and the desktop's would need QtSvg linked), so
+ * accepting it would render an empty box — which reads as a bug, not as a file. `bytes <= 0`
+ * means the server did not report a size, which is not a reason to hide an image;
+ * only a size we KNOW is too large is.
+ *
+ * The same rule lives in `clients/desktop/ui/ImageCard.qml` (`inlineImage`),
+ * because the two clients share no code and both must agree about what "an image"
+ * means. Change one, change the other (docs/PARITY.md `ui.fileInlineImage`).
+ */
+fun isInlineImage(mime: String, name: String, bytes: Long): Boolean {
+    if (bytes > INLINE_IMAGE_MAX_BYTES) return false
+    val m = mime.lowercase(Locale.US).substringBefore(';').trim()
+    if (m in INLINE_IMAGE_MIMES) return true
+    // Any other `image/…` we did not list: try it rather than hiding a picture
+    // behind a download chip. The two exceptions are the ones no decoder here can
+    // read — SVG (no raster loader) and TIFF (device-dependent).
+    if (m.startsWith("image/") && m != "image/svg+xml" && m != "image/tiff") return true
+    // No MIME at all, or the generic one a relay falls back to: the SUFFIX is the
+    // only evidence left, and dropping the preview on "application/octet-stream"
+    // is exactly how a picture became a chip with no explanation.
+    if (m.isEmpty() || m == "application/octet-stream" || m == "binary/octet-stream") {
+        return name.substringAfterLast('.', "").lowercase(Locale.US) in INLINE_IMAGE_EXTS
+    }
+    return false
+}
+
 /** The icon for a file, chosen by MIME and falling back to the name's suffix. */
 fun attachmentIcon(mime: String, name: String): ImageVector {
     val m = mime.lowercase(Locale.US)

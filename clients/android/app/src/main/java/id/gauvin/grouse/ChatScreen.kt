@@ -85,6 +85,10 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.height
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.*
@@ -217,10 +221,15 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
     // A handoff from My Day ("discuss this item") arrives as a prefilled line, not a sent
     // prompt: the assistant needs the item id in the conversation, the user needs to finish
     // the sentence. One-shot — consumed on entry so it cannot resurface on a later visit.
-    LaunchedEffect(Unit) {
+    //
+    // The value is an INSTRUCTION about this chat's box, not a hint: an EMPTY one means
+    // "start clean", which is what opening a thread chat sends. The old `if (input.isBlank())`
+    // made the empty case a no-op, so the previous chat's draft (typically the "About item …"
+    // line) came straight back into a brand-new thread — read as the app re-typing your prompt.
+    LaunchedEffect(cm.pendingDraft.value) {
         cm.pendingDraft.value?.let { pending ->
             cm.pendingDraft.value = null
-            if (input.isBlank()) input = pending
+            input = pending
         }
     }
     val listState = rememberLazyListState()
@@ -844,7 +853,12 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                                             item.m.appKey.isNotEmpty() && item.m.appKey == pins
                                         MessageBubble(
                                             item.m,
-                                            streaming = i == 0 && cm.busy.value && item.m.role == "assistant",
+                                            // Only the bubble the core is writing into renders as
+                                            // plain text; the previous reply keeps its Markdown
+                                            // while the next one is still starting (see
+                                            // ConnectionManager.streamingRowId).
+                                            streaming = item.m.role == "assistant" &&
+                                                item.m.id == cm.streamingRowId.value,
                                             live = cm.busy.value,
                                             // Each message carries its own stats now, so an older reply
                                             // long-presses to ITS numbers rather than the latest turn's.
@@ -1540,17 +1554,22 @@ private fun ToolManagementBody(cm: ConnectionManager, title: String = "Tools for
         Text(stringResource(R.string.session_only_note),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
         Spacer(Modifier.height(12.dp))
-        // A federated session's rows come from the PEER's own session extension list
-        // (plus any detached this session, so they can be re-enabled). The peer's global
-        // catalog isn't queryable — config/extensions/list has no session id to route on —
-        // so extensions not attached to the remote session simply don't appear.
-        val remotePeer = ConnectionManager.roamPeer(cm.currentSession.value)
-        val rows = if (remotePeer != null)
-            (cm.sessionExtensionInfos.value + cm.detachedPeerExts.value).sortedBy { it.name }
-        else cm.extensions.value
-        if (remotePeer != null) {
-            Text("This chat lives on $remotePeer — changes apply there, and only " +
-                "extensions already in the chat are listed.",
+        // Rows are the CATALOG of the server this chat lives on, unioned with the chat's own
+        // lease. The catalog is what makes an extension the chat LACKS visible and addable —
+        // listing only session/extensions/list (what this sheet did) meant a chat whose lease
+        // predated an extension could never be told it existed. The session list still wins for
+        // a row it has: its DTO is the one remove accepts, and it carries rows since dropped
+        // from config (peer rows stay in `detachedPeerExts` so they can be switched back on).
+        val attached = cm.sessionExtensionInfos.value
+        val catalog = cm.catalogFor(cm.currentSession.value)
+        val rows = (attached + catalog.filter { c ->
+            attached.none { it.configKey == c.configKey }
+        } + cm.detachedPeerExts.value.filter { d ->
+            attached.none { it.configKey == d.configKey } &&
+                catalog.none { it.configKey == d.configKey }
+        }).sortedBy { it.name }
+        ConnectionManager.roamPeer(cm.currentSession.value)?.let { peer ->
+            Text("This chat lives on $peer — changes apply there.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline)
             Spacer(Modifier.height(12.dp))
@@ -1691,7 +1710,11 @@ private fun ComposerSheet(
  *  assistant-state has no push. */
 @Composable
 private fun ThreadPanel(cm: ConnectionManager, label: String) {
-    var expanded by rememberSaveable(label) { mutableStateOf(false) }
+    // OPEN by default, and deliberately NOT rememberSaveable: a saved `false` from an
+    // earlier visit (or an earlier build, where collapsed was the default) came straight
+    // back and the panel read as a chip with a number on it — the exact thing this panel
+    // exists to avoid. The area's cards ARE the point of the thread chat.
+    var expanded by remember(label) { mutableStateOf(true) }
     LaunchedEffect(label) { cm.refreshTasks() }
     val items = cm.openTasks.value.filter { it.thread == label }
     val tasks = cm.handedTasks.value.filter { it.thread == label }
@@ -1700,59 +1723,38 @@ private fun ThreadPanel(cm: ConnectionManager, label: String) {
         items.size.takeIf { n -> n > 0 }?.let { n -> "$n open" },
         tasks.size.takeIf { n -> n > 0 }?.let { n -> "$n handed over" },
     ).joinToString(" · ")
-    Card(
-        shape = RoundedCornerShape(12.dp),
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
-    ) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
-            Row(
-                Modifier.fillMaxWidth().clickable { expanded = !expanded },
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    threadName(label),
-                    style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(summary, style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.outline)
-                Icon(
-                    if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                    contentDescription = if (expanded) "collapse" else "expand",
-                    tint = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.size(18.dp),
-                )
+    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+        Row(
+            Modifier.fillMaxWidth().clickable { expanded = !expanded }
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                threadName(label),
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(summary, style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline)
+            Icon(
+                if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                contentDescription = if (expanded) "collapse" else "expand",
+                tint = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        if (expanded) {
+            // The SAME cards My Day paints, not a text summary of them: "cards inline" was
+            // the request, and a one-line restatement of each row made the panel a list of
+            // reminders about the list. Read-only here (no Done/Snooze buttons) — acting on
+            // an item belongs in My Day, where the whole board is in front of you.
+            tasks.forEach { t ->
+                HandedRow(t, modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp))
             }
-            if (expanded) {
-                tasks.forEach { t ->
-                    Text(
-                        (if (t.state == "review") "ready · " else "working · ") + t.title +
-                            if (t.result.isNotBlank()) " — ${t.result}" else "",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 4.dp),
-                    )
-                }
-                items.forEach { it ->
-                    val meta = listOfNotNull(
-                        dueLabel(it.dueAt).takeIf { d -> d.isNotBlank() },
-                        if (it.state == "snoozed") "snoozed" else null,
-                    ).joinToString(" · ")
-                    Text(
-                        it.title + if (meta.isNotBlank()) " — $meta" else "",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 4.dp),
-                    )
-                }
+            items.forEach { it ->
+                TaskRow(it, modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp), actions = false)
             }
         }
     }
@@ -1823,6 +1825,50 @@ private fun TurnLogDialog(cm: ConnectionManager, onDismiss: () -> Unit) {
  * of context per turn). So the card is the download. `cm.fileDownloads` is the
  * state, keyed by the server path, which is what the core reports on.
  */
+/** Long edge an inline preview is decoded at. Bigger than the box it paints in
+ *  (420dp wide, 320dp tall) so it stays sharp on a dense screen; small enough that
+ *  a 12 MP photo does not become a 48 MB bitmap. */
+private const val INLINE_IMAGE_PREVIEW_PX = 1600
+
+/** The box a reply's picture is fitted into. Wide enough to read a chart, capped so a
+ *  portrait photo cannot own the whole screen; the aspect ratio then decides the actual
+ *  width, which is what keeps a narrow image left-aligned instead of floating centred
+ *  in a full-width frame. */
+private val INLINE_IMAGE_MAX_W = 340.dp
+private val INLINE_IMAGE_MAX_H = 300.dp
+
+/**
+ * Decode a file the core cached, downsampled to at most [maxPx] on its long edge.
+ *
+ * `inJustDecodeBounds` first, then a power-of-two `inSampleSize`: decoding a full
+ * camera JPEG to paint a 420dp box allocates tens of megabytes and is the usual
+ * reason an image list janks or dies. Returns null for anything unreadable, so the
+ * caller can fall back to the ordinary download card instead of an empty frame.
+ */
+private fun decodeScaledImage(ctx: Context, path: String, maxPx: Int): Bitmap? {
+    if (path.isEmpty()) return null
+    // Two shapes reach here: the core's private copy (a file path) and a copy this
+    // app already exported to Downloads (a MediaStore content:// URI). Refusing the
+    // second one is how an inline image could silently degrade back into a chip, so
+    // both are decoded — same sampling either way.
+    val stream: () -> java.io.InputStream? = if (path.startsWith("content://")) {
+        { runCatching { ctx.contentResolver.openInputStream(android.net.Uri.parse(path)) }.getOrNull() }
+    } else {
+        if (!java.io.File(path).isFile) return null
+        { java.io.File(path).inputStream() }
+    }
+    return runCatching {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        stream()?.use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxPx) sample *= 2
+        stream()?.use {
+            android.graphics.BitmapFactory.decodeStream(
+                it, null, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+        }
+    }.getOrNull()
+}
+
 @Composable
 internal fun SharedFileRow(cm: ConnectionManager, m: ChatMessage, ctx: Context) {
     // A row the core called a share but sent no reference for: paint the caption
@@ -1840,10 +1886,85 @@ internal fun SharedFileRow(cm: ConnectionManager, m: ChatMessage, ctx: Context) 
     val phase = state?.state ?: "idle"
     val busy = phase == "downloading"
     val ready = phase == "saved"
+    // An image in the reply is part of the reply, so it is fetched without a tap.
+    // Keyed on the path: a replayed row paints its cached copy rather than asking
+    // again, and the core answers `saved` from its own cache anyway.
+    val inline = isInlineImage(file.mime, file.name, file.bytes)
+    LaunchedEffect(file.path) {
+        if (inline && cm.fileDownloads[file.path] == null) cm.fetchFile(file)
+    }
+    // The preview, once the bytes are here. A copy exported to Downloads is a
+    // content:// URI and BitmapFactory cannot read it — inline images are NOT
+    // exported (ConnectionManager.onFile keeps the private copy for exactly this).
+    val localPath = if (inline && ready) state?.localPath.orEmpty() else ""
+    val preview = remember(localPath) {
+        if (localPath.isEmpty()) null else decodeScaledImage(ctx, localPath, INLINE_IMAGE_PREVIEW_PX)
+    }
+    var viewerOpen by remember(file.path) { mutableStateOf(false) }
+    if (preview != null) {
+        // The picture's OWN width, capped — not the column's. `fillMaxWidth` made a
+        // narrow image sit centred in a wide frame with empty space either side, which
+        // reads as a broken layout rather than as a reply carrying a picture.
+        val density = LocalDensity.current
+        val ratio = preview.width.coerceAtLeast(1).toFloat() / preview.height.coerceAtLeast(1).toFloat()
+        val maxWpx = with(density) { INLINE_IMAGE_MAX_W.toPx() }
+        val maxHpx = with(density) { INLINE_IMAGE_MAX_H.toPx() }
+        val wPx = if (ratio >= maxWpx / maxHpx) maxWpx else maxHpx * ratio
+        val shownW = with(density) { wPx.toDp() }
+        val shownH = with(density) { (wPx / ratio).toDp() }
+        Image(
+            bitmap = preview.asImageBitmap(),
+            contentDescription = file.name,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .padding(vertical = 3.dp)
+                .width(shownW)
+                .height(shownH)
+                .clip(MaterialTheme.shapes.medium)
+                // Tap enlarges, which is what the eye expects from a picture in a
+                // conversation. The full-screen view carries the only way back out to
+                // another app, because an inline image is never exported to Downloads.
+                .clickable { viewerOpen = true },
+        )
+        if (viewerOpen) {
+            Dialog(
+                onDismissRequest = { viewerOpen = false },
+                // Edge to edge: the default dialog width would letterbox it all over
+                // again, which is the thing the tap is trying to escape.
+                properties = DialogProperties(usePlatformDefaultWidth = false),
+            ) {
+                Box(
+                    Modifier.fillMaxSize().background(Color.Black)
+                        .clickable { viewerOpen = false },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Image(
+                        bitmap = preview.asImageBitmap(),
+                        contentDescription = file.name,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize().padding(8.dp),
+                    )
+                    TextButton(
+                        onClick = { viewerOpen = false; openLocalFile(ctx, localPath, file.mime) },
+                        modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                    ) { Text("Open") }
+                }
+            }
+        }
+        return
+    }
+    // A row that IS an image but did not paint is a bug, and a chip that just says
+    // "saved" makes it look like a design choice. Say which part failed instead: the
+    // bytes arrived and the decoder refused them, or a non-store copy is all we have.
+    LaunchedEffect(file.path, phase) {
+        if (inline) cm.noteApp("file ${file.name}: inline phase=$phase local=${state?.localPath.orEmpty()}")
+    }
     val label = when {
         busy && (state?.total ?: 0) > 0 ->
             "downloading ${((state!!.received * 100) / state.total).toInt()}%"
         busy -> "downloading…"
+        ready && inline && preview == null ->
+            "image · could not decode — tap to open"
         ready -> if (state?.localPath?.startsWith("content://") == true)
             "saved to Downloads · tap to open" else "saved · tap to open"
         phase == "failed" -> state?.message?.takeIf { it.isNotBlank() } ?: "could not fetch"

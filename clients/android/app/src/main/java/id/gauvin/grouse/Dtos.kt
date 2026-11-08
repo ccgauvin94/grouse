@@ -272,7 +272,14 @@ internal fun toExtensionDto(raw: JsonObject): JsonObject {
             put("type", "stdio"); put("name", name)
             put("command", raw["cmd"]?.jsonPrimitive?.contentOrNull ?: "")
             put("args", (raw["args"] as? JsonArray) ?: JsonArray(emptyList()))
-            put("env", JsonArray(emptyList()))
+            // Literal env VALUES when the server exposed them (`envs`). goose usually
+            // does not: its list moves them to secret storage and reports only NAMES,
+            // as `envKeys` (camelCase on the wire) — see the envKeys copy below.
+            put("env", JsonArray((raw["envs"] as? JsonObject).orEmpty().map { (k, v) ->
+                buildJsonObject {
+                    put("name", k); put("value", v.jsonPrimitive.contentOrNull ?: "")
+                }
+            }))
         }
         // sse and streamable_http are both HTTP transports to goose's client.
         else -> buildJsonObject {
@@ -291,7 +298,13 @@ internal fun toExtensionDto(raw: JsonObject): JsonObject {
         put("server", server)
         raw["timeout"]?.let { put("timeout", it) }
         raw["description"]?.let { put("description", it) }
-        raw["env_keys"]?.let { put("envKeys", it) }
+        // The env/secret key NAMES this server needs. Dropping them is silent and
+        // fatal for a stdio server that reads one: re-adding Attachments without
+        // ATTACHMENTS_DIR starts it at the no-container default, it dies on
+        // `mkdir /workspace/attachments`, and the session comes out with no tools —
+        // which is the "toggle errors / this chat has no share tool" report
+        // (2026-11-06). The wire name is `envKeys`; accept the snake spelling too.
+        (raw["envKeys"] ?: raw["env_keys"])?.let { put("envKeys", it) }
         raw["available_tools"]?.let { put("available_tools", it) }
     }
 }

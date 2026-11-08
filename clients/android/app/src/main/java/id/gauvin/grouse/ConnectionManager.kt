@@ -208,7 +208,7 @@ class ConnectionManager private constructor(context: Context) {
      *  the app ignored (an id that did not match the chat on screen) is invisible
      *  from either side alone. */
     private val appTurnLog = ArrayDeque<String>()
-    private fun noteApp(line: String) {
+    internal fun noteApp(line: String) {
         if (appTurnLog.size >= 200) appTurnLog.removeFirst()
         appTurnLog.addLast(line)
         // The dialog is a 200-line ring buffer read off a screenshot; a stuck turn
@@ -254,6 +254,9 @@ class ConnectionManager private constructor(context: Context) {
         // clears it and the server's status re-arms it if still relevant.
         compacting.value = false
         compactionStatus.value = ""
+        // A different chat's rows are on screen (this list is rebuilt on open), and a
+        // stale id could only ever match a row of the chat we just left.
+        streamingRowId.value = null
         // The chip and the queue cards describe THIS chat's queue, and the queue is
         // per-chat. Use the session being opened (currentSession is still the old one here).
         publishQueue(sessionId)
@@ -270,6 +273,7 @@ class ConnectionManager private constructor(context: Context) {
         compactionStatus.value = ""
         activeRunId = null
         activeRunIdState.value = null
+        streamingRowId.value = null
     }
 
 
@@ -373,6 +377,14 @@ class ConnectionManager private constructor(context: Context) {
         // My Day: assistant-state's own items over a deterministic tool call (no
         // model turn), gated by the Assistant switch like the tab itself.
         override fun onTasks(tasks: String) { main.post { onCoreTasks(tasks) } }
+        // `openThread`'s answer: the conversation for that label. The CORE does not open
+        // it — binding a chat is this class's own path (turn state, tools, title), and a
+        // core-side switch arrived as a `Ready` for an id this app never asked for, which
+        // the ready handler (rightly) refuses to adopt. So every thread tap ended in the
+        // PREVIOUS chat while the panel showed the thread it thought it had opened.
+        override fun onThreadReady(label: String, sessionId: String) {
+            main.post { openSession(sessionId) }
+        }
         // A full replay's progress: messages ingested, the server's message count,
         // and `done`. The core owns the numbers (it counts distinct message ids);
         // this only paints them.
@@ -405,6 +417,11 @@ class ConnectionManager private constructor(context: Context) {
                         val name = event.name
                         val mime = event.mime
                         val local = event.localPath
+                        // An inline image is CONTENT, not a download: it paints from the
+                        // core's private copy, which is the only path BitmapFactory can
+                        // read (an exported copy is a MediaStore content:// URI). It stays
+                        // reachable by a tap through FileProvider, so nothing is lost.
+                        if (isInlineImage(mime, name, bytes)) return@post
                         thread {
                             val exported = exportToDownloads(appContext, name, mime, local)
                             if (exported != null) {
@@ -446,6 +463,9 @@ class ConnectionManager private constructor(context: Context) {
         override fun onExtensions(extensions: String) { main.post { this@ConnectionManager.onExtensions(extensions) } }
         override fun onSessionExtensions(sessionId: String, extensions: String) {
             main.post { this@ConnectionManager.onSessionExtensions(sessionId, extensions) }
+        }
+        override fun onExtensionCatalog(sessionId: String, extensions: String) {
+            main.post { this@ConnectionManager.onExtensionCatalog(sessionId, extensions) }
         }
         override fun onConfigValue(key: String, value: String) { main.post { this@ConnectionManager.onConfigValue(key, value) } }
         override fun onSupportedModels(provider: String, models: String) {
@@ -647,6 +667,17 @@ class ConnectionManager private constructor(context: Context) {
 
     val busy = mutableStateOf(false)
     val usage = mutableStateOf<AcpEvent.Usage?>(null)   // context window used/size + cost
+
+    /** Forget the context-window reading when the chat on screen changes.
+     *
+     *  `usage` is the LAST `usage_update` seen, and goose only sends one during a turn — so
+     *  a chat that has not had a turn yet has no reading of its own, and the old value
+     *  LEAKED into it. That is what made a freshly opened thread chat (one seeded line, no
+     *  turns) show a nearly-full donut: it was the context of the long conversation you
+     *  had just left. A donut for a chat whose usage is unknown is worse than no donut. */
+    private fun resetContextUsage() {
+        usage.value = null
+    }
     // True while compaction (manual /compact or server-triggered auto-compact) is running. The
     // protocol only ever sends discrete text status lines, never a numeric percentage, so this
     // drives an INDETERMINATE indicator, not a real progress fraction. `compactionStatus` is the
@@ -654,6 +685,18 @@ class ConnectionManager private constructor(context: Context) {
     // compacting the conversation...") so the UI can repeat it verbatim; empty when idle.
     val compacting = mutableStateOf(false)
     val compactionStatus = mutableStateOf("")
+    /**
+     * The row CURRENTLY receiving text chunks — the only bubble that may render as plain
+     * text while it grows (re-parsing Markdown on every token is O(n²)).
+     *
+     * It is set by `AppendText` and cleared at the turn's end, because "the newest row is
+     * an assistant row and a turn is running" is NOT the same thing: after sending, the
+     * newest row is still the PREVIOUS turn's reply for as long as it takes the new one to
+     * appear, so that rule re-rendered finished Markdown as raw `**stars**` and backticks
+     * the moment you hit send (measured 2026-11-08). Only the core's own chunks say which
+     * bubble is live.
+     */
+    val streamingRowId = mutableStateOf<Long?>(null)
     val commands = mutableStateOf<List<String>>(emptyList())
     val permissions = mutableStateListOf<AcpEvent.Permission>()   // pending approvals, oldest first
     val elicitations = mutableStateListOf<AcpEvent.Elicitation>() // pending input forms, oldest first
@@ -701,6 +744,19 @@ class ConnectionManager private constructor(context: Context) {
     val sessionExtensionNames = mutableStateOf<List<String>>(emptyList())
     // Full extension objects for the CURRENT session (same reply as the names above).
     val sessionExtensionInfos = mutableStateOf<List<ExtInfo>>(emptyList())
+    // The extension CATALOG of the server that owns the CURRENT chat (`config/extensions/list`
+    // asked on the chat's own connection). Session-scoped because a roam chat's catalog lives
+    // on its peer: the sheet needs the rows the chat does NOT have, or an extension missing
+    // from a stale session lease can never be seen, let alone added.
+    val sessionCatalog = mutableStateOf<List<ExtInfo>>(emptyList())
+    // The chat `sessionCatalog` belongs to. Rows are rendered only when it matches the chat on
+    // screen: a peer open path has no single "clear" moment, and a stale catalog would offer
+    // one server's extensions as addable on the other's chat (with the wrong DTO shape).
+    private val sessionCatalogFor = mutableStateOf<String?>(null)
+
+    /** The catalog rows for the chat on screen; empty when the last reply was another chat's. */
+    fun catalogFor(session: String?): List<ExtInfo> =
+        if (session != null && sessionCatalogFor.value == session) sessionCatalog.value else emptyList()
     // Peer extensions toggled OFF this session, kept so their row (and DTO) survives to be
     // toggled back on. Cleared on session open; local sessions never need it because their
     // rows come from the local global catalog.
@@ -797,7 +853,27 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     /** Everything the in-chat tool sheet displays, refreshed together on open. */
-    fun refreshSessionSheet() { refreshTools(); sessionExtensionsList() }
+    fun refreshSessionSheet() {
+        refreshTools(); sessionExtensionsList(); extensionCatalog()
+    }
+
+    /** Ask the chat's OWN server for its extension catalog. `listGlobalExtensions` asks the
+     *  main connection (the settings screen's defaults), which a peer chat does not live on —
+     *  that is what left the sheet listing only what the chat already had. */
+    private fun extensionCatalog() {
+        val sid = core.activeSessionId() ?: return
+        io { unstable.extensionCatalog(sid) }
+    }
+
+    private fun onExtensionCatalog(sessionId: String, json: String) {
+        // Stale replies from a chat the user already left must not become this sheet's rows.
+        if (sessionId != currentSession.value) return
+        // Parsed as the CONFIG shape (configKey), then flagged with the owning node: a peer
+        // row must only ever round-trip a peer DTO (Dtos.ExtInfo.fromPeer).
+        val fromPeer = roamPeer(sessionId) != null
+        sessionCatalog.value = parseGlobalExtensions(json).map { it.copy(fromPeer = fromPeer) }
+        sessionCatalogFor.value = sessionId
+    }
 
     private fun sessionExtensionsList() {
         val sid = core.activeSessionId() ?: return
@@ -1415,6 +1491,7 @@ class ConnectionManager private constructor(context: Context) {
         // turn still running in the chat you left is neither steered nor cleared.
         resetTurnRouting(sessionId)
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
+        resetContextUsage()
         // A new tap supersedes any earlier failure notice.
         openFailed.value = null
         // Clearing the dot: opening the session consumes its staged content.
@@ -1506,6 +1583,7 @@ class ConnectionManager private constructor(context: Context) {
         // the chat screen, and that screen's slot is reused when this replaces a live chat).
         freshChatSeq.value += 1
         messages.clear(); lastSessionId = null; currentSession.value = null; config.value = emptyList()
+        resetContextUsage()
         // A new chat always leaves any peer-owned session (the core clears its own routing too).
         currentRoamPeer = null
         pendingRecipeId = recipeId
@@ -1697,34 +1775,33 @@ class ConnectionManager private constructor(context: Context) {
     /** The label of the conversation on screen, when that conversation IS a thread chat. */
     val currentThreadLabel: String?
         get() {
+            // The MAP is the only source. It used to fall back to "the label we last asked
+            // for", which leaked: when the open never landed, that label stuck and the
+            // panel painted one area's cards above every later chat — including roam
+            // chats, which have no thread at all.
             val cur = currentSession.value ?: return null
-            val mapped = threadSessions.value.entries.firstOrNull { it.value == cur }?.key
-            if (mapped != null) {
-                pendingThreadLabel = null
-                return mapped
-            }
-            // The freshly created chat is not in the mirror yet (the map arrives on the
-            // next refresh): the label we ASKED for is what it is, until the mirror says
-            // otherwise.
-            return pendingThreadLabel
+            val known = threadSessions.value
+            for ((label, id) in known) if (id == cur) return label
+            return null
         }
 
-    /** The label whose chat `openThreadChat` just asked the core for.
-     *
-     *  The core owns creation now, so this app does not know the new session's id — it
-     *  only knows which area it asked about. The panel needs a label the moment the
-     *  chat opens, and the map arrives on the NEXT refresh, so this stands in until
-     *  then and is cleared as soon as the mirror carries the session. */
-    @Volatile private var pendingThreadLabel: String? = null
-
     /** Open the chat for `label`, creating it the first time — in the CORE, so both
-     *  clients reach the SAME conversation. Leaves the composer for the caller to
-     *  prefill; navigation is the caller's too, so this stays testable. */
+     *  clients reach the SAME conversation. The chat is bound by `onThreadReady`, which
+     *  is this class's ordinary `openSession` path; navigation is the caller's, so this
+     *  stays testable.
+     *
+     *  A known label opens IMMEDIATELY from the map: the core would answer with the same
+     *  id one round trip later, and waiting meant a chat that sat on "Loading…" while
+     *  the panel showed a conversation nobody had opened. */
     fun openThreadChat(label: String) {
-        pendingThreadLabel = label
+        val known = threadSessions.value[label]
+        if (known != null) {
+            openSession(known)
+            // The panel needs the area's rows; a tap can be the first thing after launch.
+            refreshTasks()
+            return
+        }
         core.openThread(label)
-        // One refresh now, so the map is current by the time the chat paints; the
-        // panel's own refresh covers the rest.
         refreshTasks()
     }
 
@@ -1988,6 +2065,8 @@ class ConnectionManager private constructor(context: Context) {
             return
         }
         speaker.stop()   // a new prompt supersedes any reply still being spoken
+        // The next bubble to stream is a NEW one; the reply on screen is finished.
+        streamingRowId.value = null
         // Conversation mode: the model's first word is a second or more away, so arm
         // the spoken filler to cover the silence. The reply cancels it; a turn that
         // never speaks (an error) is caught by RunEnded.
@@ -2400,6 +2479,8 @@ class ConnectionManager private constructor(context: Context) {
         busy.value = false
         turnInFlight = false
         turnInFlightSession = null
+        // Nothing will ever append to that bubble again, so its plain-text pass is over.
+        streamingRowId.value = null
     }
 
     /** Answer the given approval request; null optionId denies (cancelled). */
@@ -2535,6 +2616,7 @@ class ConnectionManager private constructor(context: Context) {
             reopenAttemptedFor = null
             lastSessionId = sid
             store.lastSessionId = sid
+            if (currentSession.value != sid) resetContextUsage()   // cold start: nothing to carry
             currentSession.value = sid
             // (A chat started from inside a project is filed by session/new's
             // `_meta.projectId` now — grouse#5 P0 — not a post-Ready call.)
@@ -2556,6 +2638,8 @@ class ConnectionManager private constructor(context: Context) {
             // for the full picture rather than caching a half-built one. (Peer-owned sessions
             // are skipped: the unstable surface routes to the main connection only.)
             detachedPeerExts.value = emptyList()
+            sessionCatalog.value = emptyList()   // the previous chat's rows must not linger
+            sessionCatalogFor.value = null
             io { unstable.listTools(sid) }
             main.postDelayed({ if (live && core.activeSessionId() == sid) io { unstable.listTools(sid) } }, 2500)
             io { unstable.sessionExtensionsList(sid) }
@@ -2676,6 +2760,7 @@ class ConnectionManager private constructor(context: Context) {
                 messages.clear()
                 coreKeyToAppId.clear()
                 olderPending.clear()
+                streamingRowId.value = null
                 setLoadingOlder(false)
                 // A fresh paint means the chat contents are being replaced: a
                 // previous open failure no longer describes what is on screen.
@@ -2710,7 +2795,12 @@ class ConnectionManager private constructor(context: Context) {
             is TranscriptOp.AppendText -> {
                 noteCoreEvent()
                 val idx = rowIndexOf(op.id)
-                if (idx >= 0) messages[idx] = messages[idx].copy(text = messages[idx].text + op.chunk)
+                if (idx >= 0) {
+                    messages[idx] = messages[idx].copy(text = messages[idx].text + op.chunk)
+                    // This bubble is the one being written to, so it is the one that
+                    // renders plain-text until the turn ends (see [streamingRowId]).
+                    streamingRowId.value = messages[idx].id
+                }
             }
             is TranscriptOp.AppendOutput -> {
                 noteCoreEvent()
@@ -2945,6 +3035,9 @@ class ConnectionManager private constructor(context: Context) {
             turnInFlightSession = null
             activeRunId = null
             activeRunIdState.value = null
+            // Its bubble re-renders once as full Markdown (the plain-text pass was the
+            // streaming one).
+            streamingRowId.value = null
             // We got the authoritative completion straight from our own socket -- stop waiting
             // on the Stop-hook push for this turn so a later turn from another client in the
             // same (possibly shared) session doesn't spuriously match the stale flag.
@@ -3170,6 +3263,25 @@ class ConnectionManager private constructor(context: Context) {
             if (sessionId == currentSession.value) {
                 activeRunId = null
                 activeRunIdState.value = null
+            }
+            // ...but "wait for RunEnded" is only safe if RunEnded is still coming.
+            // When the CORE already released the turn, its own finish decision is
+            // IGNORED and no RunEnded is ever emitted — leaving the chat on
+            // "working…" with the composer saying "Queue message…" while nothing
+            // runs, and a message typed there goes out with no turn to answer it
+            // (measured 2026-11-08: the prompt reached goose, the screen showed
+            // nothing until a refresh reset the turn state). The core is the
+            // authority: if it holds no turn for this chat and nothing is parked,
+            // release it here.
+            if (sessionId == currentSession.value && busy.value && queuedFor(sessionId) == 0 &&
+                !runCatching { core.turnInFlight(sessionId) }.getOrDefault(false)
+            ) {
+                noteApp("app: released a turn the core does not hold")
+                inFlight.remove(sessionId)
+                turnInFlight = false
+                turnInFlightSession = null
+                busy.value = false
+                streamingRowId.value = null
             }
             return
         }
