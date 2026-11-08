@@ -414,6 +414,30 @@ Kirigami.Page {
         // chips use), so a server file reads like any other file.
         return Mgr.serverFileCard(name || path, mime || "", bytes || 0)
     }
+    // An image a reply shares paints as the picture, not as a chip describing one.
+    // A raster allowlist rather than `image/*`: QML has no SVG loader wired here, so
+    // accepting SVG would paint an empty frame. `bytes <= 0` means the server did not
+    // report a size — not a reason to hide an image; only a KNOWN-too-large one is.
+    // Duplicated in the Android client (Files.kt `isInlineImage`); change one, change
+    // the other (docs/PARITY.md `ui.fileInlineImage`).
+    readonly property var inlineImageMimes: [
+        "image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp", "image/bmp",
+        "image/heic", "image/heif", "image/avif"
+    ]
+    readonly property var inlineImageExts: [
+        "png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif", "avif"
+    ]
+    readonly property real inlineImageMaxBytes: 8 * 1024 * 1024
+    function inlineImage(mime, name, bytes) {
+        if (Number(bytes || 0) > page.inlineImageMaxBytes)
+            return false
+        const m = String(mime || "").toLowerCase().split(";")[0].trim()
+        if (m.length > 0)
+            return page.inlineImageMimes.indexOf(m) >= 0
+        const parts = String(name || "").toLowerCase().split(".")
+        const ext = parts.length > 1 ? parts[parts.length - 1] : ""
+        return page.inlineImageExts.indexOf(ext) >= 0
+    }
     function downloadFile(row, path, name, mime, sha) {
         page.fileDownloads[path] = { state: "downloading", received: 0, total: 0 }
         page.fileDownloads = Object.assign({}, page.fileDownloads)
@@ -915,8 +939,11 @@ Kirigami.Page {
             readonly property string label: Mgr.currentThreadLabel
             readonly property var items: page.threadRows(Mgr.myDayOpen, threadPanel.label)
             readonly property var tasks: page.threadRows(Mgr.myDayHanded, threadPanel.label)
-            property bool expanded: false
-            onLabelChanged: expanded = false
+            // OPEN by default: a thread chat exists so the area's cards sit right
+            // there, above the conversation. Collapsed made the panel read as a chip
+            // that had to be discovered before it said anything.
+            property bool expanded: true
+            onLabelChanged: expanded = true
             Layout.fillWidth: true
             Layout.topMargin: Kirigami.Units.smallSpacing
             Layout.preferredHeight: visible ? panelCol.implicitHeight + Theme.spacing.s2 : 0
@@ -1181,6 +1208,12 @@ Kirigami.Page {
                     : ({})
                 readonly property var fileProgress: mdel.isFile
                     ? page.fileState(String(fileRef.path || "")) : ({})
+                // A shared IMAGE is the reply's own content, so it paints inline and
+                // is fetched without a tap (ImageCard). Anything else keeps the
+                // download card.
+                readonly property bool inlineFileImage: mdel.isFile
+                    && page.inlineImage(String(fileRef.mime || ""), String(fileRef.name || ""),
+                                        Number(fileRef.size || 0))
                 // True when QtWebEngine was compiled in: MCP Apps render inline
                 // (AppView) instead of the browser-handoff chip.
                 readonly property bool inlineApps: Mgr.inlineAppsEnabled()
@@ -1259,7 +1292,8 @@ Kirigami.Page {
                      : mdel.isThought ? thoughtBlock.implicitHeight
                      : mdel.isChart ? mdel.chartH + mdel.pad * 2
                      : mdel.isMcpApp ? mcpAppChip.implicitHeight
-                     : mdel.isFile ? fileCard.implicitHeight
+                     : mdel.isFile ? (mdel.inlineFileImage ? imageCard.implicitHeight
+                                                           : fileCard.implicitHeight)
                      : errorBanner.implicitHeight
 
                 // The selectable bubble text under the cursor (user or agent).
@@ -2053,7 +2087,7 @@ Kirigami.Page {
                 // model). The card is the download.
                 FileCard {
                     id: fileCard
-                    visible: mdel.isFile
+                    visible: mdel.isFile && !mdel.inlineFileImage
                     anchors.top: parent.top
                     anchors.left: parent.left
                     anchors.leftMargin: mdel.gap
@@ -2073,6 +2107,43 @@ Kirigami.Page {
                         if (local.length > 0)
                             Qt.openUrlExternally("file://" + local)
                     }
+                }
+
+                // ---------------- shared image, inline ----------------
+                // The same reference, painted as the picture: an image a reply shares is
+                // part of the reply, so it arrives without a tap and reads at a glance.
+                ImageCard {
+                    id: imageCard
+                    objectName: "imageCard"
+                    visible: mdel.isFile && mdel.inlineFileImage
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.leftMargin: mdel.gap
+                    width: Math.min(mdel.maxW, 440)
+                    fileName: String(mdel.fileRef.name || mdel.messageText)
+                    subtitle: String(mdel.fileMeta.subtitle || "")
+                    imagePath: String(mdel.fileProgress.localPath || "")
+                    phase: String(mdel.fileProgress.state || "idle")
+                    received: Number(mdel.fileProgress.received || 0)
+                    total: Number(mdel.fileProgress.total || 0)
+                    failure: String(mdel.fileProgress.failure || "")
+                    // Fetch as the row appears. A delegate is created when the row comes
+                    // into view, which is exactly when the bytes are wanted; the guard
+                    // keeps a re-created delegate from starting a second fetch (the map
+                    // already holds `downloading`/`saved` from the first).
+                    Component.onCompleted: {
+                        if (!visible || String(mdel.fileProgress.state || "") !== "")
+                            return
+                        page.downloadFile(
+                            mdel, String(mdel.fileRef.path || ""), String(mdel.fileRef.name || ""),
+                            String(mdel.fileRef.mime || ""), String(mdel.fileRef.sha256 || ""))
+                    }
+                    onDownloadRequested: page.downloadFile(
+                        mdel, String(mdel.fileRef.path || ""), String(mdel.fileRef.name || ""),
+                        String(mdel.fileRef.mime || ""), String(mdel.fileRef.sha256 || ""))
+                    // No `onOpenRequested` handler on purpose: the card opens its own
+                    // enlarged view, so wiring the system viewer here too would open the
+                    // picture twice, in two different applications.
                 }
 
                 // ---------------- error banner ----------------

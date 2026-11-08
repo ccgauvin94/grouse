@@ -477,6 +477,7 @@ void Manager::openRoamSession(const QString &label, const QString &sessionId, co
     // not discard it — the same per-chat queue Android keeps. Only Stop drops one.
     m_landing = false;
     emit landingChanged();
+    resetContextUsage();
     m_currentSessionId = sessionId;
     restoreTurnState(sessionId);
     emit queuedChanged();   // the queue view is per-chat: republish for the chat we opened
@@ -485,6 +486,7 @@ void Manager::openRoamSession(const QString &label, const QString &sessionId, co
     m_currentSessionTitle = m_roamTitles.value(sessionId);
     m_tools.clear();
     m_extDefs.clear();
+    m_catalogDefs.clear();
     m_sessionExts.clear();
     m_sessionRestricted.clear();
     m_peekQueue.clear();
@@ -509,10 +511,12 @@ void Manager::newRoamSession(const QString &label)
     emit queuedChanged();
     m_landing = false;
     emit landingChanged();
+    resetContextUsage();
     m_currentSessionId.clear();
     m_currentSessionTitle.clear();
     m_tools.clear();
     m_extDefs.clear();
+    m_catalogDefs.clear();
     m_sessionExts.clear();
     m_sessionRestricted.clear();
     m_peekQueue.clear();
@@ -537,10 +541,12 @@ void Manager::newRoamSessionIn(const QString &label, const QString &cwd)
     emit queuedChanged();
     m_landing = false;
     emit landingChanged();
+    resetContextUsage();
     m_currentSessionId.clear();
     m_currentSessionTitle.clear();
     m_tools.clear();
     m_extDefs.clear();
+    m_catalogDefs.clear();
     m_sessionExts.clear();
     m_sessionRestricted.clear();
     m_peekQueue.clear();
@@ -661,6 +667,7 @@ void Manager::openSession(const QString &sessionId)
     // silently lose input. Stop is what discards it.
     m_landing = false;
     emit landingChanged();
+    resetContextUsage();
     m_currentSessionId = sessionId;
     restoreTurnState(sessionId);
     emit queuedChanged();   // the queue view is per-chat: republish for the chat we opened
@@ -674,6 +681,7 @@ void Manager::openSession(const QString &sessionId)
     }
     m_tools.clear();
     m_extDefs.clear();
+    m_catalogDefs.clear();
     m_sessionExts.clear();
     m_sessionRestricted.clear();
     m_peekQueue.clear();
@@ -731,6 +739,15 @@ void Manager::resetReloadProgress()
     emit reloadProgressChanged();
 }
 
+void Manager::resetContextUsage()
+{
+    if (m_contextUsed == 0 && m_contextSize == 0)
+        return;
+    m_contextUsed = 0;
+    m_contextSize = 0;
+    emit contextChanged();
+}
+
 void Manager::coreOnReplayProgress(const QString &sessionId, int loaded, int total, bool done)
 {
     // Only the chat on screen owns the bar: a background replay (a peer, or a
@@ -761,10 +778,12 @@ void Manager::newChat()
     emit queuedChanged();
     m_landing = false;
     emit landingChanged();
+    resetContextUsage();
     m_currentSessionId.clear();
     m_currentSessionTitle.clear();
     m_tools.clear();
     m_extDefs.clear();
+    m_catalogDefs.clear();
     m_sessionExts.clear();
     m_sessionRestricted.clear();
     m_peekQueue.clear();
@@ -1477,12 +1496,11 @@ QString Manager::currentThreadLabel() const
         if (it.value() == m_currentSessionId)
             return it.key();
     }
-    // The mirror is only what the last refresh carried; the CORE knows which area the
-    // chat on screen is, and it is the thing that opened it.
-    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_current_thread_label)
-        return QString();
-    return m_bridge->takeString(
-        m_bridge->api().grouse_current_thread_label(m_bridge->handle()));
+    // Nothing else. The core used to answer this too, and its answer could be the label of
+    // a chat that was never opened — which painted one area's cards above every later
+    // conversation. The map is idle-by-construction: a row only has a label while the chat
+    // on screen IS that thread's.
+    return QString();
 }
 
 void Manager::openThreadChat(const QString &label)
@@ -1495,13 +1513,24 @@ void Manager::openThreadChat(const QString &label)
     // lands in the SAME chat. Each client used to keep its own map, which is how one
     // label ended up with two conversations.
     closeMyDay();
+    // A label the mirror already carries opens NOW, through the ordinary chat-open path
+    // (turn state, tools, title). Asking the core and waiting for its answer left the
+    // window on the previous chat for a round trip — the first version of this had the
+    // core bind the chat itself, which the ready handler refused precisely because it was
+    // an id nobody had asked to display.
+    const auto known = m_threadSessions.constFind(trimmed);
+    if (known != m_threadSessions.constEnd() && !known.value().isEmpty()) {
+        openSession(known.value());
+        return;
+    }
     if (m_bridge && m_bridge->isAvailable() && m_bridge->api().grouse_open_thread) {
         const QByteArray l = trimmed.toUtf8();
         m_bridge->api().grouse_open_thread(m_bridge->handle(), l.constData());
     }
-    // Seeded either way: the reason a thread chat exists is to talk about THIS area,
-    // and an empty box asks the user to retype its name.
-    emit draftRequested(QStringLiteral("About the \"%1\" thread: ").arg(trimmed));
+    // The composer is left EMPTY. The chat opens with its own opening line (the core
+    // writes it when it mints the conversation) and the panel above paints the thread's
+    // rows, so a pre-typed prompt only put words in the box that nobody wrote.
+    emit draftRequested(QString());
 }
 
 void Manager::openTaskSession(const QString &sessionId, const QString &thread)
@@ -1658,6 +1687,7 @@ void Manager::deleteSession(const QString &sessionId)
     const QByteArray sid = sessionId.toUtf8();
     m_bridge->api().grouse_delete_session(m_bridge->handle(), sid.constData());
     if (sessionId == m_currentSessionId) {
+        resetContextUsage();
         m_currentSessionId.clear();
         m_currentSessionTitle.clear();
         m_messageModel->clear();
@@ -1786,10 +1816,17 @@ void Manager::refreshToolGroups()
     // All three, every time — the switches used to refresh only as a side effect
     // of an add's re-list, so opening a chat showed everything OFF until the user
     // toggled one thing (which "fixed" the rest).
-    m_bridge->api().grouse_unstable_list_global_extensions(m_bridge->handle());
     const QByteArray sid = m_currentSessionId.toUtf8();
-    if (sid.isEmpty())
-        return;   // no session open: nothing session-scoped to pull
+    if (sid.isEmpty()) {
+        // No chat open: the rows still have to come from somewhere, and with no session
+        // to route on that is the main server's config.yaml.
+        m_bridge->api().grouse_unstable_list_global_extensions(m_bridge->handle());
+        return;
+    }
+    // The CATALOG for this chat (its own server — the peer's, for a roam chat). Asking
+    // the main connection instead is what made a peer chat's sheet list the local
+    // server's rows while offering nothing the chat actually lacked.
+    m_bridge->api().grouse_unstable_extension_catalog(m_bridge->handle(), sid.constData());
     m_bridge->api().grouse_unstable_list_tools(m_bridge->handle(), sid.constData());
     m_bridge->api().grouse_unstable_session_extensions_list(m_bridge->handle(), sid.constData());
 }
@@ -1933,7 +1970,10 @@ void Manager::setGlobalExtensionEnabled(const QString &extKey, bool enabled)
 {
     if (!m_bridge || !m_bridge->isAvailable())
         return;
-    const ExtDef *d = extDef(extKey);
+    // GLOBAL means the main server's config.yaml: a row that exists only in the chat's
+    // catalog (a peer's extension) must not be written here, or a peer-only key would
+    // land in this box's config as a phantom.
+    const ExtDef *d = globalExtDef(extKey);
     if (!d)
         return;
     m_bridge->api().grouse_unstable_set_extension_enabled(
@@ -1942,7 +1982,7 @@ void Manager::setGlobalExtensionEnabled(const QString &extKey, bool enabled)
 
 void Manager::setGlobalToolEnabled(const QString &extName, const QString &toolName, bool on)
 {
-    const ExtDef *d = extDef(extName);
+    const ExtDef *d = globalExtDef(extName);
     if (!d)
         return;
     QSet<QString> current(d->availableTools.constBegin(), d->availableTools.constEnd());
@@ -1964,6 +2004,17 @@ void Manager::setGlobalToolEnabled(const QString &extName, const QString &toolNa
 // ---- tool-group plumbing ---------------------------------------------------
 
 const Manager::ExtDef *Manager::extDef(const QString &key) const
+{
+    // The CHAT's server first: for a roam chat that is the peer's definition, and it is
+    // the one its session/extensions/add accepts. A key only the main server knows still
+    // resolves for the tool grouping and for the settings screen's rows.
+    for (const auto &d : m_catalogDefs)
+        if (d.key == key)
+            return &d;
+    return globalExtDef(key);
+}
+
+const Manager::ExtDef *Manager::globalExtDef(const QString &key) const
 {
     for (const auto &d : m_extDefs)
         if (d.key == key)
@@ -2436,6 +2487,7 @@ void Manager::coreOnPeerNewSession(const QString &label, const QString &sid)
 {
     refreshSessions();
     if (label == m_activePeerLabel) {
+        if (m_currentSessionId != sid) resetContextUsage();
         m_currentSessionId = sid;
         restoreTurnState(sid);
         emit queuedChanged();
@@ -2634,6 +2686,17 @@ void Manager::fetchFile(const QString &sessionId, const QString &path,
         // Not a background failure: the user just tapped this card.
         onError(message, false);
     }
+}
+
+void Manager::coreOnThreadReady(const QString &label, const QString &sessionId)
+{
+    Q_UNUSED(label);
+    if (sessionId.isEmpty())
+        return;
+    // Same reason as `openThreadChat`'s fast path: the chat is bound here, by the ordinary
+    // opener. The answer can only arrive for a label the mirror did not have — a thread
+    // being created — so there is nothing to reconcile beyond opening it.
+    openSession(sessionId);
 }
 
 void Manager::coreOnTasks(const QString &json)
@@ -3839,11 +3902,15 @@ void Manager::onTools(const QVariantList &tools)
     emit toolsChanged();
 }
 
-void Manager::onExtensions(const QVariantList &extensions)
+/// Parse a `config/extensions/list` payload (`session/extensions/list` carries the same
+/// extension objects, keyed `extensionKey` instead of `configKey`). One parser for both
+/// lists: the settings screen's defaults and the chat's own server catalog are answered
+/// by the same method on different connections, and they must read identically.
+QList<Manager::ExtDef> Manager::parseExtDefs(const QString &json)
 {
-    m_extDefs.clear();
-    for (const auto &v : extensions) {
-        const QVariantMap m = v.toMap();
+    QList<ExtDef> out;
+    for (const auto &el : parseArr(json)) {
+        const QVariantMap m = el.toObject().toVariantMap();
         // The server nests the definition: {"extension": {...}, "enabled": bool,
         // "configKey": "..."}. Read the nested object (with a flat fallback) so
         // names/types aren't blank — the old code read the top level, where
@@ -3885,12 +3952,32 @@ void Manager::onExtensions(const QVariantList &extensions)
         const QVariantList at = m.value("availableTools").toList();
         for (const auto &a : at)
             d.availableTools << a.toString();
-        m_extDefs << d;
+        out << d;
     }
+    return out;
+}
+
+void Manager::onExtensions(const QVariantList &extensions)
+{
+    QJsonArray arr;
+    for (const auto &v : extensions)
+        arr.append(QJsonValue::fromVariant(v));
+    m_extDefs = parseExtDefs(QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
     publishToolGroups();
     saveToolCache(m_currentSessionId);
     emit globalExtensionsChanged();
     emit toolsChanged();
+}
+
+void Manager::coreOnExtensionCatalog(const QString &sid, const QString &json)
+{
+    // Stale replies from a chat the user already left must not become this
+    // sheet's rows (same guard as the session list).
+    if (!m_currentSessionId.isEmpty() && sid != m_currentSessionId)
+        return;
+    m_catalogDefs = parseExtDefs(json);
+    buildPeekQueue();
+    publishToolGroups();
 }
 
 void Manager::onSessionExtensions(const QStringList &names, const QSet<QString> &restricted)
@@ -3967,7 +4054,7 @@ void Manager::buildPeekQueue()
         return;                              // a sweep or a manual peek is running
     if (m_currentSessionId.isEmpty() || !m_activePeerLabel.isEmpty())
         return;                              // only the local chat can host a peek
-    for (const auto &d : std::as_const(m_extDefs))
+    for (const auto &d : (m_catalogDefs.isEmpty() ? m_extDefs : m_catalogDefs))
         // Only rows the server actually runs: a peek is a real session attach, so a
         // GLOBALLY DISABLED extension (kwin's dead tailnet URI, say) must never be
         // dialed just to learn its tool count — the server's failed client-init
@@ -4119,7 +4206,7 @@ QVariant Manager::toolGroups() const
     const QSet<QString> enabled(m_sessionExts.constBegin(), m_sessionExts.constEnd());
     // Every identity here is the extension KEY; `name` is carried per group for display.
     QStringList allKeys;
-    for (const auto &d : m_extDefs)
+    for (const auto &d : (m_catalogDefs.isEmpty() ? m_extDefs : m_catalogDefs))
         allKeys << d.key;
     for (const auto &n : m_sessionExts)
         if (!allKeys.contains(n))

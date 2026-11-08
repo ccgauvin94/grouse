@@ -29,14 +29,17 @@ Kirigami.Page {
     /// outcome text and the exact wording live in one place with the others).
     signal closeItemRequested(string id, string title, string state)
 
-    // Which thread groups are open. A JS map rather than a Set: this is QML, and a
-    // label is a stable string (normalised `[a-z0-9-]`), so it is a safe key.
-    property var expandedLabels: ({})
+    // Which thread groups the user CLOSED. Open is the default, and the map therefore
+    // records the exceptions: an inline board that arrives folded behind a chevron is
+    // not inline, and "N items" is a number you cannot act on. A JS map rather than a
+    // Set because this is QML; a label is a stable string (normalised `[a-z0-9-]`), so
+    // it is a safe key.
+    property var collapsedLabels: ({})
     function toggleLabel(label) {
         const next = {}
-        for (const k in page.expandedLabels) next[k] = page.expandedLabels[k]
-        next[label] = page.expandedLabels[label] !== true
-        page.expandedLabels = next
+        for (const k in page.collapsedLabels) next[k] = page.collapsedLabels[k]
+        next[label] = page.collapsedLabels[label] !== true
+        page.collapsedLabels = next
     }
 
     /// The in-play list: handed-over work first, then open loops, both carrying the
@@ -95,7 +98,7 @@ Kirigami.Page {
         for (let g = 0; g < groups.length; g++) {
             const grp = groups[g]
             const collapsible = grp.label.length > 0 && grp.entries.length > 1
-            const open = page.expandedLabels[grp.label] === true
+            const open = page.collapsedLabels[grp.label] !== true
             if (collapsible)
                 out.push({ type: "header", label: grp.label, count: grp.entries.length, open: open })
             if (!collapsible || open) {
@@ -265,7 +268,8 @@ Kirigami.Page {
         id: header
         property string label: ""
         property int count: 0
-        property bool expanded: false
+        // Open by default: the rows ARE the board. The chevron only takes them away.
+        property bool expanded: true
         Layout.fillWidth: true
         implicitHeight: headRow.implicitHeight + Theme.spacing.s1
         radius: Theme.radius.md
@@ -400,15 +404,19 @@ Kirigami.Page {
             // Sit under the buttons: a click on Done must not also navigate.
             z: -1
             onClicked: {
-                if ((card.row.thread || "").length > 0)
+                // A labelled loop opens its THREAD chat, which carries its own opening
+                // line and this area's cards above the transcript — so the composer
+                // stays empty. An unlabelled one has no thread, so it goes to the
+                // assistant and names the ITEM: that line is the only thing telling the
+                // model which loop is meant.
+                if ((card.row.thread || "").length > 0) {
                     Mgr.openThreadChat(card.row.thread)
-                else
+                    Mgr.setDraft("")
+                } else {
                     Mgr.openAssistant()
-                // Last write wins: openThreadChat/openAssistant already seeded a
-                // generic line, and this one names the ITEM so the model can
-                // state_close on it instead of guessing which loop you mean.
-                Mgr.setDraft("About item " + card.row.id + " ("
-                             + String(card.row.title || "").substring(0, 80) + "): ")
+                    Mgr.setDraft("About item " + card.row.id + " ("
+                                 + String(card.row.title || "").substring(0, 80) + "): ")
+                }
             }
         }
     }

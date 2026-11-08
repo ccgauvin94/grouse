@@ -62,6 +62,11 @@ configure_file(qml/tst_attachmentcard.qml.in
 # the same property-only interface (no Mgr stub).
 configure_file(qml/tst_filecard.qml.in
     ${CMAKE_CURRENT_BINARY_DIR}/qml/tst_filecard.qml @ONLY)
+# ImageCard: the same reference painted as a picture. Property-only interface too;
+# the fixed preview box is the part worth pinning (no height derived from the
+# decoded image, so the runner can never be left chasing a resize).
+configure_file(qml/tst_imagecard.qml.in
+    ${CMAKE_CURRENT_BINARY_DIR}/qml/tst_imagecard.qml @ONLY)
 # Plain QML tests pass through unchanged (no placeholders).
 configure_file(qml/tst_combobox.qml
     ${CMAKE_CURRENT_BINARY_DIR}/qml/tst_combobox.qml COPYONLY)

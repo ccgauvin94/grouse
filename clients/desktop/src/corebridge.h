@@ -138,6 +138,10 @@ public:
         void (*grouse_unstable_session_extensions_add)(void *h, const char *sid, const char *extension);
         void (*grouse_unstable_session_extensions_remove)(void *h, const char *sid, const char *name);
         void (*grouse_unstable_list_global_extensions)(void *h);
+        // The extension catalog of the server that OWNS this chat (`config/extensions/list`
+        // on the session's connection) — the PEER's catalog for a roam chat. The list above
+        // always asks the main connection, which is the settings screen's defaults.
+        void (*grouse_unstable_extension_catalog)(void *h, const char *sid);
         void (*grouse_unstable_set_extension_enabled)(void *h, const char *name, int enabled);
         void (*grouse_unstable_add_extension)(void *h, const char *extension, int enabled);
         void (*grouse_unstable_sources_list)(void *h, const char *source_type);
@@ -275,5 +279,14 @@ struct GrouseCoreListener {
     // A shared file's download as JSON (`FileEvent`: progress / saved / failed),
     // keyed by the server-side path. Appended last; ABI 9.
     void (*on_file)(void *, const char *);
+    // The conversation a thread's chat lives in — the reply to `grouse_open_thread`:
+    // (label, session_id). The CLIENT opens it; the core deliberately does not.
+    // Appended last; ABI 11.
+    void (*on_thread_ready)(void *, const char *, const char *);
+    // The extension CATALOG of the server that owns a chat: (session_id, extensions).
+    // Same shape as `on_extensions` (the main connection's config.yaml); asked on the
+    // chat's own connection, so a roam chat reports its PEER's catalog. Appended last;
+    // ABI 12.
+    void (*on_extension_catalog)(void *, const char *, const char *);
 };
 }

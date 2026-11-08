@@ -1,0 +1,157 @@
+import QtQuick
+import QtTest
+import "@CARD_UI_URL@"
+
+// The inline image card, instantiated directly. Same state contract as FileCard
+// (idle → downloading → saved, or a failure that keeps its reason), plus the one
+// thing that makes it an image: a saved card WITH a local path paints the picture,
+// and everything else paints a placeholder rather than an empty frame.
+TestCase {
+    id: tc
+    name: "ImageCard"
+    width: 640
+    height: 400
+
+    Component {
+        id: cardComp
+        ImageCard { }
+    }
+
+    property var card: null
+
+    function make(props) {
+        tc.card = cardComp.createObject(tc, props || {})
+        verify(tc.card !== null, "ImageCard failed to instantiate")
+        return tc.card
+    }
+
+    function cleanup() {
+        if (tc.card) {
+            tc.card.destroy()
+            tc.card = null
+        }
+    }
+
+    function test_a_fresh_card_is_a_placeholder_with_the_reference_subtitle() {
+        const card = make({ fileName: "chart.png", subtitle: "PNG \u00b7 42 KB" })
+        compare(findChild(card, "cardName").text, "chart.png")
+        compare(findChild(card, "cardSubtitle").text, "PNG \u00b7 42 KB")
+        compare(card.showsImage, false, "nothing to paint before the bytes are here")
+        verify(card.showsPlaceholder, "the placeholder is what fills the frame")
+        verify(!findChild(card, "cardProgress").visible, "and nothing is downloading yet")
+    }
+
+    function test_downloading_reports_progress_in_the_subtitle_and_the_strip() {
+        const card = make({
+            fileName: "chart.png",
+            phase: "downloading",
+            received: 10,
+            total: 40,
+        })
+        compare(card.progress, 0.25)
+        compare(findChild(card, "cardSubtitle").text, "downloading 25%")
+        verify(card.showsProgress)
+        compare(findChild(card, "cardProgressFill").width,
+                findChild(card, "cardProgress").width * 0.25)
+        compare(card.showsImage, false, "a picture mid-fetch is not a picture yet")
+    }
+
+    function test_progress_without_a_total_does_not_divide_by_zero() {
+        // A share whose result never reported a size: bytes stream, the fraction
+        // stays 0, and the subtitle must say "downloading" rather than "0%".
+        const card = make({ fileName: "chart.png", phase: "downloading", received: 5, total: 0 })
+        compare(card.progress, 0)
+        compare(findChild(card, "cardSubtitle").text, "downloading\u2026")
+    }
+
+    function test_a_saved_card_with_a_local_copy_paints_the_image() {
+        const card = make({
+            fileName: "chart.png",
+            phase: "saved",
+            imagePath: "/tmp/grouse-files/abc123-chart.png",
+        })
+        verify(card.showsImage, "a saved card with a path is a picture")
+        compare(findChild(card, "cardSubtitle").text, "tap to open")
+        verify(!card.showsPlaceholder, "no placeholder over the picture")
+        compare(String(findChild(card, "cardImage").source),
+                "file:///tmp/grouse-files/abc123-chart.png")
+    }
+
+    function test_the_frame_hugs_the_picture_instead_of_filling_the_width() {
+        // A 4:1 panorama and a 1:4 portrait, both in a 440-wide card. The frame takes
+        // the picture's own shape (capped) and stays anchored LEFT — a frame that
+        // filled the width would centre a narrow picture in a wide empty box.
+        const card = make({ fileName: "wide.png", phase: "saved", imagePath: "/tmp/x-wide.png" })
+        card.width = 440
+        // Let the (deliberately missing) file fail to load FIRST: a failed decode reports
+        // "size unknown" and would overwrite the stand-in values below.
+        wait(50)
+        card.naturalW = 800
+        card.naturalH = 200
+        compare(Math.round(card.frameW), 428)                    // card width - 12 gutter
+        compare(Math.round(card.frameH), 107)                    // 4:1, so a quarter as tall
+    }
+
+    function test_a_tall_picture_is_capped_by_the_preview_height() {
+        const card = make({ fileName: "tall.png", phase: "saved", imagePath: "/tmp/x-tall.png" })
+        card.width = 440
+        wait(50)
+        card.naturalW = 200
+        card.naturalH = 800
+        compare(Math.round(card.frameH), 200, "the box height is the cap")
+        compare(Math.round(card.frameW), 50, "and the width follows the 1:4 shape")
+    }
+
+    function test_a_tap_on_a_saved_picture_enlarges_it() {
+        const card = make({ fileName: "chart.png", phase: "saved",
+                             imagePath: "/tmp/grouse-files/abc123-chart.png" })
+        compare(card.viewerOpen, false, "nothing is enlarged until it is asked for")
+        card.activate()
+        compare(card.viewerOpen, true, "a tap enlarges the picture")
+    }
+
+    function test_a_saved_card_with_no_path_stays_a_placeholder() {
+        // `saved` without a local copy is what an older core (or a failed export)
+        // reports; painting an empty frame would look like a broken picture.
+        const card = make({ fileName: "chart.png", phase: "saved" })
+        compare(card.showsImage, false)
+        verify(card.showsPlaceholder)
+    }
+
+    function test_a_failure_keeps_the_reason() {
+        const card = make({
+            fileName: "chart.png",
+            phase: "failed",
+            failure: "share expired on the server",
+        })
+        compare(findChild(card, "cardSubtitle").text, "share expired on the server")
+        compare(card.showsImage, false)
+    }
+
+    function test_a_tap_means_fetch_or_open_never_both() {
+        const card = make({ fileName: "chart.png", phase: "idle" })
+        let downloads = 0
+        let opens = 0
+        card.downloadRequested.connect(function() { downloads += 1 })
+        card.openRequested.connect(function() { opens += 1 })
+        card.activate()
+        compare(downloads, 1, "an idle card fetches")
+        compare(opens, 0)
+
+        card.phase = "saved"
+        card.imagePath = "/tmp/grouse-files/abc123-chart.png"
+        card.activate()
+        compare(opens, 1, "a saved card opens instead of re-fetching")
+        compare(downloads, 1, "and does not fetch again")
+    }
+
+    function test_a_tap_while_fetching_is_a_no_op() {
+        // The row fetches itself on sight, so a tap before it lands is common — and
+        // a second fetch of the same bytes would fight the first one's `saved`.
+        const card = make({ fileName: "chart.png", phase: "downloading", received: 1, total: 4 })
+        let downloads = 0
+        card.downloadRequested.connect(function() { downloads += 1 })
+        card.activate()
+        compare(downloads, 0)
+    }
+}

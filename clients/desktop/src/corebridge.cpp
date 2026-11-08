@@ -141,6 +141,7 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_unstable_session_extensions_add);
     RESOLVE(grouse_unstable_session_extensions_remove);
     RESOLVE(grouse_unstable_list_global_extensions);
+    RESOLVE(grouse_unstable_extension_catalog);
     RESOLVE(grouse_unstable_set_extension_enabled);
     RESOLVE(grouse_unstable_add_extension);
     RESOLVE(grouse_unstable_sources_list);
@@ -171,7 +172,7 @@ bool CoreBridge::resolve()
     // The listener table's layout and the symbol signatures are the contract.
     // An older core (or a stale GROUSE_CORE) is refused before any callback can
     // be invoked with the wrong arity.
-    static constexpr unsigned kExpectedAbiVersion = 10;
+    static constexpr unsigned kExpectedAbiVersion = 12;
     if (!a.grouse_abi_version) {
         qWarning() << "CoreBridge: core library predates the ABI version symbol; refusing it";
         return false;
@@ -303,6 +304,11 @@ static void cb_on_tasks(void *u, const char *json) {
     const QString s = copyStr(json);
     marshal(u, nullptr, [=](Manager *m) { m->coreOnTasks(s); });
 }
+static void cb_on_thread_ready(void *u, const char *label, const char *sessionId) {
+    const QString l = copyStr(label);
+    const QString sid = copyStr(sessionId);
+    marshal(u, nullptr, [=](Manager *m) { m->coreOnThreadReady(l, sid); });
+}
 static void cb_on_replay_progress(void *u, const char *sessionId, long long loaded,
                                   long long total, int done) {
     const QString sid = copyStr(sessionId);
@@ -340,6 +346,10 @@ static void cb_on_extensions(void *u, const char *json) { const QString s = copy
 static void cb_on_session_extensions(void *u, const char *a, const char *b) {
     const QString sa = copyStr(a); const QString sb = copyStr(b);
     marshal(u, nullptr, [=](Manager *m) { m->coreOnSessionExtensions(sa, sb); });
+}
+static void cb_on_extension_catalog(void *u, const char *a, const char *b) {
+    const QString sa = copyStr(a); const QString sb = copyStr(b);
+    marshal(u, nullptr, [=](Manager *m) { m->coreOnExtensionCatalog(sa, sb); });
 }
 static void cb_on_config_value(void *u, const char *a, const char *b) {
     const QString sa = copyStr(a); const QString sb = copyStr(b);
@@ -411,6 +421,8 @@ void CoreBridge::installListener()
         cb_on_tasks,
         cb_on_replay_progress,
         cb_on_file,
+        cb_on_thread_ready,
+        cb_on_extension_catalog,
     };
     m_listener = &table;
 

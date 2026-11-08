@@ -542,6 +542,10 @@ public:
     void coreOnExport(const QString &data);
     /** The My Day lists arrived (both sections in one JSON document). */
     void coreOnTasks(const QString &json);
+    /// `open_thread`'s answer: the conversation for that label, which the CLIENT
+    /// opens — the core does not, so that a thread chat arrives through the same
+    /// path as every other chat (turn state, tools, title).
+    void coreOnThreadReady(const QString &label, const QString &sessionId);
     /// A shared file's download event, as the core's `FileEvent` JSON.
     void coreOnFile(const QString &json);
 
@@ -564,6 +568,9 @@ public:
     void coreOnTools(const QString &sid, const QString &json);
     void coreOnExtensions(const QString &json);
     void coreOnSessionExtensions(const QString &sid, const QString &json);
+    /// The extension catalog of the server that OWNS this chat (the peer's, for a roam
+    /// chat) — the rows the sheet can offer beyond the chat's own lease.
+    void coreOnExtensionCatalog(const QString &sid, const QString &json);
     void coreOnConfigValue(const QString &key, const QString &value);
     void coreOnSupportedModels(const QString &provider, const QString &json);
     void coreOnProviders(const QString &json);
@@ -665,6 +672,14 @@ private:
 
     /// Drop the reload bar (session switch, new chat). Emits only on a change.
     void resetReloadProgress();
+
+    /// Forget the context-window reading on a session switch.
+    ///
+    /// goose sends `usage_update` only DURING a turn, so a chat that has not had one yet
+    /// has no reading of its own and the previous chat's survived — a freshly opened
+    /// thread (one seeded line, no turns) showed the near-full context of the long
+    /// conversation just left. No donut is honest; the wrong donut is not.
+    void resetContextUsage();
     QStringList m_configuredProviders;
     QString m_announcedTurnSession;
     qint64 m_announcedTurnAtMs = 0;
@@ -810,6 +825,14 @@ private:
         QJsonObject raw;              // verbatim listed extension object
     };
     QList<ExtDef> m_extDefs;
+    /// The CURRENT chat's own server catalog (`config/extensions/list` on the chat's
+    /// connection). `m_extDefs` above is the MAIN server's config.yaml — the settings
+    /// screen's defaults — and using it for the sheet is why a roam chat offered the
+    /// local server's rows and none of the peer's. Empty until the first reply.
+    QList<ExtDef> m_catalogDefs;
+    /// Parse a `config/extensions/list` payload into rows (shared by both lists).
+    static QList<ExtDef> parseExtDefs(const QString &json);
+    const ExtDef *globalExtDef(const QString &key) const;
     /// Extensions enabled in the CURRENT session (KEYS — extensionKey/configKey, not
     /// display names: "Extension Manager" is keyed "extensionmanager").
     QStringList m_sessionExts;
