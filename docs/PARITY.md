@@ -134,11 +134,14 @@ excluded = 8
 | `listener.on_commands` | yes: ConnectionManager.kt#override fun onCommands | yes: src/corebridge.cpp#cb_on_commands |
 | `listener.on_session_open_failed` | yes: ConnectionManager.kt#override fun onSessionOpenFailed | yes: src/corebridge.cpp#cb_on_session_open_failed |
 | `listener.on_tasks` | yes: ConnectionManager.kt#override fun onTasks | yes: src/corebridge.cpp#cb_on_tasks |
+| `listener.on_thread_ready` | yes: ConnectionManager.kt#override fun onThreadReady | yes: src/corebridge.cpp#cb_on_thread_ready |
 | `listener.on_replay_progress` | yes: ConnectionManager.kt#override fun onReplayProgress | yes: src/corebridge.cpp#cb_on_replay_progress |
 | `kind.File` | yes: ConnectionManager.kt#ItemKind.FILE | yes: src/manager.cpp#QLatin1String("File") |
 | `listener.on_file` | yes: ConnectionManager.kt#override fun onFile | yes: src/corebridge.cpp#cb_on_file |
 | `ui.chat-file-card` | yes: ChatScreen.kt#fun SharedFileRow | yes: ui/FileCard.qml#objectName: "cardName" |
+| `ui.fileInlineImage` | yes: Files.kt#fun isInlineImage | yes: ui/ImageCard.qml#objectName: "cardImage" |
 | `ui.chat-attachment-card` | yes: Files.kt#AttachmentCard | yes: ui/AttachmentCard.qml#objectName: "cardName" |
 | `ui.my-day` | yes: MyDayScreen.kt#MyDayScreen | yes: ui/MyDayPage.qml#objectName: "myDayCardBody" |
 | `ui.my-day-thread-chat` | yes: ConnectionManager.kt#fun openThreadChat | yes: src/manager.cpp#grouse_open_thread |
 | `ui.chat-scroll-pinned` | yes: ChatScreen.kt#var follow by remember | yes: ui/ChatPage.qml#function pinPass |
+| `ui.tools-sheet-catalog` | yes: ConnectionManager.kt#fun onExtensionCatalog | yes: src/manager.cpp#void Manager::coreOnExtensionCatalog |

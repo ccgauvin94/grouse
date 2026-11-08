@@ -41,7 +41,12 @@ UI (native)                    core (Rust, tokio)
   timeout (`session::rpc_timeout`, 30s per non-prompt method) so a hung remote
   goose never pins the caller forever (S-RC-6); outcomes still also arrive as
   events where applicable. `session/prompt` is the exception with no timeout:
-  its reply IS the turn's end.
+  its reply IS the turn's end. `session/load` is bounded separately and far more
+  generously (`session::load_request`, `LOAD_TIMEOUT_SECS`, 10 min): a full
+  replay of a long session can honestly take minutes, but an unanswered load used
+  to hold that chat's load slot forever, so every retry queued behind it and the
+  client showed a spinner with nothing to report. It now fails the open with a
+  message the client can retry.
 - **Events** arrive as typed methods on `CoreListener` (one per event family).
 - **Getters** return immutable snapshots (`Record`s). They are cheap; the core
   is authoritative, the UI mirrors what events tell it and may re-read a
@@ -138,6 +143,14 @@ pub trait CoreListener {
     // for every refresh and after every task action — never mid-turn, because
     // none of these calls runs a model.
     fn on_tasks(&self, tasks: String);
+    // `open_thread`'s answer: the conversation a thread's chat lives in, once the
+    // label is resolved (from the map, or after minting one). The CLIENT opens it
+    // — binding a chat is its own `session/open` path, with its turn state, tools
+    // and title. The core must NOT bind it: a switch it performed arrived as a
+    // `Ready` for an id no client had asked to display, every late-Ready guard
+    // refused it, and the tap left the reader in the previous chat while the
+    // thread panel showed an area that was not on screen (2026-11-04).
+    fn on_thread_ready(&self, label: String, session_id: String);
     // A FULL replay's progress: `loaded` messages ingested so far, `total` the
     // session's `messageCount` as the server last reported it (0 = unknown), and
     // `done` once when the replay ends — the clients' reload bar, and a terminal
@@ -372,6 +385,18 @@ Rules:
   Mode on — `code_execution` — a tool result never reaches the client at all:
   the only visible call is `execute javascript` with empty content.)
 
+- **An IMAGE among those references paints as the picture, not as a chip.** The
+  wire is unchanged — same `ItemKind::File` row, same on-demand fetch — but both
+  clients treat a raster image (PNG/JPEG/GIF/WebP/BMP/HEIC/AVIF, up to 8 MiB,
+  `bytes` absent meaning "unknown, not empty") as the reply's own content: they
+  fetch it as the row appears and paint it inline, and the Android client keeps
+  the private cached copy rather than exporting it to Downloads, because a
+  `content://` URI is not decodable by `BitmapFactory`. SVG is deliberately out:
+  neither toolkit has a loader for it, so it would paint an empty frame — which
+  reads as a bug, not as a file. The predicate is duplicated by necessity
+  (`Files.kt` `isInlineImage`, `ChatPage.qml` `inlineImage`); they must agree
+  (docs/PARITY.md `ui.fileInlineImage`).
+
 - **A file's NAME is display data; only its PATH is sanitised.** The
   `attachments` server writes `<sha16>-<sanitised name>` on disk (it must: the
   name is client-supplied and a name is not an address) but reports the name the
@@ -488,7 +513,11 @@ reason this path exists.
   because a per-client copy FORKED the conversation — measured 2026-11-01,
   "Thread: Global entry" existed twice (82 and 99 messages, 21 minutes apart), one
   per device. Clients therefore mirror the map and open through `open_thread`;
-  nothing in a client writes it.
+  nothing in a client writes it. A label the mirror already carries is opened
+  DIRECTLY by the client (`session/open` on that id) — `open_thread` is for the
+  mint case, and answers `on_thread_ready`, which the client opens the same way.
+  `current_thread_label` is therefore map-only: a remembered "label we last asked
+  for" leaked onto every later chat, roam ones included.
 - **The core MINTS the conversations, eagerly.** A refresh derives the label set
   from the rows it just fetched, then creates any that have none:
   `session/new` filed under the assistant project (`new_session_detached` — it must
@@ -577,6 +606,7 @@ Separate `GrouseUnstable` interface, clearly marked for retirement. Methods
 - `session_info(session_id)` → probe (used by resync + cwd resolution)
 - `session_project(session_id, project_id?)` — move between projects
 - `list_tools(session_id)`, `session_extensions_list/add/remove(session_id, …)` — `remove` takes the extension's KEY (session list `extensionKey` = global list `configKey`), not the display name: goose renamed the wire param and rejects `name` now. UIs must match rows by key, since `extension.name` can differ from the key ("Extension Manager" vs `extensionmanager`)
+- `extension_catalog(session_id)` → `on_extension_catalog(session_id, extensions)` — the third list of the extension family, and the one an in-chat tools sheet needs for rows it does NOT have. It is `config/extensions/list` asked **on the chat's own connection**, so a roam chat gets its PEER's catalog; `list_global_extensions()` below always asks the MAIN connection (the settings screen's defaults, and nothing at all on a client that only talks to peers). A sheet built from `session_extensions_list` alone can only ever show what the chat already has, which is why a chat whose lease predated an extension could not be told the extension existed, let alone add it.
 - `list_global_extensions()`, `set_extension_enabled(config_key, enabled)`, `add_extension(…)` — `set_extension_enabled` takes the global list's `configKey` (goose renamed the wire param from `name` and rejects it now)
 - `sources_list/create/delete/update` (projects + skills) — `sourcesCreate(type, name, description, content)` creates a GLOBAL source; project-scoped skills were removed (goose is migrating sources CRUD out of the server — grouse#5)
 - `config_read(key)`, `config_upsert(key, value)`, `supported_models(provider)`
@@ -607,7 +637,8 @@ thing that keeps a roam session's context bar live at all.
 > **Raw-JSON listeners (deliberate, documented here).** The unstable shim's
 > list families deliver their payloads to the UI **verbatim as JSON strings**
 > on `GrouseUnstableListener`: `on_recipes`, `on_projects`, `on_skills`,
-> `on_tools`, `on_extensions`, `on_session_extensions`, `on_supported_models`,
+> `on_tools`, `on_extensions`, `on_session_extensions`, `on_extension_catalog`,
+> `on_supported_models`,
 > `on_providers`, `on_config_value`, `on_export`, `on_session_probe`,
 > `on_app_resource`, `on_tool_result`, and the dictation pair
 > `on_dictation_config` / `on_transcript` (+ the error/compaction/message

@@ -6,6 +6,201 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — a failing hidden session can no longer mint an agent per retry
+
+- The core's three hidden-session users (the My Day host, the per-endpoint file-fetch host, the
+  step-label summarizer) all drop their cached session on any failure — right for recovery,
+  wrong as a retry policy, because each retry creates a **whole goose agent**: extensions leased,
+  MCP servers spawned. Measured on the roam agent 2026-11-06: ~500 hidden sessions a day and 75
+  `attachments-mcp` children after a burst. A failure now cools that purpose off for 30 s
+  (`HIDDEN_RETRY_AFTER`, per purpose, so a broken My Day host cannot block file fetches) and the
+  decision is recorded in the turn log (`hidden-session … created|failed`). The `attachments`
+  extension itself also moved off stdio on the server side (one streamable-HTTP process per
+  agent instead of one per session) — see `services/llm/AGENTS.md`.
+
+### Fixed — a stale run id can no longer leave a chat saying "working…"
+
+- **A `session_info_update` repeating the run id of a turn that had already ended re-armed
+  it.** The client marks a chat busy the moment it sees an id, and there is no second end to
+  wait for — so the chat showed `working…`, the composer switched to "Queue message…", and a
+  message typed there was *parked instead of sent* (nothing appeared inline until a refresh
+  reset the turn state). Measured 2026-11-08 on a roam chat, whose resync touches re-announce
+  the last run. A run the SERVER said ended (`activeRunId: null`, or the `session/prompt`
+  reply) is now inert; `turn_lost` deliberately does not record it, because a wire that
+  dropped mid-turn leaves the run alive on the host and its re-announcement is the only way
+  to re-adopt the chat (both cases pinned by tests).
+- **`/compact` and other queued prompts are the victims, not the cause**: with `busy` stuck,
+  `send` queues rather than sends.
+
+### Fixed — sending a message no longer re-renders the previous reply as raw Markdown
+
+- The transcript painted "the newest row renders as plain text while a turn runs" — but right
+  after a send the newest row is still the PREVIOUS reply, so its Markdown flipped to raw
+  `**stars**` and backticks and stayed that way. Plain text is now driven by the core's own
+  chunks: `AppendText` marks the ONE bubble being written to (`ConnectionManager.streamingRowId`),
+  and the turn's end clears it so the bubble re-renders once as full Markdown.
+
+### Fixed — a chat that will not load now says so instead of spinning forever
+
+- **`session/load` had no timeout on either wire.** A load the host never answers held
+  that chat's load slot for the whole await, so the client showed a spinner with nothing
+  to report AND every retry of the same chat queued behind the first one — a chat could
+  stop opening for good. Reproduced sequence: a turn running in one roam chat, a
+  `/compact` in a second, then opening a third (a peer is ONE connection, so both turns
+  and the open share one pipe; each open also makes the host build a fresh agent with
+  its MCP extensions, which is where the time goes). The load is now bounded generously
+  (`session::load_request`, 10 min — a full replay of a long session is legitimately
+  minutes), frees the slot, and reports an open failure the client can retry.
+- The wait is shared by both transports by construction: `replay_held` is the ONE
+  `session/load` lifecycle, so a peer and the main socket fail the same way.
+
+### Fixed — the roam cache fix was inert; the wrapper dropped it
+
+- **`PrefixHost` did not forward the two stamp accessors.** The peer's paint plan asks
+  its host for the freshness baseline (`listed_stamp`) and whether the store is truncated
+  (`is_incomplete`); `PrefixHost` sits between the peer and the core, and inherited the
+  TRAIT DEFAULTS instead of forwarding. So the peer went on comparing its cached
+  transcript against its own session list — the drift that makes every open replay a
+  tail — and treated an incomplete store as settled. The fix in 0.2.78 was therefore a
+  no-op on roam; both accessors are now forwarded, with a regression test that would
+  have caught it (a default that silently returns `""`/`false` is invisible to the
+  compiler).
+- Same trace: a share whose file had to be COPIED in (an import root) kept the caller's
+  path, so the client fetched a path the store refuses and the row stayed a card reading
+  `ValueError: '…' is outside the attachments directory`. The share reply's path now wins
+  (0.2.80).
+
+
+### Fixed — a picture shared from an import root now downloads, and paints
+
+- **The row pointed at the wrong path.** A share whose file the extension had to COPY
+  in (anything outside the attachments store — ComfyUI's `/mnt/data/comfyui/output`, for
+  instance) returns the path it landed at, but the core kept the path the model *passed*
+  and the client fetched that. The store refuses it, so the row stayed a card reading
+  `ValueError: '…' is outside the attachments directory` instead of the picture —
+  measured 2026-11-06 on a render shared straight from ComfyUI's output dir, while the
+  same image shared by its store path rendered inline. The share reply is now the
+  authority on where the bytes are (the name still comes from the call, because a stored
+  copy is hash-prefixed).
+
+
+### Fixed — a roam chat no longer re-fetches itself on every switch
+
+- **Two stamps for one fact.** A peer chat's cached transcript is stamped with the
+  core's `updatedAt` baseline (`save_cache_for`), but the peer decided freshness by
+  comparing it against its OWN session list — a second copy of the same field that
+  only moves on `session_info_update`, while a turn end re-baselines the core from a
+  `session/info` probe. Once they disagreed they never agreed again, so `plan_paint`
+  answered "stale" for every roam chat forever and each open merged a 100-message
+  replay tail: opening or switching re-downloaded the conversation, every time. The
+  plan now reads `DispatchHost::listed_stamp` — the one map the cache is written
+  with — and falls back to the peer's list only for a session the core has never
+  stamped. `DispatchHost::is_incomplete` is read the same way (the peer passed a
+  hard-coded `false`).
+- **A peer re-baselines after a load, like the main wire.** The spine probes its
+  stamp after every replay; the peer never did, so a chat fetched with a bounded
+  tail kept the stamp it had before that fetch and could not be recognised as
+  current next time. It now probes (and persists) after a successful `session/load`.
+- **Superseded opens are dropped instead of replayed.** Every open is a whole
+  `session/load` awaited on the peer's single command loop, so tapping through four
+  chats queued four full loads and the chat you finally landed on waited behind all
+  of them — the "switch too much and it hangs" half of the report. A queued open is
+  now coalesced into the newest one; other queued commands keep their order.
+
+
+### Fixed — the tools sheet lists what the chat could have, not just what it has
+
+- **The sheet offered only the chat's own lease.** It was built from
+  `session/extensions/list`, the extensions a session was started with — so a chat whose
+  lease predated an extension (a restart, a config edit, an old conversation) had no way to
+  see that extension, let alone add it: the row simply was not there. Both clients now show
+  the CATALOG of the server the chat lives on, unioned with the lease, with the switch state
+  still decided by the lease.
+- **A roam chat's catalog comes from its PEER.** `config/extensions/list` takes no session
+  id, so the shim always asked the MAIN connection — where a phone that only talks to a
+  peer has nothing at all, and the desktop reported the local server's rows as if they were
+  the peer's. New `extension_catalog(session_id)` asks that method on the session's own
+  connection and answers `on_extension_catalog(session_id, …)`; the C ABI is 12. The main
+  connection's list is unchanged and still what the settings screen edits, so a peer-only
+  key can never be written into this box's `config.yaml`.
+- The peer note in the sheet now says only "this chat lives on <peer> — changes apply
+  there": the "only extensions already in the chat are listed" caveat is gone, because it
+  is no longer true.
+
+
+### Fixed — a shared image is the picture's size, and a tap enlarges it
+
+- **The frame hugs the picture.** Both clients sized the preview to the whole column, so
+  a narrow image floated in the middle of a wide empty box. The frame (and on Android the
+  image itself) now takes the picture's own aspect ratio, capped at 340x300dp on the phone
+  and 200px tall on the desktop, and is anchored left.
+- **A tap enlarges it.** A saved picture opens a full-window view over a dim backdrop —
+  tap anywhere (or Escape) to close. On the phone that view carries "Open", because an
+  inline image is deliberately never exported to Downloads and is otherwise only reachable
+  through the core's private cache.
+- The desktop's viewer is centred by coordinates rather than reparented to `Overlay`,
+  which Qt warns about as a binding loop on every card it instantiates.
+- `ImageCard`'s natural size is now ASSIGNED by the `Image` on decode instead of bound to
+  it: a property binding to an id the component has not instantiated yet evaluates once to
+  `undefined` and never runs again, so the size stayed 0 and every picture quietly fell
+  back to a full-width frame.
+
+### Added — an image the agent shares is shown, inline
+
+- **A shared image paints as the picture.** The transcript still carries a reference and
+  the bytes are still pulled on demand (a blob in a tool result is re-sent on every replay
+  and shown to the model), but a raster image is now the reply's own content rather than a
+  chip describing it: both clients fetch it as its row appears and paint it inline, and a
+  tap opens the full-size copy. Raster only — PNG/JPEG/GIF/WebP/BMP/HEIC/AVIF up to 8 MiB —
+  because neither toolkit can decode SVG, and an empty frame reads as a broken picture
+  rather than as a file. Android keeps the private cached copy for inline images instead of
+  exporting them to Downloads, since a `MediaStore` `content://` URI is not decodable by
+  `BitmapFactory`; the tap still opens it through the FileProvider.
+- The predicate is duplicated by necessity (`Files.kt` `isInlineImage`, `ChatPage.qml`
+  `inlineImage`, ledger row `ui.fileInlineImage`) and pinned by tests on both sides:
+  `InlineImageTest` on the JVM, `tst_imagecard.qml` for the card.
+
+### Fixed — a thread tap opens the thread, and its cards are cards
+
+- **The tap binds the chat itself.** `open_thread` used to have the CORE open the session;
+  its `Ready` arrived for an id the client never asked to display, so every late-Ready
+  guard refused it and the tap left the reader in the previous chat — usually the
+  Assistant thread — while the panel showed an area that was not on screen. The core now
+  only RESOLVES (map, or a fresh mint) and answers `on_thread_ready`; the client opens that
+  id through its ordinary path. A label the mirror already carries opens immediately.
+- **`current_thread_label` is the map and nothing else.** It used to fall back to "the label
+  we last asked for", which leaked: when an open never landed, that label stuck and the
+  panel painted one area's cards above every later conversation — including roam chats,
+  which have no thread.
+- **The panel paints the same cards My Day does**, not a one-line restatement of each row,
+  and it no longer restores a saved "collapsed" — a `rememberSaveable` from an earlier
+  build brought the chevron back over the cards.
+
+### Fixed — My Day opens inline, not folded
+
+- **A thread group starts OPEN.** Both clients defaulted its header to collapsed, so a
+  label holding several rows showed only "N items" behind a chevron — a number you cannot
+  act on, and not the inline board that was asked for. The state now records the groups you
+  CLOSED, so open is the default and the chevron only takes rows away.
+
+### Fixed — threads actually open with their context
+
+- **The composer cleared for real.** Opening a thread sent an EMPTY draft, and the chat
+  screen treated an empty one as "no instruction" (`if (input.isBlank()) input = pending`),
+  so the previous chat's text — usually the "About item …" line — came back into a
+  brand-new thread. The draft is now an instruction: empty means start clean.
+- **The opening line lands even on a thread that already existed.** The relay that writes
+  it (`notify__thread_note`) gained `once`: it writes only while the conversation is
+  empty, so the core can re-offer the line on every open. That repaired every thread minted
+  before the extension was wired (they had opened blank) and makes a mint-time failure
+  self-healing rather than permanent.
+- **A seed failure is no longer silent.** Both seed paths log the error instead of
+  swallowing it — the silence is why a batch of threads opened blank with no way to tell.
+- **The context donut no longer lies.** `usage` is the last `usage_update` seen and goose
+  only sends one DURING a turn, so the previous chat's reading survived a session switch and
+  a freshly opened thread (one seeded line, no turns) showed a nearly-full ring. Both
+  clients now clear it on a switch: no donut is honest, the wrong donut is not.
+
 ### Added
 
 - **The agent can hand you a file, in the chat.** A tool that shares one

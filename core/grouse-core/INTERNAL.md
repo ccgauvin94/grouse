@@ -97,7 +97,10 @@ roam.rs        the peer registry: RoamPeer { label, transport, session list },
      `session_load_params(wire_id, cwd, replay_tail)`, `prompt_params(prompt, wire_id)`.
    - RPC policy: `rpc_timeout(method)` (bounded for every control call, `None` for
      `session/prompt` — the reply IS the turn's end) and `request(owner, method, params)`
-     which applies it through a `ChatEndpoint`.
+     which applies it through a `ChatEndpoint`. `session/load` does NOT go through that
+     table: it is bounded by `load_request`/`LOAD_TIMEOUT_SECS` (10 min) because a long
+     replay is legitimate and an unanswered one must still free the store's load slot and
+     report an open failure rather than pin the chat forever.
    - Translation: `content_block_text` / `chunk_text`, `tool_call_kind` (→
      `(ToolCallKind, detail)`), `tool_call_app`, `tool_live_output`,
      `tool_final_output`, `tool_call_status_str`, `permission_option_kind_str`,
@@ -169,6 +172,26 @@ roam.rs        the peer registry: RoamPeer { label, transport, session list },
    - freshness is the CALLER's job (compare updatedAt); the store is dumb I/O.
      The core's caller is `Core::save_cache_for` (incomplete store ⇒ empty
      stamp) and `session::plan_paint`.
+   - **no default bodies in `DispatchHost`.** Every method is REQUIRED, and
+     `PrefixHost` (the peer's wrapper) forwards all of them. A method with a
+     default can be skipped by a wrapper and nothing says so — `listed_stamp` and
+     `is_incomplete` shipped defaulted, so roam compared a cached transcript
+     against its own session list and replayed a tail on every open, for two
+     release rounds, with tests and the compiler both looking past the wrapper
+     (2026-11-06). Adding a method now breaks the wrapper until someone decides
+     how to forward it; that compile error IS the ratchet. Same rule for the
+     transport seam: anything sequences around a `session/load` lives in
+     `session::replay_held`, never in a transport.
+   - **one stamp source.** The baseline a plan compares against is
+     `DispatchHost::listed_stamp` — the same map `save_cache_for` stamps with —
+     for BOTH wires. A transport that keeps its own copy of `updatedAt` (the
+     roam peer kept its session list) drifts the moment one side is updated and
+     the other is not, and a stamp that never matches means `plan_paint` never
+     answers fresh: every open then merges a `REPLAY_TAIL` window (measured
+     2026-11-06, the "it re-downloads the chat on every switch" report). The
+     transport's own list is only the fallback for a key the core has no stamp
+     for. `DispatchHost::is_incomplete` comes from the same place for the same
+     reason (the peer used to pass a hard-coded `false`).
 5. **Roam** (roam.rs):
    - `RoamPeer::connect(secret, card, label, listener, host, hub, cache) -> Arc<RoamPeer>`
      — browse mode: initialize → session/list, no auto-open.
