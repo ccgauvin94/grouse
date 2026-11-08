@@ -24,6 +24,7 @@ impl CoreListener for L {
     fn on_status(&self, s: ConnectionStatus) {
         println!("status: {s:?}");
     }
+    fn on_thread_ready(&self, _: String, _: String) {}
     fn on_sessions(&self, _s: Vec<grouse_core::SessionSummary>) {}
     fn on_session_touched(&self, _i: String, _t: String, _u: String) {}
     fn on_item(&self, _op: grouse_core::TranscriptOp) {}
@@ -78,6 +79,7 @@ impl grouse_core::GrouseUnstableListener for UL {
     fn on_session_extensions(&self, _s: String, e: String) {
         println!("extensions: {e}");
     }
+    fn on_extension_catalog(&self, _s: String, _e: String) {}
     fn on_config_value(&self, _k: String, _v: String) {}
     fn on_supported_models(&self, _p: String, _m: String) {}
     fn on_providers(&self, _p: String) {}

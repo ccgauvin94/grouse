@@ -14,6 +14,7 @@
 #![allow(clippy::type_complexity)] // The SDK handler table is intentionally a set of boxed closures.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -230,6 +231,63 @@ pub(crate) fn rpc_timeout(method: &str) -> Option<Duration> {
         // own failure path reports a dead link.
         "session/load" => None,
         _ => Some(Duration::from_secs(30)),
+    }
+}
+
+/// How long a `session/load` may go unanswered before the open is reported as a
+/// FAILURE.
+///
+/// Deliberately not part of [`rpc_timeout`] (which answers `None` here): a full
+/// replay of a long session can honestly take minutes, so a short cap would fail
+/// loads that would have worked. But "no bound at all" is what turned one
+/// unanswered load into a chat that can never open again: the await holds the
+/// store's load slot (`TranscriptStore::begin_load`), so every retry of the SAME
+/// chat queues behind the first one, the client's spinner never resolves, and no
+/// listener event is ever emitted to say why — the roam "this chat will not load"
+/// report. Ten minutes is far past any replay this client asks for and still
+/// converts "forever" into a message the user can act on.
+pub(crate) static LOAD_TIMEOUT_SECS: AtomicU64 = AtomicU64::new(600);
+
+/// The same for a load that replays the WHOLE session (no tail): a resync's
+/// in-place rebuild, or the merge-gap fallback. Those are not user-initiated and
+/// they FREEZE the chat while they wait — the store's emissions are held until
+/// the replay ends, so every row the live turn produces is swallowed and the
+/// screen stops updating (the "nothing shows until I refresh" report). Two
+/// minutes is far longer than a real full replay needs and short enough that a
+/// chat recovers instead of sitting dead behind a load that will never answer.
+pub(crate) static REBUILD_TIMEOUT_SECS: AtomicU64 = AtomicU64::new(120);
+
+fn load_timeout(full: bool) -> Duration {
+    let secs = if full {
+        REBUILD_TIMEOUT_SECS.load(Ordering::SeqCst)
+    } else {
+        LOAD_TIMEOUT_SECS.load(Ordering::SeqCst)
+    };
+    Duration::from_secs(secs)
+}
+
+/// `session/load` with the bounded wait above. Both wires go through this, so a
+/// load that is never answered fails the same way everywhere and the caller can
+/// report an open failure the client can retry.
+pub(crate) async fn load_request(
+    endpoint: &dyn ChatEndpoint,
+    key: &str,
+    cwd: &str,
+    tail: Option<usize>,
+) -> Result<Value, AcpError> {
+    let limit = load_timeout(tail.is_none());
+    match tokio::time::timeout(
+        limit,
+        endpoint.request("session/load", session_load_params(key, cwd, tail)),
+    )
+    .await
+    {
+        Ok(reply) => reply,
+        Err(_) => Err(AcpError::internal_error().data(format!(
+            "session/load gave no answer in {}s (the host is busy with another turn, or the link \
+             is half-open) — open the chat again to retry",
+            limit.as_secs()
+        ))),
     }
 }
 
@@ -865,6 +923,59 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     #[test]
+    fn a_load_the_host_never_answers_fails_instead_of_pinning_the_chat() {
+        // A `session/load` with no reply used to wait forever: the await holds the
+        // store's load slot, so the chat could not be opened again, and the client
+        // got no event to explain the spinner. It must fail, say why, and let go.
+        use futures::future::BoxFuture;
+        struct Hang;
+        impl ChatEndpoint for Hang {
+            fn request(&self, _m: &str, _p: Value) -> BoxFuture<'static, Result<Value, AcpError>> {
+                Box::pin(futures::future::pending())
+            }
+            fn notify(&self, _m: &str, _p: Value) -> Result<(), AcpError> {
+                Ok(())
+            }
+            fn wire_id(&self, display: &str) -> String {
+                display.to_string()
+            }
+            fn accepts_prompt(&self) -> bool {
+                true
+            }
+            fn label(&self) -> Option<String> {
+                None
+            }
+        }
+        LOAD_TIMEOUT_SECS.store(1, Ordering::SeqCst);
+        let error = crate::roam::runtime()
+            .block_on(load_request(&Hang, "s1", "/work", Some(80)))
+            .err();
+        LOAD_TIMEOUT_SECS.store(600, Ordering::SeqCst);
+        let error = error.expect("a load with no answer is an error, not a wait");
+        assert!(
+            format!("{error:?}").contains("gave no answer"),
+            "{error:?}"
+        );
+
+        // A WHOLE-session load (a resync's rebuild, or the merge-gap fallback) has
+        // its own, shorter bound: it holds the chat's paint while it waits, so it
+        // must give up far sooner than a first open of a long chat may.
+        assert!(
+            REBUILD_TIMEOUT_SECS.load(Ordering::SeqCst) < LOAD_TIMEOUT_SECS.load(Ordering::SeqCst),
+            "a rebuild must not wait as long as a first open"
+        );
+        REBUILD_TIMEOUT_SECS.store(1, Ordering::SeqCst);
+        let error = crate::roam::runtime()
+            .block_on(load_request(&Hang, "s1", "/work", None))
+            .err();
+        REBUILD_TIMEOUT_SECS.store(120, Ordering::SeqCst);
+        assert!(
+            format!("{:?}", error.expect("a whole-session load must fail too"))
+                .contains("gave no answer")
+        );
+    }
+
+    #[test]
     fn an_assistant_project_session_is_not_a_chat_but_keeps_its_cwd() {
         // One chat per thread label is filed under the `assistant` project so the
         // persona prompt applies — and then it must not appear in any chat list,
@@ -1051,6 +1162,7 @@ mod tests {
         fn on_commands(&self, _: Vec<String>) {}
         fn on_session_open_failed(&self, _: String, _: String) {}
         fn on_tasks(&self, _: String) {}
+        fn on_thread_ready(&self, _: String, _: String) {}
         fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
     }
 
@@ -1458,9 +1570,7 @@ async fn replay_held(
     host.begin_replay(key, suppress);
     store.hold_emissions(true);
     let mut guard = ReplayGuard { host, store, key, ends: true, holds: true };
-    let reply = endpoint
-        .request("session/load", session_load_params(key, cwd, tail))
-        .await;
+    let reply = load_request(endpoint, key, cwd, tail).await;
     let reply = match reply {
         Ok(reply) => reply,
         // The rows on screen are the provisional cache paint, which is the right
@@ -1475,8 +1585,7 @@ async fn replay_held(
     // cache would leave a hole. Clear and load the whole transcript now.
     if store.end_merge() {
         store.clear();
-        let full = session_load_params(key, cwd, None);
-        if let Ok(full_reply) = endpoint.request("session/load", full).await {
+        if let Ok(full_reply) = load_request(endpoint, key, cwd, None).await {
             // This reply describes what is on screen now, backlog included.
             reply = full_reply;
         }
@@ -1530,21 +1639,18 @@ pub(crate) trait DispatchHost: Send + Sync {
     fn replaying(&self, key: &str) -> bool;
 
     /// One message id ingested by a `session/load` replay, for the reload
-    /// progress the clients paint. Defaulted to a no-op: only the real core
-    /// counts, and a host that does not care must not have to implement it.
-    fn replay_tick(&self, _key: &str, _message_id: &str) {}
+    /// progress the clients paint.
+    fn replay_tick(&self, key: &str, message_id: &str);
     /// A backfill page is being ingested for `key`. Its rows land in a SCRATCH
     /// store, so anything that belongs to the live turn — step labels, the green
     /// dot, usage, commands, config — must not fire for them (they are history,
     /// not news).
-    fn paging(&self, _key: &str) -> bool {
-        false
-    }
+    fn paging(&self, key: &str) -> bool;
     /// The `session/load` reply reported a backlog of `skipped` leading messages
     /// (`0` = the transcript is complete), and `tail` is how much trailing
     /// history that load asked for. Drives `has_older` at the store's origin and
     /// sizes the next page.
-    fn replay_backlog(&self, _key: &str, _skipped: usize, _tail: usize) {}
+    fn replay_backlog(&self, key: &str, skipped: usize, tail: usize);
     /// Fresh-cache opens drop replayed rows; other transports keep them.
     fn accepts_chat(&self, key: &str) -> bool;
     /// Background content arrived (green dot).
@@ -1556,6 +1662,21 @@ pub(crate) trait DispatchHost: Send + Sync {
     /// Record a listed session's `updatedAt` (the cache-freshness baseline)
     /// without emitting a touch event.
     fn session_stamp(&self, key: &str, updated_at: &str);
+    /// The baseline [`DispatchHost::session_stamp`] last recorded for `key` —
+    /// the exact value a cache is stamped WITH (`Core::save_cache_for`), so this
+    /// is the only thing a paint plan may compare it against.
+    ///
+    /// A transport that keeps its own copy of the field (the roam peer kept its
+    /// session list) drifts from it the moment anything updates one and not the
+    /// other: the two disagree forever, `plan_paint` never reports fresh, and
+    /// every single open replays [`REPLAY_TAIL`] messages — a chat that looks
+    /// like it is re-downloaded on each switch. Empty means "unknown"; callers
+    /// fall back to their own copy.
+    fn listed_stamp(&self, key: &str) -> String;
+    /// Whether `key`'s store is known to be truncated (a turn in flight, or one
+    /// that ended in error), so a plan may not treat it as current or use it as
+    /// a merge base. The peer used to pass a hard-coded `false` here.
+    fn is_incomplete(&self, key: &str) -> bool;
     /// A plain tool call landed in `run_id` — the end-of-turn summarizer's
     /// worklist for `key`, oldest first.
     fn tool_run(&self, key: &str, run_id: &str);
@@ -1604,6 +1725,16 @@ impl PrefixHost {
     }
 }
 
+/// The peer's host: the core's, with this label's prefix on display ids.
+///
+/// **Every trait method is required, and this wrapper forwards ALL of them — that
+/// is the ratchet.** A method carrying a default body can be skipped here without
+/// a word from the compiler, and the peer then behaves differently from the main
+/// wire in a way nothing can see: `listed_stamp`/`is_incomplete` were defaulted,
+/// so roam kept comparing a cached transcript against its own session list and
+/// replayed a tail on every open (2026-11-06, two rounds to find because both my
+/// tests and the compiler were looking past the wrapper). Adding a method to the
+/// trait now breaks this impl until someone decides how to forward it.
 impl DispatchHost for PrefixHost {
     fn display_id(&self, wire: &str) -> String {
         display_id(Some(&self.label), wire)
@@ -1653,6 +1784,11 @@ impl DispatchHost for PrefixHost {
             host.begin_replay(key, suppress);
         }
     }
+    fn replay_tick(&self, key: &str, message_id: &str) {
+        if let Some(host) = self.host() {
+            host.replay_tick(key, message_id);
+        }
+    }
     fn end_replay(&self, key: &str) {
         if let Some(host) = self.host() {
             host.end_replay(key);
@@ -1697,6 +1833,18 @@ impl DispatchHost for PrefixHost {
         if let Some(host) = self.host() {
             host.session_stamp(key, updated_at);
         }
+    }
+    /// FORWARDED, not defaulted. The trait's defaults are the empty stamp and
+    /// `false`, which is exactly the wrong answer here: a peer's paint plan would
+    /// then compare the cache against the peer's own session list again (the
+    /// drift that made every roam open replay a tail) and treat an incomplete
+    /// store as settled. A `DispatchHost` wrapper that forgets these two is
+    /// invisible to the compiler, so the regression test lives next to the peer.
+    fn listed_stamp(&self, key: &str) -> String {
+        self.host().map(|host| host.listed_stamp(key)).unwrap_or_default()
+    }
+    fn is_incomplete(&self, key: &str) -> bool {
+        self.host().is_some_and(|host| host.is_incomplete(key))
     }
     fn tool_run(&self, key: &str, run_id: &str) {
         if let Some(host) = self.host() {
@@ -2153,6 +2301,7 @@ impl crate::CoreListener for NullListener {
     fn on_commands(&self, _: Vec<String>) {}
     fn on_session_open_failed(&self, _: String, _: String) {}
     fn on_tasks(&self, _: String) {}
+    fn on_thread_ready(&self, _: String, _: String) {}
     fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
 }
 
@@ -2234,6 +2383,11 @@ impl crate::CoreListener for SessionGate {
     }
     fn on_tasks(&self, tasks: String) {
         self.inner.on_tasks(tasks);
+    }
+    fn on_thread_ready(&self, label: String, session_id: String) {
+        // Not gated: this is an ANSWER to a tap, and the whole point is that it
+        // arrives when the chat on screen is NOT yet the thread's.
+        self.inner.on_thread_ready(label, session_id);
     }
     fn on_replay_progress(&self, session_id: String, loaded: i64, total: i64, done: bool) {
         // Gated like every other per-session event: a reload of a chat that is

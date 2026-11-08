@@ -550,6 +550,23 @@ pub(crate) fn apply_share_result(file: &mut SharedFile, payload: &Value) {
             file.mime = mime.to_string();
         }
     }
+    // The PATH last, on purpose: the name rule above compares against the call's
+    // own path, which stops being true once this points at the store.
+    //
+    // A share from an IMPORT ROOT is COPIED into the store, and the envelope
+    // reports where it landed. The call's path — `/mnt/data/comfyui/output/x.png`
+    // — is outside the store, so a fetch against it is refused and the row stays
+    // a card with `ValueError: '…' is outside the attachments directory` instead
+    // of painting (measured 2026-11-06, a render shared straight from ComfyUI's
+    // output dir). The envelope is the authority on where the bytes are.
+    if let Some(path) = payload
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        file.path = path.to_string();
+    }
 }
 
 /// A safe on-disk name for a downloaded file.
@@ -641,6 +658,38 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(file.name, "Q3 report (final).pdf");
+    }
+
+    /// A share from an import root is COPIED into the store, and the envelope's
+    /// path is where the bytes actually are. Keeping the call's own path made the
+    /// fetch get refused (`outside the attachments directory`) and the row stayed
+    /// a broken card instead of painting the picture (measured 2026-11-06).
+    #[test]
+    fn the_result_moves_the_path_to_where_the_copy_landed() {
+        let mut file = share(serde_json::json!({
+            "path": "/mnt/data/comfyui/output/qwen21_033139.png",
+            "mime": "image/png",
+        }))
+        .unwrap();
+        assert_eq!(file.path, "/mnt/data/comfyui/output/qwen21_033139.png");
+        apply_share_result(
+            &mut file,
+            &serde_json::json!({
+                "path": "/home/colin/services/llm/goose-workspace/attachments/cda94e10-qwen21_033139.png",
+                "name": "qwen21_033139.png",
+                "mime": "image/png",
+                "bytes": 2911163,
+                "sha256": "cda94e10",
+            }),
+        );
+        assert_eq!(
+            file.path,
+            "/home/colin/services/llm/goose-workspace/attachments/cda94e10-qwen21_033139.png"
+        );
+        // The name still comes from the CALL (the stored copy is hash-prefixed).
+        assert_eq!(file.name, "qwen21_033139.png");
+        assert_eq!(file.bytes, 2911163);
+        assert_eq!(file.mime, "image/png");
     }
 
     #[test]

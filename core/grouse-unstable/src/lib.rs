@@ -78,6 +78,9 @@ mod tests {
         fn on_extensions(&self, _extensions: String) {
             self.events.lock().push("on_extensions".into());
         }
+        fn on_extension_catalog(&self, _session_id: String, _extensions: String) {
+            self.events.lock().push("on_extension_catalog".into());
+        }
         fn on_session_extensions(&self, _session_id: String, _extensions: String) {
             self.events.lock().push("on_session_extensions".into());
         }

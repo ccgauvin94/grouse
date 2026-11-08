@@ -46,7 +46,7 @@ use crate::{
 /// The desktop refuses a library whose value it does not expect — a mismatch is
 /// a callback called with the wrong arity (a garbage pointer), not a compile
 /// error, so it must be caught at load time.
-pub const GROUSE_ABI_VERSION: u32 = 10;
+pub const GROUSE_ABI_VERSION: u32 = 12;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
@@ -236,6 +236,17 @@ pub struct GrouseCoreListener {
     /// A shared file's download as JSON (`FileEvent`: `progress` / `saved` /
     /// `failed`), keyed by the server-side path. Appended at the END; ABI 9.
     pub on_file: Option<extern "C" fn(*mut c_void, *const c_char)>,
+    /// The conversation a thread's chat lives in: `(label, session_id)`, the reply to
+    /// `grouse_open_thread`. The CLIENT opens it — see the listener's own note for why
+    /// the core no longer binds it. Appended at the END; ABI 11.
+    pub on_thread_ready:
+        Option<extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
+    /// The extension CATALOG of the server that owns a chat: `(session_id, extensions)`.
+    /// Same shape as `on_extensions` (that one is the MAIN server's config.yaml); this
+    /// one is asked on the chat's own connection, so a roam chat reports its PEER's
+    /// catalog. Appended at the END; ABI 12.
+    pub on_extension_catalog:
+        Option<extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
 }
 
 /// Bridges the core's typed listener traits to the installed C table. The raw
@@ -521,8 +532,19 @@ impl CoreListener for CoreCallbackForwarder {
                 &message,
             )
         };
-    }    fn on_tasks(&self, tasks: String) {
+    }
+    fn on_tasks(&self, tasks: String) {
         unsafe { cb_str1(table_fn!(self, on_tasks), self.user_data, &tasks) };
+    }
+    fn on_thread_ready(&self, label: String, session_id: String) {
+        unsafe {
+            cb_str2(
+                table_fn!(self, on_thread_ready),
+                self.user_data,
+                &label,
+                &session_id,
+            )
+        };
     }
     fn on_file(&self, event: crate::attachments::FileEvent) {
         let p = c_json(&event);
@@ -600,6 +622,9 @@ impl GrouseUnstableListener for CoreCallbackForwarder {
     }
     fn on_session_extensions(&self, session_id: String, extensions: String) {
         unsafe { cb_str2(table_fn!(self, on_session_extensions), self.user_data, &session_id, &extensions) };
+    }
+    fn on_extension_catalog(&self, session_id: String, extensions: String) {
+        unsafe { cb_str2(table_fn!(self, on_extension_catalog), self.user_data, &session_id, &extensions) };
     }
     fn on_config_value(&self, key: String, value: String) {
         unsafe { cb_str2(table_fn!(self, on_config_value), self.user_data, &key, &value) };
@@ -1331,6 +1356,16 @@ pub extern "C" fn grouse_unstable_session_extensions_remove(h: *mut c_void, sid:
         return;
     };
     catch_unwind(AssertUnwindSafe(|| handle(h).unstable.session_extensions_remove(sid, extension_key))).ok();
+}
+
+/// The extension catalog of the server that OWNS this chat (`config/extensions/list`
+/// on the session's connection), delivered on `on_extension_catalog`. Distinct from
+/// `grouse_unstable_list_global_extensions`, which always asks the MAIN connection
+/// (the settings screen's defaults) — see CONTRACT §5.
+#[no_mangle]
+pub extern "C" fn grouse_unstable_extension_catalog(h: *mut c_void, sid: *const c_char) {
+    let Some(sid) = (unsafe { c_param(sid) }).map(str::to_owned) else { return };
+    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.extension_catalog(sid))).ok();
 }
 
 #[no_mangle]

@@ -185,6 +185,30 @@ impl GrouseUnstable {
         }
     }
 
+    /// The extension CATALOG of the server that OWNS `session_id`; surfaces as
+    /// `on_extension_catalog`.
+    ///
+    /// This is the third list of the same family, and the difference is who answers:
+    /// `session_extensions_list` is the chat's own lease (what it HAS), `list_global_extensions`
+    /// is the MAIN connection's config.yaml (what the settings screen edits), and this one is
+    /// `config/extensions/list` asked ON THE SESSION'S OWN CONNECTION — so a roam chat gets the
+    /// PEER's catalog. Without it the sheet could only ever show what a chat already has, and an
+    /// extension the chat lacks (a stale lease from a restart, say) could not be seen, let alone
+    /// added: `config/extensions/list` takes no session id, so the shim would ask the main
+    /// connection, where a phone talking only to a peer has none.
+    ///
+    /// Silent when nothing is connected (the sheet is empty either way); a peer that is known
+    /// but down surfaces the transport's own error, which is the honest answer.
+    pub fn extension_catalog(&self, session_id: String) {
+        let Some(conn) = self.route(&session_id) else { return };
+        if let Some(result) =
+            self.call(&*conn, "_goose/unstable/config/extensions/list", json!({}))
+        {
+            let extensions = result.get("extensions").cloned().unwrap_or(Value::Null);
+            self.listener.on_extension_catalog(session_id, extensions.to_string());
+        }
+    }
+
     /// Enable an extension for THIS session. The add reply is the moment the session's tool
     /// set is current, so refresh tools + session extensions from here (desktop behavior).
     pub fn session_extensions_add(&self, session_id: String, extension: String) {
@@ -1015,6 +1039,7 @@ mod tests {
         Tools(String, String),
         Extensions(String),
         SessionExtensions(String, String),
+        ExtensionCatalog(String, String),
         ConfigValue(String, String),
         SupportedModels(String, String),
         Providers(String),
@@ -1082,6 +1107,11 @@ mod tests {
             self.events
                 .lock()
                 .push(Ev::SessionExtensions(session_id, extensions));
+        }
+        fn on_extension_catalog(&self, session_id: String, extensions: String) {
+            self.events
+                .lock()
+                .push(Ev::ExtensionCatalog(session_id, extensions));
         }
         fn on_config_value(&self, key: String, value: String) {
             self.events.lock().push(Ev::ConfigValue(key, value));
@@ -1534,6 +1564,55 @@ mod tests {
                 ("_goose/unstable/session/extensions/list", json!({"sessionId": "s1"})),
             ],
         );
+    }
+
+    /// The sheet's third list, and the reason it exists: a chat can only be shown an
+    /// extension it does NOT have by asking its OWN server for the catalog. A roam chat
+    /// therefore asks its peer — asking the main connection answered with the wrong
+    /// server's config.yaml, or with nothing at all on a client that only talks to peers.
+    #[test]
+    fn extension_catalog_asks_the_server_that_owns_the_chat() {
+        let _guard = TEST_LOCK.lock();
+        let main = StubConn::new();
+        let peer = StubConn::new();
+        peer.script(vec![Ok(json!({"extensions": [{"configKey": "attachments"}]}))]);
+        let peer_conn: Arc<dyn RpcConn> = peer.clone();
+        spine::register_peer_resolver(Arc::new(move |_id: &str| Some(peer_conn.clone())));
+        let (g, rec) = harness(main.clone());
+
+        g.extension_catalog("roam:phaethon:20261106_96".to_string());
+
+        assert_calls(&peer, &[("_goose/unstable/config/extensions/list", json!({}))]);
+        assert!(main.calls().is_empty(), "the main connection must not be asked");
+        match rec.events().as_slice() {
+            [Ev::ExtensionCatalog(sid, payload)] => {
+                assert_eq!(sid, "roam:phaethon:20261106_96");
+                let parsed: Value = serde_json::from_str(payload).unwrap();
+                assert_eq!(parsed, json!([{"configKey": "attachments"}]));
+            }
+            other => panic!("expected one on_extension_catalog, got {other:?}"),
+        }
+        spine::register_peer_resolver(Arc::new(|_id: &str| None));
+    }
+
+    /// A local chat's catalog is the main connection's config.yaml — the same rows the
+    /// settings screen edits, so the sheet and the settings cannot disagree about a
+    /// local server.
+    #[test]
+    fn extension_catalog_asks_the_main_connection_for_a_local_chat() {
+        let _guard = TEST_LOCK.lock();
+        spine::register_peer_resolver(Arc::new(|_id: &str| None));
+        let stub = StubConn::new();
+        stub.script(vec![Ok(json!({"extensions": [{"configKey": "developer"}]}))]);
+        let (g, rec) = harness(stub.clone());
+
+        g.extension_catalog("20261106_96".to_string());
+
+        assert_calls(&stub, &[("_goose/unstable/config/extensions/list", json!({}))]);
+        match rec.events().as_slice() {
+            [Ev::ExtensionCatalog(sid, _)] => assert_eq!(sid, "20261106_96"),
+            other => panic!("expected one on_extension_catalog, got {other:?}"),
+        }
     }
 
     /// Pins the wire shape goose now requires: remove is keyed by `extensionKey`

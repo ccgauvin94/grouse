@@ -28,6 +28,7 @@ impl CoreListener for L {
         println!("status: {s:?}");
         self.0.lock().unwrap().push(format!("{s:?}"));
     }
+    fn on_thread_ready(&self, _: String, _: String) {}
     fn on_sessions(&self, sessions: Vec<grouse_core::SessionSummary>) {
         println!("-- on_sessions ({}):", sessions.len());
         for s in &sessions {
@@ -78,6 +79,7 @@ impl grouse_core::GrouseUnstableListener for UL {
     fn on_tools(&self, _s: String, _t: String) {}
     fn on_extensions(&self, _e: String) {}
     fn on_session_extensions(&self, _s: String, _e: String) {}
+    fn on_extension_catalog(&self, _s: String, _e: String) {}
     fn on_config_value(&self, _k: String, _v: String) {}
     fn on_supported_models(&self, _p: String, _m: String) {}
     fn on_providers(&self, _providers: String) {}

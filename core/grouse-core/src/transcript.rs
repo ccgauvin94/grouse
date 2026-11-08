@@ -2639,6 +2639,7 @@ mod tests {
     impl CoreListener for TestListener {
     fn on_file(&self, _: crate::attachments::FileEvent) {}
         fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
+        fn on_thread_ready(&self, _: String, _: String) {}
         fn on_status(&self, _status: ConnectionStatus) {}
         fn on_sessions(&self, _sessions: Vec<SessionSummary>) {}
         fn on_item(&self, op: crate::TranscriptOp) {

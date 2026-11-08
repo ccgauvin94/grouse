@@ -930,13 +930,43 @@ impl RoamPeer {
         // owned here would die with it. Intents keep buffering in `cmd_tx`
         // across the outage; the next attempt picks the queue back up here.
         let mut cmd_rx = self.cmd_rx.lock().await;
-        while let Some(cmd) = cmd_rx.recv().await {
+        // Commands pulled forward while coalescing a run of opens. They run
+        // AFTER the open that superseded them, in their original order.
+        let mut deferred: std::collections::VecDeque<PeerCommand> = Default::default();
+        loop {
+            let cmd = match deferred.pop_front() {
+                Some(cmd) => cmd,
+                None => match cmd_rx.recv().await {
+                    Some(cmd) => cmd,
+                    None => break,
+                },
+            };
             match cmd {
                 PeerCommand::OpenSession {
-                    session_id,
-                    cwd,
-                    force,
+                    mut session_id,
+                    mut cwd,
+                    mut force,
                 } => {
+                    // A tap that supersedes three earlier taps owes ONE load.
+                    // Every open is a whole `session/load` awaited right here,
+                    // so a queue of them re-fetched a tail per step and the
+                    // chat the user finally tapped sat behind all of them —
+                    // the "switching fast makes it hang" report. Keep only the
+                    // newest open; anything queued behind it runs next.
+                    while let Ok(next) = cmd_rx.try_recv() {
+                        match next {
+                            PeerCommand::OpenSession {
+                                session_id: newer,
+                                cwd: newer_cwd,
+                                force: newer_force,
+                            } => {
+                                session_id = newer;
+                                cwd = newer_cwd;
+                                force = newer_force;
+                            }
+                            other => deferred.push_back(other),
+                        }
+                    }
                     let raw = self.strip_prefix(&session_id);
                     if let Err(error) = self.load_session(raw, cwd, force).await {
                         self.fail(format!("roam session/open: {error}"));
@@ -997,15 +1027,12 @@ impl RoamPeer {
         // main connection applies (one implementation, `session::plan_paint`).
         self.save_open_transcript();
         let key = self.cache_key(&raw);
-        let listed = self
-            .inner
-            .lock()
-            .sessions
-            .iter()
-            .find(|s| s.id == key)
-            .map(|s| s.updated_at.clone())
-            .unwrap_or_default();
-        let plan = crate::session::plan_paint(&self.cache, &key, &listed, force, false);
+        let listed = {
+            let list = self.inner.lock().sessions.clone();
+            freshness_stamp(self.host.as_ref(), &list, &key)
+        };
+        let incomplete = self.host.is_incomplete(&key);
+        let plan = crate::session::plan_paint(&self.cache, &key, &listed, force, incomplete);
         {
             let mut inner = self.inner.lock();
             inner.open_session_id = Some(raw.clone());
@@ -1037,6 +1064,12 @@ impl RoamPeer {
             Ok(reply) => {
                 self.emit_status("ready");
                 self.emit_config(&reply, &key);
+                // Re-baseline from the server after the replay, like the main
+                // wire does (spine's post-load `stamp_probe`). Without it a peer
+                // chat's cache keeps the stamp it had BEFORE the replay, so the
+                // next open cannot tell that the rows it just fetched are current
+                // — the second half of "it reloads every time".
+                self.host.stamp_probe(&key, true);
             }
             Err(error) => {
                 // The tapped session is stale/archived — do NOT quietly proxy
@@ -1377,6 +1410,31 @@ impl RoamPeer {
     }
 }
 
+/// The `updatedAt` a peer's paint plan compares a cached transcript against.
+///
+/// It is the CORE's stamp — the very value `save_cache_for` wrote into the file —
+/// and only falls back to this peer's own session list for a session the core has
+/// no stamp for yet (listed, never opened). The two are copies of one field and
+/// they drift: the list moves on `session_info_update`, while a turn end
+/// re-baselines the core from a `session/info` probe. Comparing against the list
+/// made the answer "stale" for every peer chat, forever — so each open merged a
+/// `REPLAY_TAIL` window, which is what "it re-downloads the whole chat when I
+/// switch" was.
+pub(crate) fn freshness_stamp(
+    host: &dyn crate::session::DispatchHost,
+    list: &[SessionSummary],
+    key: &str,
+) -> String {
+    let stamp = host.listed_stamp(key);
+    if !stamp.is_empty() {
+        return stamp;
+    }
+    list.iter()
+        .find(|s| s.id == key)
+        .map(|s| s.updated_at.clone())
+        .unwrap_or_default()
+}
+
 /// The unstable shim routes session-bound RPCs through this when the session
 /// belongs to a peer (`roam:<label>:` prefix) — the peer's connection answers
 /// tool/extension/config calls for its own sessions.
@@ -1485,6 +1543,7 @@ mod tests {
     impl CoreListener for RecordingListener {
     fn on_file(&self, _: crate::attachments::FileEvent) {}
         fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
+        fn on_thread_ready(&self, _: String, _: String) {}
         fn on_status(&self, status: ConnectionStatus) {
             self.events
                 .lock()
@@ -1583,6 +1642,10 @@ mod tests {
         hub: Arc<crate::session::SessionHub>,
         recorder: Arc<RecordingListener>,
         replaying: Mutex<std::collections::HashSet<String>>,
+        /// The core's freshness baseline per key (`Core::session_updated_at`).
+        stamps: Mutex<std::collections::HashMap<String, String>>,
+        /// Keys whose stamp was re-read after a load.
+        probes: Mutex<Vec<String>>,
     }
 
     impl crate::session::DispatchHost for TestHost {
@@ -1655,10 +1718,37 @@ mod tests {
         }
         fn endpoint_ready(&self, _label: Option<&str>) {}
         fn cache_session(&self, _key: &str) {}
-        fn session_stamp(&self, _key: &str, _updated_at: &str) {}
+        fn session_stamp(&self, key: &str, updated_at: &str) {
+            if !updated_at.is_empty() {
+                self.stamps.lock().insert(key.to_string(), updated_at.to_string());
+            }
+        }
+        fn listed_stamp(&self, key: &str) -> String {
+            self.stamps.lock().get(key).cloned().unwrap_or_default()
+        }
+        fn is_incomplete(&self, _key: &str) -> bool {
+            false
+        }
+        fn replay_tick(&self, key: &str, message_id: &str) {
+            self.recorder
+                .events
+                .lock()
+                .push(format!("replay_tick {key} {message_id}"));
+        }
+        fn paging(&self, _key: &str) -> bool {
+            false
+        }
+        fn replay_backlog(&self, key: &str, skipped: usize, tail: usize) {
+            self.recorder
+                .events
+                .lock()
+                .push(format!("backlog {key} {skipped} {tail}"));
+        }
         fn tool_run(&self, _key: &str, _run_id: &str) {}
         fn step_closed(&self, _key: &str) {}
-        fn stamp_probe(&self, _key: &str, _persist: bool) {}
+        fn stamp_probe(&self, key: &str, _persist: bool) {
+            self.probes.lock().push(key.to_string());
+        }
         fn is_summarizer(&self, _key: &str) -> bool {
             false
         }
@@ -1692,6 +1782,8 @@ mod tests {
             hub: hub.clone(),
             recorder: listener,
             replaying: Mutex::new(std::collections::HashSet::new()),
+            stamps: Mutex::new(std::collections::HashMap::new()),
+            probes: Mutex::new(Vec::new()),
         });
         let peer = Arc::new(RoamPeer {
             label: label.to_string(),
@@ -2133,6 +2225,109 @@ mod tests {
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].id, "roam:laptop:s9");
         assert_eq!(sessions[0].title, "New");
+    }
+
+    /// The freshness baseline is the CORE's stamp, not the peer's own list.
+    ///
+    /// Regression: the two are copies of one field and drift (a turn end
+    /// re-baselines the core from a `session/info` probe; the list only moves on
+    /// `session_info_update`), so comparing against the list answered "stale"
+    /// for every peer chat and each open merged a REPLAY_TAIL window — the
+    /// re-download-on-switch report. Here the list still holds the OLD stamp
+    /// while the cache was written with the core's: the plan must say fresh.
+    #[test]
+    fn a_peer_paint_trusts_the_core_stamp_not_its_own_list() {
+        let listener = test_listener();
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let key = "roam:laptop:s1";
+        peer.apply_sessions(&list_response(&[("s1", "Old", "2026-01-01T00:00:00Z")]));
+        // The core learned the post-turn stamp; the list never caught up.
+        peer.host.session_stamp(key, "2026-02-02T00:00:00Z");
+        let list = peer.inner.lock().sessions.clone();
+        assert_eq!(
+            super::freshness_stamp(peer.host.as_ref(), &list, key),
+            "2026-02-02T00:00:00Z",
+            "the core's stamp wins"
+        );
+
+        let items = vec![crate::Item {
+            id: "m1".into(),
+            kind: crate::ItemKind::Agent,
+            text: "hello".into(),
+            detail: String::new(),
+            output: String::new(),
+            status: String::new(),
+            app_key: String::new(),
+            calls: Vec::new(),
+            thought: String::new(),
+            summary: String::new(),
+            steps: Vec::new(),
+            seq: 0,
+            attachments: 0,
+            files: Vec::new(),
+            images: Vec::new(),
+            message_id: String::new(),
+        }];
+        peer.cache.save_transcript(key, &items, "2026-02-02T00:00:00Z", true);
+        let plan = crate::session::plan_paint(
+            &peer.cache,
+            key,
+            &super::freshness_stamp(peer.host.as_ref(), &list, key),
+            false,
+            false,
+        );
+        assert!(plan.suppress, "a cache matching the core stamp is FRESH");
+        assert_eq!(plan.tail, 1, "a fresh cache asks the wire for one row");
+
+        // The list alone would have called it stale — that is the bug.
+        let stale = crate::session::plan_paint(
+            &peer.cache,
+            key,
+            &list.iter().find(|s| s.id == key).unwrap().updated_at,
+            false,
+            false,
+        );
+        assert!(stale.merge && !stale.suppress);
+        assert_eq!(stale.tail, crate::session::REPLAY_TAIL);
+    }
+
+    /// A wrapper host must FORWARD the two stamp accessors, not inherit their
+    /// defaults: `PrefixHost` sat between the peer and the core without them, so
+    /// the peer's paint plan fell back to its own session list and every reopen
+    /// replayed a tail (2026-11-06, the "still not caching" report).
+    #[test]
+    fn the_peer_host_forwards_the_stamp_accessors() {
+        let listener = test_listener();
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let key = "roam:laptop:s1";
+        peer.host.session_stamp(key, "2026-03-03T00:00:00Z");
+        let prefixed = crate::session::PrefixHost::new(
+            "laptop".to_string(),
+            peer.host.clone(),
+            peer.hub.clone(),
+        );
+        use crate::session::DispatchHost as _;
+        assert_eq!(prefixed.listed_stamp(key), "2026-03-03T00:00:00Z");
+        assert!(!prefixed.is_incomplete(key));
+    }
+
+    /// A session the core has no stamp for yet (listed by a peer, never opened)
+    /// still gets a baseline — the list's — so the first open can merge rather
+    /// than repaint from scratch.
+    #[test]
+    fn a_peer_paint_falls_back_to_the_list_when_the_core_has_no_stamp() {
+        let listener = test_listener();
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        peer.apply_sessions(&list_response(&[("s1", "Old", "2026-01-01T00:00:00Z")]));
+        let list = peer.inner.lock().sessions.clone();
+        assert_eq!(
+            super::freshness_stamp(peer.host.as_ref(), &list, "roam:laptop:s1"),
+            "2026-01-01T00:00:00Z"
+        );
+        assert_eq!(super::freshness_stamp(peer.host.as_ref(), &list, "roam:laptop:nope"), "");
     }
 
     #[test]

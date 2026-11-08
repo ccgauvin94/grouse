@@ -22,6 +22,7 @@ impl CoreListener for L {
     fn on_status(&self, s: ConnectionStatus) {
         println!("status: {s:?}");
     }
+    fn on_thread_ready(&self, _: String, _: String) {}
     fn on_sessions(&self, _: Vec<grouse_core::SessionSummary>) {}
     fn on_item(&self, op: grouse_core::TranscriptOp) {
         self.0.lock().unwrap().push(format!("{op:?}"));

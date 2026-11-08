@@ -192,6 +192,7 @@ pub static LISTENER_EVENTS: &[&str] = &[
     "listener.on_commands",
     "listener.on_session_open_failed",
     "listener.on_tasks",
+    "listener.on_thread_ready",
     "listener.on_replay_progress",
     "listener.on_file",
 ];
@@ -245,7 +246,7 @@ mod tests {
             (FILE_FIELDS, 5),
             (TRANSCRIPT_OPS, 6),
             (ITEM_KINDS, 9),
-            (LISTENER_EVENTS, 19),
+            (LISTENER_EVENTS, 20),
         ] {
             assert_eq!(group.len(), n, "{} changed size: {:?}", group.len(), group);
         }

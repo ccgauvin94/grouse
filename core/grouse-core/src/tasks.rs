@@ -35,6 +35,11 @@ pub(crate) const EXTENSION: &str = "Assistant State";
 /// The extension KEY, which is what prefixes every tool name.
 pub(crate) const EXTENSION_KEY: &str = "assistantstate";
 
+/// The notifier, which owns the relay into a session's transcript. Only
+/// `thread_note` is exposed on it globally (see the `notify` block in config.yaml).
+pub(crate) const NOTE_EXTENSION: &str = "Notify";
+pub(crate) const NOTE_EXTENSION_KEY: &str = "notify";
+
 /// `_goose/unstable/tools/call` params for one tool on `wire`.
 ///
 /// `extensionName` is REQUIRED by the server's `GooseToolCallRequest` and it is
@@ -174,6 +179,87 @@ pub(crate) fn labels(open: Option<&str>, handed: Option<&str>) -> Vec<String> {
         }
     }
     out
+}
+
+/// One short opening line per label: what the thread holds right now.
+///
+/// This is the "context, pre-loaded" half of a thread chat: the conversation is minted
+/// with one deterministic assistant row naming its own items, so opening it is not a
+/// blank page and the model does not have to be told which area it is in. No model turn
+/// (it is a `thread_note` relay), and it costs ~150 tokens once, when the thread is made.
+pub(crate) fn thread_seeds(
+    open: Option<&str>,
+    handed: Option<&str>,
+) -> std::collections::BTreeMap<String, String> {
+    // label -> (rows, titles)
+    let mut out: std::collections::BTreeMap<String, (usize, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for (text, kind) in [(open, "open"), (handed, "handed over")] {
+        let Some(text) = text else { continue };
+        let Ok(Value::Array(rows)) = serde_json::from_str::<Value>(text) else {
+            continue;
+        };
+        for row in rows {
+            let Some(label) = row.get("thread").and_then(Value::as_str) else {
+                continue;
+            };
+            let label = label.trim();
+            if label.is_empty() {
+                continue;
+            }
+            let title = row
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if title.is_empty() {
+                continue;
+            }
+            let entry = out.entry(label.to_string()).or_insert((0, Vec::new()));
+            entry.0 += 1;
+            // Three is enough to place the area; the panel carries the rest live.
+            if entry.1.len() < 3 {
+                let mut short = title;
+                if short.chars().count() > 110 {
+                    short = short.chars().take(110).collect::<String>() + "…";
+                }
+                entry.1.push(format!("{short} ({kind})"));
+            }
+        }
+    }
+    out.into_iter()
+        .map(|(label, (count, titles))| {
+            let mut line = String::from("Thread opened. Holding ");
+            line.push_str(&count.to_string());
+            line.push_str(if count == 1 { " item: " } else { " items: " });
+            line.push_str(&titles.join("; "));
+            if count > titles.len() {
+                line.push_str("; …");
+            }
+            line.push('.');
+            (label, line)
+        })
+        .collect()
+}
+
+/// `notify__thread_note` — append one line into a thread's own conversation.
+///
+/// The CORE uses it for exactly one thing: the OPENING line of a thread chat. It must
+/// never write into `sessions.db` itself, and this is the one path that already knows how.
+///
+/// `once` makes the relay the guard: it writes only while the thread's conversation is
+/// still empty. That is what lets the core re-offer the line on every open with no state
+/// of its own — a thread whose mint-time relay failed, or one that predates this map
+/// (minted by an older client, or mapped by hand), gets its context the first time
+/// somebody opens it, and a thread that already has a log is left alone.
+pub(crate) fn note_params(wire: &str, label: &str, text: &str) -> Value {
+    json!({
+        "sessionId": wire,
+        "extensionName": NOTE_EXTENSION,
+        "name": format!("{NOTE_EXTENSION_KEY}__thread_note"),
+        "arguments": { "thread": label, "text": text, "once": true },
+    })
 }
 
 /// `nuclera-pricing` -> `Thread: Nuclera pricing`, the name every thread chat carries.
@@ -618,6 +704,45 @@ mod tests {
         // A section that failed contributes nothing rather than emptying the set.
         assert_eq!(labels(None, Some(handed)), vec!["a-one".to_string(), "c-three".to_string()]);
         assert!(labels(None, None).is_empty());
+    }
+
+    #[test]
+    fn a_thread_seed_names_what_the_thread_holds() {
+        let open = r#"[{"id":"1","thread":"a-one","title":"Renew the domain"},
+                       {"id":"2","thread":"a-one","title":"Call the insurer"},
+                       {"id":"3","thread":"a-one","title":"Third"},
+                       {"id":"4","thread":"a-one","title":"Fourth is beyond the cap"},
+                       {"id":"5","thread":"b-two","title":"Ring the vet"},
+                       {"id":"6","title":"unlabelled"}]"#;
+        let seeds = thread_seeds(Some(open), None);
+        // One line per label, singular/plural correct, and capped at three titles.
+        assert_eq!(
+            seeds.get("b-two").map(String::as_str),
+            Some("Thread opened. Holding 1 item: Ring the vet (open).")
+        );
+        let a = seeds.get("a-one").cloned().unwrap_or_default();
+        assert!(a.starts_with("Thread opened. Holding 4 items: "), "{a}");
+        assert!(a.contains("Renew the domain (open)"));
+        assert!(a.ends_with('.'), "{a}");
+        // A row with no label cannot seed a thread.
+        assert_eq!(seeds.len(), 2);
+    }
+
+    #[test]
+    fn the_note_params_name_the_relay_tool() {
+        let p = note_params("s1", "a-one", "hello");
+        assert_eq!(p["name"], "notify__thread_note");
+        assert_eq!(p["extensionName"], NOTE_EXTENSION);
+        assert_eq!(p["arguments"]["thread"], "a-one");
+    }
+
+    #[test]
+    fn the_opening_line_may_only_land_once() {
+        // `once` is the whole idempotence story: the relay checks the conversation is
+        // empty, so the core can offer the line on every open without keeping state.
+        let p = note_params("s1", "a-one", "Thread opened.");
+        assert_eq!(p["arguments"]["once"], true);
+        assert_eq!(p["arguments"]["thread"], "a-one");
     }
 
     #[test]

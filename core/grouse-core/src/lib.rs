@@ -536,6 +536,18 @@ pub trait CoreListener: Send + Sync {
     /// refresh and after every task action.
     fn on_tasks(&self, tasks: String);
 
+    /// The conversation a thread's chat lives in, ready to be opened.
+    ///
+    /// Emitted by `open_thread` once the label is RESOLVED (from the map, or after
+    /// minting one) — and only then, because the core does not open it: binding a chat
+    /// is the client's ordinary `open_session` path, with its turn state, tools and
+    /// title. Having the core bind it instead was a real defect (2026-11-04): its
+    /// ready-arrival carried an id the client had never asked to display, so every
+    /// guard that keeps a late `Ready` from stealing the screen refused it, and the
+    /// tap left the reader in the previous chat — often the Assistant thread — while
+    /// the panel showed a thread it had not opened.
+    fn on_thread_ready(&self, label: String, session_id: String);
+
     /// A full replay's progress (`refresh_session` with `Full`).
     ///
     /// `loaded` counts MESSAGES the replay has ingested, `total` is the
@@ -587,6 +599,11 @@ pub trait GrouseUnstableListener: Send + Sync {
     fn on_tools(&self, session_id: String, tools: String);
     fn on_extensions(&self, extensions: String);
     fn on_session_extensions(&self, session_id: String, extensions: String);
+    /// The extension CATALOG of the server that owns this chat (same shape as
+    /// `on_extensions`, which is the MAIN server's config.yaml for the settings screen).
+    /// Keyed by session: a roam chat's catalog lives on its peer, and a chat's sheet
+    /// needs the rows it does NOT have to offer them.
+    fn on_extension_catalog(&self, session_id: String, extensions: String);
     fn on_config_value(&self, key: String, value: String);
     fn on_supported_models(&self, provider: String, models: String);
     /// The server's provider inventory (`_goose/unstable/providers/list`): the
@@ -634,6 +651,12 @@ pub(crate) fn unlabeled_steps(turn_runs: &[String], labeled: &HashSet<String>) -
 /// How many of a turn's steps the end-of-turn summarizer labels. A step is one
 /// thinking burst plus the calls it ran, so a long loop is many steps; past this
 /// the rest keep their provisional label instead of queueing a huge request.
+/// How long a hidden session's failure blocks a retry (see
+/// `CoreState::hidden_backoff`). Long enough that a failing path cannot mint an
+/// agent per pass — the ~45s cadence that produced 30-40 hidden sessions per half
+/// hour — and short enough that a transient server restart heals by itself.
+const HIDDEN_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
 const MAX_SUMMARIZED_STEPS: usize = 40;
 
 /// How many trailing messages ONE backfill page asks the wire for. Pages are
@@ -719,6 +742,16 @@ struct CoreState {
     /// that may be truncated. Keyed by display id: a turn on one chat must not
     /// mark another chat's cache partial (parallel peers make that real).
     incomplete: HashSet<String>,
+    /// Per-purpose cool-off after a hidden session FAILED to be created or used:
+    /// the instant of the last failure. A hidden session is a whole goose agent
+    /// (extensions leased, MCP servers spawned), so a path that re-mints one per
+    /// retry is a process factory — measured 2026-11-06: ~500 hidden sessions a
+    /// day and 75 `attachments-mcp` children under the roam agent. Each of the
+    /// three creators (My Day host, file fetch, step labels) drops its cached
+    /// session on ANY failure, which is right for recovery and wrong as a retry
+    /// policy. Keyed by purpose, not by session: "" = the main wire's My Day
+    /// host, "file:<label>" a peer's fetch host, "labels:<slot>" the summarizer.
+    hidden_backoff: HashMap<String, std::time::Instant>,
     /// Per-session pending intents (key is sessionId, "" for global/no-session).
     /// Prompts queued in one chat must not leak into another.
     pending: HashMap<String, VecDeque<PendingIntent>>,
@@ -762,6 +795,16 @@ struct CoreState {
     /// only when one was actually started, so a bare title update cannot clear
     /// the app's busy/steer state.
     active_runs: HashMap<String, String>,
+    /// The run id that ENDED each session's last turn, once the SERVER said so
+    /// (`activeRunId: null`, or the `session/prompt` reply). A `session_info_update`
+    /// that repeats a dead run id must not re-arm it: the client marks a chat busy
+    /// the moment it sees an id, and there is no second end to clear it — so the
+    /// chat sat on "working…", the composer said "Queue message…", and a retyped
+    /// message was parked instead of sent (measured 2026-11-08 on a roam chat,
+    /// whose resync touches re-announce the last run). Deliberately NOT filled by
+    /// `turn_lost`: a wire that dropped mid-turn leaves the run alive on the host,
+    /// and its re-announcement after the reconnect is the only way to re-adopt it.
+    ended_runs: HashMap<String, String>,
     /// Per-session backfill bookkeeping (docs/TRANSCRIPT_MODEL.md, "Windows").
     backfill: HashMap<String, Backfill>,
     /// Each session's plain tool runs for the turn in flight, oldest first.
@@ -835,6 +878,22 @@ struct CoreInner {
     /// Refreshed with the My Day lists; the label set that needs one is derived from
     /// those same rows.
     thread_map: Mutex<std::collections::BTreeMap<String, String>>,
+    /// Serialises My Day refreshes.
+    ///
+    /// A refresh is not just a read: it MINTS thread conversations, and two of them
+    /// running at once both see "no mapping" and both create one. Measured 2026-11-04:
+    /// six identical "Thread: Lodgepole pth1r" sessions inside two seconds, because a
+    /// tab open, a panel refresh and the post-open refresh all raced. The lists are
+    /// cheap; serialising them costs nothing and makes creation one-at-a-time.
+    tasks_refresh_lock: tokio::sync::Mutex<()>,
+    /// The opening line each thread's chat should carry, from the last refresh.
+    ///
+    /// Kept so a TAP can seed, not just a mint: a thread created before the relay could
+    /// write (or mapped by hand, or whose mint-time note failed silently) would otherwise
+    /// open blank forever — "pre-opened with the context" is only true if the line lands.
+    /// Re-offering it is safe because the relay writes it once and refuses after that
+    /// (`note_params`), so this needs no state of its own beyond the text.
+    last_seeds: Mutex<std::collections::BTreeMap<String, String>>,
 }
 
 /// A file the app wants to attach, read on demand.
@@ -935,6 +994,8 @@ impl Core {
                 tasks_session: Mutex::new(None),
                 file_sessions: Mutex::new(HashMap::new()),
                 thread_map: Mutex::new(std::collections::BTreeMap::new()),
+                tasks_refresh_lock: tokio::sync::Mutex::new(()),
+                last_seeds: Mutex::new(std::collections::BTreeMap::new()),
             }),
         });
         let _ = core.inner.self_ref.set(Arc::downgrade(&core));
@@ -1098,13 +1159,23 @@ impl Core {
             return;
         }
         if let Some(id) = self.inner.thread_map.lock().get(&label).cloned() {
-            self.open_session(id);
+            // The chat exists — but it may still be EMPTY, and an empty thread chat is the
+            // "pre-opened with the context" promise broken: it happens whenever the relay
+            // could not write at mint time, and for every thread that predates this map.
+            // The relay itself refuses a second opening line, so this is safe to repeat.
+            self.seed_thread_once(&label);
+            self.inner.listener.on_thread_ready(label, id);
             return;
         }
         let this = self.clone();
         crate::roam::runtime().spawn(async move {
-            match this.create_thread(&label).await {
-                Ok(id) => this.open_session(id),
+            match this.create_thread(&label, None).await {
+                Ok(id) => {
+                    this.inner
+                        .listener
+                        .on_thread_ready(label.clone(), id);
+                    this.seed_thread_once(&label);
+                }
                 Err(e) => this.alert(format!("could not open the {label} thread ({e})")),
             }
         });
@@ -2284,6 +2355,10 @@ impl Core {
         if let Some(wire) = self.inner.file_sessions.lock().get(&key).cloned() {
             return Ok(wire);
         }
+        let purpose = format!("file:{key}");
+        if !self.hidden_ready(&purpose) {
+            return Err("the file host session failed moments ago; retrying shortly".to_string());
+        }
         let cwd = self
             .inner
             .state
@@ -2292,30 +2367,75 @@ impl Core {
             .clone()
             .map(|c| c.cwd)
             .unwrap_or_default();
-        let reply = owner
+        let reply = match owner
             .request(
                 "session/new",
                 crate::tasks::new_session_params(&cwd),
             )
             .await
-            .map_err(|e| e.to_string())?;
-        let wire = reply
+        {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.hidden_failed(&purpose);
+                return Err(error.to_string());
+            }
+        };
+        let Some(wire) = reply
             .get("sessionId")
             .and_then(Value::as_str)
-            .ok_or_else(|| "session/new returned no session id".to_string())?
-            .to_string();
-        owner
+            .map(str::to_string)
+        else {
+            self.hidden_failed(&purpose);
+            return Err("session/new returned no session id".to_string());
+        };
+        if let Err(error) = owner
             .request(
                 "session/set_mode",
                 crate::tasks::set_mode_params(&wire, "auto"),
             )
             .await
-            .map_err(|e| e.to_string())?;
+        {
+            self.hidden_failed(&purpose);
+            return Err(error.to_string());
+        }
         self.inner
             .file_sessions
             .lock()
             .insert(key, wire.clone());
+        self.hidden_created(&purpose);
         Ok(wire)
+    }
+
+    /// May a hidden session be created for `purpose` right now? See
+    /// `CoreState::hidden_backoff`: after a failure, wait before minting another
+    /// agent, and say so in the turn log so a burst is visible rather than
+    /// inferred from a process count.
+    fn hidden_ready(&self, purpose: &str) -> bool {
+        let mut state = self.inner.state.lock();
+        match state.hidden_backoff.get(purpose).copied() {
+            Some(at) if at.elapsed() < HIDDEN_RETRY_AFTER => false,
+            Some(_) => {
+                state.hidden_backoff.remove(purpose);
+                true
+            }
+            None => true,
+        }
+    }
+
+    /// Record that a hidden session for `purpose` failed, so the next attempt
+    /// waits instead of spawning another agent immediately.
+    fn hidden_failed(&self, purpose: &str) {
+        self.inner.state.lock().hidden_backoff.insert(
+            purpose.to_string(),
+            std::time::Instant::now(),
+        );
+        self.note(format!("hidden-session {purpose} failed; backing off"));
+    }
+
+    /// One line per creation, so "why are there N agents" is answerable from the
+    /// turn log instead of a process count.
+    fn hidden_created(&self, purpose: &str) {
+        self.note(format!("hidden-session {purpose} created"));
     }
 
     async fn tasks_wire(&self) -> Result<(Arc<crate::spine::Conn>, String), String> {
@@ -2328,6 +2448,9 @@ impl Core {
         if let Some(wire) = self.inner.tasks_session.lock().clone() {
             return Ok((conn, wire));
         }
+        if !self.hidden_ready("tasks") {
+            return Err("the task host session failed moments ago; retrying shortly".to_string());
+        }
         let cwd = self
             .inner
             .state
@@ -2336,18 +2459,27 @@ impl Core {
             .clone()
             .map(|c| c.cwd)
             .unwrap_or_default();
-        let reply = crate::session::request(
+        let reply = match crate::session::request(
             conn.as_ref(),
             "session/new",
             crate::tasks::new_session_params(&cwd),
         )
         .await
-        .map_err(|e| e.to_string())?;
-        let wire = reply
+        {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.hidden_failed("tasks");
+                return Err(error.to_string());
+            }
+        };
+        let Some(wire) = reply
             .get("sessionId")
             .and_then(Value::as_str)
-            .ok_or_else(|| "session/new returned no session id".to_string())?
-            .to_string();
+            .map(str::to_string)
+        else {
+            self.hidden_failed("tasks");
+            return Err("session/new returned no session id".to_string());
+        };
         // Not fatal: the tool call that follows reports the real failure, and
         // this alert is the only place that failure's CAUSE is named.
         if let Err(e) = crate::session::request(
@@ -2360,6 +2492,7 @@ impl Core {
             self.alert(format!("My Day: task session could not be set to auto ({e})"));
         }
         *self.inner.tasks_session.lock() = Some(wire.clone());
+        self.hidden_created("tasks");
         Ok((conn, wire))
     }
 
@@ -2378,6 +2511,7 @@ impl Core {
             Ok(reply) => {
                 if crate::tasks::is_error(&reply) {
                     *self.inner.tasks_session.lock() = None;
+                    self.hidden_failed("tasks");
                     Err(crate::tasks::content_text(&reply))
                 } else {
                     Ok(reply)
@@ -2385,6 +2519,7 @@ impl Core {
             }
             Err(e) => {
                 *self.inner.tasks_session.lock() = None;
+                self.hidden_failed("tasks");
                 Err(e.to_string())
             }
         }
@@ -2599,6 +2734,7 @@ impl Core {
                 let text = crate::tasks::content_text(&reply);
                 if crate::tasks::is_error(&reply) {
                     *self.inner.tasks_session.lock() = None;
+                    self.hidden_failed("tasks");
                     Err(text)
                 } else {
                     Ok(text)
@@ -2606,6 +2742,7 @@ impl Core {
             }
             Err(e) => {
                 *self.inner.tasks_session.lock() = None;
+                self.hidden_failed("tasks");
                 Err(e.to_string())
             }
         }
@@ -2617,6 +2754,9 @@ impl Core {
     /// The same document carries the thread map, and a refresh is also the moment to
     /// mint the conversations a new thread has not got yet — see `threads_sync`.
     async fn tasks_refresh_now(&self) {
+        // One refresh at a time: this path creates thread conversations, and a
+        // concurrent second pass would create them again (see the field's comment).
+        let _one_at_a_time = self.inner.tasks_refresh_lock.lock().await;
         let open = self
             .tasks_call(|wire| crate::tasks::open_params(wire, 60))
             .await;
@@ -2630,11 +2770,18 @@ impl Core {
             open.as_deref().ok(),
             tasks.as_deref().ok(),
         );
+        let seeds = crate::tasks::thread_seeds(
+            open.as_deref().ok(),
+            tasks.as_deref().ok(),
+        );
+        if !seeds.is_empty() {
+            *self.inner.last_seeds.lock() = seeds.clone();
+        }
         let (map, mut error) = self.threads_read().await;
         // Paint first: the lists are the tab, and a first run has several conversations
         // to create. The re-emit below carries them.
         self.emit_tasks(&open, &done, &tasks, &map, error.clone());
-        if self.threads_sync(&labels).await {
+        if self.threads_sync(&labels, &seeds).await {
             let (map, err) = self.threads_read().await;
             error = err.or(error);
             self.emit_tasks(&open, &done, &tasks, &map, error);
@@ -2688,7 +2835,11 @@ impl Core {
     /// BOUNDED per refresh (`MAX_NEW_THREADS`): a board with twenty new labels must not
     /// turn one refresh into sixty round trips, and each creation is three (session/new,
     /// rename, link). The rest converge on the following refreshes.
-    async fn threads_sync(&self, labels: &[String]) -> bool {
+    async fn threads_sync(
+        &self,
+        labels: &[String],
+        seeds: &std::collections::BTreeMap<String, String>,
+    ) -> bool {
         const MAX_NEW_THREADS: usize = 4;
         let mut created = false;
         let mut tried = 0usize;
@@ -2699,11 +2850,22 @@ impl Core {
             if self.inner.thread_map.lock().contains_key(label) {
                 continue;
             }
+            // Someone else may have created it between our read and now (a second
+            // client, or an earlier refresh): ask again before minting, because a
+            // duplicate conversation is worse than a slightly stale one.
+            let (fresh, _) = self.threads_read().await;
+            if fresh.contains_key(label) {
+                continue;
+            }
             tried += 1;
             // Silent by design: this is background work with a live fallback (the tap
             // still opens a chat), and the tab shows `errors.threads` when the MAP itself
             // could not be read. A failure here is retried on the next refresh.
-            if self.create_thread(label).await.is_ok() {
+            if self
+                .create_thread(label, seeds.get(label).map(String::as_str))
+                .await
+                .is_ok()
+            {
                 created = true;
             }
         }
@@ -2715,7 +2877,12 @@ impl Core {
     ///
     /// The name matters: it is what every thread chat has always been called, so the
     /// sessions created before this map existed keep their identity.
-    async fn create_thread(&self, label: &str) -> Result<String, String> {
+    async fn create_thread(&self, label: &str, seed: Option<&str>) -> Result<String, String> {
+        // Asked again here, not just by the caller: this runs from a tap as well as
+        // from a refresh, and both can be in flight at once.
+        if let Some(existing) = self.inner.thread_map.lock().get(label).cloned() {
+            return Ok(existing);
+        }
         let conn = self.inner.conn.lock().clone().ok_or("not connected")?;
         if !conn.is_ready() {
             return Err("not connected".into());
@@ -2751,7 +2918,49 @@ impl Core {
             .thread_map
             .lock()
             .insert(label.to_string(), id.clone());
+        // The opening line: a thread chat that starts blank makes the reader (and the
+        // model) work out which area it is. Best effort — a relay failure must not fail
+        // the creation, the conversation already exists and is linked.
+        if let Some(text) = seed {
+            let label_owned = label.to_string();
+            let text_owned = text.to_string();
+            if let Err(e) = self
+                .tasks_call(move |wire| {
+                    crate::tasks::note_params(wire, &label_owned, &text_owned)
+                })
+                .await
+            {
+                // Silent until 2026-11-04, and that silence is why a batch of threads opened
+                // blank with nobody able to say why: the opening line is best effort, so the
+                // failure has to be visible SOMEWHERE.
+                eprintln!("[thread-seed] {label}: {e}");
+            }
+        }
         Ok(id)
+    }
+
+    /// Offer a thread's opening line to a conversation that may already exist.
+    ///
+    /// Best effort and idempotent by the relay's own rule (`once`), so it is a no-op on a
+    /// thread that has a log and a repair on one that does not. Runs off the caller's
+    /// thread: `open_thread` is a tap handler and must not wait on a tool call.
+    fn seed_thread_once(&self, label: &str) {
+        let Some(text) = self.inner.last_seeds.lock().get(label).cloned() else {
+            return;
+        };
+        let this = self.clone();
+        let label = label.to_string();
+        crate::roam::runtime().spawn(async move {
+            let shown = label.clone();
+            if let Err(e) = this
+                .tasks_call(move |wire| {
+                    crate::tasks::note_params(wire, &label, &text)
+                })
+                .await
+            {
+                eprintln!("[thread-seed reopen] {shown}: {e}");
+            }
+        });
     }
 
     /// A mutation, then a refresh: the UI reflects server state, never a local
@@ -3434,9 +3643,13 @@ impl Core {
             .summarizer_sessions
             .get(&slot)
             .cloned();
+        let purpose = format!("labels:{slot}");
         let (hidden, wire) = if let Some(pair) = existing {
             pair
         } else {
+            if !self.hidden_ready(&purpose) {
+                return; // a session minted now would be another agent for nothing
+            }
             let cwd = owner
                 .session_cwd(&key)
                 .filter(|cwd| !cwd.is_empty())
@@ -3456,6 +3669,7 @@ impl Core {
             let Ok(reply) =
                 crate::session::request(owner.as_ref(), "session/new", params).await
             else {
+                self.hidden_failed(&purpose);
                 return;
             };
             let Some(wire) = reply
@@ -3463,6 +3677,7 @@ impl Core {
                 .and_then(Value::as_str)
                 .map(str::to_string)
             else {
+                self.hidden_failed(&purpose);
                 return;
             };
             let hidden = crate::session::display_id(owner.label().as_deref(), &wire);
@@ -3471,6 +3686,7 @@ impl Core {
                 .lock()
                 .summarizer_sessions
                 .insert(slot.clone(), (hidden.clone(), wire.clone()));
+            self.hidden_created(&purpose);
             (hidden, wire)
         };
         self.inner
@@ -3508,12 +3724,14 @@ impl Core {
             state.summarizer_ids.remove(&hidden);
             if !sent || !truncated {
                 // The hidden session is unusable (the link replaced it, or its
-                // context could not be emptied): recreate it next turn.
+                // context could not be emptied): recreate it next turn — after a
+                // cool-off, or a path that keeps failing mints one per pass.
                 state.summarizer_sessions.remove(&slot);
                 state.summarizer_replies.remove(&hidden);
             }
         }
         if !sent || !truncated {
+            self.hidden_failed(&purpose);
             return;
         }
         let store = self.store_for(&key);
@@ -3594,6 +3812,16 @@ impl Core {
                 ("error".to_string(), false)
             }
         };
+        // The reply is authoritative as well, so whatever run id is STILL
+        // recorded for this chat is over: recording it here means a later touch
+        // repeating that id cannot re-arm a finished turn. (The run-end
+        // notification usually arrives first and records it itself.)
+        if clean {
+            let mut state = self.inner.state.lock();
+            if let Some(ended) = state.active_runs.remove(key) {
+                state.ended_runs.insert(key.to_string(), ended);
+            }
+        }
         if !self.finish_turn(key, &stop, clean) {
             // Another end signal closed this turn first (goose's run-end
             // notification, or the wire dying). The prompt reply still moves
@@ -3602,7 +3830,6 @@ impl Core {
             self.refresh_stamp(key, true);
         }
     }
-
     /// One line in the turn log (see [`CoreState::turn_log`]).
     fn note(&self, line: impl AsRef<str>) {
         static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -4385,14 +4612,29 @@ impl crate::session::DispatchHost for Core {
             // and the only one that still arrives when the response is lost.
             // The run-end is claimed once (`active_runs` held a live id), so a
             // bare title update cannot end anything.
-            let was_live = self.inner.state.lock().active_runs.remove(&key).is_some();
-            if was_live {
+            let ended = self.inner.state.lock().active_runs.remove(&key);
+            if let Some(ended) = ended {
+                // Remember WHICH run ended: a later `session_info_update` that
+                // repeats this id must not re-arm a dead turn (see `ended_runs`).
+                self.inner
+                    .state
+                    .lock()
+                    .ended_runs
+                    .insert(key.clone(), ended);
                 self.inner.listener.on_active_run(key.clone(), String::new());
                 self.finish_turn(&key, "ended", true);
             }
         } else {
             {
                 let mut state = self.inner.state.lock();
+                if state.ended_runs.get(&key) == Some(&run_id) {
+                    // A run that already ended, repeated by a touch. Re-arming it
+                    // would leave the chat busy forever: the client sets busy on
+                    // the id, and the end for that run has already been sent.
+                    drop(state);
+                    self.note(format!("run-start {key} run={run_id} IGNORED (ended)"));
+                    return;
+                }
                 state.active_runs.insert(key.clone(), run_id.clone());
                 // A run id is a turn in flight, whoever started it. Without this
                 // the CORE would not know the turn exists, and the end-of-turn
@@ -4534,6 +4776,18 @@ impl crate::session::DispatchHost for Core {
     fn cache_session(&self, key: &str) {
         self.save_cache_for(key);
     }
+    fn is_incomplete(&self, key: &str) -> bool {
+        self.inner.state.lock().incomplete.contains(key)
+    }
+    fn listed_stamp(&self, key: &str) -> String {
+        self.inner
+            .state
+            .lock()
+            .session_updated_at
+            .get(key)
+            .cloned()
+            .unwrap_or_default()
+    }
     fn session_stamp(&self, key: &str, updated_at: &str) {
         if !updated_at.is_empty() {
             self.inner
@@ -4642,6 +4896,9 @@ mod tests {
         fn on_commands(&self, _: Vec<String>) {}
         fn on_session_open_failed(&self, _: String, _: String) {}
         fn on_tasks(&self, _: String) {}
+        fn on_thread_ready(&self, label: String, session: String) {
+            self.push(format!("thread_ready {label} {session}"));
+        }
     }
 
     fn core() -> (Arc<Core>, Arc<Events>) {
@@ -4715,6 +4972,9 @@ mod tests {
         fn on_session_open_failed(&self, session_id: String, message: String) {
             self.0.on_session_open_failed(session_id, message);
         }
+        fn on_thread_ready(&self, label: String, session_id: String) {
+            self.0.on_thread_ready(label, session_id);
+        }
         fn on_tasks(&self, tasks: String) {
             self.0.on_tasks(tasks);
         }
@@ -4772,6 +5032,81 @@ mod tests {
             events.run_ends(),
             vec![format!("run_ended {key} ended")],
             "the adopted turn must be released like any other"
+        );
+    }
+
+    #[test]
+    fn a_failed_hidden_session_backs_off_instead_of_minting_another_agent() {
+        // Every hidden-session creator drops its cached session on failure (correct
+        // recovery) and every retry mints a WHOLE goose agent — extensions leased,
+        // MCP servers spawned. Measured 2026-11-06: ~500 hidden sessions a day and 75
+        // `attachments-mcp` children on the roam agent. So a failure has to cool off.
+        let (core, _events) = core();
+        assert!(core.hidden_ready("tasks"), "a fresh purpose may create");
+        core.hidden_failed("tasks");
+        assert!(
+            !core.hidden_ready("tasks"),
+            "the immediate retry would be another agent for nothing"
+        );
+        assert!(core.hidden_ready("file:"), "the cool-off is per purpose");
+        // Age the recorded failure past the window: it heals by itself.
+        core.inner.state.lock().hidden_backoff.insert(
+            "tasks".to_string(),
+            std::time::Instant::now() - HIDDEN_RETRY_AFTER - std::time::Duration::from_secs(1),
+        );
+        assert!(core.hidden_ready("tasks"), "an old failure no longer blocks");
+    }
+
+    #[test]
+    fn a_dead_run_repeated_by_a_touch_does_not_re_arm_the_chat() {
+        // The chat sat on "working…" with nothing running — and the composer said
+        // "Queue message…", so a retyped message was parked instead of sent. Cause:
+        // a resync touch repeated the run id of a turn that had already ended, and
+        // the app marks a chat busy the moment it sees an id (there is no second end
+        // to wait for). A run the SERVER said ended is therefore inert.
+        let (core, events) = core();
+        let key = "roam:Phaethon:20261107_120".to_string();
+        core.inner.hub.display(&key);
+        let armed = |e: &Events| {
+            e.lines()
+                .into_iter()
+                .filter(|line| line.starts_with("active_run "))
+                .count()
+        };
+
+        crate::session::DispatchHost::active_run(&*core, key.clone(), "run-1".to_string());
+        crate::session::DispatchHost::active_run(&*core, key.clone(), String::new());
+        assert_eq!(events.run_ends().len(), 1);
+        let announcements = armed(&events);
+
+        // A later touch repeats the dead id.
+        crate::session::DispatchHost::active_run(&*core, key.clone(), "run-1".to_string());
+        assert!(
+            !core.turn_in_flight(key.clone()),
+            "a repeated dead run id must not mark the chat busy"
+        );
+        assert_eq!(armed(&events), announcements, "and must not re-announce it");
+
+        // A NEW run on the same chat is a real turn.
+        crate::session::DispatchHost::active_run(&*core, key.clone(), "run-2".to_string());
+        assert!(core.turn_in_flight(key.clone()));
+    }
+
+    #[test]
+    fn a_wire_drop_leaves_its_run_re_adoptable() {
+        // The contrast to the test above: `turn_lost` releases the turn because the
+        // WIRE died, while the run is still alive on the host. Its re-announcement
+        // after the reconnect is the only way to re-adopt the chat, so it must arm.
+        let (core, _events) = core();
+        let key = "roam:Phaethon:s3".to_string();
+        core.inner.hub.display(&key);
+        crate::session::DispatchHost::active_run(&*core, key.clone(), "run-5".to_string());
+        crate::session::DispatchHost::turn_lost(&*core, &key);
+        assert!(!core.turn_in_flight(key.clone()));
+        crate::session::DispatchHost::active_run(&*core, key.clone(), "run-5".to_string());
+        assert!(
+            core.turn_in_flight(key.clone()),
+            "the re-announced live run re-adopts the chat"
         );
     }
 
