@@ -377,6 +377,12 @@ void Manager::autoConnect()
     }
     m_landing = true;
     connectToServer();
+    // A launch OPENS NOTHING: it connects, then stays on the landing page until a chat is
+    // picked — the same rule the phone follows. `connectToServer` clears the flag (it is the
+    // manual "connect and go to the chat" path), so re-assert it here rather than making the
+    // two callers disagree about what pressing Connect means.
+    m_landing = true;
+    emit landingChanged();
 }
 
 void Manager::disconnect()

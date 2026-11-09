@@ -6,6 +6,25 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed — a launch opens nothing
+
+- **No conversation loads by itself any more.** A launch used to land on the Assistant thread
+  (immediately, or — when its id was not cached — as soon as a `session/list` arrived, which is
+  what opened a chat a minute in on whatever screen you had walked to), and a relaunch could
+  drop you back into the restored chat route. Now: the app connects, shows its landing page, and
+  stays there until you pick something. The nav stack is reset to the landing page on launch, so
+  a process death no longer reopens the chat you were in.
+- **The wire still resumes the last main chat.** That is not an open — nothing adopts it, so
+  `currentSession` stays empty — it just avoids minting a throwaway `session/new` (an empty
+  "New Chat") on every launch. Tapping a chat adopts it as usual.
+- Tapping Assistant before the session list has arrived still parks the open, and it is still
+  dropped if you walk off to My Day or a project before it lands.
+- Desktop parity: `autoConnect()` no longer leaves the landing page (`connectToServer()` clears
+  it for the manual Connect path; a launch re-asserts it), so both clients open on their landing
+  view with nothing loaded.
+
+grouse 0.2.87 (versionCode 189).
+
 ### Fixed — the launch's Assistant landing can no longer open a chat later, elsewhere
 
 - Opening the app is meant to land on the Assistant thread. When its session id is not cached

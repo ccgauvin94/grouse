@@ -174,9 +174,21 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
     }
 
     val nav = rememberNavController()
-    // Fresh start lands on the Assistant thread; re-entry after the lock screen (or any
-    // recreation) only reconnects to whatever session was already open.
-    LaunchedEffect(Unit) { cm.connectHome() }
+    // Fresh start connects but opens NOTHING (ConnectionManager.connectHome): no Assistant
+    // landing, no resumed chat.
+    LaunchedEffect(Unit) {
+        // …and the launch surface is the landing page. The nav controller restores the last
+        // route after a process death, so without this a relaunch dropped the reader straight
+        // back into a conversation they never asked to open. Runs BEFORE the intent effects
+        // below, so a notification or shortcut still wins. A later re-entry from the lock
+        // screen is not a launch (connectHome returns false) and leaves the stack alone.
+        if (cm.connectHome() && cm.configured) {
+            nav.navigate("landing") {
+                popUpTo(0) { inclusive = true }
+                launchSingleTop = true
+            }
+        }
+    }
     // "New chat" from a shortcut/tile: start fresh and land on the chat screen.
     LaunchedEffect(cm.pendingNewChat.value) {
         if (cm.pendingNewChat.value && cm.configured) {
