@@ -25,7 +25,17 @@ All notable changes to Grouse are recorded here. The format is based on
 - Refreshed from the tool rows that carry step/status changes (`on_item`), on `on_run_ended`,
   and when the panel/sheet is shown; a no-op refresh does not repaint.
 
-grouse 0.2.90 (versionCode 192).
+### Fixed — the Android Activity surface is reachable
+
+- The header badge only appears while the chat HAS lanes, so it was invisible in exactly
+  the chat you want to inspect after the fact. The composer's **+** sheet now carries an
+  **Activity** row permanently (with the live count), alongside the tools list; the header
+  badge stays as the at-a-glance version.
+- A chat now learns its lanes when it is painted (`TranscriptOp.Window`), not only from a
+  tool row — a delegate that finished before the chat was opened has no live row to nudge
+  the refresh, so the badge could stay empty on entry.
+
+grouse 0.2.91 (versionCode 193).
 ### Fixed — a project's older chats came back (session/list pages were never followed)
 
 - **`session/list` answers 50 rows at a time, ordered by last message, with a `nextCursor` —

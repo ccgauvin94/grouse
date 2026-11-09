@@ -2893,6 +2893,10 @@ class ConnectionManager private constructor(context: Context) {
                 coreKeyToAppId.remove(op.id)
             }
             is TranscriptOp.Window -> {
+                // The chat is painted, so its work lanes are settled too: this is where an
+                // OPEN learns them (a delegate that finished before you opened the chat has
+                // no live row to nudge the refresh, and the header badge would stay empty).
+                refreshActivity()
                 if (loadingOlder) {
                     // Older items arrive oldest-first; insert them as one batch.
                     olderPending.forEach { (key, bubble) -> upsertBubble(key, bubble) }

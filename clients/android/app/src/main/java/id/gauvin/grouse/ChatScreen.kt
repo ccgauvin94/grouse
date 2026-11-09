@@ -452,6 +452,7 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                 ActivityResultContracts.PickVisualMedia.ImageOnly)) },
             onFiles = { filePicker.launch(arrayOf("*/*")) },
             onDismiss = { showComposer = false },
+            onActivity = { showActivity = true },
         )
     }
 
@@ -1760,6 +1761,10 @@ private fun ComposerSheet(
     onPhotos: () -> Unit,
     onFiles: () -> Unit,
     onDismiss: () -> Unit,
+    /// Open the chat's Activity list (sub-agents + running work). Always offered, because
+    /// the header badge only appears while something is running — so without this the
+    /// surface would be undiscoverable in exactly the chat you want to inspect afterwards.
+    onActivity: () -> Unit,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
@@ -1819,6 +1824,25 @@ private fun ComposerSheet(
                     cm.refreshSessionSheet()
                 }
             }
+            // Activity sits with Tools because they answer the same question — what is
+            // this chat doing, and what may it use. The count is the live lanes.
+            val laneCount = cm.activity.value.count { it.status == "in_progress" }
+            OutlinedButton(
+                onClick = { onDismiss(); onActivity() },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    when {
+                        laneCount > 0 -> "Activity — $laneCount running"
+                        cm.activity.value.isNotEmpty() -> "Activity — ${cm.activity.value.size} recent"
+                        else -> "Activity"
+                    },
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+
             ToolManagementBody(cm, title = "Tools")
             Spacer(Modifier.height(4.dp))
             HorizontalDivider()
