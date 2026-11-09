@@ -19,11 +19,13 @@ All notable changes to Grouse are recorded here. The format is based on
   "New Chat") on every launch. Tapping a chat adopts it as usual.
 - Tapping Assistant before the session list has arrived still parks the open, and it is still
   dropped if you walk off to My Day or a project before it lands.
+- The launch Ready still fetches the session list (that is what the landing page's recent chats
+  come from): skipping the adoption must not skip the one fetch that made the page useful.
 - Desktop parity: `autoConnect()` no longer leaves the landing page (`connectToServer()` clears
   it for the manual Connect path; a launch re-asserts it), so both clients open on their landing
   view with nothing loaded.
 
-grouse 0.2.87 (versionCode 189).
+grouse 0.2.88 (versionCode 190).
 
 ### Fixed — the launch's Assistant landing can no longer open a chat later, elsewhere
 

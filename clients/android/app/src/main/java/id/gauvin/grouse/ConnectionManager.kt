@@ -2642,6 +2642,10 @@ class ConnectionManager private constructor(context: Context) {
         if (launchQuiet) {
             launchQuiet = false
             noteApp("app: launch connected; not adopting $sid")
+            // Nothing is on screen, but the landing page lists recent chats — and the only
+            // other place that fetches them is the adoption block below, which this returns
+            // before. Without it a launch showed an empty landing page over a live wire.
+            refreshSidebar()
             return
         }
         // Latest tap wins: a Ready for a session the user already navigated away from
