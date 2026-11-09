@@ -92,6 +92,7 @@ excluded = 8
 | `work.title` | yes: ChatScreen.kt#lane.title | yes: ui/ChatSidePanel.qml#modelData.title |
 | `work.detail` | yes: ChatScreen.kt#lane.detail | yes: ui/ChatSidePanel.qml#modelData.detail |
 | `work.status` | yes: ChatScreen.kt#lane.status | yes: ui/ChatSidePanel.qml#modelData.status |
+| `work.running` | yes: ChatScreen.kt#lane.running | yes: ui/ChatSidePanel.qml#modelData.running |
 | `work.subagent` | yes: ChatScreen.kt#lane.subagent | yes: ui/ChatSidePanel.qml#modelData.subagent |
 | `work.steps` | yes: ChatScreen.kt#lane.steps | yes: ui/ChatSidePanel.qml#modelData.steps |
 | `call.id` | yes: ConnectionManager.kt#c.id | yes: src/manager.cpp#c.value("id") |

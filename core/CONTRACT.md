@@ -573,8 +573,14 @@ row — which the core already parses into `SubagentStep`s. `activity()` exposes
   sub-agent — nothing has come back to say otherwise, and `subagent: false` says so.
 - **Fields:** `id` (the tool call), `title` (the run summary, else the call title),
   `detail` (the call's arguments, flattened to one line and capped), `status`
-  (`in_progress` | `completed` | `failed`), `subagent`, and `steps` — the child tool
-  calls the sub-agent made, oldest first (`SubagentStep`: `name`, `detail`).
+  (`in_progress` | `completed` | `failed`), `running`, `subagent`, and `steps` — the
+  child tool calls the sub-agent made, oldest first (`SubagentStep`: `name`, `detail`).
+- **`running` is NOT `status == "in_progress"`.** It is that AND the chat still holds a
+  turn. A tool call whose response never came (a stopped turn, a dropped wire) keeps
+  `in_progress` in the stored history forever — one real session had 27 of them, which
+  is how a header badge came to claim "26 running" on an idle chat. A row that is
+  `in_progress` without a live turn is reported as a lane only if it has sub-agent
+  steps, and clients render it "unfinished", never "running".
 - **It is a GETTER, not an event stream.** A client asks when its panel is visible and
   again when a tool row arrives on `on_item` (the only carrier of step/status changes),
   and on `on_run_ended`. Deriving it instead of storing it is what makes it work with no

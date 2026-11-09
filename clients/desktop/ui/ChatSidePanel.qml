@@ -96,7 +96,10 @@ Rectangle {
                 readonly property string wId: modelData.id
                 readonly property string wTitle: modelData.title !== "" ? modelData.title
                                                                         : qsTr("tool call")
-                readonly property bool wRunning: modelData.status === "in_progress"
+                // `running` is the core's answer (a turn is live AND the call is open); an
+                // `in_progress` row without one is a call whose response never came.
+                readonly property bool wRunning: modelData.running === true
+                readonly property bool wUnfinished: !wRunning && modelData.status === "in_progress"
                 readonly property bool wFailed: modelData.status === "failed"
                 readonly property var wSteps: modelData.steps === undefined ? [] : modelData.steps
                 readonly property bool wAgent: modelData.subagent === true
@@ -128,6 +131,7 @@ Rectangle {
                         Controls.Label {
                             text: wdel.wRunning ? qsTr("running")
                                   : wdel.wFailed ? qsTr("failed")
+                                  : wdel.wUnfinished ? qsTr("unfinished")
                                   : qsTr("done")
                             color: Kirigami.Theme.disabledTextColor
                             font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8

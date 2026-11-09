@@ -6,6 +6,22 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — "26 running" on an idle chat, and an Activity pill that read as part of the host name
+
+- **`in_progress` is not the same as running.** A tool call whose response never came — a
+  stopped turn, a dropped wire — keeps `in_progress` in the stored history for good; this
+  session has **27** of them, which is exactly what the badge was counting. `ActiveWork`
+  gains **`running`** = `status == "in_progress"` **and** the chat holds a turn. Without a
+  live turn an open call is reported as a lane only if it has sub-agent steps, and clients
+  render it "unfinished", never "running".
+- **Android**: the activity control moved out of the action slot — the roam chip was cutting
+  its badge off — into the title row, immediately **left of the context donut**. It is no
+  longer a wrench (that means tools): a small pill reading "N running", shown only while
+  something is genuinely running. The composer's + sheet keeps the permanent Activity entry.
+- **Desktop**: the panel's row badge follows the same `running` rule ("unfinished" is its own
+  state), so the Activity tab cannot claim a stale call is in flight.
+
+grouse 0.2.92 (versionCode 194).
 ### Added — the chat's work lanes (sub-agents and background work), both clients
 
 - **`Core::activity()`** (`CONTRACT` §3.7): the active chat's lanes — every tool call that

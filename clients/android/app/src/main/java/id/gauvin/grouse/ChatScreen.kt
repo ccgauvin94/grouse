@@ -579,22 +579,47 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        // Context window fullness, as a colored donut aligned to the
-                        // FAR RIGHT of the title row (it's a status readout, not part of
-                        // the chat name). Shown once the first turn reports usage.
+                        // The right-hand status cluster: work in flight, then the context
+                        // donut. Both sit at the far right of the TITLE row (they are
+                        // readouts, not part of the chat name) — the activity pill used to
+                        // live in the action slot, where the roam chip cut it off and it
+                        // read as part of the host name.
+                        val running = cm.activity.value.count { it.running }
                         val u = cm.usage.value
-                        if (u != null && u.size > 0 && !cm.compacting.value) {
-                            Spacer(Modifier.weight(1f))   // push the donut to the right edge
-                            // Breathing room off the action slot. The roam chip is wider and
+                        val hasRing = u != null && u.size > 0 && !cm.compacting.value
+                        if (running > 0 || hasRing) {
+                            Spacer(Modifier.weight(1f))
+                            // A WORD, not an icon: a wrench means tools, and this is
+                            // agents/background work. Shown only while something is
+                            // genuinely running (CONTRACT §3.7 `running`), so an idle chat
+                            // has no pill at all.
+                            if (running > 0) {
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                    modifier = Modifier.clickable { showActivity = true },
+                                ) {
+                                    Text(
+                                        "$running running",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    )
+                                }
+                            }
+                            // Breathing room off the action slot: the roam chip is wider and
                             // its leading edge sits closer than an icon button's, so the ring
                             // read as part of the host name rather than as the chat's own
-                            // status; it gets more room there.
-                            Spacer(Modifier.width(if (roamPeer != null) 18.dp else 8.dp))
-                            ContextRing(
-                                pct = (u.used * 100 / u.size).coerceIn(0, 100),
-                                modifier = Modifier.size(14.dp),
-                                onClick = { showContextDetail = !showContextDetail }
-                            )
+                            // status. It gets more room there (and more again when the pill
+                            // sits between the title and it).
+                            if (hasRing) {
+                                Spacer(Modifier.width(if (roamPeer != null) 18.dp else 8.dp))
+                                ContextRing(
+                                    pct = (u.used * 100 / u.size).coerceIn(0, 100),
+                                    modifier = Modifier.size(14.dp),
+                                    onClick = { showContextDetail = !showContextDetail }
+                                )
+                            }
                         }
                     }
                 }
@@ -603,23 +628,6 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                 IconButton(onClick = onOpenDrawer) { Icon(Icons.Filled.Menu, contentDescription = "menu") }
             },
             actions = {
-                // Activity: this chat's sub-agents and running work (CONTRACT §3.7). Shown
-                // only when there IS work, so a quiet chat keeps its header clean; the badge
-                // is the point — a delegate working in the background is otherwise invisible
-                // (goose keeps sub-agent sessions off ACP, so nothing else reports them).
-                val lanes = cm.activity.value
-                if (lanes.isNotEmpty()) {
-                    IconButton(onClick = { showActivity = true }) {
-                        BadgedBox(badge = {
-                            Badge {
-                                val live = lanes.count { it.status == "in_progress" }
-                                Text("${if (live > 0) live else lanes.size}")
-                            }
-                        }) {
-                            Icon(Icons.Filled.Build, contentDescription = "activity")
-                        }
-                    }
-                }
                 // Assistant/Sessions/Settings are now drawer items — this icon's navigation role
                 // moved there. On the Assistant thread itself it stays as the page-local briefing-
                 // health indicator (opens the schedule dialog); off it, there's nothing to show here.
@@ -1605,15 +1613,18 @@ fun ActivitySheet(cm: ConnectionManager, onDismiss: () -> Unit) {
             }
             LazyColumn(Modifier.fillMaxWidth()) {
                 items(lanes, key = { it.id }) { lane ->
-                    val running = lane.status == "in_progress"
-                    val badge = when (lane.status) {
-                        "in_progress" -> "running"
-                        "failed" -> "failed"
+                    // `running` is the core's answer (a turn is live AND the call is open);
+                    // an `in_progress` row without one is a call whose response never came.
+                    val running = lane.running
+                    val badge = when {
+                        running -> "running"
+                        lane.status == "failed" -> "failed"
+                        lane.status == "in_progress" -> "unfinished"
                         else -> "done"
                     }
-                    val tint = when (lane.status) {
-                        "in_progress" -> MaterialTheme.statusColors.connecting
-                        "failed" -> MaterialTheme.colorScheme.error
+                    val tint = when {
+                        running -> MaterialTheme.statusColors.connecting
+                        lane.status == "failed" -> MaterialTheme.colorScheme.error
                         else -> MaterialTheme.statusColors.online
                     }
                     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
@@ -1826,7 +1837,7 @@ private fun ComposerSheet(
             }
             // Activity sits with Tools because they answer the same question — what is
             // this chat doing, and what may it use. The count is the live lanes.
-            val laneCount = cm.activity.value.count { it.status == "in_progress" }
+            val laneCount = cm.activity.value.count { it.running }
             OutlinedButton(
                 onClick = { onDismiss(); onActivity() },
                 modifier = Modifier.fillMaxWidth(),

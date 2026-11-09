@@ -138,6 +138,7 @@ record_surface!(
     title,
     detail,
     status,
+    running,
     subagent,
     steps,
 );

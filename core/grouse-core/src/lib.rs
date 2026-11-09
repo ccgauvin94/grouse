@@ -315,8 +315,15 @@ pub struct ActiveWork {
     pub title: String,
     /// The call's arguments / brief, trimmed to one line.
     pub detail: String,
-    /// `in_progress` | `completed` | `failed` — the call's lifecycle.
+    /// `in_progress` | `completed` | `failed` — the call's lifecycle as the transcript
+    /// recorded it.
     pub status: String,
+    /// Whether this lane is RUNNING NOW: `status == "in_progress"` **and** the chat still
+    /// holds a turn. The second half is what makes the count honest — a tool call whose
+    /// response never came (a stopped turn, a dropped wire) keeps `in_progress` in the
+    /// stored history forever, and this session had 27 of them, which is how the badge
+    /// came to claim "26 running" in an idle chat (2026-11-08).
+    pub running: bool,
     /// Whether goose reported a SUB-AGENT working under this call (any `SubagentStep`).
     /// A delegate that has not called a tool yet reads `false` and shows up as running
     /// work instead, which is the honest answer: nothing has come back to say otherwise.
@@ -2001,19 +2008,27 @@ impl Core {
         let Some(store) = self.inner.hub.displayed_store() else {
             return Vec::new();
         };
+        // Is this chat working at all? An `in_progress` tool row outside a turn is a row
+        // whose response never came, not work in flight.
+        let live = self
+            .inner
+            .hub
+            .displayed_key()
+            .map(|key| self.inner.state.lock().in_flight.contains(&key))
+            .unwrap_or(false);
         let mut lanes = Vec::new();
         for item in store.rich_transcript() {
             match item.kind {
                 ItemKind::Tool => {
                     if let Some(lane) = work_lane(&item.id, &item.text, &item.detail, &item.status,
-                                                  &item.steps) {
+                                                  &item.steps, live) {
                         lanes.push(lane);
                     }
                 }
                 ItemKind::ToolGroup => {
                     for call in &item.calls {
                         if let Some(lane) = work_lane(&call.id, &call.title, &call.detail,
-                                                      &call.status, &call.steps) {
+                                                      &call.status, &call.steps, live) {
                             lanes.push(lane);
                         }
                     }
@@ -4981,14 +4996,18 @@ impl crate::session::DispatchHost for Core {
 
 /// One transcript tool call as a work lane, or `None` when there is nothing to report —
 /// a finished call that never had a sub-agent is history, not activity.
+/// `live` is the CHAT's turn state: an `in_progress` call is only running while the chat
+/// holds a turn. Outside one it is a call whose response never came, which is history —
+/// and listing it as running is what produced a "26 running" badge on an idle chat.
 fn work_lane(
     id: &str,
     title: &str,
     detail: &str,
     status: &str,
     steps: &[SubagentStep],
+    live: bool,
 ) -> Option<ActiveWork> {
-    let running = status == "in_progress";
+    let running = live && status == "in_progress";
     if steps.is_empty() && !running {
         return None;
     }
@@ -4997,6 +5016,7 @@ fn work_lane(
         title: title.trim().to_string(),
         detail: one_line(detail),
         status: status.to_string(),
+        running,
         subagent: !steps.is_empty(),
         steps: steps.to_vec(),
     })
@@ -5400,6 +5420,16 @@ mod tests {
         });
         store.tool_update("call-agent", "completed", "done", true);
 
+        // The chat holds no turn here, so an `in_progress` call is a call whose response
+        // never came — the 27 of them in this session are what made the badge say
+        // "26 running" on an idle chat.
+        let idle = core.activity();
+        assert_eq!(idle.len(), 1, "only the sub-agent lane survives an idle chat: {idle:?}");
+        assert_eq!(idle[0].id, "call-agent");
+        assert!(!idle[0].running, "nothing is running without a turn");
+
+        // With a turn live, the same in-progress call IS running work.
+        core.inner.state.lock().in_flight.insert(key.clone());
         let lanes = core.activity();
         assert_eq!(lanes.len(), 2, "one running, one sub-agent: {lanes:?}");
         let agent = lanes.iter().find(|l| l.id == "call-agent").expect("the sub-agent lane");
@@ -5408,6 +5438,7 @@ mod tests {
         assert_eq!(agent.steps.len(), 2);
         assert_eq!(agent.steps[0].name, "developer__shell", "oldest first");
         let running = lanes.iter().find(|l| l.id == "call-delegate").expect("the running lane");
+        assert!(running.running);
         assert!(!running.subagent);
         assert_eq!(running.detail, "draft the report");
         assert!(
