@@ -213,6 +213,10 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
     val drawerScope = rememberCoroutineScope()
     val backStack by nav.currentBackStackEntryAsState()
     val route = backStack?.destination?.route
+    // Tell the core-facing controller where the reader is: a launch's deferred landing on
+    // the Assistant thread must not fire once they have gone somewhere else (My Day, a
+    // project, a roam endpoint, the drawer). See ConnectionManager.noteRoute.
+    LaunchedEffect(route, drawerState.isOpen) { cm.noteRoute(route, drawerState.isOpen) }
     fun closeDrawer() = drawerScope.launch { drawerState.close() }
     fun openDrawer() = drawerScope.launch { drawerState.open() }
 

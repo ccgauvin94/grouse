@@ -61,6 +61,11 @@ enum class VoiceState { IDLE, LISTENING, TRANSCRIBING, SPEAKING }
  *  loud. Warm turns answer in well under this; the filler is for the cold/slow ones. */
 private const val THINKING_FILLER_MS = 900L
 
+/** How long a launch's deferred Assistant landing stays worth doing. The session list
+ *  normally arrives in a second or two; a list that lands later than this is not a
+ *  landing, it is the reader being moved mid-sentence. */
+private const val DEFERRED_OPEN_MS = 15_000L
+
 /**
  * Process-scoped owner of the grouse-core connection + chat state. A singleton (not a
  * ViewModel) so it survives navigation/config changes and can later be shared with a
@@ -1361,7 +1366,7 @@ class ConnectionManager private constructor(context: Context) {
         val a = store.assistantSessionId
         if (a != null) openSession(a, knownKind = SessionKind.ASSISTANT)
         else {
-            pendingOpenAssistant = true
+            armedDeferredAssistant(byUser = false)
             // Bring the wire up on the last MAIN chat if we have one (not a
             // roam-prefixed id — peers aren't dialled on a cold start), so we
             // don't mint a throwaway "New Chat" that the deferred Assistant
@@ -1487,6 +1492,7 @@ class ConnectionManager private constructor(context: Context) {
         // Cancel any deferred "open the assistant thread" -- the user has since picked a specific
         // session and that choice wins.
         pendingOpenAssistant = false
+        pendingOpenAssistantByUser = false
         pendingAssistantRename = false
         // Switching chats re-points the turn state at the chat being opened; a
         // turn still running in the chat you left is neither steered nor cleared.
@@ -1579,6 +1585,7 @@ class ConnectionManager private constructor(context: Context) {
         projectId: String? = null,
     ) {
         pendingOpenAssistant = false      // same as openSession: an explicit choice cancels it
+        pendingOpenAssistantByUser = false
         pendingAssistantRename = false
         // A fresh chat starts with an empty composer (see freshChatSeq: the draft is local to
         // the chat screen, and that screen's slot is reused when this replaces a live chat).
@@ -1722,6 +1729,53 @@ class ConnectionManager private constructor(context: Context) {
     val onAssistant: Boolean get() = currentSession.value != null && currentSession.value == assistantSessionId()
 
     @Volatile private var pendingOpenAssistant = false
+    /** The deferral came from a TAP (`openAssistant`), not from the launch. A tap is a
+     *  request and outlives both the deadline and going into the drawer; the launch's own
+     *  landing is a convenience and expires (see `deferredAssistantStillWelcome`). */
+    @Volatile private var pendingOpenAssistantByUser = false
+    /** When the deferred Assistant landing was armed, so it can expire. */
+    @Volatile private var pendingOpenAssistantAt = 0L
+    /** The screen on top, mirrored from the nav graph. A launch may still be landing on the
+     *  Assistant thread, but only while the reader has not gone somewhere else. */
+    @Volatile private var currentRoute: String? = null
+
+    /** MainActivity reports the top route (and whether the drawer is open) here.
+     *
+     *  This is what stops the launch's deferred landing from firing on whatever screen the
+     *  reader is on by the time the session list arrives. It never cancels a landing the
+     *  reader ASKED for by tapping Assistant. */
+    fun noteRoute(route: String?, drawerOpen: Boolean = false) {
+        currentRoute = route
+        val away = route != null && route != "chat" && route != "landing"
+        if (away) dropDeferredAssistant(fromDrawer = false)
+        // Opening the drawer by itself is not leaving: a tap on Assistant is made FROM the
+        // drawer, so that is the one case a user-armed landing has to survive.
+        else if (drawerOpen) dropDeferredAssistant(fromDrawer = true)
+    }
+
+    private fun dropDeferredAssistant(fromDrawer: Boolean) {
+        if (!pendingOpenAssistant) return
+        if (fromDrawer && pendingOpenAssistantByUser) return
+        pendingOpenAssistant = false
+        pendingOpenAssistantByUser = false
+        noteApp("app: dropped the deferred Assistant landing (now on ${currentRoute ?: "?"})")
+    }
+
+    private fun armedDeferredAssistant(byUser: Boolean) {
+        pendingOpenAssistant = true
+        pendingOpenAssistantByUser = byUser
+        pendingOpenAssistantAt = android.os.SystemClock.elapsedRealtime()
+    }
+
+    /** Whether the deferred Assistant landing is still welcome: the launch's own landing
+     *  only while the chat surface is still on top and it is still recent; a tap always. */
+    private fun deferredAssistantStillWelcome(): Boolean {
+        if (pendingOpenAssistantByUser) return true
+        val fresh = android.os.SystemClock.elapsedRealtime() - pendingOpenAssistantAt < DEFERRED_OPEN_MS
+        val home = currentRoute == null || currentRoute == "chat" || currentRoute == "landing"
+        return fresh && home
+    }
+
 
     /** Open the privileged assistant thread; if the session list isn't loaded yet, refresh it and
      *  open as soon as it arrives (see the Sessions handler). */
@@ -1731,7 +1785,7 @@ class ConnectionManager private constructor(context: Context) {
         // No id yet: defer until a session list arrives -- but only if one can actually arrive.
         // With no live connection, refreshSidebar() does nothing and the flag would sit armed
         // indefinitely.
-        if (live) { pendingOpenAssistant = true; refreshSidebar() }
+        if (live) { armedDeferredAssistant(byUser = true); refreshSidebar() }
         else beginAssistantThread()
     }
 
@@ -2717,11 +2771,22 @@ class ConnectionManager private constructor(context: Context) {
                 assistantSessionId()
         }
         if (pendingOpenAssistant) {
-            pendingOpenAssistant = false
-            val id = assistantSessionId()
-            // If no assistant thread exists (e.g. an interrupted reset, or a fresh box),
-            // recreate one instead of silently no-oping so openAssistant() can never dead-end.
-            if (id != null) openSession(id, knownKind = SessionKind.ASSISTANT) else beginAssistantThread()
+            // Only land if this is still a landing: the list can arrive long after the app
+            // was usable, and opening a chat the reader never asked for — while they are in
+            // My Day, in a project, or reading a resumed conversation — is the bug this
+            // guard exists for. `openSession` already cancels the flag for an explicit
+            // pick; this covers everything that is not a session pick.
+            if (!deferredAssistantStillWelcome()) {
+                dropDeferredAssistant(fromDrawer = false)
+            } else {
+                pendingOpenAssistant = false
+                pendingOpenAssistantByUser = false
+                val id = assistantSessionId()
+                // If no assistant thread exists (e.g. an interrupted reset, or a fresh box),
+                // recreate one instead of silently no-oping so openAssistant() can never
+                // dead-end.
+                if (id != null) openSession(id, knownKind = SessionKind.ASSISTANT) else beginAssistantThread()
+            }
         }
     }
 

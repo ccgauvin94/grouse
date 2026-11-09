@@ -6,6 +6,17 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — the launch's Assistant landing can no longer open a chat later, elsewhere
+
+- Opening the app is meant to land on the Assistant thread. When its session id is not cached
+  yet the open is DEFERRED until a `session/list` arrives — and that list can land long after the
+  app is usable, on whatever screen the reader is on by then, so a conversation appeared to open
+  by itself while clicking around. The deferral is now bounded to the launch (15 s) and to the
+  chat surface: going to My Day, a project, a roam endpoint or settings, or opening a session or
+  a new chat, drops it. A landing the reader ASKED for by tapping Assistant still survives the
+  drawer it was tapped in, and is dropped only if they then go somewhere else. Drops are written
+  to the turn log ("dropped the deferred Assistant landing").
+
 ### Changed — My Day opens on its cache and refreshes behind it
 
 - **The tab used to force a reload before it displayed anything.** One refresh is four tool
