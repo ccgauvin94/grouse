@@ -576,7 +576,11 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                         val u = cm.usage.value
                         if (u != null && u.size > 0 && !cm.compacting.value) {
                             Spacer(Modifier.weight(1f))   // push the donut to the right edge
-                            Spacer(Modifier.width(8.dp))  // breathing room off the action icons
+                            // Breathing room off the action slot. The roam chip is wider and
+                            // its leading edge sits closer than an icon button's, so the ring
+                            // read as part of the host name rather than as the chat's own
+                            // status; it gets more room there.
+                            Spacer(Modifier.width(if (roamPeer != null) 18.dp else 8.dp))
                             ContextRing(
                                 pct = (u.used * 100 / u.size).coerceIn(0, 100),
                                 modifier = Modifier.size(14.dp),
