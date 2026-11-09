@@ -29,6 +29,11 @@ Controls.ApplicationWindow {
     // Sidebar pane: "main" = the home server's sessions, "roam" = roam peers.
     property string sidebarTab: "main"
 
+    // The per-chat panel (tools + activity). Kept on the window, not in the panel, so
+    // hiding and re-showing it comes back to the tab you left.
+    property bool sidePanelOpen: false
+    property int sidePanelTab: 0
+
     // True while startup is actively connecting / loading the session list;
     // drives the sidebar's "Loading sessions…" overlay.
     function startingUp() {
@@ -741,7 +746,10 @@ Controls.ApplicationWindow {
                 id: chatPage
                 anchors.fill: parent
                 visible: !Mgr.landingPage && !Mgr.myDayVisible
-                onToolsOpenRequested: toolsPanel.drawerOpen = !toolsPanel.drawerOpen
+                onToolsOpenRequested: {
+                    root.sidePanelOpen = !root.sidePanelOpen
+                    root.sidePanelTab = 0
+                }
             }
 
             // My Day takes the chat area over rather than becoming a fourth column:
@@ -838,155 +846,23 @@ Controls.ApplicationWindow {
                 }
             }
         }
-    }
 
-    // Native KDE drawer slides the per-session tools panel in from the right.
-    // It must be a DIRECT child of the window (not nested in a layout) so its
-    // DrawerHandle can attach to the window overlay.
-    Kirigami.OverlayDrawer {
-        id: toolsPanel
-        edge: Qt.RightEdge
-        // Keep this as a non-modal drawer, but explicitly close it at startup.
-        // Older Kirigami versions expose drawerOpen more consistently than Popup-only props.
-        modal: false
-        drawerOpen: false
-        width: 340
-        padding: Kirigami.Units.smallSpacing
-        onDrawerOpenChanged: {
-            if (drawerOpen) {
-                Mgr.refreshToolGroups()
-            }
-        }
-
-        ColumnLayout {
-            anchors.fill: parent
-            spacing: Kirigami.Units.smallSpacing
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: Kirigami.Units.smallSpacing
-                Controls.Label {
-                    id: toolsHeaderLabel
-                    text: Mgr.tools.length + qsTr(" tools")
-                    font.bold: true
-                    Layout.fillWidth: true
-                }
-                Controls.Button {
-                    flat: true
-                    display: Controls.AbstractButton.IconOnly
-                    icon.name: "dialog-close"
-                    onClicked: toolsPanel.drawerOpen = false
-                }
-            }
-            Kirigami.Separator { Layout.fillWidth: true }
-
-            ListView {
-                id: toolsList
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                clip: true
-                spacing: 2
-                model: Mgr.toolGroups
-                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-
-                // Column root (not Item): the header row and the expanded subtool
-                // column then stack naturally instead of overlapping.
-                delegate: Column {
-                    id: tdel
-                    width: ListView.view.width - Kirigami.Units.gridUnit
-                    spacing: 2
-                    property bool expanded: false
-                    readonly property string gName: modelData.name
-                    // Session toggles/catalog discovery are keyed by extensionKey, not the
-                    // display name (see Manager::ExtDef.key).
-                    readonly property string gKey: modelData.key
-                    readonly property bool gAttrib: modelData.attrib
-                    readonly property bool gEnabled: modelData.enabled
-                    readonly property bool gKnown: modelData.known
-                    // The expander is about SUB-TOOLS, not attachment (Manager
-                    // computes it): unknown catalogues get a peek arrow (the peek
-                    // attaches the extension for one round-trip and detaches it —
-                    // seeing the list costs no context), known ones only if they
-                    // really have >=2 tools.
-                    readonly property bool gExpandable: modelData.expandable
-
-                    RowLayout {
-                        width: parent.width
-                        spacing: Kirigami.Units.smallSpacing
-                        // Fixed-width slot for the expander: hiding the BUTTON
-                        // alone lets the Switch drift left on arrowless rows
-                        // (an invisible item still claims its column). The Item
-                        // keeps every switch at the same x.
-                        Item {
-                            Layout.preferredWidth: Kirigami.Units.gridUnit
-                            implicitWidth: Kirigami.Units.gridUnit
-                            Layout.preferredHeight: Kirigami.Units.gridUnit * 1.25
-                            Controls.Button {
-                                anchors.centerIn: parent
-                                flat: true
-                                display: Controls.AbstractButton.IconOnly
-                                icon.name: tdel.expanded ? "arrow-down" : "arrow-right"
-                                visible: tdel.gExpandable
-                                onClicked: {
-                                    tdel.expanded = !tdel.expanded
-                                    if (tdel.expanded && !tdel.gKnown)
-                                        Mgr.discoverToolGroup(tdel.gKey)
-                                }
-                            }
-                        }
-                        Controls.Switch {
-                            Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
-                            checked: tdel.gEnabled
-                            onToggled: Mgr.setSessionExtensionEnabled(tdel.gKey, checked)
-                        }
-                        Controls.Label {
-                            text: tdel.gName
-                            textFormat: Text.PlainText
-                            elide: Text.ElideRight
-                            Layout.fillWidth: true
-                            font.bold: true
-                        }
-                    Controls.Label {
-                        // The count shows on every KNOWN row — expandable or
-                        // not (the background sweep makes rows known without a
-                        // click); "…" only while a row is still unknown.
-                        text: tdel.gKnown
-                              ? (tdel.expanded ? "" : modelData.tools.length + qsTr(" tools"))
-                              : (tdel.gExpandable ? qsTr("…") : "")
-                        opacity: 0.6
-                        horizontalAlignment: Text.AlignRight
-                    }
-                    }
-
-                    Column {
-                        id: toolsCol
-                        width: parent.width
-                        visible: tdel.expanded
-                        Repeater {
-                            model: tdel.gExpandable ? modelData.tools : []
-                            delegate: RowLayout {
-                                width: parent.width
-                                spacing: Kirigami.Units.smallSpacing
-                                Controls.Switch {
-                                    Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
-                                    checked: modelData.on
-                                    // Ticking a tool on a detached row ATTACHES the
-                                    // extension restricted to that tool (see
-                                    // Manager::setSessionToolEnabled) — browsing the
-                                    // list and enabling one must not require enabling all.
-                                    onToggled: Mgr.setSessionToolEnabled(tdel.gKey, modelData.name, checked)
-                                }
-                                Controls.Label {
-                                    text: modelData.name
-                                    textFormat: Text.PlainText
-                                    elide: Text.ElideRight
-                                    Layout.fillWidth: true
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        // ----- the per-chat panel: tools + activity, DOCKED -----
+        // A SplitView pane, not the OverlayDrawer this used to be: the drawer floated
+        // OVER the conversation, so reading meant closing it. Docked, the chat narrows
+        // once and the panel stays out — and the divider between them is draggable,
+        // which is the KDE way to say "this is a pane, not a popup".
+        ChatSidePanel {
+            id: sidePanel
+            SplitView.preferredWidth: 340
+            SplitView.minimumWidth: 260
+            SplitView.maximumWidth: 560
+            SplitView.fillHeight: true
+            // No chat, no per-chat panel: on the landing page it would be an empty
+            // column stealing width from the pickers.
+            visible: root.sidePanelOpen && !Mgr.landingPage && !Mgr.myDayVisible
+            tab: root.sidePanelTab
+            onCloseRequested: root.sidePanelOpen = false
         }
     }
 

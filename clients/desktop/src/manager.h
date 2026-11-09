@@ -467,6 +467,13 @@ public:
     /** Back to the conversation (or the landing page) without touching the wire. */
     Q_INVOKABLE void closeMyDay();
     Q_INVOKABLE void refreshTasks();
+    /** The active chat's WORK LANES (CONTRACT §3.7): delegate/sub-agent runs and every
+     *  call still in flight. A getter over the core's own transcript, so it holds for a
+     *  roam chat and for a replayed one alike; the panel calls `refreshActivity()` when
+     *  it is visible and the core's item stream nudges it. */
+    Q_PROPERTY(QVariantList activity READ activity NOTIFY activityChanged)
+    QVariantList activity() const { return m_activity; }
+    Q_INVOKABLE void refreshActivity();
     /// Paint the cached board (the core's `my-day.json`), marked `cached`. Called
     /// on open before the refresh; a no-op on a core that has no such symbol.
     void paintCachedTasks();
@@ -595,6 +602,7 @@ signals:
     void configChanged();
     void toolsChanged();
     void toolGroupsChanged();
+    void activityChanged();
     void globalExtensionsChanged();
     void currentSessionChanged();
     /** The current session's pinned MCP-App dock changed (pin/unpin/resize). */
@@ -912,6 +920,8 @@ private:
     int m_replayTotal = 0;      // the server's message count (0 = unknown)
     bool m_myDayVisible = false;
     bool m_tasksLoading = false;
+    /// Decoded `grouse_activity` lanes, newest last (the panel's model).
+    QVariantList m_activity;
     QVariantList m_myDayOpen;
     QVariantList m_myDayDone;
     QVariantList m_myDayHanded;

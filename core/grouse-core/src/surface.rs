@@ -50,7 +50,7 @@ macro_rules! record_surface {
 }
 
 use crate::attachments::UploadedFile;
-use crate::{Item, ItemKind, SubagentStep, ToolCall, TranscriptOp};
+use crate::{ActiveWork, Item, ItemKind, SubagentStep, ToolCall, TranscriptOp};
 
 /// The same for an enum whose variants all carry fields (`{ .. }` matches them).
 macro_rules! struct_enum_surface {
@@ -131,6 +131,18 @@ record_surface!(
 );
 
 record_surface!(
+    ActiveWork,
+    WORK_FIELDS,
+    "work":
+    id,
+    title,
+    detail,
+    status,
+    subagent,
+    steps,
+);
+
+record_surface!(
     UploadedFile,
     FILE_FIELDS,
     "file":
@@ -204,6 +216,7 @@ pub fn all() -> Vec<&'static str> {
         ITEM_FIELDS,
         CALL_FIELDS,
         STEP_FIELDS,
+        WORK_FIELDS,
         FILE_FIELDS,
         TRANSCRIPT_OPS,
         ITEM_KINDS,
@@ -229,7 +242,8 @@ mod tests {
         for id in &ids {
             assert!(!id.is_empty());
             let (prefix, rest) = id.split_once('.').expect("an id is `group.name`");
-            assert!(['i', 'c', 's', 'f', 'o', 'k', 'l'].contains(&prefix.chars().next().unwrap()));
+            // i(tem) / c(all) / s(tep) / w(ork) / f(ile) / o(p) / k(ind) / l(istener).
+            assert!(['i', 'c', 's', 'w', 'f', 'o', 'k', 'l'].contains(&prefix.chars().next().unwrap()));
             assert!(!rest.is_empty(), "empty name in {id}");
             assert!(seen.insert(*id), "duplicate id: {id}");
         }

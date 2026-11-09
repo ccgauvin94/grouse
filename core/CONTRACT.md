@@ -100,6 +100,7 @@ defaulting to real verification; roam byte stream). The UI supplies only
 | `roam_disconnect(label)` | | |
 | `roam_open_session(label, session_id)` | | |
 | `tasks_refresh()` | — | My Day (§3.6): open items, the done tail and handed-over tasks arrive in ONE `on_tasks` |
+| `activity()` | → `Vec<ActiveWork>` | §3.7: the chat's work lanes — delegate/sub-agent runs and every call still in flight, oldest first. A getter over the transcript the core holds (no network, no extra state), so it answers for a roam chat and a replayed one alike |
 | `tasks_paint()` | → `bool` | My Day from the DISK CACHE, marked `cached: true` on `on_tasks`; `false` when there is none. Called on every open, before (and independently of) `tasks_refresh`, so the tab is never blank while four round trips run — and is filled at all when there is no wire |
 | `task_close(id, state, resolution)` | — | `state` is `done` \| `dropped` \| `expired`; `resolution` is the one line that keeps the next briefing from re-raising it |
 | `task_snooze(id, until, reason)` | — | `until` is an ISO instant |
@@ -558,6 +559,32 @@ reason this path exists.
   session id is a cache, so a mapping whose session is gone must be dropped when
   the open FAILS (`on_session_open_failed`, grouse#19) — never by testing it
   against the session list, which no longer contains it.
+
+### 3.7 The chat's work lanes (`activity()`)
+
+What the chat is DOING, next to what it may use. goose keeps sub-agent sessions out of
+ACP (`ACP_VISIBLE_SESSION_TYPES` excludes them), so the only record of a delegate's
+child work is the `subagent:<id>` notifications it forwards onto the parent's delegate
+row — which the core already parses into `SubagentStep`s. `activity()` exposes them:
+
+- **A lane is a tool call that reported a sub-agent step OR is still `in_progress`.**
+  A finished call that never had a sub-agent is history, not activity, and is left out.
+  A delegate that has not called a tool yet is therefore "running work", not a
+  sub-agent — nothing has come back to say otherwise, and `subagent: false` says so.
+- **Fields:** `id` (the tool call), `title` (the run summary, else the call title),
+  `detail` (the call's arguments, flattened to one line and capped), `status`
+  (`in_progress` | `completed` | `failed`), `subagent`, and `steps` — the child tool
+  calls the sub-agent made, oldest first (`SubagentStep`: `name`, `detail`).
+- **It is a GETTER, not an event stream.** A client asks when its panel is visible and
+  again when a tool row arrives on `on_item` (the only carrier of step/status changes),
+  and on `on_run_ended`. Deriving it instead of storing it is what makes it work with no
+  extra state: it reads the session's whole transcript, not the painted window, so a
+  delegate that started forty rows ago is still listed.
+- **Both kinds have to appear:** a sub-agent run is the thing a user cannot otherwise
+  see, but "background tasks" are usually a delegate still in flight, and an
+  `in_progress` ordinary call is what a long tool run looks like. One list, two badges.
+- Clients render it as a panel over the chat (desktop: a docked pane with Tools and
+  Activity tabs; Android: a sheet behind a header badge whose count is the live lanes).
 
 ---
 

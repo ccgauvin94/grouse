@@ -95,6 +95,9 @@ public:
         // My Day (CONTRACT §3.3): assistant-state's items over a deterministic
         // tools/call. The lists come back on the `on_tasks` callback.
         void (*grouse_tasks_refresh)(void *h);
+        // The active chat's work lanes (CONTRACT §3.7): delegate/sub-agent runs and
+        // anything still in flight, as a JSON array. Optional like the paint above.
+        char *(*grouse_activity)(void *h);
         // Paint the cached board (marked `cached` on on_tasks) before refreshing.
         // Optional deliberately: a core that predates it paints nothing, and the
         // page then behaves exactly as it did before the cache existed.

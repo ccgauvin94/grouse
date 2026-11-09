@@ -927,6 +927,17 @@ pub extern "C" fn grouse_tasks_refresh(h: *mut c_void) {
     catch_unwind(AssertUnwindSafe(|| handle(h).core.tasks_refresh())).ok();
 }
 
+/// The active chat's work lanes (CONTRACT §3.7): delegate/sub-agent runs and anything
+/// still in flight, as a JSON array of `ActiveWork`. Empty array when nothing is open.
+#[no_mangle]
+pub extern "C" fn grouse_activity(h: *mut c_void) -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| {
+        let lanes = handle(h).core.activity();
+        c_str(&serde_json::to_string(&lanes).unwrap_or_else(|_| "[]".to_string()))
+    }))
+    .unwrap_or(std::ptr::null_mut())
+}
+
 /// Paint the cached board (marked `cached: true` on `on_tasks`) before refreshing:
 /// 1 when something was painted, 0 when there is no cache. The client calls this
 /// on every open, and `grouse_tasks_refresh` only when it has a wire.

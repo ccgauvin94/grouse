@@ -2566,6 +2566,35 @@ void Manager::closeMyDay()
     setMyDayVisible(false);
 }
 
+void Manager::refreshActivity()
+{
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_activity) {
+        if (!m_activity.isEmpty()) {
+            m_activity.clear();
+            emit activityChanged();
+        }
+        return;
+    }
+    const QString json =
+        m_bridge->takeString(m_bridge->api().grouse_activity(m_bridge->handle()));
+    QVariantList lanes;
+    const QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());
+    for (const QJsonValue &v : doc.array()) {
+        const QJsonObject o = v.toObject();
+        if (o.value(QStringLiteral("id")).toString().isEmpty())
+            continue;
+        QVariantMap lane = o.toVariantMap();
+        // The steps are what make a delegate row expandable; keep them as a list of maps
+        // (QJsonValue::toVariant already gives QVariantList of QVariantMap).
+        lanes.append(lane);
+    }
+    // A no-op refresh must not repaint: this is called on every tool item that lands.
+    if (lanes == m_activity)
+        return;
+    m_activity = lanes;
+    emit activityChanged();
+}
+
 void Manager::refreshTasks()
 {
     if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_tasks_refresh) {
@@ -3382,6 +3411,7 @@ void Manager::coreOnItem(const QString &json)
             emit itemWindowChanged();
         }
         requestMessagesUpdate();
+        refreshActivity();   // the transcript was replaced: the lanes with it
         return;
     }
     if (root.contains(QStringLiteral("Window"))) {
@@ -3413,6 +3443,7 @@ void Manager::coreOnItem(const QString &json)
             || m_status == QStringLiteral("reloading…")
             || m_status == QStringLiteral("reloading from the start…"))
             setStatus(QStringLiteral("ready"));
+        refreshActivity();   // the chat is painted: its lanes are what the panel shows
         return;
     }
     if (root.contains(QStringLiteral("Upsert"))) {
@@ -3426,6 +3457,12 @@ void Manager::coreOnItem(const QString &json)
         m_messageModel->upsert(item.value(QStringLiteral("id")).toString(), row);
         m_currentIndex = -1;
         requestMessagesUpdate();
+        // A tool row changed: its status or its sub-agent steps are what the activity
+        // panel draws, and there is no separate event for either (CONTRACT §3.7). A
+        // no-op refresh is dropped inside refreshActivity.
+        const QString itemKind = item.value(QStringLiteral("kind")).toString();
+        if (itemKind == QLatin1String("Tool") || itemKind == QLatin1String("ToolGroup"))
+            refreshActivity();
         return;
     }
     if (root.contains(QStringLiteral("AppendText"))) {
@@ -3482,6 +3519,9 @@ void Manager::coreOnRunEnded(const QString &sessionId, const QString &stopReason
     // thing the user is looking at.
     finishTail();
     notifyTurnFinished();
+    // A delegate that ended is a lane whose status just changed, and the panel must not
+    // keep saying "running" after the turn is over.
+    refreshActivity();
 }
 
 // ---------------------------------------------------------------------------

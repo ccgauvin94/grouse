@@ -299,6 +299,32 @@ pub struct Item {
     pub seq: u32,
 }
 
+/// One lane of WORK in the active chat: a delegate/sub-agent run, or a tool call still
+/// in flight (CONTRACT §3.7).
+///
+/// goose keeps sub-agent SESSIONS out of ACP, so the only place their work appears is
+/// the parent's delegate row (`SubagentStep`s, parsed from `subagent:<id>`
+/// notifications). This is a getter over the transcript the core already holds —
+/// no network, no extra state — so it answers for a roam chat, a replayed chat and a
+/// cached one alike.
+#[derive(uniffi::Record, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ActiveWork {
+    /// The tool call this lane belongs to (its `tool_call_id`).
+    pub id: String,
+    /// The step's label as the transcript shows it (the run summary, else the call title).
+    pub title: String,
+    /// The call's arguments / brief, trimmed to one line.
+    pub detail: String,
+    /// `in_progress` | `completed` | `failed` — the call's lifecycle.
+    pub status: String,
+    /// Whether goose reported a SUB-AGENT working under this call (any `SubagentStep`).
+    /// A delegate that has not called a tool yet reads `false` and shows up as running
+    /// work instead, which is the honest answer: nothing has come back to say otherwise.
+    pub subagent: bool,
+    /// The child tool calls the sub-agent made, oldest first (bounded by the store).
+    pub steps: Vec<SubagentStep>,
+}
+
 /// One tool call a SUBAGENT made on behalf of a delegate call.
 ///
 /// goose does not expose subagent sessions over ACP (`ACP_VISIBLE_SESSION_TYPES`
@@ -1959,6 +1985,43 @@ impl Core {
     pub fn tasks_refresh(&self) {
         let this = self.clone();
         crate::roam::runtime().spawn(async move { this.tasks_refresh_now().await });
+    }
+
+    /// The active chat's WORK LANES: every delegate/sub-agent run and everything still
+    /// in flight, oldest first (CONTRACT §3.7).
+    ///
+    /// A getter, not an event stream: it is derived from the transcript the core already
+    /// holds, so a client asks when its panel is visible and after an item arrives. It
+    /// covers the whole store rather than the painted window, so a delegate that started
+    /// forty rows ago is still in the list.
+    pub fn activity(&self) -> Vec<ActiveWork> {
+        // The DISPLAYED chat, not the wire's active id: they are the same thing while a
+        // chat is open, and this is the one that survives a peer chat, a cached paint and
+        // a test with no wire at all.
+        let Some(store) = self.inner.hub.displayed_store() else {
+            return Vec::new();
+        };
+        let mut lanes = Vec::new();
+        for item in store.rich_transcript() {
+            match item.kind {
+                ItemKind::Tool => {
+                    if let Some(lane) = work_lane(&item.id, &item.text, &item.detail, &item.status,
+                                                  &item.steps) {
+                        lanes.push(lane);
+                    }
+                }
+                ItemKind::ToolGroup => {
+                    for call in &item.calls {
+                        if let Some(lane) = work_lane(&call.id, &call.title, &call.detail,
+                                                      &call.status, &call.steps) {
+                            lanes.push(lane);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        lanes
     }
 
     /// Paint the LAST COMPLETE board from disk, marked `cached: true`, so opening
@@ -4916,6 +4979,42 @@ impl crate::session::DispatchHost for Core {
     }
 }
 
+/// One transcript tool call as a work lane, or `None` when there is nothing to report —
+/// a finished call that never had a sub-agent is history, not activity.
+fn work_lane(
+    id: &str,
+    title: &str,
+    detail: &str,
+    status: &str,
+    steps: &[SubagentStep],
+) -> Option<ActiveWork> {
+    let running = status == "in_progress";
+    if steps.is_empty() && !running {
+        return None;
+    }
+    Some(ActiveWork {
+        id: id.to_string(),
+        title: title.trim().to_string(),
+        detail: one_line(detail),
+        status: status.to_string(),
+        subagent: !steps.is_empty(),
+        steps: steps.to_vec(),
+    })
+}
+
+/// A brief one line: tool arguments are JSON documents and a panel row is one line.
+fn one_line(text: &str) -> String {
+    const CAP: usize = 200;
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > CAP {
+        let mut cut: String = flat.chars().take(CAP).collect();
+        cut.push('…');
+        cut
+    } else {
+        flat
+    }
+}
+
 /// The cache + identity directory (CONTRACT §7.4 says the UI supplies a
 /// CacheDir at construction, but the skeleton constructor does not carry one;
 /// the core defaults to the platform data dir).
@@ -5268,6 +5367,57 @@ mod tests {
             core.accepts_chat(mine),
             "a merge (or a full replay) must land its rows"
         );
+    }
+
+    #[test]
+    fn a_chat_reports_its_subagents_and_whatever_is_still_running() {
+        // The panel a client draws over a chat (CONTRACT §3.7): goose keeps sub-agent
+        // SESSIONS out of ACP, so the parent's delegate row is the only evidence they
+        // exist. A lane is a call that reported a sub-agent step OR is still running —
+        // a finished ordinary call is history, not activity.
+        let (core, _) = core();
+        let key = "roam:Phaethon:s1".to_string();
+        let store = core.inner.hub.display(&key);
+
+        // Finished, no sub-agent → not a lane.
+        store.tool_call("Reading a file", "", "call-done", crate::ToolCallKind::Plain);
+        store.tool_update("call-done", "completed", "ok", true);
+        // Running ordinary call → a lane, not a sub-agent (a delegate that has not
+        // called a tool yet must still show up as work in flight).
+        store.tool_call("Delegating", "draft the report", "call-delegate",
+                        crate::ToolCallKind::Plain);
+        store.tool_update("call-delegate", "in_progress", "", true);
+        // A delegate with a child step → a SUB-AGENT lane, children kept in order.
+        store.tool_call("Delegating again", "check the mail", "call-agent",
+                        crate::ToolCallKind::Plain);
+        store.tool_step("call-agent", crate::SubagentStep {
+            name: "developer__shell".to_string(),
+            detail: "rg greeting".to_string(),
+        });
+        store.tool_step("call-agent", crate::SubagentStep {
+            name: "read_file".to_string(),
+            detail: "/tmp/a".to_string(),
+        });
+        store.tool_update("call-agent", "completed", "done", true);
+
+        let lanes = core.activity();
+        assert_eq!(lanes.len(), 2, "one running, one sub-agent: {lanes:?}");
+        let agent = lanes.iter().find(|l| l.id == "call-agent").expect("the sub-agent lane");
+        assert!(agent.subagent);
+        assert_eq!(agent.status, "completed");
+        assert_eq!(agent.steps.len(), 2);
+        assert_eq!(agent.steps[0].name, "developer__shell", "oldest first");
+        let running = lanes.iter().find(|l| l.id == "call-delegate").expect("the running lane");
+        assert!(!running.subagent);
+        assert_eq!(running.detail, "draft the report");
+        assert!(
+            !lanes.iter().any(|l| l.id == "call-done"),
+            "a finished ordinary call is not activity"
+        );
+
+        // Nothing displayed → nothing to report (no panic on a cold core).
+        core.inner.hub.display("other");
+        let _ = core.activity();
     }
 
     #[test]

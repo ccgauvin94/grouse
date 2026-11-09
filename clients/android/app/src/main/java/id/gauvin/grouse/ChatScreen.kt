@@ -106,7 +106,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import android.widget.Toast
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.res.stringResource
@@ -179,6 +181,8 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
     var showSchedule by remember { mutableStateOf(false) }
     var showContextDetail by remember { mutableStateOf(false) }
     var showTurnLog by remember { mutableStateOf(false) }
+    // The chat's work lanes (sub-agents + running calls), opened from the header badge.
+    var showActivity by remember { mutableStateOf(false) }
     // Debug diagnostics (Settings → Experimental, default OFF): the turn log and the
     // live turn-state readout both expose internal state rather than conversation.
     val debugTools = cm.store.debugTools
@@ -434,6 +438,10 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
         PermissionSheet(req, onChoose = { cm.answerPermission(req, it) })
     }
 
+    if (showActivity) {
+        ActivitySheet(cm, onDismiss = { showActivity = false })
+    }
+
     if (showComposer) {
         ComposerSheet(cm,
             // Every tile closes the sheet first (ComposerSheet does it): each
@@ -594,6 +602,23 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                 IconButton(onClick = onOpenDrawer) { Icon(Icons.Filled.Menu, contentDescription = "menu") }
             },
             actions = {
+                // Activity: this chat's sub-agents and running work (CONTRACT §3.7). Shown
+                // only when there IS work, so a quiet chat keeps its header clean; the badge
+                // is the point — a delegate working in the background is otherwise invisible
+                // (goose keeps sub-agent sessions off ACP, so nothing else reports them).
+                val lanes = cm.activity.value
+                if (lanes.isNotEmpty()) {
+                    IconButton(onClick = { showActivity = true }) {
+                        BadgedBox(badge = {
+                            Badge {
+                                val live = lanes.count { it.status == "in_progress" }
+                                Text("${if (live > 0) live else lanes.size}")
+                            }
+                        }) {
+                            Icon(Icons.Filled.Build, contentDescription = "activity")
+                        }
+                    }
+                }
                 // Assistant/Sessions/Settings are now drawer items — this icon's navigation role
                 // moved there. On the Assistant thread itself it stays as the page-local briefing-
                 // health indicator (opens the schedule dialog); off it, there's nothing to show here.
@@ -1544,6 +1569,113 @@ fun ElicitationSheet(
                     }
                     onAccept(values)
                 }) { Text(stringResource(R.string.submit)) }
+            }
+        }
+    }
+}
+
+/** The chat's WORK lanes: sub-agent runs (a delegate and the child tool calls it made)
+ *  and anything still in flight (CONTRACT §3.7). goose keeps sub-agent SESSIONS off
+ *  ACP, so this is the only place the phone can show what a delegate is doing while it
+ *  runs — the transcript shows the delegate as one chip that barely changes.
+ *
+ *  A sheet rather than a pane: the phone has no room for a second column, so this is
+ *  the "in addition to the tools menu" half of the desktop's docked panel. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ActivitySheet(cm: ConnectionManager, onDismiss: () -> Unit) {
+    val lanes = cm.activity.value
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
+            Text("Activity", style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Sub-agents and work still running in this chat.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+            )
+            Spacer(Modifier.height(12.dp))
+            if (lanes.isEmpty()) {
+                Text(
+                    "Nothing running. Delegate work shows up here while this chat is busy.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
+            LazyColumn(Modifier.fillMaxWidth()) {
+                items(lanes, key = { it.id }) { lane ->
+                    val running = lane.status == "in_progress"
+                    val badge = when (lane.status) {
+                        "in_progress" -> "running"
+                        "failed" -> "failed"
+                        else -> "done"
+                    }
+                    val tint = when (lane.status) {
+                        "in_progress" -> MaterialTheme.statusColors.connecting
+                        "failed" -> MaterialTheme.colorScheme.error
+                        else -> MaterialTheme.statusColors.online
+                    }
+                    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                if (lane.subagent) Icons.Filled.Build else Icons.Filled.Refresh,
+                                contentDescription = null,
+                                tint = tint,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                lane.title.ifBlank { "tool call" },
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (lane.subagent) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(badge, style = MaterialTheme.typography.labelSmall, color = tint)
+                        }
+                        if (lane.detail.isNotBlank()) {
+                            Text(
+                                lane.detail,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(start = 24.dp, top = 2.dp),
+                            )
+                        }
+                        // The sub-agent's own tool calls — what it ACTUALLY did, which
+                        // neither the delegate's chip nor its summary says.
+                        lane.steps.takeLast(6).forEach { step ->
+                            Row(Modifier.padding(start = 24.dp, top = 2.dp)) {
+                                Text(
+                                    step.name,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.outline,
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    step.detail,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.outline,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                        if (running && lane.steps.size > 6) {
+                            Text(
+                                "… ${lane.steps.size - 6} earlier steps",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline,
+                                modifier = Modifier.padding(start = 24.dp, top = 2.dp),
+                            )
+                        }
+                    }
+                    HorizontalDivider()
+                }
             }
         }
     }

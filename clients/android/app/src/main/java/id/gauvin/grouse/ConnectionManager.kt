@@ -21,6 +21,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import uniffi.grouse_core.ActiveWork
 import uniffi.grouse_core.ConfigOption as CoreConfigOption
 import uniffi.grouse_core.ConnectionStatus
 import uniffi.grouse_core.Core
@@ -518,6 +519,22 @@ class ConnectionManager private constructor(context: Context) {
      *  hands over `About item <id>: ` so the assistant can look the item up). Consumed
      *  by ChatScreen on entry, never persisted: it is a handoff, not a draft store. */
     val pendingDraft = mutableStateOf<String?>(null)
+
+    /** The active chat's WORK LANES (CONTRACT §3.7): delegate/sub-agent runs and every
+     *  tool call still in flight, oldest first. goose keeps sub-agent SESSIONS out of
+     *  ACP, so the parent's delegate row is the only record of what a sub-agent did —
+     *  the core derives this from the transcript it holds, which is why it works for a
+     *  roam chat too. Refreshed when a tool row changes (see onCoreItem) and on a turn's
+     *  end; the sheet is a plain view of it. */
+    val activity = mutableStateOf<List<ActiveWork>>(emptyList())
+
+    /** Re-read [activity]. Cheap (a local snapshot, no network), so callers do not batch. */
+    fun refreshActivity() {
+        io {
+            val lanes = runCatching { core.activity() }.getOrNull() ?: return@io
+            main.post { activity.value = lanes }
+        }
+    }
 
     /** Goose projects, refreshed alongside the session list. A project is a named source with an
      *  id, not a directory -- so filing a chat no longer decides where its tools run, and the
@@ -2829,6 +2846,10 @@ class ConnectionManager private constructor(context: Context) {
                 // A ToolGroup expands to one row per call: the chat UI groups
                 // consecutive "tool" rows itself and each call keeps a stable
                 // tool_call_id key.
+                // A tool row is the only carrier of a sub-agent's progress (goose keeps
+                // child sessions off ACP), so the Activity sheet re-reads its lanes here.
+                val kind = op.item.kind
+                if (kind == ItemKind.TOOL || kind == ItemKind.TOOL_GROUP) refreshActivity()
                 val rows = itemRows(op.item)
                 // Not every Upsert is progress: the step summarizer rewrites chip
                 // labels while the turn runs, and the tool lifecycle repeats the
@@ -3076,6 +3097,9 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun onCoreRunEnded(sessionId: String, stopReason: String) {
         noteCoreEvent()
+        // A delegate that ended is a lane whose status changed; the sheet must not keep
+        // saying "running" after the turn is over.
+        refreshActivity()
         noteApp("app: runEnded $sessionId stop=$stopReason shown=${sessionId == currentSession.value} current=${currentSession.value}")
         // Every completion clears ITS chat; only the chat on screen owns the
         // busy/compacting/run-id state the UI draws.

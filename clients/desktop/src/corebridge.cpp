@@ -112,6 +112,7 @@ bool CoreBridge::resolve()
     // required-symbols check below — an older core still loads and simply never
     // paints a cached board, which is the behaviour every client had before.
     RESOLVE(grouse_tasks_paint);
+    RESOLVE(grouse_activity);
     RESOLVE(grouse_task_close);
     RESOLVE(grouse_task_snooze);
     RESOLVE(grouse_task_react);

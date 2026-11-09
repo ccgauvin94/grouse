@@ -6,6 +6,26 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Added — the chat's work lanes (sub-agents and background work), both clients
+
+- **`Core::activity()`** (`CONTRACT` §3.7): the active chat's lanes — every tool call that
+  reported a **sub-agent** step, plus everything still `in_progress`. goose keeps sub-agent
+  sessions out of ACP, so the parent's delegate row is the only record of what a delegate
+  actually did; the core exposes it as `id`, `title`, `detail`, `status`, `subagent` and
+  `steps`. It is a getter over the transcript the core already holds (no network, no extra
+  state), so it works on a roam chat, a replayed chat and a cached one alike.
+- **Desktop**: the per-chat panel is now DOCKED, not an overlay. The `Kirigami.OverlayDrawer`
+  that floated over the conversation is replaced by a `SplitView` pane (`ChatSidePanel.qml`,
+  draggable divider), so it can stay out while you read — and it carries two tabs: **Tools**
+  (what it always had) and **Activity** (the lanes above, with each sub-agent's child tool
+  calls listed). The Tools pill toggles the pane.
+- **Android**: a header badge shows the live lane count while the chat is working and opens an
+  Activity sheet (`ActivitySheet`) with the same lanes — the delegate's brief, its status and
+  the sub-agent's own calls. Nothing appears in a quiet chat.
+- Refreshed from the tool rows that carry step/status changes (`on_item`), on `on_run_ended`,
+  and when the panel/sheet is shown; a no-op refresh does not repaint.
+
+grouse 0.2.90 (versionCode 192).
 ### Fixed — a project's older chats came back (session/list pages were never followed)
 
 - **`session/list` answers 50 rows at a time, ordered by last message, with a `nextCursor` —

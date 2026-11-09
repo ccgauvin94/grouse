@@ -1009,6 +1009,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_active_session_id(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_activity(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_archive_session(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_assistant_project(
@@ -1311,6 +1313,8 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_constructor_core_new(`listener`: Long,`cacheDir`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_grouse_core_fn_method_core_active_session_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_grouse_core_fn_method_core_activity(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_archive_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1642,6 +1646,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_active_session_id() and 0xFFFF) != 8270) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_core_activity() and 0xFFFF) != 38874) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_archive_session() and 0xFFFF) != 46828) {
@@ -2569,6 +2576,17 @@ public interface CoreInterface {
     fun `activeSessionId`(): kotlin.String?
     
     /**
+     * The active chat's WORK LANES: every delegate/sub-agent run and everything still
+     * in flight, oldest first (CONTRACT §3.7).
+     *
+     * A getter, not an event stream: it is derived from the transcript the core already
+     * holds, so a client asks when its panel is visible and after an item arrives. It
+     * covers the whole store rather than the painted window, so a delegate that started
+     * forty rows ago is still in the list.
+     */
+    fun `activity`(): List<ActiveWork>
+    
+    /**
      * Archive a session (out of `session/list`, history stays on disk); re-lists.
      */
     fun `archiveSession`(`sessionId`: kotlin.String)
@@ -3088,6 +3106,28 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_grouse_core_fn_method_core_active_session_id(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The active chat's WORK LANES: every delegate/sub-agent run and everything still
+     * in flight, oldest first (CONTRACT §3.7).
+     *
+     * A getter, not an event stream: it is derived from the transcript the core already
+     * holds, so a client asks when its panel is visible and after an item arrives. It
+     * covers the whole store rather than the painted window, so a delegate that started
+     * forty rows ago is still in the list.
+     */override fun `activity`(): List<ActiveWork> {
+            return FfiConverterSequenceTypeActiveWork.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_activity(
         it,
         _status)
 }
@@ -5706,6 +5746,94 @@ public object FfiConverterTypeGrouseUnstable: FfiConverter<GrouseUnstable, Long>
 
     override fun write(value: GrouseUnstable, buf: ByteBuffer) {
         buf.putLong(lower(value))
+    }
+}
+
+
+
+/**
+ * One lane of WORK in the active chat: a delegate/sub-agent run, or a tool call still
+ * in flight (CONTRACT §3.7).
+ *
+ * goose keeps sub-agent SESSIONS out of ACP, so the only place their work appears is
+ * the parent's delegate row (`SubagentStep`s, parsed from `subagent:<id>`
+ * notifications). This is a getter over the transcript the core already holds —
+ * no network, no extra state — so it answers for a roam chat, a replayed chat and a
+ * cached one alike.
+ */
+data class ActiveWork (
+    /**
+     * The tool call this lane belongs to (its `tool_call_id`).
+     */
+    var `id`: kotlin.String
+    , 
+    /**
+     * The step's label as the transcript shows it (the run summary, else the call title).
+     */
+    var `title`: kotlin.String
+    , 
+    /**
+     * The call's arguments / brief, trimmed to one line.
+     */
+    var `detail`: kotlin.String
+    , 
+    /**
+     * `in_progress` | `completed` | `failed` — the call's lifecycle.
+     */
+    var `status`: kotlin.String
+    , 
+    /**
+     * Whether goose reported a SUB-AGENT working under this call (any `SubagentStep`).
+     * A delegate that has not called a tool yet reads `false` and shows up as running
+     * work instead, which is the honest answer: nothing has come back to say otherwise.
+     */
+    var `subagent`: kotlin.Boolean
+    , 
+    /**
+     * The child tool calls the sub-agent made, oldest first (bounded by the store).
+     */
+    var `steps`: List<SubagentStep>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeActiveWork: FfiConverterRustBuffer<ActiveWork> {
+    override fun read(buf: ByteBuffer): ActiveWork {
+        return ActiveWork(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterSequenceTypeSubagentStep.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ActiveWork) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`title`) +
+            FfiConverterString.allocationSize(value.`detail`) +
+            FfiConverterString.allocationSize(value.`status`) +
+            FfiConverterBoolean.allocationSize(value.`subagent`) +
+            FfiConverterSequenceTypeSubagentStep.allocationSize(value.`steps`)
+    )
+
+    override fun write(value: ActiveWork, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`title`, buf)
+            FfiConverterString.write(value.`detail`, buf)
+            FfiConverterString.write(value.`status`, buf)
+            FfiConverterBoolean.write(value.`subagent`, buf)
+            FfiConverterSequenceTypeSubagentStep.write(value.`steps`, buf)
     }
 }
 
@@ -9260,6 +9388,34 @@ public object FfiConverterSequenceTypeFileSource: FfiConverterRustBuffer<List<Fi
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeFileSource.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeActiveWork: FfiConverterRustBuffer<List<ActiveWork>> {
+    override fun read(buf: ByteBuffer): List<ActiveWork> {
+        val len = buf.getInt()
+        return List<ActiveWork>(len) {
+            FfiConverterTypeActiveWork.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ActiveWork>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeActiveWork.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ActiveWork>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeActiveWork.write(it, buf)
         }
     }
 }

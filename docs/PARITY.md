@@ -88,6 +88,12 @@ excluded = 8
 | `item.images` | yes: ConnectionManager.kt#item.images | yes: src/manager.cpp#value(QStringLiteral("images")) |
 | `item.message_id` | excluded: clients key rows on `id`; the server id is core-internal merge state | excluded: same — the row model keys on `id`, never on the server's message id |
 | `item.seq` | yes: ConnectionManager.kt#item.seq | yes: src/manager.cpp#value(QStringLiteral("seq")) |
+| `work.id` | yes: ChatScreen.kt#key = { it.id } | yes: ui/ChatSidePanel.qml#modelData.id |
+| `work.title` | yes: ChatScreen.kt#lane.title | yes: ui/ChatSidePanel.qml#modelData.title |
+| `work.detail` | yes: ChatScreen.kt#lane.detail | yes: ui/ChatSidePanel.qml#modelData.detail |
+| `work.status` | yes: ChatScreen.kt#lane.status | yes: ui/ChatSidePanel.qml#modelData.status |
+| `work.subagent` | yes: ChatScreen.kt#lane.subagent | yes: ui/ChatSidePanel.qml#modelData.subagent |
+| `work.steps` | yes: ChatScreen.kt#lane.steps | yes: ui/ChatSidePanel.qml#modelData.steps |
 | `call.id` | yes: ConnectionManager.kt#c.id | yes: src/manager.cpp#c.value("id") |
 | `call.title` | yes: ConnectionManager.kt#c.title | yes: src/manager.cpp#c.value("title") |
 | `call.detail` | yes: ConnectionManager.kt#c.detail | yes: src/manager.cpp#c.value("detail") |
@@ -142,6 +148,7 @@ excluded = 8
 | `ui.fileInlineImage` | yes: Files.kt#fun isInlineImage | yes: ui/ImageCard.qml#objectName: "cardImage" |
 | `ui.chat-attachment-card` | yes: Files.kt#AttachmentCard | yes: ui/AttachmentCard.qml#objectName: "cardName" |
 | `ui.my-day` | yes: MyDayScreen.kt#MyDayScreen | yes: ui/MyDayPage.qml#objectName: "myDayCardBody" |
+| `ui.chat-work-panel` | yes: ChatScreen.kt#fun ActivitySheet | yes: ui/ChatSidePanel.qml#objectName: "workList" |
 | `ui.my-day-lazy-cache` | yes: ConnectionManager.kt#fun paintTasks | yes: src/manager.cpp#void Manager::paintCachedTasks |
 | `ui.my-day-thread-chat` | yes: ConnectionManager.kt#fun openThreadChat | yes: src/manager.cpp#grouse_open_thread |
 | `ui.chat-scroll-pinned` | yes: ChatScreen.kt#var follow by remember | yes: ui/ChatPage.qml#function pinPass |
