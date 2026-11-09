@@ -584,23 +584,31 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                         // readouts, not part of the chat name) — the activity pill used to
                         // live in the action slot, where the roam chip cut it off and it
                         // read as part of the host name.
-                        val running = cm.activity.value.count { it.running }
+                        val lanes = cm.activity.value
+                        val running = lanes.count { it.running }
                         val u = cm.usage.value
                         val hasRing = u != null && u.size > 0 && !cm.compacting.value
-                        if (running > 0 || hasRing) {
+                        if (lanes.isNotEmpty() || hasRing) {
                             Spacer(Modifier.weight(1f))
                             // A WORD, not an icon: a wrench means tools, and this is
-                            // agents/background work. Shown only while something is
-                            // genuinely running (CONTRACT §3.7 `running`), so an idle chat
-                            // has no pill at all.
-                            if (running > 0) {
+                            // agents/background work. The pill stays for the life of the
+                            // chat's activity — "2 running" while a turn works, "3 agents"
+                            // afterwards — because an affordance that vanishes the moment
+                            // nothing is live is one you cannot find when you want it. A
+                            // chat that never had a delegate shows no pill at all: there is
+                            // nothing in the sheet to open (the + sheet still lists it).
+                            if (lanes.isNotEmpty()) {
                                 Surface(
                                     shape = RoundedCornerShape(50),
                                     color = MaterialTheme.colorScheme.secondaryContainer,
                                     modifier = Modifier.clickable { showActivity = true },
                                 ) {
                                     Text(
-                                        "$running running",
+                                        when {
+                                            running > 0 -> "$running running"
+                                            lanes.size == 1 -> "1 agent"
+                                            else -> "${lanes.size} agents"
+                                        },
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSecondaryContainer,
                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
@@ -650,12 +658,17 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                 // reports the main wire: colour for state, tap for the endpoint's page
                 // (which is where its reconnect/disconnect/remove actions live).
                 if (roamPeer != null) {
-                    val chipState = roamLinkState(cm.roamStatus[roamPeer])
+                    val chipStatus = cm.roamStatus[roamPeer]
+                    val chipState = roamLinkState(chipStatus)
                     AssistChip(
                         onClick = { nav.navigate("roam_endpoint/" + Uri.encode(roamPeer)) },
                         label = {
                             Text(
-                                roamPeer,
+                                // A colour alone cannot say "cannot connect": while
+                                // this chat's peer is down, name the phase beside it
+                                // ("laptop · no reply", "laptop · reconnect 3").
+                                if (chipState == LinkState.Connected) roamPeer
+                                else "$roamPeer · ${ConnectionManager.roamStatusShort(chipStatus)}",
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 // Tint only when there is something wrong: a green chip every
@@ -1606,7 +1619,8 @@ fun ActivitySheet(cm: ConnectionManager, onDismiss: () -> Unit) {
             Spacer(Modifier.height(12.dp))
             if (lanes.isEmpty()) {
                 Text(
-                    "Nothing running. Delegate work shows up here while this chat is busy.",
+                    "No sub-agents or background work in this chat. A delegate appears here " +
+                        "while it runs, and stays once it has run.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                 )

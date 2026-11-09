@@ -173,8 +173,9 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit,
                 // Each endpoint is a card: colored status dot + name, count of
                 // sessions, and a toggle that expands/collapses the chats below.
                 // Clicking the NAME (not a caret) drops it down / slides it up.
-                // Status is the dot's color — the textual "ready/connecting" label
-                // is gone. When expanded, the session rows render INSIDE the card.
+                // The dot carries the colour; a non-ready phase/error gets a line
+                // of its own under the header so a stuck dial is never silent.
+                // When expanded, the session rows render INSIDE the card.
                 Card(
                     modifier = Modifier.fillMaxWidth()
                         .padding(start = 10.dp, end = 10.dp, bottom = 6.dp),
@@ -231,6 +232,19 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit,
                                         tint = MaterialTheme.colorScheme.primary)
                                 }
                             }
+                        }
+                        // The dot alone leaves a stuck dial invisible. Name the phase
+                        // ("reconnect 3", "dialing", "no reply") on its own line — the
+                        // error detail below the card explains a terminal failure.
+                        if (!ready && st != null) {
+                            Text(ConnectionManager.roamStatusShort(st),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = when {
+                                    st.startsWith("error") -> MaterialTheme.colorScheme.error
+                                    st.startsWith("connecting") -> MaterialTheme.statusColors.connecting
+                                    else -> MaterialTheme.colorScheme.outline
+                                },
+                                modifier = Modifier.padding(start = 44.dp, end = 14.dp, bottom = 8.dp))
                         }
                         // Sessions live INSIDE the expanded card, with a separator
                         // under the header. Stable per-session keys + deterministic

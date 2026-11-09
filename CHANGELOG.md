@@ -6,6 +6,21 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — a roam dial that hangs now says so
+
+- **The iroh dial is bounded (30s).** `roam_connect` awaited relay discovery and the QUIC
+  handshake with no timeout. An unreachable relay parked that future forever, so the core's
+  supervised retry never finished an attempt and never emitted its terminal error: the app
+  sat on `connecting: reconnect N` and the user got "cannot connect" with no error at all.
+  A stalled attempt now fails after 30s, the 6-try budget reaches "giving up after 6
+  reconnect attempts" in ~90s, and the app's own redial takes over from a real status.
+- **Android**: the endpoint card names the phase under its header (`dialing`,
+  `reconnect 3`, `no reply`) instead of showing only a coloured dot, and the chat's roam
+  chip becomes `laptop · no reply` while that peer is not ready. The full explanation
+  stays on the endpoint page.
+
+grouse 0.2.93 (versionCode 195).
+
 ### Fixed — "26 running" on an idle chat, and an Activity pill that read as part of the host name
 
 - **`in_progress` is not the same as running.** A tool call whose response never came — a

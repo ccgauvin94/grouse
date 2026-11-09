@@ -20,6 +20,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 use base64::Engine;
 use futures::AsyncReadExt;
@@ -124,6 +125,10 @@ fn shared_node(secret_b64: &str) -> Result<Arc<RoamingNode>, RoamError> {
     Ok(node)
 }
 
+/// Upper bound on one iroh dial + roam handshake. Past a healthy relay this is
+/// generous; past a dead one it is the difference between a retry and a hang.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Dial a host from its card (endpoint id + relay URLs), complete the roam
 /// handshake, and return the authorized stream. Only succeeds once the host
 /// has accepted this device's key into its allowlist.
@@ -146,10 +151,19 @@ pub fn roam_connect(
     // the IO actor). Dropping the node was what made connect succeed and then the very
     // first read return "stream closed".
     let node = shared_node(secret_b64)?;
+    // iroh's connect future waits for relay address discovery and the QUIC
+    // handshake; without a bound, an unreachable peer or relay parks the caller
+    // forever (and with it the core's supervised retry, which then never emits
+    // its terminal error). 30s is well past a healthy relay dial and short
+    // enough that the 6-try budget finishes in ~90s.
     let stream: RoamingClientStream = rt.block_on(async {
-        node.connect(&card, label)
-            .await
-            .map_err(|e| RoamError::Message(format!("connect: {e}")))
+        match tokio::time::timeout(CONNECT_TIMEOUT, node.connect(&card, label)).await {
+            Ok(Ok(stream)) => Ok(stream),
+            Ok(Err(e)) => Err(RoamError::Message(format!("connect: {e}"))),
+            Err(_) => Err(RoamError::Message(
+                "connect timed out after 30s".to_string(),
+            )),
+        }
     })?;
 
     let (write, read, conn) = stream.into_futures_io();
