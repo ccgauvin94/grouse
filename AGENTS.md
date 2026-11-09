@@ -237,7 +237,8 @@ keep them when extending the core.
   slug `assistant` from the chat lists (both transports, both clients) and `sources_list`
   drops the project itself, because those sessions are the assistant's per-area working
   chats reached from My Day. A session filed there therefore cannot be found *by title*
-  in any list — and the list is also capped at 50 and excludes 0-message sessions, so a
+  in any list — and the list is one 50-row PAGE unless the client follows `nextCursor`
+  (the core walks every page, `Core::list_sessions`) and excludes 0-message sessions, so a
   live chat can be missing for three independent reasons. **A cached id is
   authoritative; the list is a hint.** `openThreadChat`'s mapping already worked this way
   (`threadSessionId` deliberately skips list validation); the assistant thread's lookup

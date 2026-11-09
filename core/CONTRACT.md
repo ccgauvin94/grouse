@@ -519,7 +519,8 @@ reason this path exists.
 - **A thread's own conversation is found by a map that lives on the SERVER.**
   `on_tasks` carries `"threads": {label: sessionId}` — assistant-state schema v6's
   `thread_sessions`, read with `thread_sessions` and written with `thread_link`.
-  This is the ONLY way to find one: `session/list` caps at 50, excludes 0-message
+  This is the ONLY way to find one: `session/list` pages at 50 rows (the core follows
+  `nextCursor` to the end, `Core::list_sessions`), excludes 0-message
   sessions, and the assistant project is filtered out of every chat list here, so
   an idle thread conversation is unfindable by name. It lives on the server
   because a per-client copy FORKED the conversation — measured 2026-11-01,

@@ -1683,7 +1683,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_item() and 0xFFFF) != 1772) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_list_sessions() and 0xFFFF) != 33034) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_list_sessions() and 0xFFFF) != 55827) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_load_cached_transcript() and 0xFFFF) != 50836) {
@@ -2677,6 +2677,13 @@ public interface CoreInterface {
     
     /**
      * Refresh `session/list` (reply → `on_sessions`).
+     *
+     * Every page is fetched, in order: one page is 50 rows sorted by last message, and
+     * this box's Assistant thread chats plus its hourly scheduled runs fill that page by
+     * themselves — so a project's own conversations fell off the bottom and a client that
+     * groups by project drew one row where there used to be five ("the Media project only
+     * shows Games", 2026-11-08). goose has always answered with `nextCursor`; nothing was
+     * following it.
      */
     fun `listSessions`()
     
@@ -3345,6 +3352,13 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     
     /**
      * Refresh `session/list` (reply → `on_sessions`).
+     *
+     * Every page is fetched, in order: one page is 50 rows sorted by last message, and
+     * this box's Assistant thread chats plus its hourly scheduled runs fill that page by
+     * themselves — so a project's own conversations fell off the bottom and a client that
+     * groups by project drew one row where there used to be five ("the Media project only
+     * shows Games", 2026-11-08). goose has always answered with `nextCursor`; nothing was
+     * following it.
      */override fun `listSessions`()
         = 
     callWithHandle {

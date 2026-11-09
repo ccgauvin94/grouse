@@ -1114,8 +1114,8 @@ pub(crate) fn initialize_params() -> Value {
 }
 
 /// The `session/list` params: list user + ACP sessions (desktop listSessions).
-pub(crate) fn session_list_params() -> Value {
-    crate::session::session_list_params()
+pub(crate) fn session_list_params(cursor: Option<&str>) -> Value {
+    crate::session::session_list_params(cursor)
 }
 
 #[cfg(test)]

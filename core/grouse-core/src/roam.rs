@@ -41,7 +41,7 @@ use parking_lot::Mutex;
 
 use agent_client_protocol::schema::v1::{
     ListSessionsRequest, ListSessionsResponse, RequestPermissionRequest, RequestPermissionResponse,
-    SessionNotification, SessionUpdate,
+    SessionInfo, SessionNotification, SessionUpdate,
 };
 use agent_client_protocol::{
     Agent, Channel, Client, ConnectTo, Error as AcpError, Responder, TransportFrame, UntypedMessage,
@@ -880,30 +880,25 @@ impl RoamPeer {
         }
 
         self.emit_status("connecting: listing sessions");
-        let list = tokio::time::timeout(
-            PHASE_TIMEOUT,
-            cx.send_request(ListSessionsRequest::new().meta(crate::session::session_list_meta()))
-                .block_task(),
-        )
-        .await;
-        let list: ListSessionsResponse = match list {
-            Ok(Ok(reply)) => reply,
-            Ok(Err(error)) => {
-                eprintln!(
-                    "grouse-core: roam peer '{}' session/list: {error}",
-                    self.label
-                );
-                return Err(AcpError::internal_error().data(format!("roam session/list: {error}")));
-            }
-            Err(_) => {
-                eprintln!(
-                    "grouse-core: roam peer '{}' session/list timed out",
-                    self.label
-                );
-                return Err(AcpError::internal_error()
-                    .data("handshake timed out waiting for session/list reply"));
-            }
-        };
+        let list: ListSessionsResponse =
+            match tokio::time::timeout(PHASE_TIMEOUT, list_all_peer_sessions(&cx)).await {
+                Ok(Ok(reply)) => reply,
+                Ok(Err(error)) => {
+                    eprintln!(
+                        "grouse-core: roam peer '{}' session/list: {error}",
+                        self.label
+                    );
+                    return Err(error);
+                }
+                Err(_) => {
+                    eprintln!(
+                        "grouse-core: roam peer '{}' session/list timed out",
+                        self.label
+                    );
+                    return Err(AcpError::internal_error()
+                        .data("handshake timed out waiting for session/list reply"));
+                }
+            };
         self.apply_sessions(&list);
 
         // Resume owed from a supervised reconnect: re-open the session that
@@ -985,13 +980,7 @@ impl RoamPeer {
                     // peer; re-fetch its list so the drawer reflects it. The
                     // remote goose does not reliably notify us of our own
                     // mutation, so we re-list explicitly.
-                    let list = cx
-                        .send_request(
-                            ListSessionsRequest::new().meta(crate::session::session_list_meta()),
-                        )
-                        .block_task()
-                        .await;
-                    if let Ok(list) = list {
+                    if let Ok(list) = list_all_peer_sessions(&cx).await {
                         self.apply_sessions(&list);
                     }
                 }
@@ -1133,8 +1122,7 @@ impl RoamPeer {
         // never learns it exists (and cannot route a chat to it). Re-list.
         let relist = tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            cx.send_request(ListSessionsRequest::new().meta(crate::session::session_list_meta()))
-                .block_task(),
+            list_all_peer_sessions(cx),
         )
         .await;
         if let Ok(Ok(list)) = relist {
@@ -1508,6 +1496,45 @@ pub(crate) fn active_peer<'a>(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Every page of a peer's `session/list`, merged into one reply.
+///
+/// The peer's goose pages at 50 rows ordered by last message, exactly like the main
+/// wire's, so a busy peer pushes a project's own chats off the first page and the drawer
+/// draws one row where there used to be five (see `Core::list_sessions`). A first page
+/// that FAILS is an error — the caller reports it — while a later page that fails keeps
+/// what was already collected, so one bad cursor cannot blank the list.
+async fn list_all_peer_sessions(
+    cx: &agent_client_protocol::ConnectionTo<Agent>,
+) -> Result<ListSessionsResponse, AcpError> {
+    let mut all: Vec<SessionInfo> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut first = true;
+    for _ in 0..crate::session::SESSION_LIST_MAX_PAGES {
+        let mut req = ListSessionsRequest::new().meta(crate::session::session_list_meta());
+        if let Some(next) = cursor.clone() {
+            req = req.cursor(next);
+        }
+        match cx.send_request(req).block_task().await {
+            Ok(page) => {
+                first = false;
+                all.extend(page.sessions);
+                match page.next_cursor {
+                    Some(next) if !next.is_empty() => cursor = Some(next),
+                    _ => break,
+                }
+            }
+            Err(error) => {
+                if first {
+                    return Err(AcpError::internal_error()
+                        .data(format!("roam session/list: {error}")));
+                }
+                break;
+            }
+        }
+    }
+    Ok(ListSessionsResponse::new(all))
+}
 
 #[cfg(test)]
 mod tests {

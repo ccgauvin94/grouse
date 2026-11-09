@@ -6,6 +6,22 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — a project's older chats came back (session/list pages were never followed)
+
+- **`session/list` answers 50 rows at a time, ordered by last message, with a `nextCursor` —
+  and the core sent one request and stopped.** This box's Assistant thread chats and hourly
+  scheduled runs fill that first page on their own, so every older chat fell off the end of
+  what the clients were given: the Media project drew "Games" alone where it used to draw
+  Movies, Music and the rest. Measured against the live server: page 1 = 50 rows with a
+  cursor, page 2 = "Movies", "Music" and three media sessions.
+- The core now walks `nextCursor` to the end (bounded at 40 pages), de-duplicates by id and
+  emits the union as one `on_sessions` — and the same for every roam peer's list. A failed
+  FIRST page still stays "no answer" (nothing painted) instead of an empty drawer that reads
+  like every chat was deleted; a later page that fails keeps what was already collected.
+- `tests/spine.rs` pins it: the fake server hands out a two-page list, and the test asserts
+  both pages arrive AND that the second request carried `cursor`.
+
+grouse 0.2.89 (versionCode 191).
 ### Changed — a launch opens nothing
 
 - **No conversation loads by itself any more.** A launch used to land on the Assistant thread

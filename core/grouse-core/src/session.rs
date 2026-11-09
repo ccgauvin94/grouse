@@ -123,9 +123,26 @@ fn goose_meta() -> Map<String, Value> {
     meta
 }
 
+/// How many `session/list` pages a single refresh will walk.
+///
+/// 50 rows a page, so this is a 2,000-session ceiling — far past anything this box
+/// has (167 real chats), and a bound the loop needs so a server that hands back a
+/// cursor it never exhausts cannot spin forever.
+pub(crate) const SESSION_LIST_MAX_PAGES: usize = 40;
+
 /// `session/list`: user + ACP sessions only (the desktop's `listSessions`).
-pub(crate) fn session_list_params() -> Value {
-    json!({ "_meta": { "types": ["user", "acp"] } })
+///
+/// `cursor` asks for the page after a previous reply's `nextCursor`. Callers follow
+/// it to the end (`Core::list_sessions`): one page is 50 rows ordered by last
+/// message, and this box's Assistant thread chats and scheduled runs fill that page
+/// on their own, so a project's own conversations fall off the bottom and a client
+/// grouping by project draws one row where there used to be five.
+pub(crate) fn session_list_params(cursor: Option<&str>) -> Value {
+    let mut params = json!({ "_meta": { "types": ["user", "acp"] } });
+    if let Some(cursor) = cursor.filter(|c| !c.is_empty()) {
+        params["cursor"] = Value::String(cursor.to_string());
+    }
+    params
 }
 
 /// The same filter as a typed `ListSessionsRequest` meta map (the SDK's typed

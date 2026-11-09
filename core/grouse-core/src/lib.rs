@@ -1432,18 +1432,60 @@ impl Core {
     }
 
     /// Refresh `session/list` (reply → `on_sessions`).
+    ///
+    /// Every page is fetched, in order: one page is 50 rows sorted by last message, and
+    /// this box's Assistant thread chats plus its hourly scheduled runs fill that page by
+    /// themselves — so a project's own conversations fell off the bottom and a client that
+    /// groups by project drew one row where there used to be five ("the Media project only
+    /// shows Games", 2026-11-08). goose has always answered with `nextCursor`; nothing was
+    /// following it.
     pub fn list_sessions(&self) {
         let Some(conn) = self.inner.conn.lock().clone() else {
             return;
         };
         let core = self.clone();
         crate::roam::runtime().spawn(async move {
-            if let Ok(reply) = conn
-                .rpc_async("session/list", crate::spine::session_list_params())
-                .await
-            {
-                core.on_sessions_reply(reply);
+            let mut rows: Vec<Value> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut cursor: Option<String> = None;
+            let mut answered = false;
+            for _ in 0..crate::session::SESSION_LIST_MAX_PAGES {
+                let Ok(reply) = conn
+                    .rpc_async(
+                        "session/list",
+                        crate::spine::session_list_params(cursor.as_deref()),
+                    )
+                    .await
+                else {
+                    break;
+                };
+                answered = true;
+                if let Some(page) = reply.get("sessions").and_then(Value::as_array) {
+                    for row in page {
+                        // The cursor is (sort_at, id), so pages should not overlap — but a
+                        // session touched mid-walk can, and a duplicate row in the drawer is
+                        // a worse failure than a repeated id check.
+                        let id = row
+                            .get("sessionId")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        if seen.insert(id) {
+                            rows.push(row.clone());
+                        }
+                    }
+                }
+                match reply.get("nextCursor").and_then(Value::as_str) {
+                    Some(next) if !next.is_empty() => cursor = Some(next.to_string()),
+                    _ => break,
+                }
             }
+            // A failed FIRST page must stay "no answer" (nothing painted) rather than an
+            // empty drawer that reads like every chat was deleted.
+            if !answered {
+                return;
+            }
+            core.on_sessions_reply(json!({ "sessions": rows }));
         });
     }
 

@@ -222,6 +222,11 @@ struct FakeServer {
     /// `0` = off (the small canned replay below).
     history: Arc<Mutex<usize>>,
     release_load: Arc<tokio::sync::Notify>,
+    /// When set, `session/list` answers in TWO pages with a `nextCursor` between
+    /// them, the way goose does past 50 sessions — the shape a client that never
+    /// followed the cursor silently truncated (2026-11-08: the Media project
+    /// showed one chat where it used to show five).
+    page_lists: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FakeServer {
@@ -243,6 +248,7 @@ impl FakeServer {
             gate_load: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             history: Arc::new(Mutex::new(0)),
             release_load: Arc::new(tokio::sync::Notify::new()),
+            page_lists: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -391,15 +397,45 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
                     ]
                 })
             }
-            "session/list" => json!({
-                "sessions": [{
-                    "sessionId": "sess-e2e",
-                    "title": "E2E Chat",
-                    "updatedAt": "2026-08-12T00:00:00.000Z",
-                    "cwd": "/tmp",
-                    "_meta": { "messageCount": 1, "lastMessageSnippet": "hi from the list" }
-                }]
-            }),
+            "session/list" => {
+                if server.page_lists.load(std::sync::atomic::Ordering::SeqCst) {
+                    // Page 2 is asked for with the cursor page 1 handed out; a client
+                    // that ignores `nextCursor` never sends that request at all.
+                    let cursor = params.get("cursor").and_then(Value::as_str).unwrap_or("");
+                    if cursor == "page-2" {
+                        json!({
+                            "sessions": [{
+                                "sessionId": "sess-old",
+                                "title": "Movies",
+                                "updatedAt": "2026-01-01T00:00:00.000Z",
+                                "cwd": "/tmp",
+                                "_meta": { "messageCount": 4 }
+                            }]
+                        })
+                    } else {
+                        json!({
+                            "sessions": [{
+                                "sessionId": "sess-e2e",
+                                "title": "E2E Chat",
+                                "updatedAt": "2026-08-12T00:00:00.000Z",
+                                "cwd": "/tmp",
+                                "_meta": { "messageCount": 1, "lastMessageSnippet": "hi from the list" }
+                            }],
+                            "nextCursor": "page-2"
+                        })
+                    }
+                } else {
+                    json!({
+                        "sessions": [{
+                            "sessionId": "sess-e2e",
+                            "title": "E2E Chat",
+                            "updatedAt": "2026-08-12T00:00:00.000Z",
+                            "cwd": "/tmp",
+                            "_meta": { "messageCount": 1, "lastMessageSnippet": "hi from the list" }
+                        }]
+                    })
+                }
+            }
             "session/load" => {
                 let session = params
                     .get("sessionId")
@@ -2175,6 +2211,69 @@ fn cold_start_paint_is_not_filed_under_the_transient_session() {
     let painted: String =
         core.transcript().iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("");
     assert!(painted.contains("OWNED-BY-SESS-R"), "paint must stay on screen: {painted}");
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&cache_dir);
+}
+
+// ---------------------------------------------------------------------------
+// session/list is PAGED — following the cursor is what keeps a project's chats
+// ---------------------------------------------------------------------------
+
+#[test]
+fn session_list_follows_the_cursor_instead_of_stopping_at_the_first_page() {
+    // goose pages `session/list` at 50 rows ordered by last message. This box's
+    // Assistant thread chats and hourly scheduled runs fill that page on their own, so
+    // the sessions a project view is built from fell off the end: the Media project
+    // showed "Games" alone where it used to show Movies and Music too (2026-11-08).
+    // The cursor was always in the reply; nothing followed it.
+    let cache_dir = std::env::temp_dir().join(format!("grouse-pages-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache_dir);
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    server
+        .page_lists
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        cache_dir.to_string_lossy().to_string(),
+    );
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+        initial_project_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "ready");
+    core.list_sessions();
+
+    let ids: Vec<String> = match wait_for(&ev_rx, |ev| matches!(ev, Ev::Sessions(_)), "session list") {
+        Ev::Sessions(list) => list.into_iter().map(|s| s.id).collect(),
+        _ => Vec::new(),
+    };
+    assert_eq!(
+        ids,
+        vec!["sess-e2e".to_string(), "sess-old".to_string()],
+        "both pages must arrive, in the server's order"
+    );
+    // And the cursor is what asked for it: one request without, one with.
+    let lists = server.frames_for("session/list");
+    assert_eq!(lists.len(), 2, "one page per request: {lists:?}");
+    assert_eq!(
+        lists[1].pointer("/params/cursor").and_then(Value::as_str),
+        Some("page-2")
+    );
 
     core.disconnect();
     let _ = std::fs::remove_dir_all(&cache_dir);
