@@ -2008,27 +2008,48 @@ impl Core {
         let Some(store) = self.inner.hub.displayed_store() else {
             return Vec::new();
         };
-        // Is this chat working at all? An `in_progress` tool row outside a turn is a row
-        // whose response never came, not work in flight.
+        // "Running" needs THREE things, and the first version of this got that wrong in a
+        // way the user caught: `in_progress` plus a live turn counted every call whose
+        // response never came, so this chat reported "26 running" whenever a turn began.
+        //
+        //   1. the chat actually holds a turn (`in_flight`), and
+        //   2. the call is `in_progress`, and
+        //   3. the call belongs to THIS turn — its position is after the newest prompt.
+        //
+        // A tool call whose response never arrives (a stopped turn, a dropped wire) keeps
+        // `in_progress` in the stored history forever; 26 such rows sat before this chat's
+        // latest prompt (measured 2026-11-08), and only the position check excludes them.
         let live = self
             .inner
             .hub
             .displayed_key()
             .map(|key| self.inner.state.lock().in_flight.contains(&key))
             .unwrap_or(false);
+        let items = store.rich_transcript();
+        // Where this turn starts: the newest prompt's position. Nothing before it can be
+        // running, whatever its stored status says.
+        let turn_floor = items
+            .iter()
+            .filter(|item| item.kind == ItemKind::User)
+            .map(|item| item.seq)
+            .max()
+            .unwrap_or(0);
+        let running_now = |status: &str, seq: u32| live && status == "in_progress" && seq > turn_floor;
         let mut lanes = Vec::new();
-        for item in store.rich_transcript() {
+        for item in &items {
             match item.kind {
                 ItemKind::Tool => {
-                    if let Some(lane) = work_lane(&item.id, &item.text, &item.detail, &item.status,
-                                                  &item.steps, live) {
+                    let running = running_now(&item.status, item.seq);
+                    if let Some(lane) = work_lane(&item.id, &item.text, &item.detail,
+                                                  &item.status, &item.steps, running) {
                         lanes.push(lane);
                     }
                 }
                 ItemKind::ToolGroup => {
                     for call in &item.calls {
+                        let running = running_now(&call.status, call.seq);
                         if let Some(lane) = work_lane(&call.id, &call.title, &call.detail,
-                                                      &call.status, &call.steps, live) {
+                                                      &call.status, &call.steps, running) {
                             lanes.push(lane);
                         }
                     }
@@ -4996,18 +5017,17 @@ impl crate::session::DispatchHost for Core {
 
 /// One transcript tool call as a work lane, or `None` when there is nothing to report —
 /// a finished call that never had a sub-agent is history, not activity.
-/// `live` is the CHAT's turn state: an `in_progress` call is only running while the chat
-/// holds a turn. Outside one it is a call whose response never came, which is history —
-/// and listing it as running is what produced a "26 running" badge on an idle chat.
+/// `running` is the caller's judgement, not `status == "in_progress"`: it also needs the
+/// chat to hold a turn AND the call to belong to it (see `Core::activity`). An open call
+/// that fails those tests is a response that never came, and is history.
 fn work_lane(
     id: &str,
     title: &str,
     detail: &str,
     status: &str,
     steps: &[SubagentStep],
-    live: bool,
+    running: bool,
 ) -> Option<ActiveWork> {
-    let running = live && status == "in_progress";
     if steps.is_empty() && !running {
         return None;
     }
