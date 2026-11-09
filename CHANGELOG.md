@@ -26,7 +26,7 @@ All notable changes to Grouse are recorded here. The format is based on
   the Roam screen no longer re-dials a failed peer, and a foreground return gives one
   fresh attempt per fallen peer.
 
-grouse 0.2.94 (versionCode 196).
+grouse 0.2.95 (versionCode 197).
 
 ### Fixed — "26 running" on an idle chat, and an Activity pill that read as part of the host name
 

@@ -5,6 +5,7 @@ package id.gauvin.grouse
 import id.gauvin.grouse.ConnectionManager.Companion.roamStatusDetail
 import id.gauvin.grouse.ConnectionManager.Companion.roamStatusShort
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -91,6 +92,12 @@ class RoamStatusTest {
     fun `an unrecognised error still says something`() {
         val d = roamStatusDetail("error: something nobody has seen before")
         assertEquals("something nobody has seen before", d)
-        assertEquals("error", roamStatusShort("error: something nobody has seen before"))
+        // The short form must not collapse to the bare word "error": it carries the
+        // transport's reason (truncated to the row budget).
+        val short = roamStatusShort("error: something nobody has seen before")!!
+        assertTrue(short.startsWith("something nobody"))
+        assertNotEquals("error", short)
+        // A truly empty message still has a fallback rather than a blank row.
+        assertEquals("error", roamStatusShort("error:"))
     }
 }

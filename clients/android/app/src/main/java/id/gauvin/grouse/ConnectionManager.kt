@@ -3903,7 +3903,11 @@ class ConnectionManager private constructor(context: Context) {
                 status.contains("timed out", true) || status.contains("no reply", true) -> "no reply"
                 status.contains("refused", true) -> "refused"
                 status.contains("invalid card", true) -> "bad card"
-                else -> "error"
+                // Never a bare "error": carry the transport's own reason, collapsed to
+                // one line. The caller truncates it for a row; the full prose lives in
+                // roamStatusDetail below and on the endpoint card.
+                else -> status.removePrefix("error:").trim()
+                    .replace(Regex("\\s+"), " ").ifBlank { "error" }
             }
             else -> status
         }

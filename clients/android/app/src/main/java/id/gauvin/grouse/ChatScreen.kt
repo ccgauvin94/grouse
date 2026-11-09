@@ -668,7 +668,8 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                                 // this chat's peer is down, name the phase beside it
                                 // ("laptop · no reply", "laptop · reconnect 3").
                                 if (chipState == LinkState.Connected) roamPeer
-                                else "$roamPeer · ${ConnectionManager.roamStatusShort(chipStatus)}",
+                                else "$roamPeer · " + (ConnectionManager.roamStatusDetail(chipStatus)
+                                    ?: ConnectionManager.roamStatusShort(chipStatus)).take(30),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 // Tint only when there is something wrong: a green chip every
