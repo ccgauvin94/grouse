@@ -42,6 +42,10 @@ struct Lists {
     /// Mirrored, never written: the map is the server's (assistant-state
     /// `thread_sessions`) so two clients converge on one chat instead of forking it.
     QVariantMap threads;
+    /// This document came off the core's DISK CACHE, not the wire: it is the last
+    /// complete board, replayed so the tab is not blank while the refresh runs. The
+    /// page paints it and keeps saying "refreshing"; it must not stop the refresh.
+    bool cached = false;
 };
 
 /// Decode `on_tasks`. A document that will not parse yields empty lists and a

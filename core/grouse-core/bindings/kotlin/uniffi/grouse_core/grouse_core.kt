@@ -1095,6 +1095,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_task_snooze(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_tasks_paint(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_tasks_refresh(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_transcript(
@@ -1396,6 +1398,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_task_snooze(`ptr`: Long,`id`: RustBuffer.ByValue,`until`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_core_tasks_paint(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_grouse_core_fn_method_core_tasks_refresh(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_transcript(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1767,6 +1771,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_task_snooze() and 0xFFFF) != 6349) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_core_tasks_paint() and 0xFFFF) != 58483) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_tasks_refresh() and 0xFFFF) != 56972) {
@@ -2879,6 +2886,22 @@ public interface CoreInterface {
     fun `taskSnooze`(`id`: kotlin.String, `until`: kotlin.String, `reason`: kotlin.String)
     
     /**
+     * Paint the LAST COMPLETE board from disk, marked `cached: true`, so opening
+     * the tab shows what it last showed instead of a spinner while the refresh
+     * runs. Returns whether anything was painted.
+     *
+     * Separate from `tasks_refresh` on purpose: a refresh needs the wire, and the
+     * moment the cache matters most is the one where the wire is not there yet
+     * (cold start, offline, roaming). It is a disk read and one callback, so a
+     * client calls it on every open and then refreshes if it is online.
+     *
+     * Only a COMPLETE board is ever written (see `save_my_day`), so what this
+     * paints is a real answer — never a half-refreshed one whose failed section
+     * would read as "nothing is open".
+     */
+    fun `tasksPaint`(): kotlin.Boolean
+    
+    /**
      * Re-read the open and closed task lists; the answer arrives on `on_tasks`.
      */
     fun `tasksRefresh`()
@@ -3877,6 +3900,33 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 }
     }
     
+    
+
+    
+    /**
+     * Paint the LAST COMPLETE board from disk, marked `cached: true`, so opening
+     * the tab shows what it last showed instead of a spinner while the refresh
+     * runs. Returns whether anything was painted.
+     *
+     * Separate from `tasks_refresh` on purpose: a refresh needs the wire, and the
+     * moment the cache matters most is the one where the wire is not there yet
+     * (cold start, offline, roaming). It is a disk read and one callback, so a
+     * client calls it on every open and then refreshes if it is online.
+     *
+     * Only a COMPLETE board is ever written (see `save_my_day`), so what this
+     * paints is a real answer — never a half-refreshed one whose failed section
+     * would read as "nothing is open".
+     */override fun `tasksPaint`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_tasks_paint(
+        it,
+        _status)
+}
+    }
+    )
+    }
     
 
     

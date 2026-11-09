@@ -112,6 +112,8 @@ Lists parse(const QString &json)
         failures << QStringLiteral("%1: %2").arg(it.key(), msg);
     }
     out.error = failures.join(QLatin1Char('\n'));
+    // The core marks a cache replay; a document from the wire never carries it.
+    out.cached = root.value(QLatin1String("cached")).toBool(false);
     return out;
 }
 

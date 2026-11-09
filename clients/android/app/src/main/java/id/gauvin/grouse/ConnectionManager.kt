@@ -511,7 +511,8 @@ class ConnectionManager private constructor(context: Context) {
     val threadSessions = mutableStateOf<Map<String, String>>(emptyMap())
     /** Set when a section failed: "nothing to do" and "could not ask" must not look alike. */
     val tasksError = mutableStateOf<String?>(null)
-    /** A refresh is outstanding (spinner on the tab's refresh affordance). */
+    /** A refresh is outstanding (spinner on the tab's refresh affordance). A CACHED board
+     *  does not clear it: those rows are the last answer, the live one is still coming. */
     val tasksLoading = mutableStateOf(false)
     /** One-shot composer text for the NEXT chat to open (My Day's "discuss this item"
      *  hands over `About item <id>: ` so the assistant can look the item up). Consumed
@@ -1820,6 +1821,14 @@ class ConnectionManager private constructor(context: Context) {
         main.postDelayed({ tasksLoading.value = false }, 15_000)
     }
 
+    /** Paint the board this device last saw, straight off the core's disk cache, marked
+     *  `cached`. Called on every open BEFORE (and independently of) a refresh: the tab
+     *  used to be blank until four round trips finished, and offline it never filled at
+     *  all. Does not touch [tasksLoading] — the refresh owns that. */
+    fun paintTasks() {
+        io { core.tasksPaint() }
+    }
+
     /** Close an item: `done` (it happened), `dropped` (it no longer matters) or `expired`.
      *  [resolution] is the one line that keeps the next briefing from re-raising it. */
     fun closeTask(id: String, state: String, resolution: String) {
@@ -1863,9 +1872,17 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     private fun onCoreTasks(json: String) {
-        tasksLoading.value = false
         val root = try { Json.parseToJsonElement(json) as? JsonObject } catch (e: Exception) { null }
-        if (root == null) { tasksError.value = "My Day: unreadable reply from the server"; return }
+        if (root == null) {
+            tasksLoading.value = false
+            tasksError.value = "My Day: unreadable reply from the server"
+            return
+        }
+        // A cached board is the LAST answer, replayed so the tab is not blank while the
+        // refresh runs: paint the rows but keep saying "refreshing" (and keep the
+        // watchdog alive), because the live envelope is still on its way.
+        val cached = (root["cached"] as? JsonPrimitive)?.booleanOrNull == true
+        if (!cached) tasksLoading.value = false
         openTasks.value = parseTasks(root["open"])
         doneTasks.value = parseTasks(root["done"])
         handedTasks.value = parseAgentTasks(root["tasks"])

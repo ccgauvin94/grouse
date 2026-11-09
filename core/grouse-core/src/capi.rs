@@ -927,6 +927,14 @@ pub extern "C" fn grouse_tasks_refresh(h: *mut c_void) {
     catch_unwind(AssertUnwindSafe(|| handle(h).core.tasks_refresh())).ok();
 }
 
+/// Paint the cached board (marked `cached: true` on `on_tasks`) before refreshing:
+/// 1 when something was painted, 0 when there is no cache. The client calls this
+/// on every open, and `grouse_tasks_refresh` only when it has a wire.
+#[no_mangle]
+pub extern "C" fn grouse_tasks_paint(h: *mut c_void) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.tasks_paint() as i32)).unwrap_or(0)
+}
+
 #[no_mangle]
 pub extern "C" fn grouse_task_close(
     h: *mut c_void,

@@ -6,6 +6,18 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed — My Day opens on its cache and refreshes behind it
+
+- **The tab used to force a reload before it displayed anything.** One refresh is four tool
+  calls plus a thread-map read, so an open was a spinner until all of them answered, and with no
+  wire (cold start, offline) the lists never filled at all. The core now writes the last
+  **complete** board to `<cache>/my-day.json` and replays it on open, marked `"cached": true`,
+  while the refresh runs behind it — a paint is a disk read and one callback
+  (`tasks_paint()`, C ABI `grouse_tasks_paint`). Both clients call it on open before asking the
+  server; a cached paint keeps the refresh affordance turning, because it is the live envelope,
+  never the cache, that ends it. Only an envelope whose three sections all answered is written —
+  a partial refresh would replay "nothing is open" as if the server had said so.
+
 ### Fixed — a failing hidden session can no longer mint an agent per retry
 
 - The core's three hidden-session users (the My Day host, the per-endpoint file-fetch host, the

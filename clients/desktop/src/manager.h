@@ -467,6 +467,9 @@ public:
     /** Back to the conversation (or the landing page) without touching the wire. */
     Q_INVOKABLE void closeMyDay();
     Q_INVOKABLE void refreshTasks();
+    /// Paint the cached board (the core's `my-day.json`), marked `cached`. Called
+    /// on open before the refresh; a no-op on a core that has no such symbol.
+    void paintCachedTasks();
     /** Close an item: `done` (it happened) / `dropped` (it never mattered) /
      *  `expired`. `resolution` is the one line that stops the next briefing from
      *  raising it again, which is why the page refuses an empty one. */

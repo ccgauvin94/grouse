@@ -2540,7 +2540,19 @@ void Manager::openMyDay()
     // scheduled sessions, so there is nothing to subscribe to and re-reading is
     // the only way to see them move.
     setMyDayVisible(true);
+    paintCachedTasks();
     refreshTasks();
+}
+
+/// Paint the board this machine last saw, off the core's disk cache. Called on
+/// every open BEFORE the refresh: the refresh is four round trips, and this is
+/// the only thing that fills the page when there is no wire at all — which is
+/// exactly when the last board is worth the most.
+void Manager::paintCachedTasks()
+{
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_tasks_paint)
+        return; // an older core: nothing cached, the page behaves as it always did
+    m_bridge->api().grouse_tasks_paint(m_bridge->handle());
 }
 
 void Manager::closeMyDay()
@@ -2718,6 +2730,13 @@ void Manager::coreOnTasks(const QString &json)
             m_threadSessions.insert(it.key(), sid);
     }
     emit currentThreadLabelChanged();
+    if (lists.cached) {
+        // A cached board: the rows are the last answer this machine got, so paint
+        // them but keep saying "refreshing" — and keep the watchdog armed, because
+        // the live envelope has not arrived (and may never, offline).
+        emit tasksChanged();
+        return;
+    }
     m_tasksLoading = false;
     if (m_tasksWatchdog)
         m_tasksWatchdog->stop();

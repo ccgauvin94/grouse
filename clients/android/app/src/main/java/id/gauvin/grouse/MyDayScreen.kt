@@ -86,7 +86,13 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
     var closeState by remember { mutableStateOf("done") }
     var closeNote by rememberSaveable { mutableStateOf("") }
 
-    LaunchedEffect(Unit) { if (cm.online.value) cm.refreshTasks() }
+    // Paint what this device last showed, then refresh: the cached board is a disk read
+    // and one callback, so the tab has rows immediately instead of a spinner, and it is
+    // the only thing that fills it when there is no wire (offline, cold start).
+    LaunchedEffect(Unit) {
+        cm.paintTasks()
+        if (cm.online.value) cm.refreshTasks()
+    }
 
     // Every way into the conversation lands here. `openAssistant()` only SELECTS the thread in
     // the core — My Day is a separate route, so without this the tap looked dead while the chat

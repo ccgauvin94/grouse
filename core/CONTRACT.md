@@ -100,6 +100,7 @@ defaulting to real verification; roam byte stream). The UI supplies only
 | `roam_disconnect(label)` | | |
 | `roam_open_session(label, session_id)` | | |
 | `tasks_refresh()` | — | My Day (§3.6): open items, the done tail and handed-over tasks arrive in ONE `on_tasks` |
+| `tasks_paint()` | → `bool` | My Day from the DISK CACHE, marked `cached: true` on `on_tasks`; `false` when there is none. Called on every open, before (and independently of) `tasks_refresh`, so the tab is never blank while four round trips run — and is filled at all when there is no wire |
 | `task_close(id, state, resolution)` | — | `state` is `done` \| `dropped` \| `expired`; `resolution` is the one line that keeps the next briefing from re-raising it |
 | `task_snooze(id, until, reason)` | — | `until` is an ISO instant |
 | `task_react(id, reaction)` | — | `acted` \| `dismissed` \| `wrong` \| `muted` — assistant-state's only learning signal |
@@ -504,6 +505,17 @@ reason this path exists.
   cannot report. So there is no push: clients refresh on tab open, on an explicit
   refresh, and after every action (the core re-reads and re-emits; a UI never
   patches its own list).
+- **The board is CACHED, and a cached paint is marked.** A refresh is four tool
+  calls plus a thread-map read, so opening the tab used to be a spinner until all
+  of them answered — and with no wire it never filled at all. The core writes the
+  last COMPLETE envelope to `<cache>/my-day.json` and `tasks_paint()` replays it
+  with `"cached": true` (an additive key, ignored by clients that do not look for
+  it). Rules: only an envelope whose three sections all came back is written (a
+  partial one would replay "nothing is open" as if the server had said it; a
+  `threads` failure is not a section and does not block it), and a client that
+  sees `cached: true` paints the rows but does NOT end its "refreshing" state —
+  the live envelope is what ends it. The paint is a getter-shaped intent (disk +
+  one callback, no network) precisely so an offline or cold-start open can use it.
 - **A thread's own conversation is found by a map that lives on the SERVER.**
   `on_tasks` carries `"threads": {label: sessionId}` — assistant-state schema v6's
   `thread_sessions`, read with `thread_sessions` and written with `thread_link`.

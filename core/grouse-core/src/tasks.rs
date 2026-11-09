@@ -485,6 +485,35 @@ pub(crate) fn envelope_threads(
     out.to_string()
 }
 
+/// A cached envelope, marked so a client can paint it and still say "refreshing".
+///
+/// `on_tasks` is one raw JSON string (no typed record), so the flag rides the
+/// envelope instead of the signature: `cached: true` means "this came from disk,
+/// the live refresh is still in flight". Unknown keys are ignored by clients that
+/// do not look for it, which is why it is additive.
+pub(crate) fn cached_envelope(json: &str) -> String {
+    let mut out: Value = serde_json::from_str(json).unwrap_or_else(|_| json!({}));
+    out["cached"] = Value::Bool(true);
+    out.to_string()
+}
+
+/// Whether an envelope carries the sections at all AND every one of them came
+/// back from the server (no `errors` entry for any section).
+pub(crate) fn envelope_is_complete(json: &str) -> bool {
+    let Ok(out) = serde_json::from_str::<Value>(json) else {
+        return false;
+    };
+    let Some(errors) = out.get("errors") else {
+        return out.get("open").is_some() && out.get("done").is_some() && out.get("tasks").is_some();
+    };
+    // `errors` present: complete only if it holds nothing but a thread-map
+    // failure, which is not a section (the lists are still the board).
+    match errors.as_object() {
+        Some(map) => map.keys().all(|k| k == "threads"),
+        None => false,
+    }
+}
+
 pub(crate) fn envelope(
     open: Result<String, String>,
     done: Result<String, String>,
@@ -855,5 +884,70 @@ mod tests {
         assert_eq!(got["open"][0]["snooze_until"], "2026-10-30T11:00:00Z");
         assert_eq!(got["open"][1]["snooze_until"], Value::Null);
         assert_eq!(got["open"][0]["state"], "snoozed");
+    }
+
+    #[test]
+    fn only_a_board_whose_sections_all_answered_is_cacheable() {
+        // A cached board is replayed as if the server had just said it, so
+        // "the open list failed" must never be remembered (it would paint as an
+        // empty board on the next open). A thread-map failure is different: the
+        // map is not a section, the lists are still the board.
+        let good = envelope_threads(
+            Ok("[]".to_string()),
+            Ok("[]".to_string()),
+            Ok("[]".to_string()),
+            &std::collections::BTreeMap::new(),
+            None,
+        );
+        assert!(envelope_is_complete(&good));
+        let no_map = envelope_threads(
+            Ok("[]".to_string()),
+            Ok("[]".to_string()),
+            Ok("[]".to_string()),
+            &std::collections::BTreeMap::new(),
+            Some("unreachable".to_string()),
+        );
+        assert!(envelope_is_complete(&no_map));
+        for failed in [
+            envelope_threads(
+                Err("boom".to_string()),
+                Ok("[]".to_string()),
+                Ok("[]".to_string()),
+                &std::collections::BTreeMap::new(),
+                None,
+            ),
+            envelope_threads(
+                Ok("[]".to_string()),
+                Err("boom".to_string()),
+                Ok("[]".to_string()),
+                &std::collections::BTreeMap::new(),
+                None,
+            ),
+            envelope_threads(
+                Ok("[]".to_string()),
+                Ok("[]".to_string()),
+                Err("unknown tool".to_string()),
+                &std::collections::BTreeMap::new(),
+                None,
+            ),
+        ] {
+            assert!(!envelope_is_complete(&failed), "{failed}");
+        }
+        // Anything unparseable is not a board either.
+        assert!(!envelope_is_complete("not json"));
+        assert!(!envelope_is_complete(r#"{"open": []}"#));
+    }
+
+    #[test]
+    fn a_painted_cache_is_marked_so_the_tab_can_still_say_refreshing() {
+        // The flag rides the envelope because `on_tasks` is one raw string and
+        // the clients that do not look for it must keep working unchanged.
+        let board = envelope(Ok("[]".to_string()), Ok("[]".to_string()), Ok("[]".to_string()));
+        let got: Value = serde_json::from_str(&cached_envelope(&board)).unwrap();
+        assert_eq!(got["cached"], Value::Bool(true));
+        assert_eq!(got["open"], json!([]));
+        // A stamp that cannot be parsed still yields a flag, never a crash.
+        let broken: Value = serde_json::from_str(&cached_envelope("garbage")).unwrap();
+        assert_eq!(broken["cached"], Value::Bool(true));
     }
 }

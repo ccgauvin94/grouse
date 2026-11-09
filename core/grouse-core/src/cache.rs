@@ -110,6 +110,37 @@ impl CacheStore {
         self.cache_dir.join(format!("{}-tools.json", escape(session_id)))
     }
 
+    /// `<dir>/my-day.json`: the last My Day envelope the server answered with.
+    ///
+    /// Not keyed by session: it is the assistant's board, one per server, and it
+    /// is what lets the tab paint its rows on open instead of waiting for four
+    /// tool calls over a hidden session (which, on roam, is seconds of blank).
+    /// Only a COMPLETE answer is ever written here (see `save_tasks`), so a
+    /// partial refresh cannot become the thing the next open shows.
+    fn tasks_path(&self) -> PathBuf {
+        self.cache_dir.join("my-day.json")
+    }
+
+    /// The cached My Day envelope, if there is one.
+    pub fn load_tasks(&self) -> Option<String> {
+        let text = fs::read_to_string(self.tasks_path()).ok()?;
+        // Only an object we could have written: a truncated file (a killed
+        // process) must read as "no cache", never as a payload the tab parses.
+        let parsed: Value = serde_json::from_str(&text).ok()?;
+        parsed.as_object()?;
+        Some(text)
+    }
+
+    /// Persist a My Day envelope. `complete` is the caller's judgement that every
+    /// section came back from the server — a partial one would be replayed as if
+    /// it were the board.
+    pub fn save_tasks(&self, json: &str, complete: bool) {
+        if !complete {
+            return;
+        }
+        let _ = atomic_write(&self.tasks_path(), json.as_bytes());
+    }
+
     /// Persist a session transcript as the RICH item list. An empty transcript
     /// (or empty session id) is not cached, so `load_transcript` reports
     /// `None` for it. Returns whether the file was written.

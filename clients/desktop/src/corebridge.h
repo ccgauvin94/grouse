@@ -95,6 +95,10 @@ public:
         // My Day (CONTRACT §3.3): assistant-state's items over a deterministic
         // tools/call. The lists come back on the `on_tasks` callback.
         void (*grouse_tasks_refresh)(void *h);
+        // Paint the cached board (marked `cached` on on_tasks) before refreshing.
+        // Optional deliberately: a core that predates it paints nothing, and the
+        // page then behaves exactly as it did before the cache existed.
+        int (*grouse_tasks_paint)(void *h);
         void (*grouse_task_close)(void *h, const char *id, const char *state,
                                   const char *resolution);
         void (*grouse_task_snooze)(void *h, const char *id, const char *until,

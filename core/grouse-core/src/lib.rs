@@ -1919,6 +1919,28 @@ impl Core {
         crate::roam::runtime().spawn(async move { this.tasks_refresh_now().await });
     }
 
+    /// Paint the LAST COMPLETE board from disk, marked `cached: true`, so opening
+    /// the tab shows what it last showed instead of a spinner while the refresh
+    /// runs. Returns whether anything was painted.
+    ///
+    /// Separate from `tasks_refresh` on purpose: a refresh needs the wire, and the
+    /// moment the cache matters most is the one where the wire is not there yet
+    /// (cold start, offline, roaming). It is a disk read and one callback, so a
+    /// client calls it on every open and then refreshes if it is online.
+    ///
+    /// Only a COMPLETE board is ever written (see `save_my_day`), so what this
+    /// paints is a real answer — never a half-refreshed one whose failed section
+    /// would read as "nothing is open".
+    pub fn tasks_paint(&self) -> bool {
+        let Some(json) = self.inner.cache.load_tasks() else {
+            return false;
+        };
+        self.inner
+            .listener
+            .on_tasks(crate::tasks::cached_envelope(&json));
+        true
+    }
+
     /// Close an item: `done` (it happened), `dropped` (it no longer matters) or
     /// `expired`. `resolution` is the one line that makes the history explain
     /// itself — without it the next briefing re-raises what the user just closed.
@@ -2780,12 +2802,25 @@ impl Core {
         let (map, mut error) = self.threads_read().await;
         // Paint first: the lists are the tab, and a first run has several conversations
         // to create. The re-emit below carries them.
-        self.emit_tasks(&open, &done, &tasks, &map, error.clone());
+        let envelope = self.emit_tasks(&open, &done, &tasks, &map, error.clone());
+        self.save_my_day(&envelope);
         if self.threads_sync(&labels, &seeds).await {
             let (map, err) = self.threads_read().await;
             error = err.or(error);
-            self.emit_tasks(&open, &done, &tasks, &map, error);
+            let envelope = self.emit_tasks(&open, &done, &tasks, &map, error);
+            self.save_my_day(&envelope);
         }
+    }
+
+    /// Remember a complete board so the next cold open paints instead of spinning.
+    ///
+    /// Gated on completeness rather than on "an envelope arrived": a refresh whose
+    /// `open` call failed still produces a document (with `errors.open`), and
+    /// caching that would replay an empty board as if the server had said so.
+    fn save_my_day(&self, envelope: &str) {
+        self.inner
+            .cache
+            .save_tasks(envelope, crate::tasks::envelope_is_complete(envelope));
     }
 
     fn emit_tasks(
@@ -2795,14 +2830,16 @@ impl Core {
         tasks: &Result<String, String>,
         threads: &std::collections::BTreeMap<String, String>,
         thread_error: Option<String>,
-    ) {
-        self.inner.listener.on_tasks(crate::tasks::envelope_threads(
+    ) -> String {
+        let envelope = crate::tasks::envelope_threads(
             open.clone(),
             done.clone(),
             tasks.clone(),
             threads,
             thread_error,
-        ));
+        );
+        self.inner.listener.on_tasks(envelope.clone());
+        envelope
     }
 
     /// Read the label -> conversation map, replacing the cache when the server answers.
@@ -4867,6 +4904,12 @@ mod tests {
                 .filter(|line| line.starts_with("run_ended "))
                 .collect()
         }
+        fn tasks(&self) -> Vec<String> {
+            self.lines()
+                .into_iter()
+                .filter_map(|line| line.strip_prefix("tasks ").map(|s| s.to_string()))
+                .collect()
+        }
         fn push(&self, line: String) {
             self.0.lock().unwrap().push(line);
         }
@@ -4895,20 +4938,27 @@ mod tests {
         }
         fn on_commands(&self, _: Vec<String>) {}
         fn on_session_open_failed(&self, _: String, _: String) {}
-        fn on_tasks(&self, _: String) {}
+        fn on_tasks(&self, tasks: String) {
+            self.push(format!("tasks {tasks}"));
+        }
         fn on_thread_ready(&self, label: String, session: String) {
             self.push(format!("thread_ready {label} {session}"));
         }
     }
 
     fn core() -> (Arc<Core>, Arc<Events>) {
-        let events = Arc::new(Events(StdMutex::new(Vec::new())));
-        let listener: Arc<dyn CoreListener> = events.clone();
         let dir = std::env::temp_dir().join(format!(
             "grouse-core-test-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
+        core_in(&dir)
+    }
+
+    /// A core whose cache directory the test knows, so it can seed a file on disk.
+    fn core_in(dir: &std::path::Path) -> (Arc<Core>, Arc<Events>) {
+        let events = Arc::new(Events(StdMutex::new(Vec::new())));
+        let listener: Arc<dyn CoreListener> = events.clone();
         let core = Core::new(Box::new(ArcListener(listener)), dir.to_string_lossy().to_string());
         (core, events)
     }
@@ -5176,5 +5226,52 @@ mod tests {
             core.accepts_chat(mine),
             "a merge (or a full replay) must land its rows"
         );
+    }
+
+    #[test]
+    fn my_day_paints_its_cache_and_never_saves_a_partial_board() {
+        // Opening the tab must show what it showed last time instead of a spinner
+        // while four round trips run — and the cache must never become a
+        // half-refreshed board, which would read on screen as "nothing is open".
+        let dir = std::env::temp_dir().join(format!(
+            "grouse-my-day-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (core, events) = core_in(&dir);
+
+        assert!(!core.tasks_paint(), "a cold install has nothing to paint");
+        assert!(events.tasks().is_empty(), "and says nothing either");
+
+        // A failed section is still a document, and it is not the board.
+        let partial = crate::tasks::envelope_threads(
+            Err("unknown tool assistantstate__state_items".to_string()),
+            Ok("[]".to_string()),
+            Ok(r#"[{"id":"tsk_1","title":"handed over"}]"#.to_string()),
+            &std::collections::BTreeMap::new(),
+            None,
+        );
+        core.save_my_day(&partial);
+        assert!(!core.tasks_paint(), "a partial refresh is never written");
+
+        let complete = crate::tasks::envelope_threads(
+            Ok(r#"[{"id":"itm_1","title":"pay the bill","state":"open"}]"#.to_string()),
+            Ok("[]".to_string()),
+            Ok("[]".to_string()),
+            &std::collections::BTreeMap::new(),
+            // A thread-map failure is not a SECTION: the lists are still the board.
+            Some("no conversation map".to_string()),
+        );
+        core.save_my_day(&complete);
+
+        assert!(core.tasks_paint(), "the next open paints it");
+        let painted = events.tasks();
+        assert_eq!(painted.len(), 1, "one callback, one board");
+        let got: Value = serde_json::from_str(&painted[0]).unwrap();
+        assert_eq!(got["cached"], json!(true), "the tab can still say 'refreshing'");
+        assert_eq!(got["open"][0]["id"], "itm_1");
+        assert_eq!(got["tasks"], json!([]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

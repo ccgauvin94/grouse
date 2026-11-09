@@ -156,7 +156,11 @@ Kirigami.Page {
     }
 
     function summaryLine() {
-        if (Mgr.tasksLoading)
+        // "reading the assistant's state…" only when there is nothing on screen yet:
+        // a cached board paints first, and replacing its counts with "reading…" made
+        // a row of real items look like it had not loaded.
+        if (Mgr.tasksLoading && page.inPlayRows.length === 0
+                && Mgr.myDayDone.length === 0 && Mgr.myDayHanded.length === 0)
             return qsTr("reading the assistant's state…")
         const parts = []
         if (page.inPlayRows.length > 0)

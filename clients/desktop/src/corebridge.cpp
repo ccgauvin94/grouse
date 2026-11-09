@@ -108,6 +108,10 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_set_image_rescale);
     RESOLVE(grouse_image_rescale);
     RESOLVE(grouse_tasks_refresh);
+    // Optional (see AimsApi): resolved best-effort, and NOT part of the
+    // required-symbols check below — an older core still loads and simply never
+    // paints a cached board, which is the behaviour every client had before.
+    RESOLVE(grouse_tasks_paint);
     RESOLVE(grouse_task_close);
     RESOLVE(grouse_task_snooze);
     RESOLVE(grouse_task_react);
