@@ -233,18 +233,32 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit,
                                 }
                             }
                         }
-                        // The dot alone leaves a stuck dial invisible. Name the phase
-                        // ("reconnect 3", "dialing", "no reply") on its own line — the
-                        // error detail below the card explains a terminal failure.
+                        // The dot alone leaves a stuck or failed dial silent. Name the
+                        // phase, and for an error show the EXPLANATION (not just the word
+                        // "error") with a Retry — the reason must be readable on this
+                        // screen, because nothing re-dials behind the user's back now.
                         if (!ready && st != null) {
-                            Text(ConnectionManager.roamStatusShort(st),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = when {
-                                    st.startsWith("error") -> MaterialTheme.colorScheme.error
-                                    st.startsWith("connecting") -> MaterialTheme.statusColors.connecting
-                                    else -> MaterialTheme.colorScheme.outline
-                                },
-                                modifier = Modifier.padding(start = 44.dp, end = 14.dp, bottom = 8.dp))
+                            val error = st.startsWith("error")
+                            val line = ConnectionManager.roamStatusDetail(st)
+                                ?: st.removePrefix("error:").removePrefix("connecting:")
+                                    .trim().ifBlank { "connecting" }
+                            Row(
+                                modifier = Modifier.fillMaxWidth()
+                                    .padding(start = 44.dp, end = 8.dp, bottom = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(line,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = when {
+                                        error -> MaterialTheme.colorScheme.error
+                                        st.startsWith("connecting") -> MaterialTheme.statusColors.connecting
+                                        else -> MaterialTheme.colorScheme.outline
+                                    },
+                                    modifier = Modifier.weight(1f))
+                                if (error) TextButton(onClick = { cm.connectRoam(peer.name) }) {
+                                    Text("Retry")
+                                }
+                            }
                         }
                         // Sessions live INSIDE the expanded card, with a separator
                         // under the header. Stable per-session keys + deterministic
@@ -282,13 +296,6 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit,
                             }
                         }
                     }
-                }
-            }
-            ConnectionManager.roamStatusDetail(st)?.let { detail ->
-                item(key = "$peerKey:detail") {
-                    Text(detail, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(start = 40.dp, end = 10.dp, bottom = 8.dp))
                 }
             }
         }

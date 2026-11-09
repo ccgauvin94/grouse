@@ -1219,14 +1219,13 @@ class ConnectionManager private constructor(context: Context) {
         store.roamPeers.forEach { (n, c) ->
             roamPeers.add(RoamPeer(n, c, runCatching { cardFingerprint(c) }.getOrDefault("")))
         }
-        // Auto-connect saved peers so chats are pre-warmed and ready to switch
-        // into — a manual Connect each launch is redundant. Runs once per call
-        // (RoamBrowse calls loadRoamPeers once on first composition). An
-        // error-state peer is re-dialed too: it may be a stale first attempt,
-        // and entering this screen is a user action on peers.
+        // Auto-connect a saved peer only if this process has NEVER tried it. An
+        // error is a message to read, not a cue to re-dial: this screen used to
+        // replace it with "connecting" before it could be read, which is why a
+        // failed endpoint looked like an endless retry. Recovery is explicit (the
+        // card's Retry) or the foreground return's one fresh attempt.
         roamPeers.forEach { peer ->
-            val st = roamStatus[peer.name]
-            if (peer.name !in explicitRoamOff && st != "ready" && st?.startsWith("connecting") != true) {
+            if (peer.name !in explicitRoamOff && roamStatus[peer.name] == null) {
                 connectRoam(peer.name)
             }
         }
@@ -2323,19 +2322,6 @@ class ConnectionManager private constructor(context: Context) {
         )
     }
 
-    /** This peer's dial gave up (its supervisor spent its own budget): retry it the same
-     *  way, and only while the peer is still the one in error — a tick that lands mid-dial
-     *  must not stack a second one. */
-    private fun autoRedialPeer(label: String) {
-        if (label in explicitRoamOff) return
-        if (roamPeers.none { it.name == label }) return
-        beginRetry(
-            key = "roam:$label",
-            fire = { if (roamStatus[label]?.startsWith("error") == true) connectRoam(label) },
-            giveUp = { /* the endpoint's own error status stays visible; the dot is red */ },
-        )
-    }
-
     /** The START_STICKY restart path (see ConnectionService): the process was
      *  reclaimed with the service still holding it, and no Activity lifecycle
      *  will run — this is the only thing that brings the wires back. Same
@@ -2349,16 +2335,16 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     /** Re-dial peers whose supervisor gave up (terminal error). An explicit
-     *  user disconnect is recorded and respected — only the retry budget
-     *  running out is the app's cue to try again. A foreground return is a fresh
-     *  chance, so each peer starts over with the full schedule. */
+     *  user disconnect is recorded and respected. A foreground return is ONE fresh
+     *  attempt per fallen peer — not an app-side retry loop: the core just spent
+     *  its own budget, and a loop would overwrite the visible error with
+     *  "connecting" indefinitely. */
     private fun redialFallenRoamPeers() {
         for (peer in roamPeers.toList()) {
             val st = roamStatus[peer.name]
             if (st?.startsWith("error") == true && peer.name !in explicitRoamOff) {
                 endRetry("roam:${peer.name}")
                 connectRoam(peer.name)
-                autoRedialPeer(peer.name)    // keeps trying if THIS attempt also fails
             }
         }
     }
@@ -3305,7 +3291,12 @@ class ConnectionManager private constructor(context: Context) {
                 currentSession.value?.takeIf { roamPeer(it) == label }
                     ?.let { releaseTurnForLostWire(it) }
                 status.value = "roam: $label — ${st.removePrefix("error:")}"
-                autoRedialPeer(label)
+                // A terminal dial error is exactly what the user needs to read: do NOT
+                // start another automatic dial here. The core already spent its six
+                // attempts; re-dialing one second later replaced this status with
+                // "connecting" and erased the reason — the "flashed error" the user saw.
+                // Recovery is explicit (the card's Retry / Connect) or a fresh chance on
+                // a foreground return (redialFallenRoamPeers), one attempt each.
             }
             // In-flight phases (connecting: dialing/handshake/listing sessions): show which
             // step the dial is on, so a stall is visible instead of a static "connecting…".

@@ -18,8 +18,15 @@ All notable changes to Grouse are recorded here. The format is based on
   `reconnect 3`, `no reply`) instead of showing only a coloured dot, and the chat's roam
   chip becomes `laptop · no reply` while that peer is not ready. The full explanation
   stays on the endpoint page.
+- **A terminal error is no longer overwritten one second later.** The app used to
+  re-dial a peer that had just exhausted the core's six attempts, which replaced
+  `error: …` with `connecting` before it could be read — the error "flashed" and the
+  screen went back to an endless-looking retry. The app's roam retry loop is gone: a
+  failure now stays on the card with its explanation and a **Retry** button, opening
+  the Roam screen no longer re-dials a failed peer, and a foreground return gives one
+  fresh attempt per fallen peer.
 
-grouse 0.2.93 (versionCode 195).
+grouse 0.2.94 (versionCode 196).
 
 ### Fixed — "26 running" on an idle chat, and an Activity pill that read as part of the host name
 
