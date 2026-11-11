@@ -159,9 +159,26 @@ pub(crate) fn session_list_meta() -> Map<String, Value> {
     meta
 }
 
+/// The tag key that carries a session's project, for the migration off
+/// `_meta.projectId`.
+///
+/// goose is moving project association out of the server and has shipped the first
+/// half of client-owned session metadata (`session/new` `_meta.tags`, a flat string
+/// map, filtered server-side; aaif-goose/goose#13173, tracked here as grouse#5 /
+/// upstream #13014). So a project is written BOTH ways while the server still
+/// honours the column, and read column-first with the tag as the fallback — the
+/// order matters because `projectId` is what makes goose inject the project's
+/// instructions, which a tag cannot do.
+///
+/// Namespaced deliberately: `grouse.` is ours, the same ownership rule
+/// #13014 asks goose to enforce, so a bare `project` from another client (or from
+/// goose itself, later) cannot collide with it.
+pub const PROJECT_TAG_KEY: &str = "grouse.project";
+
 /// `session/new`. `_meta.client` present ⇒ goose's `SessionType::User`, so the
 /// desktop/CLI can see these chats. `recipeId` starts a recipe session;
-/// `projectId` is persisted at creation (the stock-goose project bridge).
+/// `projectId` is persisted at creation (the stock-goose project bridge) and
+/// mirrored into `_meta.tags` (`PROJECT_TAG_KEY`) for the day it is not.
 pub(crate) fn session_new_params(
     client_id: &str,
     cwd: &str,
@@ -175,12 +192,44 @@ pub(crate) fn session_new_params(
     }
     if let Some(project) = project_id.filter(|p| !p.is_empty()) {
         meta.insert("projectId".into(), Value::String(project.to_string()));
+        // The forward-compatible half. A server that predates client tags ignores
+        // unknown `_meta` keys (verified against goose 1.56.0), so this costs
+        // nothing today and means a chat filed from now on is already tagged the
+        // day tags become the only mechanism. It is also why no backfill exists for
+        // older chats: `session_tags` is written only by `session/new` until
+        // upstream adds a mutation.
+        let mut tags = Map::new();
+        tags.insert(PROJECT_TAG_KEY.to_string(), Value::String(project.to_string()));
+        meta.insert("tags".into(), Value::Object(tags));
     }
     json!({
         "cwd": cwd,
         "mcpServers": [],
         "_meta": Value::Object(meta),
     })
+}
+
+/// A session's project, from a `session/list` entry's `_meta`.
+///
+/// Column first, tag second, and blank counts as absent in both: a client that sends
+/// `"  "` should not create a project named two spaces. Unknown extra tags are
+/// ignored — the tag bag is shared with whatever else a client (or a future goose)
+/// puts in it.
+pub(crate) fn project_from_meta(meta: Option<&Map<String, Value>>) -> Option<String> {
+    let meta = meta?;
+    let column = meta
+        .get("projectId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|project| !project.is_empty());
+    let tag = meta
+        .get("tags")
+        .and_then(Value::as_object)
+        .and_then(|tags| tags.get(PROJECT_TAG_KEY))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|project| !project.is_empty());
+    column.or(tag).map(str::to_string)
 }
 
 /// `session/load`. `mcpServers` is REQUIRED by goose's deserializer. A
@@ -684,10 +733,7 @@ pub(crate) fn summary_from_fields(
         .and_then(|m| m.get("lastMessageSnippet"))
         .and_then(Value::as_str)
         .map(|s| s.to_string());
-    let project_id = meta
-        .and_then(|m| m.get("projectId"))
-        .and_then(Value::as_str)
-        .map(|s| s.to_string());
+    let project_id = project_from_meta(meta);
     let message_count = meta
         .and_then(|m| m.get("messageCount"))
         .and_then(Value::as_i64)
@@ -1011,6 +1057,70 @@ mod tests {
         assert_eq!(sessions[0].id, "s_chat");
         assert!(cwds.contains(&("s_thread".to_string(), "/projects/x".to_string())));
         assert!(updated.contains(&("s_thread".to_string(), "2026-10-30T21:02:00Z".to_string())));
+    }
+
+    #[test]
+    fn a_new_session_carries_its_project_as_both_a_column_and_a_tag() {
+        // goose is moving project association out of the server (grouse#5): the
+        // column still drives instruction injection, the tag is what survives its
+        // retirement. Writing both at creation is the whole P0 — and a server that
+        // predates tags just ignores the key.
+        let params = session_new_params("grouse-test", "/w", None, Some("media"));
+        assert_eq!(
+            params.pointer("/_meta/projectId").and_then(Value::as_str),
+            Some("media")
+        );
+        assert_eq!(
+            params
+                .pointer("/_meta/tags/grouse.project")
+                .and_then(Value::as_str),
+            Some("media")
+        );
+        assert_eq!(PROJECT_TAG_KEY, "grouse.project");
+
+        // No project, no tag: an unfiled chat must not grow an empty bag.
+        let unfiled = session_new_params("grouse-test", "/w", Some("recipe-1"), None);
+        assert!(unfiled.pointer("/_meta/tags").is_none());
+        assert!(unfiled.pointer("/_meta/projectId").is_none());
+    }
+
+    #[test]
+    fn a_project_survives_on_the_tag_alone() {
+        // The read half. Until goose returns tags in `SessionInfo` a tag-only row
+        // cannot actually arrive, but this is the shape that keeps both clients
+        // working the day `project_id` is gone — including the assistant rule, which
+        // is what keeps thread chats out of the chat list.
+        let reply = json!({"sessions": [
+            {"sessionId": "s_filed", "title": "Media chat", "cwd": "/p",
+             "_meta": {"tags": {"grouse.project": "media"}}},
+            {"sessionId": "s_thread", "title": "Thread: dentist", "cwd": "/p",
+             "_meta": {"tags": {"grouse.project": "assistant"}}},
+            {"sessionId": "s_both", "title": "Both", "cwd": "/p",
+             "_meta": {"projectId": "hacking", "tags": {"grouse.project": "media"}}},
+            {"sessionId": "s_blank", "title": "Blank", "cwd": "/p",
+             "_meta": {"tags": {"grouse.project": "   "}}},
+            {"sessionId": "s_other", "title": "Other tag", "cwd": "/p",
+             "_meta": {"tags": {"buzz.thread": "t1"}}}
+        ]});
+        let (sessions, _, _) = parse_sessions(&reply);
+        let project = |id: &str| {
+            sessions
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| s.project_id.clone())
+        };
+        assert_eq!(project("s_filed").as_deref(), Some("media"));
+        assert!(
+            project("s_thread").is_none(),
+            "the assistant rule must follow the tag, not just the column"
+        );
+        assert_eq!(
+            project("s_both").as_deref(),
+            Some("hacking"),
+            "the column is authoritative while it exists"
+        );
+        assert!(project("s_blank").is_none(), "blank is not a project");
+        assert!(project("s_other").is_none(), "an unrelated tag is not ours");
     }
 
     #[test]

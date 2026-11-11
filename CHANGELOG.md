@@ -6,6 +6,28 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed — a chat's project is now written as a client tag as well as goose's column
+
+- **`session/new` carries `_meta.tags {"grouse.project": <slug>}` beside `_meta.projectId`**, and
+  a listed session's project is read column-first with the tag as fallback. goose is moving
+  project association out of the server (grouse#5; upstream #13014 asked for exactly this, and
+  #13173 shipped the first half — client-owned tags, indexed and filterable), so the aim is that
+  the day `project_id` disappears, nothing in the clients has to change.
+- **Nothing changes on an older server.** `_meta` is a per-key allow-list on goose ≤1.58, so an
+  unknown `tags` key is dropped; the column still files the chat. On 1.59+ the tag is persisted
+  and `session/list` can filter by it.
+- **The read side prefers the column while it exists**, because `project_id` is not only
+  organisational: it is the key goose uses to inject a project's instructions, which is what
+  makes the assistant persona apply in a thread chat. A tag cannot do that, so a tag-only world
+  still needs an answer for instructions.
+- Namespaced on purpose (`grouse.`), per the ownership rule #13014 asks goose to enforce, so a
+  future goose key or another client's `project` cannot collide with ours.
+- One consequence worth knowing: `session/list` returns only sessions **with messages**, so a
+  freshly created chat is invisible to a tag filter until its first message — the same rule that
+  makes a just-created chat invisible to any list.
+
+grouse 0.2.96 (versionCode 198).
+
 ### Fixed — a roam dial that hangs now says so
 
 - **The iroh dial is bounded (30s).** `roam_connect` awaited relay discovery and the QUIC
