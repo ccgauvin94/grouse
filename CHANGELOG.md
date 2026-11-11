@@ -5,6 +5,23 @@ All notable changes to Grouse are recorded here. The format is based on
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed — the context breakdown grouped, and it no longer makes you wait for it
+
+- **Grouped by category, collapsed until tapped.** goose's `category` is the CLASS
+  (`tool_definitions`, `additional_instructions`, …) and its `label` is the THING (a tool, a
+  hint file, an extension) — so the first version printed "Hints and project instructions"
+  forty times while the informative string sat in a field it never showed, on a list long
+  enough to fill the screen. One row per category now carries the total and a bar, its
+  segments nest underneath, and only a category with more than one segment gets a chevron.
+- **The previous answer stays on screen while a new one is measured.** The server tokenizes
+  every message in the conversation, so a 600k-token chat takes seconds; blanking the panel to
+  re-measure the same thing made a slow answer look like a broken tap. The last report is
+  cached per session (re-opening the panel is instant), the header says `measuring…` while a
+  refresh is in flight, and tapping the total forces one.
+- A server that never answers stops saying `measuring…` after 8s rather than spinning forever.
+
+grouse 0.2.97 (versionCode 199).
+
 
 ### Changed — a chat's project is now written as a client tag as well as goose's column
 

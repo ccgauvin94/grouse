@@ -486,3 +486,28 @@ data class ContextSegment(
     val preview: String?,
     val parts: List<ContextSegment>,
 )
+
+/** One display row of a [ContextReport]: a goose CATEGORY with its total and the individual
+ *  segments that make it up.
+ *
+ *  Grouping is not cosmetic. `category` is the CLASS (`tool_definitions`, `additional_
+ *  instructions`, …) and `label` is the THING (a tool name, a hint file, an extension), so a
+ *  flat list prints the class over and over — 40 rows reading "Hints and project
+ *  instructions" while the informative string sits in the field nobody shows. [children] is
+ *  in the order goose emitted (request order), and the group total is their sum. */
+data class ContextGroup(
+    val category: String,
+    val tokens: Long,
+    val children: List<ContextSegment>,
+)
+
+/** Category totals, in request order of first appearance — NOT sorted by size. The system
+ *  prompt is first because it IS first, and a size-sorted list hides exactly the thing worth
+ *  knowing: what the model reads before it reads anything else. */
+fun ContextReport.groups(): List<ContextGroup> {
+    val order = segments.map { it.category }.distinct()
+    return order.map { cat ->
+        val inCategory = segments.filter { it.category == cat }
+        ContextGroup(cat, inCategory.sumOf { it.tokens }, inCategory)
+    }
+}

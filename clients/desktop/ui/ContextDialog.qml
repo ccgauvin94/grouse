@@ -24,8 +24,47 @@ Controls.Dialog {
 
     // goose's categories are wire values; a person reads English. An unknown category falls
     // back to its own label so a future goose category renders instead of vanishing.
-    function categoryLabel(seg) {
-        switch (seg.category) {
+    // goose's `category` is the CLASS and `label` is the THING (a tool, a hint file, an
+    // extension). A flat list of segments therefore prints the class over and over; group by
+    // category, keep request order of first appearance (NOT size order: the system prompt is
+    // first because it IS first), and nest the labels under it.
+    function groups() {
+        const rows = Mgr.contextReport || []
+        const order = []
+        for (let i = 0; i < rows.length; i++)
+            if (order.indexOf(rows[i].category) < 0) order.push(rows[i].category)
+        return order.map(function (cat) {
+            const kids = rows.filter(function (r) { return r.category === cat })
+            let tokens = 0
+            for (let i = 0; i < kids.length; i++) tokens += kids[i].tokens || 0
+            return { category: cat, tokens: tokens, children: kids }
+        })
+    }
+    // Which categories are open; empty is the compact view, which is the point.
+    property var open: ({})
+    function toggle(cat) {
+        var next = Object.assign({}, open)
+        if (next[cat]) delete next[cat]
+        else next[cat] = true
+        open = next
+    }
+
+    // Same convention as the page's footer numbers (40.3k, 1.0M) so the dialog and the donut
+    // read alike. Local to the dialog: `page` is ChatPage's id and is NOT in scope here.
+    function fmtK(n) {
+        if (n >= 1000000) {
+            const m = n / 1000000
+            return (m >= 10 ? String(Math.round(m)) : String(Math.round(m * 10) / 10)) + "M"
+        }
+        if (n >= 1000) {
+            const v = n / 1000
+            return (v >= 100 ? String(Math.round(v)) : String(Math.round(v * 10) / 10)) + "k"
+        }
+        return String(n)
+    }
+
+    function categoryLabel(category) {
+        switch (category) {
         case "system_prompt": return qsTr("System prompt")
         case "extension_instructions": return qsTr("Extension instructions")
         case "additional_instructions": return qsTr("Hints and project instructions")
@@ -33,7 +72,7 @@ Controls.Dialog {
         case "tool_definitions": return qsTr("Tool definitions")
         case "compaction_summary": return qsTr("Compaction summary")
         case "messages": return qsTr("Conversation")
-        default: return seg.label && seg.label.length > 0 ? seg.label : seg.category
+        default: return seg
         }
     }
 
@@ -60,8 +99,8 @@ Controls.Dialog {
                 opacity: 0.7
                 text: {
                     const t = Mgr.contextReportTotal || {}
-                    const total = t.total ? page.fmtK(t.total) : ""
-                    const limit = t.limit ? page.fmtK(t.limit) : ""
+                    const total = t.total ? dialog.fmtK(t.total) : ""
+                    const limit = t.limit ? dialog.fmtK(t.limit) : ""
                     return limit.length > 0 ? total + " / " + limit : total
                 }
             }
@@ -78,12 +117,11 @@ Controls.Dialog {
             text: qsTr("Over the compaction threshold — the next turn compacts first")
         }
 
-        // Request order, not size order: it is the order the model reads them in, and a bar
-        // sorted by size would hide that the system prompt is the thing at the front.
+        // One row per category, its segments nested and collapsed until tapped.
         Repeater {
-            model: Mgr.contextReport
+            model: dialog.groups()
             delegate: ColumnLayout {
-                id: segRow
+                id: groupRow
                 required property var modelData
                 Layout.fillWidth: true
                 spacing: 2
@@ -91,17 +129,23 @@ Controls.Dialog {
                     const t = Mgr.contextReportTotal || {}
                     return t.total > 0 ? t.total : 1
                 }
+                readonly property bool isOpen: !!dialog.open[groupRow.modelData.category]
 
                 RowLayout {
                     Layout.fillWidth: true
                     Controls.Label {
+                        text: groupRow.modelData.children.length > 1
+                              ? (groupRow.isOpen ? "\u25be" : "\u25b8") : " "
+                        opacity: 0.6
+                    }
+                    Controls.Label {
                         Layout.fillWidth: true
                         elide: Text.ElideRight
-                        text: dialog.categoryLabel(segRow.modelData)
+                        text: dialog.categoryLabel(groupRow.modelData.category)
                     }
                     Controls.Label {
                         opacity: 0.7
-                        text: page.fmtK(segRow.modelData.tokens || 0)
+                        text: dialog.fmtK(groupRow.modelData.tokens || 0)
                     }
                 }
                 Rectangle {
@@ -111,16 +155,14 @@ Controls.Dialog {
                     color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
                                    Kirigami.Theme.textColor.b, 0.12)
                     Rectangle {
-                        width: parent.width * Math.min(1, (segRow.modelData.tokens || 0) / segRow.total)
+                        width: parent.width * Math.min(1, (groupRow.modelData.tokens || 0) / groupRow.total)
                         height: parent.height
                         radius: 2
                         color: Kirigami.Theme.highlightColor
                     }
                 }
-                // Per-extension / per-kind slicing, indented so the grouping reads without a
-                // second list.
                 Repeater {
-                    model: segRow.modelData.parts ? segRow.modelData.parts : []
+                    model: groupRow.isOpen ? groupRow.modelData.children : []
                     delegate: RowLayout {
                         required property var modelData
                         Layout.fillWidth: true
@@ -129,13 +171,17 @@ Controls.Dialog {
                             Layout.fillWidth: true
                             elide: Text.ElideRight
                             opacity: 0.8
-                            text: modelData.label
+                            text: modelData.label && modelData.label.length > 0
+                                  ? modelData.label : modelData.category
                         }
                         Controls.Label {
                             opacity: 0.6
-                            text: page.fmtK(modelData.tokens || 0)
+                            text: dialog.fmtK(modelData.tokens || 0)
                         }
                     }
+                }
+                TapHandler {
+                    onTapped: dialog.toggle(groupRow.modelData.category)
                 }
             }
         }

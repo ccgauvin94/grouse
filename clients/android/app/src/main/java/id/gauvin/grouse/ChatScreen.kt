@@ -125,65 +125,102 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 
 
-/** What fills the window, split the way the SERVER splits it (`context/report`).
+/** What fills the window, GROUPED the way goose defines it (`context/report`).
  *
- *  This is a different measurement from the donut: goose tokenizes the request it WOULD
- *  send next, while the donut shows the provider's billed count for the request it already
- *  sent — they are ~7k apart on a 165k conversation, which is why the caption says
- *  "estimate" rather than pretending they are one number.
+ *  `category` is the class (`tool_definitions`, `additional_instructions`, …) and `label` is
+ *  the thing (a tool, a hint file, an extension). A flat list of segments therefore prints
+ *  the class forty times — which is exactly what this used to do — while the informative
+ *  string sits in a field nobody shows. So: one row per category with its total, and its
+ *  segments nested under it, collapsed until tapped.
  *
- *  Segments come in request order (prompt first, then tool definitions, then the
- *  conversation), which is more useful than sorting by size: it is the order the model
- *  reads them in. A segment with `parts` expands to per-extension / per-kind rows. */
+ *  This is a different measurement from the donut: goose tokenizes the request it WOULD send
+ *  next, the donut shows the provider's billed count for the request it already sent. They
+ *  are ~7k apart on a 165k conversation, which is why the caption calls it an estimate.
+ *
+ *  [loading] covers the seconds it takes on a long chat — the server tokenizes every message,
+ *  and the previous answer stays on screen underneath while it does. */
 @Composable
-fun ContextBreakdown(report: ContextReport, modifier: Modifier = Modifier) {
+fun ContextBreakdown(
+    report: ContextReport,
+    modifier: Modifier = Modifier,
+    loading: Boolean = false,
+    onRefresh: (() -> Unit)? = null,
+) {
     val total = report.total.coerceAtLeast(1)
-    Column(modifier.padding(start = 18.dp, end = 18.dp, top = 4.dp)
-        .fillMaxWidth()) {
+    val groups = report.groups()
+    // Which categories are open. Empty = the compact view, which is the point: a 600k-token
+    // chat has ~40 segments and none of them belong on screen at once.
+    val open = remember(report) { mutableStateOf(emptySet<String>()) }
+    Column(modifier.padding(start = 18.dp, end = 18.dp, top = 4.dp).fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(stringResource(R.string.context_breakdown), style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+            if (loading) {
+                Text(stringResource(R.string.context_measuring),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(end = 6.dp))
+            }
             Text(fmtTokens(report.total.toInt()) + (if (report.limit > 0) " / ${fmtTokens(report.limit.toInt())}" else ""),
-                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
+                modifier = if (onRefresh != null) {
+                    Modifier.clickable { onRefresh() }
+                } else Modifier)
         }
         if (report.autoCompactionPending) {
             Text(stringResource(R.string.context_compaction_pending),
                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error,
                 modifier = Modifier.padding(top = 2.dp))
         }
-        report.segments.forEach { seg -> ContextSegmentRow(seg, total, 0f) }
+        groups.forEach { group ->
+            val isOpen = open.value.contains(group.category)
+            val label = contextCategoryLabel(group.category)
+            Column(Modifier.fillMaxWidth().clickable {
+                open.value = if (isOpen) open.value - group.category else open.value + group.category
+            }) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                    if (group.children.size > 1) {
+                        Text(if (isOpen) "▾" else "▸", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline,
+                            modifier = Modifier.padding(end = 4.dp))
+                    } else {
+                        Spacer(Modifier.width(10.dp))
+                    }
+                    Text(label, style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    Text(fmtTokens(group.tokens.toInt()), style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline)
+                }
+                Box(Modifier.fillMaxWidth().padding(start = 14.dp, top = 2.dp).height(3.dp)
+                    .clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
+                    Box(Modifier.fillMaxWidth((group.tokens.toFloat() / total).coerceIn(0f, 1f))
+                        .fillMaxHeight().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)))
+                }
+                if (isOpen) {
+                    group.children.forEach { seg ->
+                        Row(verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(start = 24.dp, top = 3.dp).fillMaxWidth()) {
+                            Text(seg.label.ifBlank { seg.category },
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f))
+                            Text(fmtTokens(seg.tokens.toInt()), style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline)
+                        }
+                    }
+                }
+            }
+        }
         Text(stringResource(R.string.context_estimate_note),
             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
-            modifier = Modifier.padding(top = 4.dp, bottom = 2.dp))
+            modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
     }
 }
 
-/** One row: name, thin proportional bar, token count. `indent` shifts a `part` under its
- *  segment so the grouping reads without a second list. */
+/** goose's category names are wire values; a person reads English. An unknown category falls
+ *  back to its own name so a future goose category still renders instead of vanishing. */
 @Composable
-private fun ContextSegmentRow(seg: ContextSegment, total: Long, indent: Float) {
-    val fraction = (seg.tokens.toFloat() / total).coerceIn(0f, 1f)
-    Column(Modifier.padding(start = (indent * 12).dp, top = 3.dp).fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(contextCategoryLabel(seg), style = MaterialTheme.typography.labelSmall,
-                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            Text(fmtTokens(seg.tokens.toInt()), style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.outline)
-        }
-        Box(Modifier.fillMaxWidth().padding(top = 2.dp).height(3.dp)
-            .clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
-            Box(Modifier.fillMaxWidth(fraction).fillMaxHeight()
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = if (indent > 0f) 0.45f else 0.75f)))
-        }
-        seg.parts.forEach { ContextSegmentRow(it, total, indent + 1f) }
-    }
-}
-
-/** goose's category names are wire values; a person reads English. An unknown category
- *  falls back to its own label so a future goose category still renders instead of
- *  vanishing. */
-@Composable
-private fun contextCategoryLabel(seg: ContextSegment): String = when (seg.category) {
+private fun contextCategoryLabel(category: String): String = when (category) {
     "system_prompt" -> stringResource(R.string.context_system_prompt)
     "extension_instructions" -> stringResource(R.string.context_extension_instructions)
     "additional_instructions" -> stringResource(R.string.context_additional_instructions)
@@ -191,7 +228,7 @@ private fun contextCategoryLabel(seg: ContextSegment): String = when (seg.catego
     "tool_definitions" -> stringResource(R.string.context_tool_definitions)
     "compaction_summary" -> stringResource(R.string.context_compaction_summary)
     "messages" -> stringResource(R.string.context_messages)
-    else -> seg.label.ifBlank { seg.category }
+    else -> category
 }
 
 /** A donut that shows how full the context window is, colored by % used —
@@ -840,7 +877,13 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                             AnimatedVisibility(visible = showContextDetail && report != null,
                                 enter = expandVertically() + fadeIn(),
                                 exit = shrinkVertically() + fadeOut()) {
-                                report?.let { ContextBreakdown(it) }
+                                report?.let {
+                                    ContextBreakdown(
+                                        it,
+                                        loading = cm.contextReportLoading.value,
+                                        onRefresh = { cm.requestContextReport(force = true) },
+                                    )
+                                }
                             }
                         }
         }

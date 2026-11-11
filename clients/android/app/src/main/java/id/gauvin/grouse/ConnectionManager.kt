@@ -479,10 +479,18 @@ class ConnectionManager private constructor(context: Context) {
             // The core owns resync now (probe → in-place replay); the app never probes.
         }
         override fun onContextReport(sessionId: String, report: String) {
+            val parsed = ContextReport.parse(report) ?: return
+            // Cache regardless: the answer is expensive to compute and is worth having when
+            // the user comes back to this chat.
+            main.post { reportCache[sessionId] = parsed }
             // Only the chat on screen: a tap belongs to one donut, and a peer's answer must
             // never paint over it.
             if (sessionId != core.activeSessionId()) return
-            main.post { contextReport.value = ContextReport.parse(report) }
+            main.post {
+                reportRequest = null
+                contextReportLoading.value = false
+                contextReport.value = parsed
+            }
         }
         // The core emits this only in response to a direct tools_call; the app issues none
         // since fetchProjectInfo was removed (the server requires Auto mode for those).
@@ -571,9 +579,16 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Ask for the donut's breakdown. Fire-and-forget: the answer arrives on
      *  [onContextReport], and a server that does not have the method simply never answers. */
-    fun requestContextReport() {
+    fun requestContextReport(force: Boolean = false) {
         val id = core.activeSessionId() ?: return
-        contextReport.value = null
+        // Paint what we already know first: on a long chat the answer takes seconds, and
+        // blanking the panel to re-measure the same thing reads as a failure.
+        reportCache[id]?.let { contextReport.value = it }
+        if (!force && reportCache.containsKey(id)) return
+        reportRequest = id
+        contextReportLoading.value = true
+        // A server older than goose 1.58 never answers at all, so stop claiming to measure.
+        main.postDelayed({ if (reportRequest == id) contextReportLoading.value = false }, 8000)
         io { runCatching { unstable.contextReport(id) } }
     }
 
@@ -704,6 +719,14 @@ class ConnectionManager private constructor(context: Context) {
      * definitions / turn context / compaction summary / messages. Null until asked, and null
      * forever on a server older than goose 1.58 (the call is quiet there by design). */
     val contextReport = mutableStateOf<ContextReport?>(null)
+    /** True while the server is measuring. A long chat takes seconds — the report tokenizes
+     *  every message — so the sheet says so instead of looking broken. */
+    val contextReportLoading = mutableStateOf(false)
+    // The last report per session. The answer costs the server a full tokenize of the
+    // conversation, so re-opening the panel shows the previous one instantly; only a
+    // deliberate refresh asks again.
+    private val reportCache = mutableMapOf<String, ContextReport>()
+    private var reportRequest: String? = null
 
     /** Forget the context-window reading when the chat on screen changes.
      *
