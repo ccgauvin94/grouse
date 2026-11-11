@@ -46,7 +46,7 @@ use crate::{
 /// The desktop refuses a library whose value it does not expect — a mismatch is
 /// a callback called with the wrong arity (a garbage pointer), not a compile
 /// error, so it must be caught at load time.
-pub const GROUSE_ABI_VERSION: u32 = 12;
+pub const GROUSE_ABI_VERSION: u32 = 13;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
@@ -246,6 +246,11 @@ pub struct GrouseCoreListener {
     /// one is asked on the chat's own connection, so a roam chat reports its PEER's
     /// catalog. Appended at the END; ABI 12.
     pub on_extension_catalog:
+        Option<extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
+    /// What fills a chat's context window if it were prompted now: `(session_id,
+    /// report)` with the report as raw JSON (`_goose/unstable/context/report`).
+    /// Appended at the END; ABI 13.
+    pub on_context_report:
         Option<extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
 }
 
@@ -625,6 +630,9 @@ impl GrouseUnstableListener for CoreCallbackForwarder {
     }
     fn on_extension_catalog(&self, session_id: String, extensions: String) {
         unsafe { cb_str2(table_fn!(self, on_extension_catalog), self.user_data, &session_id, &extensions) };
+    }
+    fn on_context_report(&self, session_id: String, report: String) {
+        unsafe { cb_str2(table_fn!(self, on_context_report), self.user_data, &session_id, &report) };
     }
     fn on_config_value(&self, key: String, value: String) {
         unsafe { cb_str2(table_fn!(self, on_config_value), self.user_data, &key, &value) };
@@ -1332,6 +1340,15 @@ pub extern "C" fn grouse_unstable_export_session(h: *mut c_void, session_id: *co
 pub extern "C" fn grouse_unstable_session_info(h: *mut c_void, id: *const c_char) {
     let Some(id) = (unsafe { c_param(id) }).map(str::to_owned) else { return };
     catch_unwind(AssertUnwindSafe(|| handle(h).unstable.session_info(id))).ok();
+}
+
+/// What fills a session's context window if it were prompted now — the reply
+/// arrives on `on_context_report` as raw JSON. A server older than goose 1.58
+/// answers "method not found" and NOTHING is emitted (see the shim's note).
+#[no_mangle]
+pub extern "C" fn grouse_unstable_context_report(h: *mut c_void, id: *const c_char) {
+    let Some(id) = (unsafe { c_param(id) }).map(str::to_owned) else { return };
+    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.context_report(id))).ok();
 }
 
 #[no_mangle]

@@ -10,6 +10,8 @@ Kirigami.Page {
 
     // Emitted when the user clicks the tools pill; main.qml owns the slide-out panel.
     signal toolsOpenRequested()
+    /// The context footer was tapped: show what fills the window (ContextDialog, declared in main.qml).
+    signal contextBreakdownRequested()
 
     // A fenced code block inside a message row. A RichText TextEdit wraps
     // everything, so a long line disappeared under a scrollless bubble: the
@@ -818,11 +820,20 @@ Kirigami.Page {
                     Layout.maximumWidth: contextRowLayout.width - 64
                 }
                 Controls.Label {
+                    id: contextLabel
                     visible: !Mgr.compacting && Mgr.contextSize > 0
                     text: page.formatContext()
                     opacity: page.contextPercent() >= 90 ? 1 : 0.7
                     color: page.contextPercent() >= 90 ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
                     font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8
+                    // The number is only half the story: what FILLS the window is the
+                    // question a near-full bar actually raises.
+                    TapHandler {
+                        onTapped: page.contextBreakdownRequested()
+                    }
+                    HoverHandler {
+                        cursorShape: Qt.PointingHandCursor
+                    }
                 }
                 Item {
                     Layout.fillWidth: true

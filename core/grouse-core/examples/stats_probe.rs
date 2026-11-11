@@ -64,6 +64,7 @@ impl grouse_core::GrouseUnstableListener for UL {
     fn on_config_value(&self, _k: String, _v: String) {}
     fn on_supported_models(&self, _p: String, _m: String) {}
     fn on_providers(&self, _providers: String) {}
+    fn on_context_report(&self, _s: String, _r: String) {}
     fn on_session_probe(&self, _s: String, _u: String, _m: i64) {}
     fn on_tool_result(&self, _t: String, _e: bool) {}
     fn on_dictation_config(&self, _p: String) {}

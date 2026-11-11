@@ -125,6 +125,75 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 
 
+/** What fills the window, split the way the SERVER splits it (`context/report`).
+ *
+ *  This is a different measurement from the donut: goose tokenizes the request it WOULD
+ *  send next, while the donut shows the provider's billed count for the request it already
+ *  sent — they are ~7k apart on a 165k conversation, which is why the caption says
+ *  "estimate" rather than pretending they are one number.
+ *
+ *  Segments come in request order (prompt first, then tool definitions, then the
+ *  conversation), which is more useful than sorting by size: it is the order the model
+ *  reads them in. A segment with `parts` expands to per-extension / per-kind rows. */
+@Composable
+fun ContextBreakdown(report: ContextReport, modifier: Modifier = Modifier) {
+    val total = report.total.coerceAtLeast(1)
+    Column(modifier.padding(start = 18.dp, end = 18.dp, top = 4.dp)
+        .fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(stringResource(R.string.context_breakdown), style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+            Text(fmtTokens(report.total.toInt()) + (if (report.limit > 0) " / ${fmtTokens(report.limit.toInt())}" else ""),
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+        }
+        if (report.autoCompactionPending) {
+            Text(stringResource(R.string.context_compaction_pending),
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 2.dp))
+        }
+        report.segments.forEach { seg -> ContextSegmentRow(seg, total, 0f) }
+        Text(stringResource(R.string.context_estimate_note),
+            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
+            modifier = Modifier.padding(top = 4.dp, bottom = 2.dp))
+    }
+}
+
+/** One row: name, thin proportional bar, token count. `indent` shifts a `part` under its
+ *  segment so the grouping reads without a second list. */
+@Composable
+private fun ContextSegmentRow(seg: ContextSegment, total: Long, indent: Float) {
+    val fraction = (seg.tokens.toFloat() / total).coerceIn(0f, 1f)
+    Column(Modifier.padding(start = (indent * 12).dp, top = 3.dp).fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(contextCategoryLabel(seg), style = MaterialTheme.typography.labelSmall,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text(fmtTokens(seg.tokens.toInt()), style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline)
+        }
+        Box(Modifier.fillMaxWidth().padding(top = 2.dp).height(3.dp)
+            .clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
+            Box(Modifier.fillMaxWidth(fraction).fillMaxHeight()
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = if (indent > 0f) 0.45f else 0.75f)))
+        }
+        seg.parts.forEach { ContextSegmentRow(it, total, indent + 1f) }
+    }
+}
+
+/** goose's category names are wire values; a person reads English. An unknown category
+ *  falls back to its own label so a future goose category still renders instead of
+ *  vanishing. */
+@Composable
+private fun contextCategoryLabel(seg: ContextSegment): String = when (seg.category) {
+    "system_prompt" -> stringResource(R.string.context_system_prompt)
+    "extension_instructions" -> stringResource(R.string.context_extension_instructions)
+    "additional_instructions" -> stringResource(R.string.context_additional_instructions)
+    "turn_context" -> stringResource(R.string.context_turn_context)
+    "tool_definitions" -> stringResource(R.string.context_tool_definitions)
+    "compaction_summary" -> stringResource(R.string.context_compaction_summary)
+    "messages" -> stringResource(R.string.context_messages)
+    else -> seg.label.ifBlank { seg.category }
+}
+
 /** A donut that shows how full the context window is, colored by % used —
  *  green until ~60%, amber through ~90%, red beyond (matches the compacting
  *  coverage of the usage line). `pct` is 0..100. */
@@ -625,7 +694,10 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                                 ContextRing(
                                     pct = (u.used * 100 / u.size).coerceIn(0, 100),
                                     modifier = Modifier.size(14.dp),
-                                    onClick = { showContextDetail = !showContextDetail }
+                                    onClick = {
+                                        showContextDetail = !showContextDetail
+                                        if (showContextDetail) cm.requestContextReport()
+                                    }
                                 )
                             }
                         }
@@ -760,6 +832,15 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                                         }
                                     }
                                 }
+                            }
+                            // The breakdown lives OUTSIDE the usage gate: a server can answer
+                            // the report without ever having pushed a usage update (and a roam
+                            // peer's custom notifications are the only usage source there).
+                            val report = cm.contextReport.value
+                            AnimatedVisibility(visible = showContextDetail && report != null,
+                                enter = expandVertically() + fadeIn(),
+                                exit = shrinkVertically() + fadeOut()) {
+                                report?.let { ContextBreakdown(it) }
                             }
                         }
         }

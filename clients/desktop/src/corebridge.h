@@ -295,5 +295,8 @@ struct GrouseCoreListener {
     // chat's own connection, so a roam chat reports its PEER's catalog. Appended last;
     // ABI 12.
     void (*on_extension_catalog)(void *, const char *, const char *);
+    // What fills the chat's context window if it were prompted now: (session_id, JSON).
+    // Appended last; ABI 13.
+    void (*on_context_report)(void *, const char *, const char *);
 };
 }

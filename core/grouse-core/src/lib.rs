@@ -644,6 +644,15 @@ pub trait GrouseUnstableListener: Send + Sync {
     /// array of ProviderInventoryEntryDto.
     fn on_providers(&self, providers: String);
     fn on_session_probe(&self, session_id: String, updated_at: String, message_count: i64);
+    /// What fills a chat's context window if it were prompted right now
+    /// (`_goose/unstable/context/report`, goose ≥1.58), as raw JSON: the model and
+    /// its limit, `totalTokens`, `segments` (category / label / source / tokenCount /
+    /// contentPreview / parts) and `autoCompactionPending`. It is the SERVER's own
+    /// attribution of the next request and makes no model call, so it is a better
+    /// answer than the donut's provider-billed last-request number — and it will not
+    /// agree with it (they measure different requests). Session-scoped, routed to the
+    /// owning peer.
+    fn on_context_report(&self, session_id: String, report: String);
     fn on_tool_result(&self, text: String, is_error: bool);
     /// Dictation provider status (`_goose/unstable/dictation/config`): which
     /// speech-to-text providers the server has configured, as a raw JSON map of

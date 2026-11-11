@@ -478,6 +478,12 @@ class ConnectionManager private constructor(context: Context) {
         override fun onSessionProbe(sessionId: String, updatedAt: String, messageCount: Long) {
             // The core owns resync now (probe → in-place replay); the app never probes.
         }
+        override fun onContextReport(sessionId: String, report: String) {
+            // Only the chat on screen: a tap belongs to one donut, and a peer's answer must
+            // never paint over it.
+            if (sessionId != core.activeSessionId()) return
+            main.post { contextReport.value = ContextReport.parse(report) }
+        }
         // The core emits this only in response to a direct tools_call; the app issues none
         // since fetchProjectInfo was removed (the server requires Auto mode for those).
         override fun onToolResult(text: String, isError: Boolean) { }
@@ -561,6 +567,14 @@ class ConnectionManager private constructor(context: Context) {
 
     fun setSchedulePaused(id: String, paused: Boolean) {
         io { if (paused) unstable.schedulesPause(id) else unstable.schedulesUnpause(id) }
+    }
+
+    /** Ask for the donut's breakdown. Fire-and-forget: the answer arrives on
+     *  [onContextReport], and a server that does not have the method simply never answers. */
+    fun requestContextReport() {
+        val id = core.activeSessionId() ?: return
+        contextReport.value = null
+        io { runCatching { unstable.contextReport(id) } }
     }
 
     fun runScheduleNow(id: String) { io { unstable.schedulesRunNow(id) } }
@@ -685,6 +699,11 @@ class ConnectionManager private constructor(context: Context) {
 
     val busy = mutableStateOf(false)
     val usage = mutableStateOf<AcpEvent.Usage?>(null)   // context window used/size + cost
+    /** The server's own attribution of the NEXT request (`_goose/unstable/context/report`):
+     * what fills the window, split by system prompt / extension instructions / hints / tool
+     * definitions / turn context / compaction summary / messages. Null until asked, and null
+     * forever on a server older than goose 1.58 (the call is quiet there by design). */
+    val contextReport = mutableStateOf<ContextReport?>(null)
 
     /** Forget the context-window reading when the chat on screen changes.
      *

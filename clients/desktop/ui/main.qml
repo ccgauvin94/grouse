@@ -746,6 +746,7 @@ Controls.ApplicationWindow {
                 id: chatPage
                 anchors.fill: parent
                 visible: !Mgr.landingPage && !Mgr.myDayVisible
+                onContextBreakdownRequested: contextDialog.open()
                 onToolsOpenRequested: {
                     root.sidePanelOpen = !root.sidePanelOpen
                     root.sidePanelTab = 0
@@ -896,6 +897,10 @@ Controls.ApplicationWindow {
     // Clicking a project header shows its summary + root.
     ProjectDialog {
         id: projectDialog
+    }
+
+    ContextDialog {
+        id: contextDialog
     }
 
     ConnectDialog {

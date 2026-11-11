@@ -135,6 +135,27 @@ impl GrouseUnstable {
         }
     }
 
+    /// What fills this chat's context window if it were prompted right now
+    /// (`_goose/unstable/context/report`, goose ≥1.58). The server attributes every
+    /// token of the NEXT request — system prompt, each extension's instructions,
+    /// hints, tool definitions per extension, turn context, the compaction summary
+    /// and the conversation by message kind — and makes no model call.
+    ///
+    /// Quiet on failure on purpose: a server older than 1.58 answers "method not
+    /// found", which is not worth telling the user about because they tapped a
+    /// donut. No event means the UI keeps what it already shows.
+    pub fn context_report(&self, session_id: String) {
+        let Some(conn) = self.route(&session_id) else { return };
+        let Some(report) = self.call_quiet(
+            &*conn,
+            "_goose/unstable/context/report",
+            json!({ "sessionId": session_id }),
+        ) else {
+            return;
+        };
+        self.listener.on_context_report(session_id, report.to_string());
+    }
+
     /// Move a session between projects (`None` un-files — an explicit JSON null, never
     /// an omitted key); re-lists projects so the sidebar reflects the change.
     pub fn session_project(&self, session_id: String, project_id: Option<String>) {
@@ -779,6 +800,13 @@ impl GrouseUnstable {
         }
     }
 
+    /// `call` without the error report. For a method whose absence is a CAPABILITY
+    /// answer rather than a fault — a feature an older server does not have — so a
+    /// tap does not raise an error dialog about it.
+    fn call_quiet(&self, conn: &dyn RpcConn, method: &str, params: Value) -> Option<Value> {
+        conn.rpc(method, params).ok()
+    }
+
     /// Whether a session-bound call can be attempted at all.
     ///
     /// Goose rejects a session it does not know: `tools/list` and
@@ -1044,6 +1072,7 @@ mod tests {
         SupportedModels(String, String),
         Providers(String),
         SessionProbe(String, String, i64),
+        ContextReport(String, String),
         ToolResult(String, bool),
         DictationConfig(String),
         Transcript(String),
@@ -1123,6 +1152,9 @@ mod tests {
         }
         fn on_providers(&self, providers: String) {
             self.events.lock().push(Ev::Providers(providers));
+        }
+        fn on_context_report(&self, session_id: String, report: String) {
+            self.events.lock().push(Ev::ContextReport(session_id, report));
         }
         fn on_session_probe(&self, session_id: String, updated_at: String, message_count: i64) {
             self.events
@@ -1446,9 +1478,56 @@ mod tests {
         );
     }
 
+    /// The donut's breakdown is the SERVER's attribution of the next request, so
+    /// the shim's whole job is to ask the chat's own connection and hand the reply
+    /// over verbatim — including its oddities (a segment per extension, previews).
     #[test]
-    fn config_read_emits_value_and_upsert_is_silent() {
+    fn context_report_emits_the_servers_attribution_verbatim() {
         let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        let report = json!({
+            "model": {"provider": "gauvin-id", "modelName": "deepseek-v4.1-flash", "contextLimit": 1000000},
+            "totalTokens": 3925,
+            "segments": [
+                {"category": "system_prompt", "label": "System prompt", "tokenCount": 796},
+                {"category": "tool_definitions", "label": "tools", "tokenCount": 774,
+                 "parts": [{"label": "nextcloud", "tokenCount": 400}]}
+            ],
+            "providerManagesContext": false,
+            "autoCompactionPending": true
+        });
+        stub.script(vec![Ok(report.clone())]);
+        let (g, rec) = harness(stub.clone());
+
+        g.context_report("s1".to_string());
+
+        assert_eq!(
+            rec.events(),
+            vec![Ev::ContextReport("s1".to_string(), report.to_string())]
+        );
+        assert_calls(
+            &stub,
+            &[("_goose/unstable/context/report", json!({"sessionId": "s1"}))],
+        );
+    }
+
+    /// A server older than goose 1.58 does not have the method. That is a missing
+    /// CAPABILITY, not a fault: the tap must stay quiet, or every donut press on an
+    /// older server raised an error dialog about a feature the user never had.
+    #[test]
+    fn a_server_without_the_context_report_is_silent() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        stub.script(vec![Err(err())]);
+        let (g, rec) = harness(stub.clone());
+
+        g.context_report("s1".to_string());
+
+        assert!(rec.events().is_empty(), "got {:?}", rec.events());
+    }
+
+    #[test]
+    fn config_read_emits_value_and_upsert_is_silent() {        let _guard = TEST_LOCK.lock();
         let stub = StubConn::new();
         stub.script(vec![
             Ok(json!({"key": "model", "value": "claude-3-7-sonnet"})),

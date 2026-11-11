@@ -473,7 +473,21 @@ public:
      *  it is visible and the core's item stream nudges it. */
     Q_PROPERTY(QVariantList activity READ activity NOTIFY activityChanged)
     QVariantList activity() const { return m_activity; }
+    // What fills the context window if the chat were prompted now — the server's own
+    // attribution (`_goose/unstable/context/report`), or empty when this server does not
+    // have the method (goose <1.58) or nothing has been asked yet. A list of
+    // {category, label, tokens, preview, parts}, in REQUEST order.
+    Q_PROPERTY(QVariantList contextReport READ contextReport NOTIFY contextReportChanged)
+    QVariantList contextReport() const { return m_contextReport; }
+    // {total, limit, pending} — goose's local estimate for the next request, the model's
+    // limit, and whether the next turn compacts first.
+    Q_PROPERTY(QVariantMap contextReportTotal READ contextReportTotal NOTIFY contextReportChanged)
+    QVariantMap contextReportTotal() const { return m_contextReportTotal; }
     Q_INVOKABLE void refreshActivity();
+    // Ask for the donut's breakdown. The answer arrives on on_context_report; a server that
+    // lacks the method answers nothing at all (the call is quiet in the core by design), so
+    // the UI keeps whatever it already shows.
+    Q_INVOKABLE void requestContextReport();
     /// Paint the cached board (the core's `my-day.json`), marked `cached`. Called
     /// on open before the refresh; a no-op on a core that has no such symbol.
     void paintCachedTasks();
@@ -581,6 +595,7 @@ public:
     /// The extension catalog of the server that OWNS this chat (the peer's, for a roam
     /// chat) — the rows the sheet can offer beyond the chat's own lease.
     void coreOnExtensionCatalog(const QString &sid, const QString &json);
+    void coreOnContextReport(const QString &sid, const QString &json);
     void coreOnConfigValue(const QString &key, const QString &value);
     void coreOnSupportedModels(const QString &provider, const QString &json);
     void coreOnProviders(const QString &json);
@@ -603,6 +618,7 @@ signals:
     void toolsChanged();
     void toolGroupsChanged();
     void activityChanged();
+    void contextReportChanged();
     void globalExtensionsChanged();
     void currentSessionChanged();
     /** The current session's pinned MCP-App dock changed (pin/unpin/resize). */
@@ -922,6 +938,8 @@ private:
     bool m_tasksLoading = false;
     /// Decoded `grouse_activity` lanes, newest last (the panel's model).
     QVariantList m_activity;
+    QVariantList m_contextReport;
+    QVariantMap m_contextReportTotal;
     QVariantList m_myDayOpen;
     QVariantList m_myDayDone;
     QVariantList m_myDayHanded;

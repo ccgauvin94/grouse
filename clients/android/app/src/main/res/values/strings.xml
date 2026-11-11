@@ -37,6 +37,16 @@
     <string name="schedule_managed_on_server">Schedule is managed on the server.</string>
     <string name="compacting">Compacting…</string>
     <string name="compact">Compact</string>
+    <string name="context_breakdown">What fills the window</string>
+    <string name="context_estimate_note">Estimated for the next request — not the number the donut shows</string>
+    <string name="context_compaction_pending">Over the compaction threshold — the next turn compacts first</string>
+    <string name="context_system_prompt">System prompt</string>
+    <string name="context_extension_instructions">Extension instructions</string>
+    <string name="context_additional_instructions">Hints and project instructions</string>
+    <string name="context_turn_context">Turn context</string>
+    <string name="context_tool_definitions">Tool definitions</string>
+    <string name="context_compaction_summary">Compaction summary</string>
+    <string name="context_messages">Conversation</string>
     <string name="loading_conversation">Loading conversation…</string>
     <string name="open_failed_title">Couldn\'t open this chat</string>
     <string name="wired_up_hint">Calendar, notes, web search, and memory are wired up — type below to start.</string>

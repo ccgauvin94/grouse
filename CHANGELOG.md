@@ -26,6 +26,24 @@ All notable changes to Grouse are recorded here. The format is based on
   freshly created chat is invisible to a tag filter until its first message — the same rule that
   makes a just-created chat invisible to any list.
 
+### Added — tapping the donut shows what fills the window
+
+- **The context ring is now a button.** Tapping it opens the server's own breakdown of the
+  next request (`_goose/unstable/context/report`, goose ≥1.58 — we now run 1.59.0): system
+  prompt, each extension's instructions, hints and project instructions, tool definitions per
+  extension, turn context, the compaction summary, and the conversation by message kind, each
+  with its token count and a proportional bar, in request order.
+- **It is a different number from the ring, on purpose.** goose tokenizes the request it
+  *would* send; the ring shows the provider's billed count for the request it *did* send. Both
+  are labelled so the difference reads as two measurements rather than a bug.
+- **Android** renders it inline under the title row (no second modal); **desktop** opens a
+  modeless dialog from the footer's context label, so it can stay open while you type.
+- **A server without the method answers nothing at all** — the call is quiet by design, so an
+  older server shows the numbers it always did instead of an error about a feature it lacks.
+- Carries **ABI 13**: the listener table gained `on_context_report`, which the desktop
+  requires on the next rebuild.
+- Also in this release: the project tag write (`_meta.tags`), below.
+
 grouse 0.2.96 (versionCode 198).
 
 ### Fixed — a roam dial that hangs now says so

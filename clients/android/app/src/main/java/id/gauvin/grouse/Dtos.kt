@@ -2,6 +2,7 @@
 
 package id.gauvin.grouse
 
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -426,4 +427,62 @@ data class ProviderInfo(
     val configured: Boolean,
     val hasCredentials: Boolean = true,
     val models: List<String>,
+)
+
+/** What fills the context window if the chat were prompted right now — the server's own
+ *  attribution (`_goose/unstable/context/report`, goose ≥1.58), not the provider-billed
+ *  last-request totals the donut shows. The two measure different requests, so they will
+ *  not agree (goose measured ~7k apart on a 165k conversation); the UI has to say so.
+ *
+ *  [total] is goose's local tokenizer's count and equals the sum of the top-level
+ *  segments. [parts] is the per-extension / per-message slicing of one segment, and adds
+ *  up to that segment EXCEPT where a prose section's headings are carried by the segment
+ *  alone. */
+data class ContextReport(
+    val model: String,
+    val limit: Long,
+    val total: Long,
+    val segments: List<ContextSegment>,
+    val autoCompactionPending: Boolean,
+) {
+    companion object {
+        fun parse(json: String): ContextReport? {
+            val root = try { Json.parseToJsonElement(json) as? JsonObject } catch (e: Exception) { null }
+                ?: return null
+            val model = (root["model"] as? JsonObject)
+            return ContextReport(
+                model = model?.get("modelName")?.jsonPrimitive?.contentOrNull ?: "",
+                limit = model?.get("contextLimit")?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L,
+                total = root["totalTokens"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L,
+                segments = (root["segments"] as? JsonArray)?.mapNotNull { segment(it as? JsonObject) }
+                    ?: emptyList(),
+                autoCompactionPending = root["autoCompactionPending"]?.jsonPrimitive?.contentOrNull
+                    ?.toBooleanStrictOrNull() ?: false,
+            )
+        }
+
+        private fun segment(obj: JsonObject?): ContextSegment? {
+            obj ?: return null
+            val tokens = obj["tokenCount"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L
+            return ContextSegment(
+                category = obj["category"]?.jsonPrimitive?.contentOrNull ?: "",
+                label = obj["label"]?.jsonPrimitive?.contentOrNull ?: "",
+                tokens = tokens,
+                preview = obj["contentPreview"]?.jsonPrimitive?.contentOrNull,
+                parts = (obj["parts"] as? JsonArray)?.mapNotNull { segment(it as? JsonObject) }
+                    ?: emptyList(),
+            )
+        }
+    }
+}
+
+/** One row of [ContextReport]. [category] is goose's own vocabulary:
+ *  `system_prompt`, `extension_instructions`, `additional_instructions`, `turn_context`,
+ *  `tool_definitions`, `compaction_summary`, `messages`. */
+data class ContextSegment(
+    val category: String,
+    val label: String,
+    val tokens: Long,
+    val preview: String?,
+    val parts: List<ContextSegment>,
 )

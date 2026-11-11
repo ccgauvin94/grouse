@@ -650,6 +650,16 @@ Separate `GrouseUnstable` interface, clearly marked for retirement. Methods
 - `steer(text, expected_run_id)` — inject into the running turn
 - `export_session(session_id)` → `on_export(data)` event
 - `session_info(session_id)` → probe (used by resync + cwd resolution)
+- `context_report(session_id)` → `on_context_report(session_id, report)` — what fills the
+  chat's context window if it were prompted NOW (`_goose/unstable/context/report`, goose ≥1.58),
+  as raw JSON: `{model{provider,modelName,contextLimit}, totalTokens, segments[{category,label,
+  source,tokenCount,contentPreview,parts[]}], providerManagesContext, autoCompactionPending}`.
+  The SERVER attributes the next request and makes no model call, so this is a different number
+  from the donut's provider-billed last request (they are ~7k apart on a 165k conversation —
+  label it an estimate). Categories: `system_prompt`, `extension_instructions`,
+  `additional_instructions`, `turn_context`, `tool_definitions`, `compaction_summary`,
+  `messages`. Quiet on failure BY DESIGN: a server older than 1.58 answers "method not found",
+  which is a missing capability rather than a fault, and no event is emitted.
 - `session_project(session_id, project_id?)` — move between projects
 - `list_tools(session_id)`, `session_extensions_list/add/remove(session_id, …)` — `remove` takes the extension's KEY (session list `extensionKey` = global list `configKey`), not the display name: goose renamed the wire param and rejects `name` now. UIs must match rows by key, since `extension.name` can differ from the key ("Extension Manager" vs `extensionmanager`)
 - `extension_catalog(session_id)` → `on_extension_catalog(session_id, extensions)` — the third list of the extension family, and the one an in-chat tools sheet needs for rows it does NOT have. It is `config/extensions/list` asked **on the chat's own connection**, so a roam chat gets its PEER's catalog; `list_global_extensions()` below always asks the MAIN connection (the settings screen's defaults, and nothing at all on a client that only talks to peers). A sheet built from `session_extensions_list` alone can only ever show what the chat already has, which is why a chat whose lease predated an extension could not be told the extension existed, let alone add it.

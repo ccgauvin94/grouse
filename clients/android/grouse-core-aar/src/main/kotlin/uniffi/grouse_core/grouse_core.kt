@@ -768,15 +768,18 @@ internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod18 : com.s
     fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`updatedAt`: RustBuffer.ByValue,`messageCount`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod19 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`text`: RustBuffer.ByValue,`isError`: Byte,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`report`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod20 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`providers`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`text`: RustBuffer.ByValue,`isError`: Byte,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod21 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`text`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`providers`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod22 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`text`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod23 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`method`: RustBuffer.ByValue,`message`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceFileSourceMethod0 : com.sun.jna.Callback {
@@ -867,7 +870,7 @@ internal open class UniffiVTableCallbackInterfaceCoreListener(
     }
 
 }
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "onExport", "onRecipeParams", "onElicitation", "onCompactionStatus", "onUsage", "onMessageUsage", "onAppResource", "onRecipes", "onSchedules", "onProjects", "onSkills", "onTools", "onExtensions", "onSessionExtensions", "onExtensionCatalog", "onConfigValue", "onSupportedModels", "onProviders", "onSessionProbe", "onToolResult", "onDictationConfig", "onTranscript", "onError")
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onExport", "onRecipeParams", "onElicitation", "onCompactionStatus", "onUsage", "onMessageUsage", "onAppResource", "onRecipes", "onSchedules", "onProjects", "onSkills", "onTools", "onExtensions", "onSessionExtensions", "onExtensionCatalog", "onConfigValue", "onSupportedModels", "onProviders", "onSessionProbe", "onContextReport", "onToolResult", "onDictationConfig", "onTranscript", "onError")
 internal open class UniffiVTableCallbackInterfaceGrouseUnstableListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
     @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
@@ -890,10 +893,11 @@ internal open class UniffiVTableCallbackInterfaceGrouseUnstableListener(
     @JvmField internal var `onSupportedModels`: UniffiCallbackInterfaceGrouseUnstableListenerMethod16? = null,
     @JvmField internal var `onProviders`: UniffiCallbackInterfaceGrouseUnstableListenerMethod17? = null,
     @JvmField internal var `onSessionProbe`: UniffiCallbackInterfaceGrouseUnstableListenerMethod18? = null,
-    @JvmField internal var `onToolResult`: UniffiCallbackInterfaceGrouseUnstableListenerMethod19? = null,
-    @JvmField internal var `onDictationConfig`: UniffiCallbackInterfaceGrouseUnstableListenerMethod20? = null,
-    @JvmField internal var `onTranscript`: UniffiCallbackInterfaceGrouseUnstableListenerMethod21? = null,
-    @JvmField internal var `onError`: UniffiCallbackInterfaceGrouseUnstableListenerMethod22? = null,
+    @JvmField internal var `onContextReport`: UniffiCallbackInterfaceGrouseUnstableListenerMethod19? = null,
+    @JvmField internal var `onToolResult`: UniffiCallbackInterfaceGrouseUnstableListenerMethod20? = null,
+    @JvmField internal var `onDictationConfig`: UniffiCallbackInterfaceGrouseUnstableListenerMethod21? = null,
+    @JvmField internal var `onTranscript`: UniffiCallbackInterfaceGrouseUnstableListenerMethod22? = null,
+    @JvmField internal var `onError`: UniffiCallbackInterfaceGrouseUnstableListenerMethod23? = null,
 ) : Structure() {
     class UniffiByValue(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -917,11 +921,12 @@ internal open class UniffiVTableCallbackInterfaceGrouseUnstableListener(
         `onSupportedModels`: UniffiCallbackInterfaceGrouseUnstableListenerMethod16? = null,
         `onProviders`: UniffiCallbackInterfaceGrouseUnstableListenerMethod17? = null,
         `onSessionProbe`: UniffiCallbackInterfaceGrouseUnstableListenerMethod18? = null,
-        `onToolResult`: UniffiCallbackInterfaceGrouseUnstableListenerMethod19? = null,
-        `onDictationConfig`: UniffiCallbackInterfaceGrouseUnstableListenerMethod20? = null,
-        `onTranscript`: UniffiCallbackInterfaceGrouseUnstableListenerMethod21? = null,
-        `onError`: UniffiCallbackInterfaceGrouseUnstableListenerMethod22? = null,
-    ): UniffiVTableCallbackInterfaceGrouseUnstableListener(`uniffiFree`,`uniffiClone`,`onExport`,`onRecipeParams`,`onElicitation`,`onCompactionStatus`,`onUsage`,`onMessageUsage`,`onAppResource`,`onRecipes`,`onSchedules`,`onProjects`,`onSkills`,`onTools`,`onExtensions`,`onSessionExtensions`,`onExtensionCatalog`,`onConfigValue`,`onSupportedModels`,`onProviders`,`onSessionProbe`,`onToolResult`,`onDictationConfig`,`onTranscript`,`onError`,), Structure.ByValue
+        `onContextReport`: UniffiCallbackInterfaceGrouseUnstableListenerMethod19? = null,
+        `onToolResult`: UniffiCallbackInterfaceGrouseUnstableListenerMethod20? = null,
+        `onDictationConfig`: UniffiCallbackInterfaceGrouseUnstableListenerMethod21? = null,
+        `onTranscript`: UniffiCallbackInterfaceGrouseUnstableListenerMethod22? = null,
+        `onError`: UniffiCallbackInterfaceGrouseUnstableListenerMethod23? = null,
+    ): UniffiVTableCallbackInterfaceGrouseUnstableListener(`uniffiFree`,`uniffiClone`,`onExport`,`onRecipeParams`,`onElicitation`,`onCompactionStatus`,`onUsage`,`onMessageUsage`,`onAppResource`,`onRecipes`,`onSchedules`,`onProjects`,`onSkills`,`onTools`,`onExtensions`,`onSessionExtensions`,`onExtensionCatalog`,`onConfigValue`,`onSupportedModels`,`onProviders`,`onSessionProbe`,`onContextReport`,`onToolResult`,`onDictationConfig`,`onTranscript`,`onError`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceGrouseUnstableListener) {
         `uniffiFree` = other.`uniffiFree`
@@ -945,6 +950,7 @@ internal open class UniffiVTableCallbackInterfaceGrouseUnstableListener(
         `onSupportedModels` = other.`onSupportedModels`
         `onProviders` = other.`onProviders`
         `onSessionProbe` = other.`onSessionProbe`
+        `onContextReport` = other.`onContextReport`
         `onToolResult` = other.`onToolResult`
         `onDictationConfig` = other.`onDictationConfig`
         `onTranscript` = other.`onTranscript`
@@ -1127,6 +1133,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_config_upsert(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_grouseunstable_context_report(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_dictation_config(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_dictation_transcribe(
@@ -1276,6 +1284,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_grouse_core_checksum_method_grouseunstablelistener_on_providers(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstablelistener_on_session_probe(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_grouseunstablelistener_on_context_report(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstablelistener_on_tool_result(
     ): Int
@@ -1443,6 +1453,8 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_method_grouseunstable_config_read(`ptr`: Long,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_config_upsert(`ptr`: Long,`key`: RustBuffer.ByValue,`value`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_grouseunstable_context_report(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_dictation_config(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1825,6 +1837,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_upsert() and 0xFFFF) != 60061) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_context_report() and 0xFFFF) != 23567) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_dictation_config() and 0xFFFF) != 55072) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2050,16 +2065,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_session_probe() and 0xFFFF) != 4370) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_tool_result() and 0xFFFF) != 35631) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_context_report() and 0xFFFF) != 18875) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_dictation_config() and 0xFFFF) != 62115) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_tool_result() and 0xFFFF) != 28819) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_transcript() and 0xFFFF) != 55424) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_dictation_config() and 0xFFFF) != 64315) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_error() and 0xFFFF) != 15788) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_transcript() and 0xFFFF) != 55256) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_error() and 0xFFFF) != 10504) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -4711,6 +4729,19 @@ public interface GrouseUnstableInterface {
     fun `configUpsert`(`key`: kotlin.String, `value`: kotlin.String)
     
     /**
+     * What fills this chat's context window if it were prompted right now
+     * (`_goose/unstable/context/report`, goose ≥1.58). The server attributes every
+     * token of the NEXT request — system prompt, each extension's instructions,
+     * hints, tool definitions per extension, turn context, the compaction summary
+     * and the conversation by message kind — and makes no model call.
+     *
+     * Quiet on failure on purpose: a server older than 1.58 answers "method not
+     * found", which is not worth telling the user about because they tapped a
+     * donut. No event means the UI keeps what it already shows.
+     */
+    fun `contextReport`(`sessionId`: kotlin.String)
+    
+    /**
      * Which dictation providers the server has configured; surfaces as
      * `on_dictation_config` (raw JSON map, the shim's list-reply convention).
      */
@@ -5094,6 +5125,30 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
         
         FfiConverterString.lower(`key`),
         FfiConverterString.lower(`value`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * What fills this chat's context window if it were prompted right now
+     * (`_goose/unstable/context/report`, goose ≥1.58). The server attributes every
+     * token of the NEXT request — system prompt, each extension's instructions,
+     * hints, tool definitions per extension, turn context, the compaction summary
+     * and the conversation by message kind — and makes no model call.
+     *
+     * Quiet on failure on purpose: a server older than 1.58 answers "method not
+     * found", which is not worth telling the user about because they tapped a
+     * donut. No event means the UI keeps what it already shows.
+     */override fun `contextReport`(`sessionId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_grouseunstable_context_report(
+        it,
+        
+        FfiConverterString.lower(`sessionId`),_status)
 }
     }
     
@@ -8851,6 +8906,18 @@ public interface GrouseUnstableListener {
     
     fun `onSessionProbe`(`sessionId`: kotlin.String, `updatedAt`: kotlin.String, `messageCount`: kotlin.Long)
     
+    /**
+     * What fills a chat's context window if it were prompted right now
+     * (`_goose/unstable/context/report`, goose ≥1.58), as raw JSON: the model and
+     * its limit, `totalTokens`, `segments` (category / label / source / tokenCount /
+     * contentPreview / parts) and `autoCompactionPending`. It is the SERVER's own
+     * attribution of the next request and makes no model call, so it is a better
+     * answer than the donut's provider-billed last-request number — and it will not
+     * agree with it (they measure different requests). Session-scoped, routed to the
+     * owning peer.
+     */
+    fun `onContextReport`(`sessionId`: kotlin.String, `report`: kotlin.String)
+    
     fun `onToolResult`(`text`: kotlin.String, `isError`: kotlin.Boolean)
     
     /**
@@ -9116,7 +9183,20 @@ internal object uniffiCallbackInterfaceGrouseUnstableListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onToolResult`: UniffiCallbackInterfaceGrouseUnstableListenerMethod19 {
+    internal object `onContextReport`: UniffiCallbackInterfaceGrouseUnstableListenerMethod19 {
+        override fun callback(`uniffiHandle`: Long,`sessionId`: RustBuffer.ByValue,`report`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeGrouseUnstableListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onContextReport`(
+                    FfiConverterString.lift(`sessionId`),
+                    FfiConverterString.lift(`report`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+    internal object `onToolResult`: UniffiCallbackInterfaceGrouseUnstableListenerMethod20 {
         override fun callback(`uniffiHandle`: Long,`text`: RustBuffer.ByValue,`isError`: Byte,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeGrouseUnstableListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
@@ -9129,7 +9209,7 @@ internal object uniffiCallbackInterfaceGrouseUnstableListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onDictationConfig`: UniffiCallbackInterfaceGrouseUnstableListenerMethod20 {
+    internal object `onDictationConfig`: UniffiCallbackInterfaceGrouseUnstableListenerMethod21 {
         override fun callback(`uniffiHandle`: Long,`providers`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeGrouseUnstableListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
@@ -9141,7 +9221,7 @@ internal object uniffiCallbackInterfaceGrouseUnstableListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onTranscript`: UniffiCallbackInterfaceGrouseUnstableListenerMethod21 {
+    internal object `onTranscript`: UniffiCallbackInterfaceGrouseUnstableListenerMethod22 {
         override fun callback(`uniffiHandle`: Long,`text`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeGrouseUnstableListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
@@ -9153,7 +9233,7 @@ internal object uniffiCallbackInterfaceGrouseUnstableListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onError`: UniffiCallbackInterfaceGrouseUnstableListenerMethod22 {
+    internal object `onError`: UniffiCallbackInterfaceGrouseUnstableListenerMethod23 {
         override fun callback(`uniffiHandle`: Long,`method`: RustBuffer.ByValue,`message`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeGrouseUnstableListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
@@ -9201,6 +9281,7 @@ internal object uniffiCallbackInterfaceGrouseUnstableListener {
         `onSupportedModels`,
         `onProviders`,
         `onSessionProbe`,
+        `onContextReport`,
         `onToolResult`,
         `onDictationConfig`,
         `onTranscript`,

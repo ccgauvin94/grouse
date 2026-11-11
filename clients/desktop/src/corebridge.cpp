@@ -172,6 +172,7 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_unstable_resources_read);
     RESOLVE(grouse_unstable_respond_recipe_params);
     RESOLVE(grouse_unstable_respond_elicitation);
+    RESOLVE(grouse_unstable_context_report);
 #undef RESOLVE
 
     // The listener table's layout and the symbol signatures are the contract.
@@ -356,6 +357,10 @@ static void cb_on_extension_catalog(void *u, const char *a, const char *b) {
     const QString sa = copyStr(a); const QString sb = copyStr(b);
     marshal(u, nullptr, [=](Manager *m) { m->coreOnExtensionCatalog(sa, sb); });
 }
+static void cb_on_context_report(void *u, const char *a, const char *b) {
+    const QString sa = copyStr(a); const QString sb = copyStr(b);
+    marshal(u, nullptr, [=](Manager *m) { m->coreOnContextReport(sa, sb); });
+}
 static void cb_on_config_value(void *u, const char *a, const char *b) {
     const QString sa = copyStr(a); const QString sb = copyStr(b);
     marshal(u, nullptr, [=](Manager *m) { m->coreOnConfigValue(sa, sb); });
@@ -428,6 +433,7 @@ void CoreBridge::installListener()
         cb_on_file,
         cb_on_thread_ready,
         cb_on_extension_catalog,
+        cb_on_context_report,
     };
     m_listener = &table;
 

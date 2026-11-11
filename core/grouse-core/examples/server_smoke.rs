@@ -83,6 +83,7 @@ impl grouse_core::GrouseUnstableListener for UL {
     fn on_config_value(&self, _k: String, _v: String) {}
     fn on_supported_models(&self, _p: String, _m: String) {}
     fn on_providers(&self, _providers: String) {}
+    fn on_context_report(&self, _s: String, _r: String) {}
     fn on_session_probe(&self, _session_id: String, updated_at: String, message_count: i64) {
         println!("-- probe: updatedAt={} count={}", updated_at, message_count);
     }

@@ -2566,6 +2566,75 @@ void Manager::closeMyDay()
     setMyDayVisible(false);
 }
 
+void Manager::requestContextReport()
+{
+    if (!m_bridge || !m_bridge->isAvailable()
+        || !m_bridge->api().grouse_unstable_context_report) {
+        return;
+    }
+    const QString sid = activeSessionId();
+    if (sid.isEmpty())
+        return;
+    // Whatever was on screen belongs to the previous chat: clear it so the sheet cannot
+    // paint one chat's breakdown under another chat's donut. A server without the method
+    // simply never answers, and nothing is emitted.
+    if (!m_contextReport.isEmpty() || !m_contextReportTotal.isEmpty()) {
+        m_contextReport.clear();
+        m_contextReportTotal.clear();
+        emit contextReportChanged();
+    }
+    const QByteArray id = sid.toUtf8();
+    m_bridge->api().grouse_unstable_context_report(m_bridge->handle(), id.constData());
+}
+
+void Manager::coreOnContextReport(const QString &sid, const QString &json)
+{
+    // Only the chat on screen: a breakdown belongs to one donut. (The core already drops a
+    // peer's report for a session that is not displayed; this is the same rule one level up,
+    // for a report that arrives after the user has moved on.)
+    if (sid != activeSessionId())
+        return;
+    QVariantList segments;
+    const QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());
+    const QJsonArray rows = doc.object().value(QStringLiteral("segments")).toArray();
+    for (const QJsonValue &v : rows) {
+        const QJsonObject o = v.toObject();
+        QVariantMap seg;
+        seg.insert(QStringLiteral("category"), o.value(QStringLiteral("category")).toString());
+        seg.insert(QStringLiteral("label"), o.value(QStringLiteral("label")).toString());
+        seg.insert(QStringLiteral("tokens"),
+                   static_cast<qlonglong>(o.value(QStringLiteral("tokenCount")).toDouble()));
+        seg.insert(QStringLiteral("preview"), o.value(QStringLiteral("contentPreview")).toString());
+        QVariantList parts;
+        for (const QJsonValue &p : o.value(QStringLiteral("parts")).toArray()) {
+            const QJsonObject po = p.toObject();
+            QVariantMap part;
+            part.insert(QStringLiteral("label"), po.value(QStringLiteral("label")).toString());
+            part.insert(QStringLiteral("tokens"),
+                        static_cast<qlonglong>(po.value(QStringLiteral("tokenCount")).toDouble()));
+            part.insert(QStringLiteral("preview"),
+                        po.value(QStringLiteral("contentPreview")).toString());
+            parts.append(part);
+        }
+        seg.insert(QStringLiteral("parts"), parts);
+        segments.append(seg);
+    }
+    const QJsonObject root = doc.object();
+    QVariantMap total;
+    total.insert(QStringLiteral("total"),
+                 static_cast<qlonglong>(root.value(QStringLiteral("totalTokens")).toDouble()));
+    total.insert(QStringLiteral("limit"),
+                 static_cast<qlonglong>(root.value(QStringLiteral("model"))
+                                            .toObject()
+                                            .value(QStringLiteral("contextLimit"))
+                                            .toDouble()));
+    total.insert(QStringLiteral("pending"),
+                 root.value(QStringLiteral("autoCompactionPending")).toBool());
+    m_contextReport = segments;
+    m_contextReportTotal = total;
+    emit contextReportChanged();
+}
+
 void Manager::refreshActivity()
 {
     if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_activity) {

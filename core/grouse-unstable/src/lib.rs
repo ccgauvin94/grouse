@@ -93,6 +93,7 @@ mod tests {
         fn on_providers(&self, _providers: String) {
             self.events.lock().push("on_providers".into());
         }
+        fn on_context_report(&self, _session_id: String, _report: String) {}
         fn on_session_probe(&self, _session_id: String, _updated_at: String, _message_count: i64) {
             self.events.lock().push("on_session_probe".into());
         }
