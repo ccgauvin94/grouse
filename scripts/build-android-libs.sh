@@ -12,6 +12,30 @@
 #
 # Prereqs: rustup targets aarch64-linux-android + x86_64-linux-android,
 # cargo-ndk, uniffi-bindgen (cargo install uniffi --features cli), the Android NDK.
+#
+# LANDMINE — this repo is written by TWO different podman containers, and their
+# SELinux MCS categories do not agree. `scripts/dev-env.sh` (the core's cargo
+# build) and the Android toolchain image both mount the tree, so whichever ran
+# last leaves `core/target/` and the staged artifacts labelled with ITS category
+# pair. The other container then fails on the files it does not own — as
+# `EPERM` ("Operation not permitted"), never `EACCES`, which reads like a broken
+# toolchain rather than a label:
+#
+#   error: unable to open output file '.../ring-.../out/*.o': Operation not permitted
+#   rm: cannot remove '.../libgrouse_core.so': Permission denied
+#
+# The staged artifacts are also owned by a SUBUID (host uid 100000), so the host
+# user cannot remove them either. Recovery, in this order:
+#
+#   rm -rf core/target/{aarch64-linux-android,x86_64-linux-android}   # host, as colin
+#   podman unshare rm -rf \
+#     clients/android/grouse-core-aar/src/main/jniLibs/{arm64-v8a,x86_64} \
+#     core/grouse-core/bindings/kotlin/uniffi \
+#     clients/android/grouse-core-aar/src/main/kotlin/uniffi
+#   ./scripts/build-android-libs.sh
+#
+# `podman unshare` is what removes the subuid-owned copies: it enters the userns
+# where 100000 is mapped, so no sudo (and there is no passwordless sudo here).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
