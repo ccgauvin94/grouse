@@ -296,6 +296,11 @@ pub(crate) fn rpc_timeout(method: &str) -> Option<Duration> {
         // A full replay of a long session can take minutes; the transport's
         // own failure path reports a dead link.
         "session/load" => None,
+        // The context report tokenizes every message in the conversation with
+        // goose's local tokenizer — seconds on a 600k-token chat, and a roam peer
+        // has to do that on the other machine and send it back. The 30s default
+        // cut it off exactly where it was most useful.
+        "_goose/unstable/context/report" => Some(Duration::from_secs(120)),
         _ => Some(Duration::from_secs(30)),
     }
 }

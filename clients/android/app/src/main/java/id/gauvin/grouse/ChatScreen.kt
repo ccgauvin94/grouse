@@ -873,7 +873,19 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                             // The breakdown lives OUTSIDE the usage gate: a server can answer
                             // the report without ever having pushed a usage update (and a roam
                             // peer's custom notifications are the only usage source there).
+                            // Keyed to the chat on screen: a roam chat that has not answered yet
+                            // must show "measuring", never the previous chat's numbers.
                             val report = cm.contextReport.value
+                                ?.takeIf { cm.contextReportSession.value == cm.currentSession.value }
+                            // Feedback for the wait ITSELF. Measuring a 600k-token chat takes
+                            // seconds, and a tap that changes nothing on screen reads as a tap
+                            // that missed — this is the line that says it landed.
+                            if (showContextDetail && report == null && cm.contextReportLoading.value) {
+                                Text(stringResource(R.string.context_measuring_long),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.outline,
+                                    modifier = Modifier.padding(start = 18.dp, top = 4.dp))
+                            }
                             AnimatedVisibility(visible = showContextDetail && report != null,
                                 enter = expandVertically() + fadeIn(),
                                 exit = shrinkVertically() + fadeOut()) {

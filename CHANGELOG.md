@@ -5,6 +5,24 @@ All notable changes to Grouse are recorded here. The format is based on
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed — a roam chat showed another chat's context breakdown
+
+- **The report is now keyed to its chat.** It is one value, so a chat whose measurement had not
+  arrived painted whatever the previous chat answered — a large roam session showing a small
+  local one's numbers under its own donut. `contextReportSession` travels with the value and the
+  panel refuses a report that is not for the session on screen; opening a report for a different
+  chat clears first rather than showing a slightly-wrong number.
+- **The wait now says it landed.** Measuring a 600k-token chat takes seconds and previously
+  changed nothing on screen, which reads as a missed tap: there is now a "measuring this
+  context" line while the first answer is in flight.
+- **The report's RPC timeout is 120s, not 30.** It tokenizes every message in the conversation,
+  and over roam the peer does that on the other machine; 30s cut it off exactly where it was
+  most useful.
+- **A failure is logged instead of swallowed** (`grouse-core: context report for <id> failed:
+  …`), so a peer that never answers is distinguishable from one that has no such method.
+
+grouse 0.2.98 (versionCode 200).
+
 ### Fixed — the context breakdown grouped, and it no longer makes you wait for it
 
 - **Grouped by category, collapsed until tapped.** goose's `category` is the CLASS

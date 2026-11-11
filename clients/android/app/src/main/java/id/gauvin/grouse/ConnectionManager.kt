@@ -489,6 +489,7 @@ class ConnectionManager private constructor(context: Context) {
             main.post {
                 reportRequest = null
                 contextReportLoading.value = false
+                contextReportSession.value = sessionId
                 contextReport.value = parsed
             }
         }
@@ -581,6 +582,12 @@ class ConnectionManager private constructor(context: Context) {
      *  [onContextReport], and a server that does not have the method simply never answers. */
     fun requestContextReport(force: Boolean = false) {
         val id = core.activeSessionId() ?: return
+        // A report belongs to ONE chat. Anything showing for a different one is not "a stale
+        // number", it is the wrong chat's number, so drop it before anything else.
+        if (contextReportSession.value != id) {
+            contextReport.value = null
+            contextReportSession.value = id
+        }
         // Paint what we already know first: on a long chat the answer takes seconds, and
         // blanking the panel to re-measure the same thing reads as a failure.
         reportCache[id]?.let { contextReport.value = it }
@@ -719,6 +726,10 @@ class ConnectionManager private constructor(context: Context) {
      * definitions / turn context / compaction summary / messages. Null until asked, and null
      * forever on a server older than goose 1.58 (the call is quiet there by design). */
     val contextReport = mutableStateOf<ContextReport?>(null)
+    /** Which chat [contextReport] belongs to. Rendering MUST check this against the chat on
+     *  screen: the report is a single value, so a roam chat that has not answered yet would
+     *  otherwise paint the last small chat's numbers under its own donut. */
+    val contextReportSession = mutableStateOf<String?>(null)
     /** True while the server is measuring. A long chat takes seconds — the report tokenizes
      *  every message — so the sheet says so instead of looking broken. */
     val contextReportLoading = mutableStateOf(false)

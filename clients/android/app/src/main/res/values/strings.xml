@@ -39,6 +39,7 @@
     <string name="compact">Compact</string>
     <string name="context_breakdown">What fills the window</string>
     <string name="context_measuring">measuring…</string>
+    <string name="context_measuring_long">Measuring this context. A long chat takes a moment.</string>
     <string name="context_estimate_note">Estimated for the next request — not the number the donut shows</string>
     <string name="context_compaction_pending">Over the compaction threshold — the next turn compacts first</string>
     <string name="context_system_prompt">System prompt</string>

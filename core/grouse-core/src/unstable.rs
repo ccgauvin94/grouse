@@ -146,14 +146,14 @@ impl GrouseUnstable {
     /// donut. No event means the UI keeps what it already shows.
     pub fn context_report(&self, session_id: String) {
         let Some(conn) = self.route(&session_id) else { return };
-        let Some(report) = self.call_quiet(
-            &*conn,
-            "_goose/unstable/context/report",
-            json!({ "sessionId": session_id }),
-        ) else {
-            return;
-        };
-        self.listener.on_context_report(session_id, report.to_string());
+        // Quiet to the USER, not to the log: a failure here is either "this server is
+        // older than 1.58" (fine, the panel keeps what it had) or a real fault worth
+        // seeing — and swallowing it made a peer that never answered indistinguishable
+        // from one that answered instantly with nothing.
+        match conn.rpc("_goose/unstable/context/report", json!({ "sessionId": session_id })) {
+            Ok(report) => self.listener.on_context_report(session_id, report.to_string()),
+            Err(error) => eprintln!("grouse-core: context report for {session_id} failed: {error}"),
+        }
     }
 
     /// Move a session between projects (`None` un-files — an explicit JSON null, never
@@ -798,13 +798,6 @@ impl GrouseUnstable {
                 None
             }
         }
-    }
-
-    /// `call` without the error report. For a method whose absence is a CAPABILITY
-    /// answer rather than a fault — a feature an older server does not have — so a
-    /// tap does not raise an error dialog about it.
-    fn call_quiet(&self, conn: &dyn RpcConn, method: &str, params: Value) -> Option<Value> {
-        conn.rpc(method, params).ok()
     }
 
     /// Whether a session-bound call can be attempted at all.
