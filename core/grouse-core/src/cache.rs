@@ -383,6 +383,7 @@ mod tests {
 
     fn text(id: &str, kind: ItemKind, t: &str) -> Item {
         Item {
+            created: 0,
             id: id.into(),
             kind,
             text: t.into(),
@@ -431,6 +432,7 @@ mod tests {
             text("m1", ItemKind::User, "hi"),
             text("m2", ItemKind::Agent, "hello there"),
             Item {
+                created: 0,
                 id: "t1".into(),
                 kind: ItemKind::Tool,
                 text: "Bash".into(),
@@ -477,6 +479,7 @@ mod tests {
         let store = CacheStore::new(dir.clone());
         let items = vec![
             Item {
+                created: 0,
                 id: "c1".into(),
                 kind: ItemKind::Chart,
                 text: "Sankey".into(),
@@ -495,6 +498,7 @@ mod tests {
                 message_id: String::new(),
             },
             Item {
+                created: 0,
                 id: "a1".into(),
                 kind: ItemKind::McpApp,
                 text: "Dashboard".into(),
@@ -513,6 +517,7 @@ mod tests {
                 message_id: String::new(),
             },
             Item {
+                created: 0,
                 id: "t1".into(),
                 kind: ItemKind::ToolGroup,
                 text: String::new(),

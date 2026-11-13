@@ -68,7 +68,7 @@ Anchors are `file#token`; `+` joins more than one (all must resolve). Roots:
 android root = clients/android/app/src/main/java/id/gauvin/grouse
 desktop root = clients/desktop
 
-excluded = 10
+excluded = 12
 
 | surface | android | desktop |
 |---|---|---|
@@ -88,6 +88,7 @@ excluded = 10
 | `item.images` | yes: ConnectionManager.kt#item.images | yes: src/manager.cpp#value(QStringLiteral("images")) |
 | `item.message_id` | excluded: clients key rows on `id`; the server id is core-internal merge state | excluded: same — the row model keys on `id`, never on the server's message id |
 | `item.seq` | yes: ConnectionManager.kt#item.seq | yes: src/manager.cpp#value(QStringLiteral("seq")) |
+| `item.created` | excluded: the area TIMELINE is its consumer (it places chat rows against My Day cards and actions); no chat row prints a date yet, and the field is additive so a client may ignore it | excluded: same — nothing on the desktop chat surface dates a row |
 | `work.id` | yes: ChatScreen.kt#key = { it.id } | yes: ui/ChatSidePanel.qml#modelData.id |
 | `work.title` | yes: ChatScreen.kt#lane.title | yes: ui/ChatSidePanel.qml#modelData.title |
 | `work.detail` | yes: ChatScreen.kt#lane.detail | yes: ui/ChatSidePanel.qml#modelData.detail |

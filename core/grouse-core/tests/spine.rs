@@ -130,6 +130,7 @@ impl CoreListener for RecordingListener {
 /// A rich cache-seed item (the cache is the item list now).
 fn item(id: &str, kind: grouse_core::ItemKind, text: &str) -> grouse_core::Item {
     grouse_core::Item {
+        created: 0,
         id: id.into(),
         kind,
         text: text.into(),

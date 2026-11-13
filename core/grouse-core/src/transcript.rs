@@ -149,6 +149,14 @@ enum Bubble {
         /// Images the row carries as data URIs (see `Item::images`): a prompt's
         /// own pixels from the send-time echo, or chunks the server replayed.
         images: Vec<String>,
+        /// When the SERVER says the message was created (epoch seconds, from
+        /// `_meta.goose.created`; 0 when it said nothing — a locally echoed prompt
+        /// has no stamp until its own chunk comes back). `seq` orders rows within
+        /// one chat; this is the only clock that lets a chat row share a timeline
+        /// with things that did not come from the transcript at all (a My Day card,
+        /// an action someone took in another app). Every goose chunk carries it and
+        /// the core used to throw it away.
+        created: i64,
     },
     /// A lone plain tool call (collapses into a `ToolGroup` on the next call).
     /// The `String` is the run's one-line label (issue #13); the thinking rides
@@ -209,6 +217,7 @@ impl Bubble {
                 role,
                 text,
                 seq,
+                created,
                 attachments,
                 files,
                 images,
@@ -224,6 +233,7 @@ impl Bubble {
                 },
                 text: text.clone(),
                 seq: *seq,
+                created: *created,
                 attachments: *attachments,
                 files: files.clone(),
                 images: images.clone(),
@@ -320,6 +330,7 @@ fn empty_item() -> Item {
         summary: String::new(),
         steps: Vec::new(),
         seq: 0,
+        created: 0,
         attachments: 0,
         files: Vec::new(),
         images: Vec::new(),
@@ -856,6 +867,9 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
                 id,
                 uid: it.id.clone(),
                 role: role.to_string(),
+                // The flat `Message` projection predates the stamp; a row rebuilt
+                // from it simply has no clock.
+                created: 0,
                 text: it.text.clone(),
                 thought: matches!(it.kind, ItemKind::Thought),
                 seq: it.seq,
@@ -1022,7 +1036,21 @@ impl TranscriptStore {
     /// an old message can end up reading as the newest.
     ///
     pub fn append_chunk(&self, role: &str, text: &str, message_id: Option<&str>, thought: bool) {
-        self.append_block(role, Some(text), None, message_id, thought);
+        self.append_block(role, Some(text), None, message_id, thought, 0);
+    }
+
+    /// The same append with the server's own creation stamp (`_meta.goose.created`),
+    /// which is what a timeline needs to place a chat row against events that live
+    /// outside the transcript.
+    pub fn append_chunk_at(
+        &self,
+        role: &str,
+        text: &str,
+        message_id: Option<&str>,
+        thought: bool,
+        created: i64,
+    ) {
+        self.append_block(role, Some(text), None, message_id, thought, created);
     }
 
     /// Append a streamed IMAGE chunk. goose re-delivers prompt images (and can
@@ -1035,7 +1063,7 @@ impl TranscriptStore {
     /// carried no text. Images that ride a LOCALLY ECHOED prompt are deduped
     /// into the adopted row: the echo already carries them from send time.
     pub fn append_image(&self, role: &str, image: &str, message_id: Option<&str>) {
-        self.append_block(role, None, Some(image), message_id, false);
+        self.append_block(role, None, Some(image), message_id, false, 0);
     }
 
     /// The shared accumulation rule behind `append_chunk` / `append_image`.
@@ -1057,6 +1085,7 @@ impl TranscriptStore {
         image: Option<&str>,
         message_id: Option<&str>,
         thought: bool,
+        created: i64,
     ) {
         let (ops, speaks) = {
             let mut st = self.state.lock();
@@ -1088,8 +1117,11 @@ impl TranscriptStore {
                         match at {
                             Some(idx) if echo_text == replayed => {
                                 st.pending_echo.pop_front();
-                                if let Bubble::Text { id, .. } = &mut st.bubbles[idx] {
+                                if let Bubble::Text { id, created: c, .. } = &mut st.bubbles[idx] {
                                     *id = mid.to_string();
+                                    if *c == 0 {
+                                        *c = created;
+                                    }
                                 }
                                 st.stream_idx = Some(idx);
                                 st.stream_role = role.to_string();
@@ -1166,6 +1198,7 @@ impl TranscriptStore {
                     text: opening,
                     thought,
                     seq,
+                    created,
                     attachments: 0,
                     files: carried,
                     images: image
@@ -1186,9 +1219,15 @@ impl TranscriptStore {
                     thought: t,
                     images,
                     files,
+                    created: acc_created,
                     ..
                 } = &mut st.bubbles[idx]
                 {
+                    // First stamp wins: every chunk of one message repeats it, and a
+                    // locally echoed prompt has 0 until its chunk arrives.
+                    if *acc_created == 0 && created != 0 {
+                        *acc_created = created;
+                    }
                     if let Some(chunk) = text {
                         // A user chunk can BE a link stub (the rendered prompt
                         // arrives as more than one block): strip it and record
@@ -1300,6 +1339,9 @@ impl TranscriptStore {
                 text: text.to_string(),
                 thought: false,
                 seq,
+                // A prompt we echo ourselves has no server stamp yet; the replayed
+                // chunk that adopts it carries one and fills this in.
+                created: 0,
                 attachments,
                 files: files.clone(),
                 images: images.clone(),
@@ -2474,6 +2516,7 @@ impl TranscriptStore {
                         text: m.content.clone(),
                         thought: m.role == "thought",
                         seq,
+                        created: 0,
                         attachments: 0,
                         files: Vec::new(),
                         images: Vec::new(),
@@ -2580,6 +2623,51 @@ mod tests {
             path: path.into(),
             sha256: String::new(),
         }
+    }
+
+    /// A row carries the SERVER's creation instant, not its arrival position.
+    ///
+    /// `seq` orders rows inside one chat and nothing else, so an area timeline — chat
+    /// interleaved with My Day cards and actions someone took elsewhere — has no clock
+    /// without this. goose stamps every chunk (`_meta.goose.created`); the store read it
+    /// and threw it away, which is why no transcript row had a date.
+    #[test]
+    fn a_message_keeps_the_servers_creation_instant() {
+        let (l1, _) = listener();
+        let store = TranscriptStore::new(l1);
+        // Two chunks of ONE message repeat the same stamp.
+        store.append_chunk_at("agent", "hello", Some("m1"), false, 1_700_000_000);
+        store.append_chunk_at("agent", " world", Some("m1"), false, 1_700_000_000);
+        // A later row with an EARLIER server instant keeps its own: arrival order is
+        // not the timeline (a replayed page can land out of order).
+        store.append_chunk_at("agent", "second", Some("m2"), false, 1_600_000_000);
+        // No stamp on the wire → 0, which a renderer reads as "unknown", never 1970.
+        store.append_chunk("user", "typed here", Some("m3"), false);
+
+        let items = store.rich_transcript();
+        let at = |id: &str| {
+            items
+                .iter()
+                .find(|i| i.id == id)
+                .unwrap_or_else(|| panic!("no item {id}"))
+                .created
+        };
+        assert_eq!(at("m1"), 1_700_000_000);
+        assert_eq!(at("m2"), 1_600_000_000, "the clock is the server's, not arrival");
+        assert_eq!(at("m3"), 0);
+
+        // An echoed prompt has no stamp until the server returns its own chunk; the
+        // adoption path has to take the stamp then, or a reopened chat loses the clock.
+        let (l2, _) = listener();
+        let s2 = TranscriptStore::new(l2);
+        s2.echo_prompt("what is this?", 0, vec![], vec![]);
+        s2.append_chunk_at("user", "what is this?", Some("srv-1"), false, 1_710_000_000);
+        let rows = s2.rich_transcript();
+        let prompt = rows
+            .iter()
+            .find(|i| i.kind == ItemKind::User)
+            .expect("the prompt row");
+        assert_eq!(prompt.created, 1_710_000_000, "adoption must carry the stamp");
     }
 
     /// A file the server SHARED is a card of its own, not a tool chip.
@@ -3556,6 +3644,7 @@ mod tests {
 
     fn text_item(id: &str, kind: ItemKind, t: &str) -> Item {
         Item {
+            created: 0,
             id: id.into(),
             kind,
             text: t.into(),
@@ -3796,6 +3885,7 @@ mod tests {
         let items = vec![
             text_item("m1", ItemKind::User, "hi"),
             Item {
+                created: 0,
                 id: "c1".into(),
                 kind: ItemKind::Chart,
                 text: "Sankey".into(),
@@ -3814,6 +3904,7 @@ mod tests {
                 message_id: String::new(),
             },
             Item {
+                created: 0,
                 id: "a1".into(),
                 kind: ItemKind::McpApp,
                 text: "Dashboard".into(),
@@ -3832,6 +3923,7 @@ mod tests {
                 message_id: String::new(),
             },
             Item {
+                created: 0,
                 id: "t1".into(),
                 kind: ItemKind::ToolGroup,
                 text: String::new(),

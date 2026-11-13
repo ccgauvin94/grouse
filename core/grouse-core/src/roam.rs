@@ -2279,6 +2279,7 @@ mod tests {
         );
 
         let items = vec![crate::Item {
+            created: 0,
             id: "m1".into(),
             kind: crate::ItemKind::Agent,
             text: "hello".into(),

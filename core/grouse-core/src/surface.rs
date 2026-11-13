@@ -106,6 +106,10 @@ record_surface!(
     images,
     message_id,
     seq,
+    // The server's own creation instant: `seq` orders rows inside a chat, this
+    // is the only clock that can place a chat row next to an event from elsewhere
+    // (an area timeline's cards and actions).
+    created,
 );
 
 record_surface!(
@@ -259,7 +263,7 @@ mod tests {
     #[test]
     fn the_groups_the_checker_knows_are_all_present() {
         for (group, n) in [
-            (ITEM_FIELDS, 16),
+            (ITEM_FIELDS, 17),
             (CALL_FIELDS, 8),
             (STEP_FIELDS, 2),
             (FILE_FIELDS, 5),

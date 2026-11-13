@@ -397,6 +397,24 @@ pub(crate) fn content_block_text(
     }
 }
 
+/// When goose says this message was created — epoch seconds, `_meta.goose.created`.
+///
+/// Every message chunk carries it (`crates/goose/src/acp/server/message_meta.rs`), and it
+/// is the ONLY clock a transcript row has: `Item::seq` orders rows inside one chat and
+/// nothing else. An area timeline has to interleave chat with events that live outside the
+/// transcript (a My Day card, an action taken in another app), and this stamp is what makes
+/// that possible. 0 when the server sent none, which a renderer must read as "unknown",
+/// never as 1970.
+pub(crate) fn chunk_created(chunk: &agent_client_protocol::schema::v1::ContentChunk) -> i64 {
+    chunk
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("goose"))
+        .and_then(|goose| goose.get("created"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0)
+}
+
 pub(crate) fn chunk_text(chunk: &agent_client_protocol::schema::v1::ContentChunk) -> String {
     content_block_text(&chunk.content)
 }
@@ -1420,6 +1438,7 @@ mod tests {
         ));
         let cache = crate::cache::CacheStore::new(dir);
         let item = crate::Item {
+            created: 0,
             id: "m1".into(),
             kind: crate::ItemKind::Agent,
             text: "hi".into(),
@@ -2217,8 +2236,9 @@ pub(crate) fn dispatch(
                 } else {
                     let text = chunk_text(&chunk);
                     if !text.is_empty() {
+                        let created = chunk_created(&chunk);
                         let mid = chunk.message_id.map(|id| id.to_string());
-                        store.append_chunk("user", &text, mid.as_deref(), false);
+                        store.append_chunk_at("user", &text, mid.as_deref(), false, created);
                     }
                 }
                 content = true;
@@ -2239,8 +2259,9 @@ pub(crate) fn dispatch(
                 } else {
                     let text = chunk_text(&chunk);
                     if !text.is_empty() {
+                        let created = chunk_created(&chunk);
                         let mid = chunk.message_id.map(|id| id.to_string());
-                        store.append_chunk("agent", &text, mid.as_deref(), false);
+                        store.append_chunk_at("agent", &text, mid.as_deref(), false, created);
                     }
                 }
                 content = true;

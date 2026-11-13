@@ -661,7 +661,14 @@ row — which the core already parses into `SubagentStep`s. `activity()` exposes
   implementation, no drift.
 - Transcript accumulation: chunks append into a bubble keyed by (role,
   `message_id`); live shell output appends, the completion update replaces;
-  replay chunks are gated by message id. Caches (per-session transcript + tool
+  replay chunks are gated by message id. Every text row also carries
+  `Item.created` — epoch seconds from `_meta.goose.created`, which goose stamps on
+  every chunk and the core read and threw away until 2026-11-13. `seq` orders rows
+  inside one chat; `created` is the only clock that can place a chat row next to
+  something that never came through the transcript (an area timeline's My Day cards
+  and the actions taken on them). `0` means the server sent no stamp — a tool row, or
+  a prompt this client echoed and never got back — and must render as unknown, not as
+  1970. Caches (per-session transcript + tool
   catalog) are the core's, keyed by display id, with the freshness check
   (`updatedAt == cachedUpdatedAt`); a peer session's cache key is
   `roam:<label>:<raw>`, and `Core::save_cache_for` writes an empty stamp for an

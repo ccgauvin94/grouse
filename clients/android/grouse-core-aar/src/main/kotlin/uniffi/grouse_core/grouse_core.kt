@@ -6154,6 +6154,18 @@ data class Item (
      * appending it on arrival put the question below its own answer.
      */
     var `seq`: kotlin.UInt
+    , 
+    /**
+     * Text rows only: when the SERVER says the message was created (epoch seconds,
+     * from `_meta.goose.created`; `0` when it sent no stamp — a tool row, or a
+     * prompt echoed locally whose own chunk never came back).
+     *
+     * `seq` only orders rows inside one chat. This is the clock that lets a chat row
+     * share an axis with things that never came through the transcript — a My Day
+     * card, a snooze someone took in another app — which is what an area timeline is
+     * built from. goose has always sent it; the core simply never read it.
+     */
+    var `created`: kotlin.Long
     
 ){
     
@@ -6186,6 +6198,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterSequenceString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterLong.read(buf),
         )
     }
 
@@ -6205,7 +6218,8 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterSequenceTypeUploadedFile.allocationSize(value.`files`) +
             FfiConverterSequenceString.allocationSize(value.`images`) +
             FfiConverterString.allocationSize(value.`messageId`) +
-            FfiConverterUInt.allocationSize(value.`seq`)
+            FfiConverterUInt.allocationSize(value.`seq`) +
+            FfiConverterLong.allocationSize(value.`created`)
     )
 
     override fun write(value: Item, buf: ByteBuffer) {
@@ -6225,6 +6239,7 @@ public object FfiConverterTypeItem: FfiConverterRustBuffer<Item> {
             FfiConverterSequenceString.write(value.`images`, buf)
             FfiConverterString.write(value.`messageId`, buf)
             FfiConverterUInt.write(value.`seq`, buf)
+            FfiConverterLong.write(value.`created`, buf)
     }
 }
 
