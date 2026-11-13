@@ -843,14 +843,32 @@ impl Conn {
         // "restored" to the previous chat from here — see the Err arm below for
         // what a failed load leaves behind.
         self.inner.session_id.lock().replace(session_id.clone());
+        let store = self.store_for(&session_id);
+        let replay_key = crate::session::display_id(self.inner.label.as_deref(), &session_id);
+        // VERIFY a suppression before arming the gates: a fresh-cache claim is
+        // built from the baseline this core last saw listed, and another client's
+        // writes never move it. Downgraded to a bounded merge here (the one place
+        // before the gates are set) so the replayed rows are kept rather than
+        // dropped — see `session::verified_ask`.
+        let endpoint: &dyn crate::session::ChatEndpoint = self;
+        let ask = crate::session::verified_ask(
+            endpoint,
+            self.inner.host.as_ref(),
+            &replay_key,
+            crate::session::ReplayAsk {
+                suppress: suppress_replay,
+                merge: merge_replay,
+                tail: crate::session::first_tail(suppress_replay, merge_replay),
+            },
+        )
+        .await;
+        let (suppress_replay, merge_replay) = (ask.suppress, ask.merge);
         self.inner
             .suppress_replay
             .store(suppress_replay, Ordering::SeqCst);
         self.inner
             .merge_replay
             .store(merge_replay, Ordering::SeqCst);
-        let store = self.store_for(&session_id);
-        let replay_key = crate::session::display_id(self.inner.label.as_deref(), &session_id);
         // A merge fetched the tail, so its result may be stamped with a newer
         // probe; a full replay (no cache) may still lag it, and a fresh cache
         // is already current.
@@ -858,7 +876,6 @@ impl Conn {
         // One shared replay lifecycle (see `session::replay_session`): hold the
         // rows, load, close any merge, repaint once — the peer path uses the
         // same function, which is what keeps the two from drifting apart.
-        let endpoint: &dyn crate::session::ChatEndpoint = self;
         let reply = crate::session::replay_session(
             endpoint,
             self.inner.host.as_ref(),

@@ -1346,6 +1346,52 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_cache_is_only_trusted_when_the_server_agrees() {
+        // THE BUG THIS GUARDS (measured 2026-11-12): the "fresh cache" verdict is
+        // built from the baseline the core last saw in `session/list` — which does
+        // not move when ANOTHER client writes to the session. `Quick` then
+        // compared a saved stamp with a stale copy of the same stamp, called the
+        // cache current, threw the replay away, and fetched nothing: a refresh
+        // that silently does nothing, worst on a chat another client is writing.
+        let fresh = ReplayAsk {
+            suppress: true,
+            merge: false,
+            tail: 1,
+        };
+        // The server's own stamp agrees: keep the suppression (the fast path).
+        let same = ask_with_stamp(fresh, "2026-11-12T20:00:00Z", Some("2026-11-12T20:00:00Z"));
+        assert!(same.suppress && !same.merge && same.tail == 1);
+
+        // It has moved: merge a bounded tail instead of discarding the replay.
+        let moved = ask_with_stamp(fresh, "2026-11-12T20:00:00Z", Some("2026-11-12T21:00:00Z"));
+        assert!(!moved.suppress && moved.merge, "{moved:?}");
+        assert_eq!(moved.tail, REPLAY_TAIL, "a downgrade owes the overlap tail");
+
+        // A probe that fails or says nothing is NOT evidence of staleness: a
+        // hiccup must not repaint every open of a current chat.
+        assert!(ask_with_stamp(fresh, "t1", None).suppress);
+        assert!(ask_with_stamp(fresh, "t1", Some("")).suppress);
+        // An unknown baseline cannot confirm freshness either way; the server's
+        // stamp is then the only word, and it is taken as the truth.
+        let unknown = ask_with_stamp(fresh, "", Some("t9"));
+        assert!(!unknown.suppress && unknown.merge);
+
+        // A merge or a full replay is already fetching: no probe, no change.
+        let merge = ReplayAsk {
+            suppress: false,
+            merge: true,
+            tail: REPLAY_TAIL,
+        };
+        assert_eq!(ask_with_stamp(merge, "t1", Some("t2")), merge);
+        let full = ReplayAsk {
+            suppress: false,
+            merge: false,
+            tail: 80,
+        };
+        assert_eq!(ask_with_stamp(full, "t1", Some("t2")), full);
+    }
+
+    #[test]
     fn paint_plan_respects_stamp_freshness() {
         let dir = std::env::temp_dir().join(format!(
             "grouse-session-test-{}-{}",
@@ -1450,7 +1496,7 @@ pub(crate) fn first_tail(suppress: bool, merge: bool) -> usize {
 /// it asks the wire for. Grouped because they are read as one decision — a
 /// caller that sets `suppress` but a full `tail` (or the reverse) is a bug, and
 /// a value makes that visible at one site.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReplayAsk {
     /// The cache is current and authoritative: discard the replayed rows.
     pub suppress: bool,
@@ -1470,6 +1516,77 @@ impl ReplayAsk {
             merge,
             tail: first_tail(suppress, merge),
         }
+    }
+}
+
+/// Confirm a "the cache is current, throw the replay away" decision against the
+/// server before honouring it, and turn it into a bounded merge when it is wrong.
+///
+/// A suppression is the ONE load that discards what the wire sends, so it can
+/// never learn it was wrong. `plan_paint` decides it from the cache's stamp and
+/// the baseline the core last saw in `session/list` (or a `session_info_update`)
+/// — and that baseline does not move when ANOTHER client writes to the session:
+/// nothing obliges the server to notify us, and a roam peer only re-lists on a
+/// reconnect or an explicit relist. So the everyday "refresh" (`RefreshMode::
+/// Quick`) compared a saved stamp with a stale copy of the same stamp, called
+/// the cache fresh, dropped the replay, and fetched nothing — a refresh that
+/// silently does nothing, worst on a chat another client (Desktop, the CLI, a
+/// scheduled run, the assistant's thread append) is actively writing to.
+///
+/// One `session/info` probe settles it. Cheap, and only on the suppress path:
+/// a cache that already knows it is stale takes the merge directly.
+pub(crate) async fn verified_ask(
+    endpoint: &dyn ChatEndpoint,
+    host: &dyn DispatchHost,
+    key: &str,
+    ask: ReplayAsk,
+) -> ReplayAsk {
+    if !ask.suppress {
+        return ask;
+    }
+    let params = json!({ "sessionId": endpoint.wire_id(key) });
+    let probed = request(endpoint, "_goose/unstable/session/info", params)
+        .await
+        .ok()
+        .and_then(|reply| {
+            reply
+                .pointer("/session/updatedAt")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    let listed = host.listed_stamp(key);
+    let ask = ask_with_stamp(ask, &listed, probed.as_deref());
+    // The server has moved on since the baseline the paint plan was built from,
+    // so record the truth: the next plan reads this baseline instead of the
+    // stale one that produced the (wrong) "fresh" verdict.
+    if !ask.suppress {
+        if let Some(stamp) = probed.as_deref().filter(|stamp| !stamp.is_empty() && *stamp != listed)
+        {
+            host.session_stamp(key, stamp);
+        }
+    }
+    ask
+}
+
+/// The decision half of [`verified_ask`], pure so it can be read and tested
+/// without a wire: `probed` is the server's own `updatedAt` (`None` when the
+/// probe failed or the reply carried no stamp).
+pub(crate) fn ask_with_stamp(ask: ReplayAsk, listed: &str, probed: Option<&str>) -> ReplayAsk {
+    if !ask.suppress {
+        return ask;
+    }
+    let Some(stamp) = probed.filter(|stamp| !stamp.is_empty()) else {
+        // A probe that answers nothing (or fails) is not evidence the cache is
+        // stale: keep the suppression rather than repaint a chat on a hiccup.
+        return ask;
+    };
+    if !listed.is_empty() && listed == stamp {
+        return ask;
+    }
+    ReplayAsk {
+        suppress: false,
+        merge: true,
+        tail: REPLAY_TAIL,
     }
 }
 
@@ -1566,19 +1683,21 @@ pub(crate) async fn load_with_plan(
 ) -> Result<Value, AcpError> {
     let _load = store.begin_load().await;
     apply_paint(store, plan);
-    replay_held(
+    // A suppression is verified against the server before it is honoured: a
+    // stale freshness baseline would otherwise discard the replay (see
+    // [`verified_ask`]).
+    let ask = verified_ask(
         endpoint,
         host,
-        store,
         key,
-        cwd,
         ReplayAsk {
             suppress: plan.suppress,
             merge: plan.merge,
             tail: plan.tail,
         },
     )
-    .await
+    .await;
+    replay_held(endpoint, host, store, key, cwd, ask).await
 }
 
 /// The `session/load` replay lifecycle after the paint — one implementation for
