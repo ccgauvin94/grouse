@@ -1588,12 +1588,18 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Force the on-screen chat to be re-fetched from the server, replacing a
      *  local view that drifted (a turn that dropped mid-stream left it partial).
-     *  Backs the "pull up to reload" gesture.
      *
      *  QUICK (grouse#18): the core decides by freshness — a current cache
      *  suppresses the replay, a stale one merges a bounded tail, an incomplete
      *  store still replays in full — and either way the replay is ingested
-     *  silently and painted once, so the chat lands on its newest messages. */
+     *  silently and painted once, so the chat lands on its newest messages.
+     *
+     *  No gesture calls this any more: the pull-up handle's armed pull is the
+     *  FULL reload (what the label promised, and what the desktop's Reload
+     *  button means), and QUICK is the automatic path on every open and on a
+     *  reconnect's resume. It stays exported because a client may want a cheap
+     *  "catch up" that never repaints — and because `Full` is the wrong tool for
+     *  a chat the core already knows is behind. */
     fun refreshCurrent() = reloadCurrent(full = false)
 
     /** Replay the open chat from its first prompt, ignoring cache freshness
@@ -1611,10 +1617,16 @@ class ConnectionManager private constructor(context: Context) {
 
     private fun reloadCurrent(full: Boolean) {
         val sid = currentSession.value ?: return
-        // ONE reload at a time: a second pull while the replay is in flight would
-        // clear the transcript again mid-rebuild. The core refuses the repeat too;
-        // refusing here keeps the handle honest.
-        if (full && replayActive.value) return
+        // ONE reload at a time is the CORE's rule: `refresh_session(Full)` returns
+        // without clearing anything while `replaying` holds this session, so a
+        // repeated hold costs one dropped intent, not a torn transcript. This used
+        // to be a client-side `return` as well — and `replayActive` is left true by
+        // a roam open that never reported back (its `"ready"` never came, or the
+        // peer dropped), so that guard could do exactly one thing: swallow the
+        // user's own reload with NO bar, NO toast, and no way to tell it from a
+        // reload that fetched nothing (reported 2026-11-12: "full refresh doesn't
+        // seem to be actually grabbing the latest messages"). The 8s watchdog below
+        // is the honest version of that guard: it says out loud that nothing ran.
         replayActive.value = true
         replayProgress.value = 0
         replayTotal.value = 0
@@ -2852,7 +2864,27 @@ class ConnectionManager private constructor(context: Context) {
      *  docs/TRANSCRIPT_MODEL.md "Windows"). Drives the row at the top of the list. */
     val loadingOlderItems = mutableStateOf(false)
 
+    /** The page this client is waiting on. A Window always ends the wait; if one never
+     *  comes (a wire dropped mid-page, a peer that answers nothing) a stuck flag is not
+     *  just a stale spinner: `onCoreItem` PARKS every later row while a page is in
+     *  flight, so the chat silently stops updating and `loadOlder` dead-ends on its own
+     *  guard — the exact "the latest messages are not displayed" shape, with nothing on
+     *  screen to explain it. Bound it, and flush what it was holding. */
+    private val olderWatchdog = Runnable {
+        if (loadingOlder) {
+            olderPending.forEach { (key, bubble) -> upsertBubble(key, bubble) }
+            olderPending.clear()
+            setLoadingOlder(false)
+            // `itemHasOlder` is left alone: the core still believes there is
+            // history, and a later scroll-back retries the page. Only the GATE
+            // is released, so the transcript keeps updating either way.
+            noteApp("app: no answer to loadOlder in 10s — flushed the page gate")
+        }
+    }
+
     private fun setLoadingOlder(loading: Boolean) {
+        main.removeCallbacks(olderWatchdog)
+        if (loading) main.postDelayed(olderWatchdog, 10_000)
         loadingOlder = loading
         loadingOlderItems.value = loading
     }
@@ -2942,8 +2974,15 @@ class ConnectionManager private constructor(context: Context) {
                     olderPending.clear()
                     setLoadingOlder(false)
                 }
-                itemHasOlder.value = op.hasOlder
-                if (drainingHistory) {
+                // `clear()` emits a Reset AND a Window with nothing behind it — the
+                // sweep a full reload starts with. That Window is not a cursor: taking
+                // its `has_older = false` as the truth cancelled the drain the reload
+                // had just armed, so the rebuilt chat stopped at the newest window
+                // instead of walking its history back in. Only a Window over paint
+                // says anything about where the store's origin is.
+                val emptySweep = messages.isEmpty() && op.oldestId.isEmpty()
+                if (!emptySweep) itemHasOlder.value = op.hasOlder
+                if (drainingHistory && !emptySweep) {
                     if (op.hasOlder) loadOlder(HISTORY_DRAIN_BATCH) else drainingHistory = false
                 }
                 if (messages.isNotEmpty() && replayActive.value) {

@@ -1092,10 +1092,21 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
 
                 // Pull-up reload handle: a dropped turn can leave the local view
                 // partial, and there is otherwise no way to force a re-fetch. When
-                // already at the bottom it reloads from the server; when scrolled
-                // back it just tails. A dedicated handle (not a list-edge swipe)
-                // because the transcript is reverseLayout, where an upward drag is
-                // ordinary scroll-back.
+                // already at the bottom the ARMED pull reloads FROM THE START; when
+                // scrolled back it just tails, because the reader asked to see the
+                // end, not to re-download the chat. A dedicated handle (not a
+                // list-edge swipe) because the transcript is reverseLayout, where an
+                // upward drag is ordinary scroll-back.
+                //
+                // The armed pull is the FULL reload (grouse#18), matching what the
+                // desktop's Reload button means, and it used to be the QUICK one:
+                // QUICK is allowed to decide the cache is current and fetch nothing,
+                // so the one gesture the phone offers could look exactly like a
+                // reload that silently did nothing — reported 2026-11-12 as "full
+                // refresh doesn't grab the latest messages, especially from another
+                // client". The label under the bar always said "Release to reload",
+                // so this is the action it promised. QUICK still runs on every open
+                // (and on a reconnect's resume); it needs no gesture of its own.
                 val reloadHint = when (link) {
                     LinkState.Down -> "Offline — pull up to reload"
                     LinkState.Retrying -> "Reconnecting… pull up to reload"
@@ -1104,7 +1115,7 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                 ReloadHandle(
                     hint = reloadHint,
                     onPullUp = {
-                        if (atBottom) cm.refreshCurrent()
+                        if (atBottom) cm.reloadCurrentFromStart()
                         else { follow = true; scope.launch { listState.animateScrollToItem(0) } }
                     },
                     onTail = { follow = true; scope.launch { listState.animateScrollToItem(0) } },
