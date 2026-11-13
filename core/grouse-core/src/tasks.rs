@@ -273,7 +273,7 @@ pub(crate) fn thread_notes(
     }
     out.into_iter()
         .map(|(label, (count, mut notes))| {
-            let header = header_note(&label, count);
+            let header = header_note(&label, count, notes.len());
             notes.insert(0, header);
             (label, notes)
         })
@@ -281,14 +281,20 @@ pub(crate) fn thread_notes(
 }
 
 /// The one line that tells a thread chat which area it is and where the rest lives.
-fn header_note(label: &str, count: usize) -> ContextNote {
+fn header_note(label: &str, count: usize, shown: usize) -> ContextNote {
+    let held = if count > shown {
+        // Only worth saying when the notes below are not the whole story.
+        format!("It holds {count} rows and the first {shown} follow. ")
+    } else {
+        String::new()
+    };
     ContextNote {
         key: format!("thread:{label}"),
         text: format!(
-            "Thread {label}: this chat is that area's own conversation. {count} row(s) of \
-             it follow, with the detail behind each one. Everything under the label — with \
-             evidence, provenance and state — is `assistantstate__state_items(thread=\"{label}\")`, \
-             and `state_item(<id>)` returns one in full."
+            "Thread {label}: this chat is that area's own conversation. {held}What it holds \
+             follows, with the detail behind each row. Everything under the label — evidence, \
+             provenance and state — is `assistantstate__state_items(thread=\"{label}\")`, and \
+             `state_item(<id>)` returns one row in full."
         ),
     }
 }
@@ -890,9 +896,9 @@ mod tests {
         let open = format!("[{rows}]");
         let notes = thread_notes(Some(&open), None).remove("a-one").unwrap_or_default();
         // Header + the cap: a note is re-sent on every turn of the conversation, so the
-        // count is bounded by cost — the header says how many rows there really are.
+        // count is bounded by cost — and the header says so when rows are left out.
         assert_eq!(notes.len(), NOTES_PER_THREAD + 1);
-        assert!(notes[0].text.contains("7 row(s)"), "{}", notes[0].text);
+        assert!(notes[0].text.contains("It holds 7 rows and the first 4 follow"), "{}", notes[0].text);
         // Keys are the ROW ids, which is what makes re-offering idempotent per row.
         assert_eq!(notes[1].key, "itm_1");
         assert_eq!(notes[NOTES_PER_THREAD].key, format!("itm_{NOTES_PER_THREAD}"));
