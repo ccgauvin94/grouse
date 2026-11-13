@@ -181,19 +181,57 @@ pub(crate) fn labels(open: Option<&str>, handed: Option<&str>) -> Vec<String> {
     out
 }
 
-/// One short opening line per label: what the thread holds right now.
+/// One line the core offers into a thread's conversation, carrying the key that makes
+/// it idempotent (see `note_params`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextNote {
+    /// What the note is ABOUT — an item id, a task id, or `thread:<label>` for the
+    /// header. It rides in the note's own text, so the relay can find it again.
+    pub key: String,
+    pub text: String,
+}
+
+/// How many of a thread's rows the opening context carries in full. Beyond this the
+/// header points at the tool instead: a note is re-sent on every turn of that
+/// conversation, so this is bounded by cost, not by what the store holds.
+const NOTES_PER_THREAD: usize = 4;
+
+/// How much of a row's `detail` a note carries.
 ///
-/// This is the "context, pre-loaded" half of a thread chat: the conversation is minted
-/// with one deterministic assistant row naming its own items, so opening it is not a
-/// blank page and the model does not have to be told which area it is in. No model turn
-/// (it is a `thread_note` relay), and it costs ~150 tokens once, when the thread is made.
-pub(crate) fn thread_seeds(
+/// The detail is where the WHO that the title assumes actually lives — the item that
+/// prompted this (2026-11-12) was titled "…right before Schaible's 3:10 seminar you
+/// haven't answered about" and its detail said "George Schaible's 15:10 seminar in
+/// PBB108". The thread chat was seeded from the title alone, so it could not answer a
+/// question about its own item and spent twenty minutes rediscovering it by tool call.
+const DETAIL_CHARS: usize = 700;
+
+/// A title is one sentence in practice; this only guards against a pathological one.
+const TITLE_CHARS: usize = 300;
+
+fn clip(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    text.chars().take(max).collect::<String>() + "…"
+}
+
+/// The context notes for every thread the board shows: a header naming the area, then
+/// one note per row carrying its title, its detail and where to read the rest.
+///
+/// This is the "context, pre-loaded" half of a thread chat, and the whole reason a thread
+/// can be discussed at all: the conversation is minted (and topped up) with deterministic
+/// assistant rows, no model turn involved. Notes are keyed per ROW rather than per label,
+/// so a thread that gains an item gains exactly that item's note the next time it is
+/// opened, and one that has not changed gets nothing.
+pub(crate) fn thread_notes(
     open: Option<&str>,
     handed: Option<&str>,
-) -> std::collections::BTreeMap<String, String> {
-    // label -> (rows, titles)
-    let mut out: std::collections::BTreeMap<String, (usize, Vec<String>)> =
+) -> std::collections::BTreeMap<String, Vec<ContextNote>> {
+    // label -> (total rows, notes so far)
+    let mut out: std::collections::BTreeMap<String, (usize, Vec<ContextNote>)> =
         std::collections::BTreeMap::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (text, kind) in [(open, "open"), (handed, "handed over")] {
         let Some(text) = text else { continue };
         let Ok(Value::Array(rows)) = serde_json::from_str::<Value>(text) else {
@@ -203,10 +241,16 @@ pub(crate) fn thread_seeds(
             let Some(label) = row.get("thread").and_then(Value::as_str) else {
                 continue;
             };
-            let label = label.trim();
+            let label = label.trim().to_string();
             if label.is_empty() {
                 continue;
             }
+            let id = row
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
             let title = row
                 .get("title")
                 .and_then(Value::as_str)
@@ -216,49 +260,119 @@ pub(crate) fn thread_seeds(
             if title.is_empty() {
                 continue;
             }
-            let entry = out.entry(label.to_string()).or_insert((0, Vec::new()));
+            let entry = out.entry(label).or_insert((0, Vec::new()));
             entry.0 += 1;
-            // Three is enough to place the area; the panel carries the rest live.
-            if entry.1.len() < 3 {
-                let mut short = title;
-                if short.chars().count() > 110 {
-                    short = short.chars().take(110).collect::<String>() + "…";
-                }
-                entry.1.push(format!("{short} ({kind})"));
+            if entry.1.len() >= NOTES_PER_THREAD || !seen.insert(id.clone()) {
+                continue;
             }
+            entry.1.push(ContextNote {
+                key: if id.is_empty() { title.clone() } else { id.clone() },
+                text: row_note(&row, kind, &id, &title),
+            });
         }
     }
     out.into_iter()
-        .map(|(label, (count, titles))| {
-            let mut line = String::from("Thread opened. Holding ");
-            line.push_str(&count.to_string());
-            line.push_str(if count == 1 { " item: " } else { " items: " });
-            line.push_str(&titles.join("; "));
-            if count > titles.len() {
-                line.push_str("; …");
-            }
-            line.push('.');
-            (label, line)
+        .map(|(label, (count, mut notes))| {
+            let header = header_note(&label, count);
+            notes.insert(0, header);
+            (label, notes)
         })
         .collect()
 }
 
+/// The one line that tells a thread chat which area it is and where the rest lives.
+fn header_note(label: &str, count: usize) -> ContextNote {
+    ContextNote {
+        key: format!("thread:{label}"),
+        text: format!(
+            "Thread {label}: this chat is that area's own conversation. {count} row(s) of \
+             it follow, with the detail behind each one. Everything under the label — with \
+             evidence, provenance and state — is `assistantstate__state_items(thread=\"{label}\")`, \
+             and `state_item(<id>)` returns one in full."
+        ),
+    }
+}
+
+/// One row as context: the title (the sentence My Day shows), the detail (what the title
+/// assumes the reader knows), and a footer naming the row so it stays addressable and so
+/// the note can be recognised as already-written.
+fn row_note(row: &Value, kind: &str, id: &str, title: &str) -> String {
+    let field = |name: &str| -> String {
+        row.get(name)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let mut text = clip(title, TITLE_CHARS);
+    // A task's own words are request (what was asked) and result (what came back); an
+    // item's are detail.
+    let mut body = if kind == "handed over" {
+        let request = field("request");
+        let result = field("result");
+        [request, result]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        field("detail")
+    };
+    if !body.is_empty() && body != text {
+        body = clip(&body, DETAIL_CHARS);
+        text.push_str("\n\n");
+        text.push_str(&body);
+    }
+    let mut footer = Vec::new();
+    let state = field("state");
+    let row_kind = if kind == "handed over" {
+        "handed over".to_string()
+    } else {
+        field("kind")
+    };
+    footer.push(if id.is_empty() {
+        format!("{kind} row")
+    } else {
+        id.to_string()
+    });
+    if !row_kind.is_empty() {
+        footer.push(row_kind);
+    }
+    if !state.is_empty() {
+        footer.push(state);
+    }
+    let due = field("due_at");
+    if !due.is_empty() {
+        footer.push(format!("due {due}"));
+    }
+    text.push_str(&format!("\n\n({})", footer.join(" · ")));
+    text
+}
+
 /// `notify__thread_note` — append one line into a thread's own conversation.
 ///
-/// The CORE uses it for exactly one thing: the OPENING line of a thread chat. It must
-/// never write into `sessions.db` itself, and this is the one path that already knows how.
+/// The CORE uses it for exactly one thing: a thread chat's context notes. It must never
+/// write into `sessions.db` itself, and this is the one path that already knows how.
 ///
-/// `once` makes the relay the guard: it writes only while the thread's conversation is
-/// still empty. That is what lets the core re-offer the line on every open with no state
-/// of its own — a thread whose mint-time relay failed, or one that predates this map
-/// (minted by an older client, or mapped by hand), gets its context the first time
-/// somebody opens it, and a thread that already has a log is left alone.
-pub(crate) fn note_params(wire: &str, label: &str, text: &str) -> Value {
+/// `key` makes the RELAY the guard, not the core: it writes only when no row in that
+/// conversation already mentions the key. That is what lets the core re-offer every note
+/// on every open with no state of its own —
+///
+/// * a thread whose mint-time relay failed, or one minted by an older client, gets its
+///   context the first time somebody opens it;
+/// * a thread that has gained an item since it was last opened gets exactly that item's
+///   note and nothing else (the keys of the rows already written are already there);
+/// * and a thread whose rows have not changed is left alone.
+///
+/// `once` (write only into an EMPTY conversation) was the previous guard and is gone:
+/// it could never repair a thread whose one truncated line had already landed, which is
+/// exactly the state 2026-11-12 was stuck in.
+pub(crate) fn note_params(wire: &str, label: &str, text: &str, key: &str) -> Value {
     json!({
         "sessionId": wire,
         "extensionName": NOTE_EXTENSION,
         "name": format!("{NOTE_EXTENSION_KEY}__thread_note"),
-        "arguments": { "thread": label, "text": text, "once": true },
+        "arguments": { "thread": label, "text": text, "key": key },
     })
 }
 
@@ -736,42 +850,77 @@ mod tests {
     }
 
     #[test]
-    fn a_thread_seed_names_what_the_thread_holds() {
-        let open = r#"[{"id":"1","thread":"a-one","title":"Renew the domain"},
-                       {"id":"2","thread":"a-one","title":"Call the insurer"},
-                       {"id":"3","thread":"a-one","title":"Third"},
-                       {"id":"4","thread":"a-one","title":"Fourth is beyond the cap"},
-                       {"id":"5","thread":"b-two","title":"Ring the vet"},
-                       {"id":"6","title":"unlabelled"}]"#;
-        let seeds = thread_seeds(Some(open), None);
-        // One line per label, singular/plural correct, and capped at three titles.
-        assert_eq!(
-            seeds.get("b-two").map(String::as_str),
-            Some("Thread opened. Holding 1 item: Ring the vet (open).")
-        );
-        let a = seeds.get("a-one").cloned().unwrap_or_default();
-        assert!(a.starts_with("Thread opened. Holding 4 items: "), "{a}");
-        assert!(a.contains("Renew the domain (open)"));
-        assert!(a.ends_with('.'), "{a}");
+    fn a_thread_note_carries_the_detail_that_makes_the_title_answerable() {
+        // The regression this guards, measured 2026-11-12: the seed was the title clipped
+        // at 110 chars, and the title did not say WHO. The item's detail did.
+        let open = r#"[{"id":"itm_1","thread":"heike-1-1","kind":"expectation","state":"open",
+                        "due_at":"2026-11-16T14:00:00-07:00",
+                        "title":"Heike moved your 1:1 to Monday Nov 16 at 2pm MST, right before Schaible's 3:10 seminar you haven't answered about",
+                        "detail":"It lands 40 minutes before George Schaible's 15:10 seminar in PBB108, which Hatzenpichler is still waiting on an answer about."},
+                       {"id":"itm_2","thread":"heike-1-1","kind":"question","state":"open",
+                        "title":"Short","detail":"Short"}]"#;
+        let notes = thread_notes(Some(open), None).remove("heike-1-1").unwrap_or_default();
+        // A header naming the area and the tool that holds the rest, then one note per row.
+        assert_eq!(notes.len(), 3);
+        assert_eq!(notes[0].key, "thread:heike-1-1");
+        assert!(notes[0].text.contains("assistantstate__state_items(thread=\"heike-1-1\")"),
+                "{}", notes[0].text);
+        // The title arrives WHOLE — no 110-char ellipsis, which is what removed "Schaible's".
+        let first = &notes[1];
+        assert!(first.text.contains("right before Schaible's 3:10 seminar you haven't answered about"),
+                "{}", first.text);
+        // And the detail lands with it, which is where the name lives.
+        assert!(first.text.contains("George Schaible's 15:10 seminar in PBB108"), "{}", first.text);
+        // The footer keeps the row addressable AND is the relay's dedupe key.
+        assert!(first.text.contains("itm_1 · expectation · open · due 2026-11-16T14:00:00-07:00"),
+                "{}", first.text);
+        assert_eq!(first.key, "itm_1");
+        // A detail identical to the title is not printed twice.
+        assert_eq!(notes[2].text.matches("Short").count(), 1, "{}", notes[2].text);
         // A row with no label cannot seed a thread.
-        assert_eq!(seeds.len(), 2);
+        assert!(thread_notes(Some(r#"[{"id":"9","title":"unlabelled"}]"#), None).is_empty());
+    }
+
+    #[test]
+    fn a_thread_note_is_bounded_and_keyed_per_row() {
+        let rows = (1..=7)
+            .map(|n| format!(r#"{{"id":"itm_{n}","thread":"a-one","title":"Row {n}","detail":"d{n}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let open = format!("[{rows}]");
+        let notes = thread_notes(Some(&open), None).remove("a-one").unwrap_or_default();
+        // Header + the cap: a note is re-sent on every turn of the conversation, so the
+        // count is bounded by cost — the header says how many rows there really are.
+        assert_eq!(notes.len(), NOTES_PER_THREAD + 1);
+        assert!(notes[0].text.contains("7 row(s)"), "{}", notes[0].text);
+        // Keys are the ROW ids, which is what makes re-offering idempotent per row.
+        assert_eq!(notes[1].key, "itm_1");
+        assert_eq!(notes[NOTES_PER_THREAD].key, format!("itm_{NOTES_PER_THREAD}"));
+    }
+
+    #[test]
+    fn a_handed_over_row_notes_what_was_asked_and_what_came_back() {
+        let handed = r#"[{"id":"tsk_1","thread":"a-one","state":"review",
+                          "title":"Table for Heike",
+                          "request":"Build the structure-by-structure table",
+                          "result":"Sent 03:20 Fri"}]"#;
+        let notes = thread_notes(None, Some(handed)).remove("a-one").unwrap_or_default();
+        let note = &notes[1];
+        assert!(note.text.contains("Build the structure-by-structure table"), "{}", note.text);
+        assert!(note.text.contains("Sent 03:20 Fri"), "{}", note.text);
+        assert!(note.text.ends_with("(tsk_1 · handed over · review)"), "{}", note.text);
+        assert_eq!(note.key, "tsk_1");
     }
 
     #[test]
     fn the_note_params_name_the_relay_tool() {
-        let p = note_params("s1", "a-one", "hello");
+        let p = note_params("s1", "a-one", "hello", "itm_1");
         assert_eq!(p["name"], "notify__thread_note");
         assert_eq!(p["extensionName"], NOTE_EXTENSION);
         assert_eq!(p["arguments"]["thread"], "a-one");
-    }
-
-    #[test]
-    fn the_opening_line_may_only_land_once() {
-        // `once` is the whole idempotence story: the relay checks the conversation is
-        // empty, so the core can offer the line on every open without keeping state.
-        let p = note_params("s1", "a-one", "Thread opened.");
-        assert_eq!(p["arguments"]["once"], true);
-        assert_eq!(p["arguments"]["thread"], "a-one");
+        // The key is the whole idempotence story: the relay writes only when the
+        // conversation does not already mention it.
+        assert_eq!(p["arguments"]["key"], "itm_1");
     }
 
     #[test]

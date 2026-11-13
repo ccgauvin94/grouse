@@ -248,6 +248,25 @@ keep them when extending the core.
   signal is the open FAILING (grouse#19) — that is where a cached id is dropped, never
   "it was not in the list".
 
+- **A thread chat's context is a set of notes, keyed per ROW and re-offered on every
+  open** (2026-11-12). `thread_notes` turns the board into a header note
+  (`thread:<label>`, naming the area and pointing at
+  `assistantstate__state_items(thread=…)`) plus one note per row: the full title, the
+  row's `detail`, and a footer naming its id, kind, state and due date. The relay
+  (`notify__thread_note`, `key`) writes a note only when the conversation does not
+  already mention that key, which is what makes re-offering free AND self-healing: a
+  thread that gained an item gains exactly that item's note next time it is opened, one
+  that is current gets nothing, and one minted before the notes carried detail is
+  repaired on its next open. **The bug this replaced:** the seed was "Thread opened.
+  Holding 1 item: <title clipped at 110 chars>" — no detail, so a thread asked to act on
+  its own item could not answer a question about it. Measured 2026-11-12: the item's
+  title said "…right before Schaible's 3:10 seminar you haven't answered about" and only
+  its `detail` said "George Schaible's 15:10 seminar in PBB108"; the thread chat spent
+  twenty minutes rediscovering that by tool call. The detail is where the WHO that the
+  title assumes lives, so it travels with the title. `once` (write only into an EMPTY
+  conversation) is gone from the core's use: it could never repair a thread whose one
+  truncated line had already landed.
+
 - **A file the server shares is a REFERENCE in the transcript, and its bytes are
   pulled on demand.** `ItemKind::File` rows carry `{name, mime, bytes, path,
   sha256}` and never the payload; `Core::fetch_file` chunks

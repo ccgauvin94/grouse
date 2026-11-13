@@ -928,14 +928,15 @@ struct CoreInner {
     /// tab open, a panel refresh and the post-open refresh all raced. The lists are
     /// cheap; serialising them costs nothing and makes creation one-at-a-time.
     tasks_refresh_lock: tokio::sync::Mutex<()>,
-    /// The opening line each thread's chat should carry, from the last refresh.
+    /// The context notes each thread's chat should carry, from the last refresh.
     ///
     /// Kept so a TAP can seed, not just a mint: a thread created before the relay could
     /// write (or mapped by hand, or whose mint-time note failed silently) would otherwise
-    /// open blank forever — "pre-opened with the context" is only true if the line lands.
-    /// Re-offering it is safe because the relay writes it once and refuses after that
-    /// (`note_params`), so this needs no state of its own beyond the text.
-    last_seeds: Mutex<std::collections::BTreeMap<String, String>>,
+    /// open blank forever — "pre-opened with the context" is only true if the notes land.
+    /// Re-offering them on every open is safe because the relay writes each one once and
+    /// refuses after that (`note_params` keys on the row), so this needs no state of its
+    /// own beyond the text.
+    last_notes: Mutex<std::collections::BTreeMap<String, Vec<crate::tasks::ContextNote>>>,
 }
 
 /// A file the app wants to attach, read on demand.
@@ -1037,7 +1038,7 @@ impl Core {
                 file_sessions: Mutex::new(HashMap::new()),
                 thread_map: Mutex::new(std::collections::BTreeMap::new()),
                 tasks_refresh_lock: tokio::sync::Mutex::new(()),
-                last_seeds: Mutex::new(std::collections::BTreeMap::new()),
+                last_notes: Mutex::new(std::collections::BTreeMap::new()),
             }),
         });
         let _ = core.inner.self_ref.set(Arc::downgrade(&core));
@@ -1203,15 +1204,18 @@ impl Core {
         if let Some(id) = self.inner.thread_map.lock().get(&label).cloned() {
             // The chat exists — but it may still be EMPTY, and an empty thread chat is the
             // "pre-opened with the context" promise broken: it happens whenever the relay
-            // could not write at mint time, and for every thread that predates this map.
-            // The relay itself refuses a second opening line, so this is safe to repeat.
+            // could not write at mint time, and for every thread that predates the notes.
+            // The relay writes only keys the conversation does not already mention, so this
+            // is safe to repeat — and it is how a thread gains an item it did not have last
+            // time it was opened.
             self.seed_thread_once(&label);
             self.inner.listener.on_thread_ready(label, id);
             return;
         }
         let this = self.clone();
         crate::roam::runtime().spawn(async move {
-            match this.create_thread(&label, None).await {
+            let notes = this.inner.last_notes.lock().get(&label).cloned();
+            match this.create_thread(&label, notes.as_deref()).await {
                 Ok(id) => {
                     this.inner
                         .listener
@@ -2942,19 +2946,19 @@ impl Core {
             open.as_deref().ok(),
             tasks.as_deref().ok(),
         );
-        let seeds = crate::tasks::thread_seeds(
+        let notes = crate::tasks::thread_notes(
             open.as_deref().ok(),
             tasks.as_deref().ok(),
         );
-        if !seeds.is_empty() {
-            *self.inner.last_seeds.lock() = seeds.clone();
+        if !notes.is_empty() {
+            *self.inner.last_notes.lock() = notes.clone();
         }
         let (map, mut error) = self.threads_read().await;
         // Paint first: the lists are the tab, and a first run has several conversations
         // to create. The re-emit below carries them.
         let envelope = self.emit_tasks(&open, &done, &tasks, &map, error.clone());
         self.save_my_day(&envelope);
-        if self.threads_sync(&labels, &seeds).await {
+        if self.threads_sync(&labels, &notes).await {
             let (map, err) = self.threads_read().await;
             error = err.or(error);
             let envelope = self.emit_tasks(&open, &done, &tasks, &map, error);
@@ -3025,7 +3029,7 @@ impl Core {
     async fn threads_sync(
         &self,
         labels: &[String],
-        seeds: &std::collections::BTreeMap<String, String>,
+        notes: &std::collections::BTreeMap<String, Vec<crate::tasks::ContextNote>>,
     ) -> bool {
         const MAX_NEW_THREADS: usize = 4;
         let mut created = false;
@@ -3049,7 +3053,7 @@ impl Core {
             // still opens a chat), and the tab shows `errors.threads` when the MAP itself
             // could not be read. A failure here is retried on the next refresh.
             if self
-                .create_thread(label, seeds.get(label).map(String::as_str))
+                .create_thread(label, notes.get(label).map(Vec::as_slice))
                 .await
                 .is_ok()
             {
@@ -3064,7 +3068,11 @@ impl Core {
     ///
     /// The name matters: it is what every thread chat has always been called, so the
     /// sessions created before this map existed keep their identity.
-    async fn create_thread(&self, label: &str, seed: Option<&str>) -> Result<String, String> {
+    async fn create_thread(
+        &self,
+        label: &str,
+        notes: Option<&[crate::tasks::ContextNote]>,
+    ) -> Result<String, String> {
         // Asked again here, not just by the caller: this runs from a tap as well as
         // from a refresh, and both can be in flight at once.
         if let Some(existing) = self.inner.thread_map.lock().get(label).cloned() {
@@ -3105,48 +3113,56 @@ impl Core {
             .thread_map
             .lock()
             .insert(label.to_string(), id.clone());
-        // The opening line: a thread chat that starts blank makes the reader (and the
-        // model) work out which area it is. Best effort — a relay failure must not fail
-        // the creation, the conversation already exists and is linked.
-        if let Some(text) = seed {
-            let label_owned = label.to_string();
-            let text_owned = text.to_string();
-            if let Err(e) = self
-                .tasks_call(move |wire| {
-                    crate::tasks::note_params(wire, &label_owned, &text_owned)
-                })
-                .await
-            {
-                // Silent until 2026-11-04, and that silence is why a batch of threads opened
-                // blank with nobody able to say why: the opening line is best effort, so the
-                // failure has to be visible SOMEWHERE.
-                eprintln!("[thread-seed] {label}: {e}");
-            }
+        // The context: a thread chat that starts blank makes the reader (and the model)
+        // work out which area it is. Best effort — a relay failure must not fail the
+        // creation, the conversation already exists and is linked.
+        if let Some(notes) = notes {
+            self.write_thread_notes(label, notes).await;
         }
         Ok(id)
     }
 
-    /// Offer a thread's opening line to a conversation that may already exist.
+    /// Offer a thread's context notes to its conversation.
     ///
-    /// Best effort and idempotent by the relay's own rule (`once`), so it is a no-op on a
-    /// thread that has a log and a repair on one that does not. Runs off the caller's
-    /// thread: `open_thread` is a tap handler and must not wait on a tool call.
+    /// Best effort and idempotent by the relay's own rule (it writes a note only when the
+    /// conversation does not already mention that note's key), so this is a no-op on a
+    /// thread that is already current and a repair on one that is not. Each note is one
+    /// deterministic `thread_note` round trip — no model turn — so a thread that gains an
+    /// item costs exactly one call the next time it is opened.
+    async fn write_thread_notes(&self, label: &str, notes: &[crate::tasks::ContextNote]) {
+        for note in notes {
+            let label_owned = label.to_string();
+            let text = note.text.clone();
+            let key = note.key.clone();
+            if let Err(e) = self
+                .tasks_call(move |wire| {
+                    crate::tasks::note_params(wire, &label_owned, &text, &key)
+                })
+                .await
+            {
+                // Silent until 2026-11-04, and that silence is why a batch of threads opened
+                // blank with nobody able to say why: the notes are best effort, so the
+                // failure has to be visible SOMEWHERE.
+                eprintln!("[thread-note] {label} {}: {e}", note.key);
+            }
+        }
+    }
+
+    /// Offer a thread's context to a conversation that may already exist.
+    ///
+    /// Best effort and idempotent by the relay's own rule (the `key`), so it is a no-op on
+    /// a thread that is current and a repair on one that is not — including one minted
+    /// before the notes carried detail, which is why it runs on every open and not just at
+    /// mint. Runs off the caller's thread: `open_thread` is a tap handler and must not
+    /// wait on tool calls.
     fn seed_thread_once(&self, label: &str) {
-        let Some(text) = self.inner.last_seeds.lock().get(label).cloned() else {
+        let Some(notes) = self.inner.last_notes.lock().get(label).cloned() else {
             return;
         };
         let this = self.clone();
         let label = label.to_string();
         crate::roam::runtime().spawn(async move {
-            let shown = label.clone();
-            if let Err(e) = this
-                .tasks_call(move |wire| {
-                    crate::tasks::note_params(wire, &label, &text)
-                })
-                .await
-            {
-                eprintln!("[thread-seed reopen] {shown}: {e}");
-            }
+            this.write_thread_notes(&label, &notes).await;
         });
     }
 
