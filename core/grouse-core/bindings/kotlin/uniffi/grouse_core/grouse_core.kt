@@ -5854,6 +5854,15 @@ data class ActiveWork (
     var `running`: kotlin.Boolean
     , 
     /**
+     * `running` | `completed` | `failed` | `cancelled` | `unfinished` — the lane's outcome
+     * as a client should print it. `status` above is the TOOL CALL's; for a delegate that
+     * is only ever "completed" (the ack), so a viewer that printed it said "done" while the
+     * child was working. `cancelled` is set when the turn that delegated it was stopped —
+     * stopping a turn kills its subagents, because goose runs them inside it.
+     */
+    var `outcome`: kotlin.String
+    , 
+    /**
      * Whether goose reported a SUB-AGENT working under this call (any `SubagentStep`).
      * A delegate that has not called a tool yet reads `false` and shows up as running
      * work instead, which is the honest answer: nothing has come back to say otherwise.
@@ -5885,6 +5894,7 @@ public object FfiConverterTypeActiveWork: FfiConverterRustBuffer<ActiveWork> {
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterSequenceTypeSubagentStep.read(buf),
         )
@@ -5896,6 +5906,7 @@ public object FfiConverterTypeActiveWork: FfiConverterRustBuffer<ActiveWork> {
             FfiConverterString.allocationSize(value.`detail`) +
             FfiConverterString.allocationSize(value.`status`) +
             FfiConverterBoolean.allocationSize(value.`running`) +
+            FfiConverterString.allocationSize(value.`outcome`) +
             FfiConverterBoolean.allocationSize(value.`subagent`) +
             FfiConverterSequenceTypeSubagentStep.allocationSize(value.`steps`)
     )
@@ -5906,6 +5917,7 @@ public object FfiConverterTypeActiveWork: FfiConverterRustBuffer<ActiveWork> {
             FfiConverterString.write(value.`detail`, buf)
             FfiConverterString.write(value.`status`, buf)
             FfiConverterBoolean.write(value.`running`, buf)
+            FfiConverterString.write(value.`outcome`, buf)
             FfiConverterBoolean.write(value.`subagent`, buf)
             FfiConverterSequenceTypeSubagentStep.write(value.`steps`, buf)
     }

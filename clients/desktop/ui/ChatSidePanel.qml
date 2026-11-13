@@ -98,11 +98,14 @@ Rectangle {
                 readonly property string wId: modelData.id
                 readonly property string wTitle: modelData.title !== "" ? modelData.title
                                                                         : qsTr("tool call")
-                // `running` is the core's answer (a turn is live AND the call is open); an
-                // `in_progress` row without one is a call whose response never came.
+                // `outcome` is the CORE's answer, not the tool call's status: a delegate's
+                // call returns its ack a second after it is issued, so `status` reads
+                // "completed" while the subagent still works. Reading `status` here is what
+                // made this panel say "done" the instant an agent was fired (2026-11-13).
                 readonly property bool wRunning: modelData.running === true
-                readonly property bool wUnfinished: !wRunning && modelData.status === "in_progress"
-                readonly property bool wFailed: modelData.status === "failed"
+                readonly property bool wCancelled: modelData.outcome === "cancelled"
+                readonly property bool wUnfinished: modelData.outcome === "unfinished"
+                readonly property bool wFailed: modelData.outcome === "failed"
                 readonly property var wSteps: modelData.steps === undefined ? [] : modelData.steps
                 readonly property bool wAgent: modelData.subagent === true
 
@@ -121,6 +124,7 @@ Rectangle {
                             implicitHeight: Kirigami.Units.iconSizes.small
                             color: wdel.wFailed ? Kirigami.Theme.negativeTextColor
                                   : wdel.wRunning ? Kirigami.Theme.neutralTextColor
+                                  : wdel.wCancelled ? Kirigami.Theme.disabledTextColor
                                   : Kirigami.Theme.positiveTextColor
                         }
                         Controls.Label {
@@ -132,6 +136,7 @@ Rectangle {
                         }
                         Controls.Label {
                             text: wdel.wRunning ? qsTr("running")
+                                  : wdel.wCancelled ? qsTr("cancelled")
                                   : wdel.wFailed ? qsTr("failed")
                                   : wdel.wUnfinished ? qsTr("unfinished")
                                   : qsTr("done")
@@ -151,6 +156,25 @@ Rectangle {
                     maximumLineCount: 3
                     color: Kirigami.Theme.disabledTextColor
                     font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.82
+                }
+
+                // What it is doing RIGHT NOW: the child's own tool calls arrive on this
+                // row while it works, so the last step is its current one — real progress
+                // rather than a spinner.
+                Controls.Label {
+                    width: parent.width
+                    visible: wdel.expanded && wdel.wRunning
+                    text: {
+                        var steps = wdel.wSteps
+                        if (steps.length === 0) return qsTr("working…")
+                        var now = steps[steps.length - 1]
+                        return qsTr("now · %1 · %2").arg(now.name).arg(now.detail)
+                    }
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    color: Kirigami.Theme.neutralTextColor
+                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8
+                    leftPadding: Kirigami.Units.gridUnit * 0.6
                 }
 
                 // The sub-agent's own tool calls: what the delegate ACTUALLY did, which
@@ -291,7 +315,14 @@ Rectangle {
               }
     }
 
-    /// The number of lanes the Activity tab would show, for its own badge.
-    readonly property int workCount: Mgr.activity.length
+    /// The number of lanes RUNNING NOW, for the tab's badge. Live only: a count that never
+    /// falls back to zero (it kept reading "3" after the turn was cancelled) is a claim
+    /// about the present that is not true. The tab still lists finished runs.
+    readonly property int workCount: {
+        var lanes = Mgr.activity
+        var n = 0
+        for (var i = 0; i < lanes.length; i++) if (lanes[i].running === true) n++
+        return n
+    }
     signal closeRequested()
 }

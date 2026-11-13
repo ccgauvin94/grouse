@@ -15,7 +15,7 @@
 //! - stream chunks / tool events / usage / run-ended go out on `on_stream`;
 //!   bubble structure changes (append / update / clear) on `on_transcript`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use parking_lot::Mutex;
 
@@ -470,7 +470,62 @@ fn index_bubbles(map: &mut HashMap<String, usize>, bubbles: &[Bubble]) {
     }
 }
 
+/// Whether a turn's stop reason means it did not finish on its own.
+///
+/// goose reports `cancelled` for a stopped turn (and `end_turn`, `max_tokens`, … otherwise),
+/// so the test is deliberately narrow: only a cancellation takes the subagents with it, and
+/// calling any other stop "cancelled" would libel work that genuinely completed.
+fn is_cancellation(stop_reason: &str) -> bool {
+    stop_reason.to_ascii_lowercase().contains("cancel")
+}
+
 impl State {
+    /// Where the current turn starts: the newest USER row's position. Nothing before it
+    /// was fired by this turn, whatever its stored status claims.
+    fn turn_floor(&self) -> u32 {
+        self.bubbles
+            .iter()
+            .map(Bubble::item)
+            .filter(|item| item.kind == ItemKind::User)
+            .map(|item| item.seq)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Mark the DELEGATE rows this turn fired as `cancelled`.
+    ///
+    /// goose runs a subagent INSIDE the turn that delegated it: the call returns an "ack"
+    /// result ("Delegated to subagent X") and then the turn BLOCKS until the child reports
+    /// (measured 2026-11-13 — three delegates came back in the same second as their ack,
+    /// and died in the same second the turn was cancelled). So the tool call genuinely
+    /// `completed` seconds after it started, which is why every viewer read killed work as
+    /// "done". Stopping the turn cancels the children with it, and this is the only place
+    /// that knows: the stop reason arrives here, before the turn's rows are sealed.
+    ///
+    /// `delegates` is passed in because `tool_names` is borrowed by the caller.
+    fn mark_cancelled_since(&mut self, floor: u32, delegates: &HashSet<String>) {
+        fn mark(row: &mut ToolRow, floor: u32, delegates: &HashSet<String>) {
+            // A child step is proof of a subagent even when the tool NAME is unknown (a
+            // cache paint drops `tool_names`; a replayed call restores it).
+            let background = delegates.contains(&row.tool_call_id) || !row.steps.is_empty();
+            // `failed` is a real outcome of its own and more informative than "cancelled".
+            if background && row.seq > floor && row.status != "failed" {
+                row.status = "cancelled".to_string();
+            }
+        }
+        for bubble in self.bubbles.iter_mut() {
+            match bubble {
+                Bubble::Tool(row, _) => mark(row, floor, delegates),
+                Bubble::ToolGroup(calls, _) => {
+                    for row in calls.iter_mut() {
+                        mark(row, floor, delegates);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Enforce the [`MAX_BUBBLES`] cap, evicting the oldest bubbles in bulk to
     /// a watermark so eviction stays rare (amortized O(1) per append). The id
     /// index is rebuilt and the stream anchor cleared (an evicted bubble may
@@ -1688,6 +1743,21 @@ impl TranscriptStore {
     /// renders the markdown once, then end the turn on the stream.
     pub fn run_ended(&self, stop_reason: &str) {
         self.seal_turn();
+        // A cancelled turn took its subagents with it — mark them before the rows are
+        // sealed, so the panel (and the cache) say "cancelled" rather than "done" for work
+        // the user killed. See `State::mark_cancelled_since` for why the ROW cannot work
+        // this out on its own.
+        if is_cancellation(stop_reason) {
+            let mut st = self.state.lock();
+            let floor = st.turn_floor();
+            let delegates: HashSet<String> = st
+                .tool_names
+                .iter()
+                .filter(|(_, name)| crate::is_background_work(Some(name.as_str())))
+                .map(|(id, _)| id.clone())
+                .collect();
+            st.mark_cancelled_since(floor, &delegates);
+        }
         self.announce_run_ended(stop_reason);
     }
 

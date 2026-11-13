@@ -100,7 +100,7 @@ defaulting to real verification; roam byte stream). The UI supplies only
 | `roam_disconnect(label)` | | |
 | `roam_open_session(label, session_id)` | | |
 | `tasks_refresh()` | — | My Day (§3.6): open items, the done tail and handed-over tasks arrive in ONE `on_tasks` |
-| `activity()` | → `Vec<ActiveWork>` | §3.7: the chat's work lanes — delegate/sub-agent runs only (deliberate background work), oldest first. An ordinary call, even one still in flight, is the transcript's business, not a lane. A getter over the transcript the core holds (no network, no extra state), so it answers for a roam chat and a replayed one alike |
+| `activity()` | → `Vec<ActiveWork>` | §3.7: the chat's work lanes — delegate/sub-agent runs only (deliberate background work), oldest first. An ordinary call, even one still in flight, is the transcript's business, not a lane. Print `outcome`, not `status`: a delegate's call completes its ack in a second while the child works, and `cancelled` is set when the turn that fired it was stopped. A getter over the transcript the core holds (no network, no extra state), so it answers for a roam chat and a replayed one alike |
 | `tasks_paint()` | → `bool` | My Day from the DISK CACHE, marked `cached: true` on `on_tasks`; `false` when there is none. Called on every open, before (and independently of) `tasks_refresh`, so the tab is never blank while four round trips run — and is filled at all when there is no wire |
 | `task_close(id, state, resolution)` | — | `state` is `done` \| `dropped` \| `expired`; `resolution` is the one line that keeps the next briefing from re-raising it |
 | `task_snooze(id, until, reason)` | — | `until` is an ISO instant |
@@ -578,14 +578,29 @@ row — which the core already parses into `SubagentStep`s. `activity()` exposes
   therefore a lane with `subagent: false`: nothing has come back to say otherwise.
 - **Fields:** `id` (the tool call), `title` (the run summary, else the call title),
   `detail` (the call's arguments, flattened to one line and capped), `status`
-  (`in_progress` | `completed` | `failed`), `running`, `subagent`, and `steps` — the
-  child tool calls the sub-agent made, oldest first (`SubagentStep`: `name`, `detail`).
-- **`running` is NOT `status == "in_progress"`.** It is that AND the chat still holds a
-  turn. A tool call whose response never came (a stopped turn, a dropped wire) keeps
-  `in_progress` in the stored history forever — one real session had 27 of them, which
-  is how a header badge came to claim "26 running" on an idle chat. A row that is
-  `in_progress` without a live turn is reported as a lane only if it has sub-agent
-  steps, and clients render it "unfinished", never "running".
+  (`in_progress` | `completed` | `failed` | `cancelled` — the TOOL CALL's lifecycle),
+  `running`, `outcome` (`running` | `completed` | `failed` | `cancelled` | `unfinished`
+  — what a client PRINTS), `subagent`, and `steps` — the child tool calls the sub-agent
+  made, oldest first (`SubagentStep`: `name`, `detail`).
+- **Read `outcome`, never `status`, to label a lane.** A delegate's tool call returns
+  its ack ("Delegated to subagent X") a second after it is issued and then the turn
+  blocks until the child reports — so `status` is `completed` for the entire time the
+  sub-agent works, and a viewer that printed it said "done" the instant three agents
+  were fired (reported 2026-11-13, with a screenshot of three rows reading `output:
+  Delegated to subagent …`).
+- **`running` is NOT `status == "in_progress"`.** For an ordinary call it is that AND
+  the chat still holds a turn (a call whose response never came keeps `in_progress` in
+  the stored history forever — one real session had 27 of them, which is how a header
+  badge came to claim "26 running" on an idle chat). For BACKGROUND work `in_progress`
+  is not even reachable, so `running` is the TURN alone: live turn + fired after the
+  newest prompt = the sub-agent is still working. goose runs a child inside its
+  parent's turn, so the turn is the honest clock.
+- **`cancelled` is the turn's fact, not the call's.** Stopping a turn kills the
+  subagents it delegated (they share its cancel token — measured: three delegates died
+  in the same second as the cancel). The store rewrites those rows' `status` to
+  `cancelled` when the turn ends with a cancellation stop reason, so the label survives
+  a reopen and a cache paint. A turn that ends on its own leaves them `completed`: the
+  two must be distinguishable or the label means nothing.
 - **It is a GETTER, not an event stream.** A client asks when its panel is visible and
   again when a tool row arrives on `on_item` (the only carrier of step/status changes),
   and on `on_run_ended`. Deriving it instead of storing it is what makes it work with no
@@ -596,7 +611,13 @@ row — which the core already parses into `SubagentStep`s. `activity()` exposes
   One list, two badges — both BACKGROUND. A long ordinary tool run is not a third kind:
   the transcript's own chip is where it pulses.
 - Clients render it as a panel over the chat (desktop: a docked pane with Tools and
-  Activity tabs; Android: a sheet behind a header badge whose count is the live lanes).
+  Activity tabs; Android: a sheet behind a header badge whose count is the LIVE lanes,
+  so it returns to nothing when the work ends or is cancelled — the sheet is still
+  reachable from the composer's "+" sheet, so a finished run is never lost). Both list
+  NEWEST FIRST, because the list is the chat's whole history of background work and the
+  live lane used to be at the bottom of it; both show the child's last step as
+  "now · <tool> · <detail>", which is real progress — the sub-agent's own calls arrive
+  on this row as it makes them.
 
 ---
 

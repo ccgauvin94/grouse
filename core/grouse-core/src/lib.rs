@@ -324,6 +324,12 @@ pub struct ActiveWork {
     /// stored history forever, and this session had 27 of them, which is how the badge
     /// came to claim "26 running" in an idle chat (2026-11-08).
     pub running: bool,
+    /// `running` | `completed` | `failed` | `cancelled` | `unfinished` — the lane's outcome
+    /// as a client should print it. `status` above is the TOOL CALL's; for a delegate that
+    /// is only ever "completed" (the ack), so a viewer that printed it said "done" while the
+    /// child was working. `cancelled` is set when the turn that delegated it was stopped —
+    /// stopping a turn kills its subagents, because goose runs them inside it.
+    pub outcome: String,
     /// Whether goose reported a SUB-AGENT working under this call (any `SubagentStep`).
     /// A delegate that has not called a tool yet reads `false` and shows up as running
     /// work instead, which is the honest answer: nothing has come back to say otherwise.
@@ -2050,13 +2056,23 @@ impl Core {
             .map(|item| item.seq)
             .max()
             .unwrap_or(0);
-        let running_now = |status: &str, seq: u32| live && status == "in_progress" && seq > turn_floor;
+        // An ordinary call is live only while its response is outstanding. BACKGROUND work
+        // is not: a delegate's call returns an ack the second it is issued, so `in_progress`
+        // is never true for it — and the panel therefore said "done" the moment three
+        // subagents were fired while they were still working (reported 2026-11-13). goose
+        // runs the child INSIDE the delegating turn, so for background work the turn is the
+        // clock: live turn + fired in this turn = still working.
+        let running_now =
+            |status: &str, seq: u32, background: bool| live && seq > turn_floor && (background || status == "in_progress");
         let mut lanes = Vec::new();
         for item in &items {
             match item.kind {
                 ItemKind::Tool => {
-                    let running = running_now(&item.status, item.seq);
-                    let background = is_background_work(store.tool_name_of(&item.id).as_deref());
+                    // A child step is proof of a subagent even when the call's NAME is
+                    // unknown — a cache paint drops `tool_names`, a replay restores it.
+                    let background = is_background_work(store.tool_name_of(&item.id).as_deref())
+                        || !item.steps.is_empty();
+                    let running = running_now(&item.status, item.seq, background);
                     if let Some(lane) = work_lane(&item.id, &item.text, &item.detail,
                                                   &item.status, &item.steps, running,
                                                   background) {
@@ -2065,8 +2081,9 @@ impl Core {
                 }
                 ItemKind::ToolGroup => {
                     for call in &item.calls {
-                        let running = running_now(&call.status, call.seq);
-                        let background = is_background_work(store.tool_name_of(&call.id).as_deref());
+                        let background = is_background_work(store.tool_name_of(&call.id).as_deref())
+                            || !call.steps.is_empty();
+                        let running = running_now(&call.status, call.seq, background);
                         if let Some(lane) = work_lane(&call.id, &call.title, &call.detail,
                                                       &call.status, &call.steps, running,
                                                       background) {
@@ -5057,7 +5074,7 @@ impl crate::session::DispatchHost for Core {
 /// commands", which is not what those are (reported 2026-11-12). The live chip in the
 /// transcript already says a call is running; this panel is for work that is not the
 /// conversation's own next step.
-fn is_background_work(tool_name: Option<&str>) -> bool {
+pub(crate) fn is_background_work(tool_name: Option<&str>) -> bool {
     // goose's tool ids are `extension__tool` for an extension tool and bare for a
     // platform one, so compare the last segment. `delegate` is summon's spawn.
     let Some(name) = tool_name.filter(|name| !name.is_empty()) else {
@@ -5093,9 +5110,29 @@ fn work_lane(
         detail: one_line(detail),
         status: status.to_string(),
         running,
+        outcome: outcome_of(status, running),
         subagent: !steps.is_empty(),
         steps: steps.to_vec(),
     })
+}
+
+/// A lane's outcome, as a client prints it.
+///
+/// `status` is the TOOL CALL's lifecycle, and for a delegate that is only ever "completed":
+/// the call returns its ack ("Delegated to subagent X") a second after it is issued, while
+/// the subagent runs on inside the same turn. So the call's status can say "failed", but it
+/// cannot say "running" — that comes from the turn (see [`Core::activity`]) — and a stopped
+/// turn rewrites the row to "cancelled", which the store can do and this getter cannot.
+fn outcome_of(status: &str, running: bool) -> String {
+    if running {
+        return "running".to_string();
+    }
+    match status {
+        "cancelled" => "cancelled".to_string(),
+        "failed" => "failed".to_string(),
+        "in_progress" => "unfinished".to_string(),
+        _ => "completed".to_string(),
+    }
 }
 
 /// A brief one line: tool arguments are JSON documents and a panel row is one line.
@@ -5512,6 +5549,11 @@ mod tests {
         let idle = core.activity();
         assert_eq!(idle.len(), 2, "the delegate and its sub-agent, both idle: {idle:?}");
         assert!(!idle.iter().any(|l| l.running), "nothing is running without a turn");
+        assert_eq!(
+            idle.iter().find(|l| l.id == "call-agent").unwrap().outcome,
+            "completed",
+            "with no turn open the lane is finished, not running"
+        );
         assert!(!idle.iter().any(|l| l.id == "call-shell"), "{idle:?}");
 
         // With a turn live, the DELEGATE is running work — and the shell call, open
@@ -5525,7 +5567,12 @@ mod tests {
         );
         let agent = lanes.iter().find(|l| l.id == "call-agent").expect("the sub-agent lane");
         assert!(agent.subagent);
+        // The CALL is completed — it returned its ack — but the subagent it started is
+        // still working, because goose runs the child inside this turn. Reading `status`
+        // here is what made the panel say "done" the instant an agent was fired.
         assert_eq!(agent.status, "completed");
+        assert!(agent.running, "a delegate acked seconds ago is still working: {agent:?}");
+        assert_eq!(agent.outcome, "running");
         assert_eq!(agent.steps.len(), 2);
         assert_eq!(agent.steps[0].name, "developer__shell", "oldest first");
         let running = lanes.iter().find(|l| l.id == "call-delegate").expect("the running lane");
@@ -5540,6 +5587,66 @@ mod tests {
         // Nothing displayed → nothing to report (no panic on a cold core).
         core.inner.hub.display("other");
         let _ = core.activity();
+    }
+
+    #[test]
+    fn a_cancelled_turn_cancels_the_delegates_it_fired() {
+        // Stopping a turn kills the subagents it delegated — goose runs a child INSIDE its
+        // parent's turn, so the parent's cancel reaches it (measured 2026-11-13: three
+        // delegates died in the same second the turn was cancelled). The tool call cannot
+        // show that: it returned its ack and reads `completed` forever. The stop reason is
+        // the only witness, and it must not spill onto an earlier turn's work.
+        // `core_a`: this test builds TWO cores, and a binding named `core` shadows the
+        // helper that makes them.
+        let (core_a, _) = core();
+        let store = core_a.inner.hub.display("roam:Phaethon:s2");
+
+        // A delegate from an EARLIER turn, genuinely finished.
+        store.tool_call("Delegating earlier", "old brief", "call-old", crate::ToolCallKind::Plain);
+        store.tool_name("call-old", "delegate");
+        store.tool_update("call-old", "completed", "Delegated to subagent 20261113_1", true);
+        // A new prompt, then the delegates THIS turn fired.
+        store.echo_prompt("fire three agents", 0, vec![], vec![]);
+        for (id, sub) in [("call-a", "20261113_20"), ("call-b", "20261113_21")] {
+            store.tool_call("Delegating", "audit the backlog", id, crate::ToolCallKind::Plain);
+            store.tool_name(id, "delegate");
+            store.tool_update(id, "completed", &format!("Delegated to subagent {sub}"), true);
+        }
+        // Not background work: the cancel has nothing to say about it.
+        store.tool_call("checking the banner", "ssh -v", "call-sh", crate::ToolCallKind::Plain);
+        store.tool_name("call-sh", "developer__shell");
+        store.tool_update("call-sh", "completed", "ok", true);
+
+        store.run_ended("cancelled");
+
+        let lanes = core_a.activity();
+        for id in ["call-a", "call-b"] {
+            let lane = lanes.iter().find(|l| l.id == id).expect(id);
+            assert_eq!(lane.status, "cancelled", "{lane:?}");
+            assert_eq!(lane.outcome, "cancelled", "{lane:?}");
+            assert!(!lane.running, "a cancelled subagent is not still working: {lane:?}");
+        }
+        let old = lanes.iter().find(|l| l.id == "call-old").expect("the earlier delegate");
+        assert_eq!(
+            (old.status.as_str(), old.outcome.as_str()),
+            ("completed", "completed"),
+            "a cancel must not retro-label work that finished before this turn"
+        );
+        assert!(!lanes.iter().any(|l| l.id == "call-sh"), "{lanes:?}");
+
+        // A turn that ends on its own leaves its delegates FINISHED — otherwise "cancelled"
+        // would be a decoration rather than a fact.
+        let (clean_core, _) = core();
+        let clean_store = clean_core.inner.hub.display("roam:Phaethon:s3");
+        clean_store.echo_prompt("go", 0, vec![], vec![]);
+        clean_store.tool_call("Delegating", "brief", "call-clean", crate::ToolCallKind::Plain);
+        clean_store.tool_name("call-clean", "delegate");
+        clean_store.tool_update("call-clean", "completed", "Delegated to subagent y", true);
+        clean_store.run_ended("end_turn");
+        let clean = clean_core.activity();
+        assert_eq!(clean.len(), 1, "{clean:?}");
+        assert_eq!(clean[0].outcome, "completed");
+        assert_eq!(clean[0].status, "completed");
     }
 
     #[test]

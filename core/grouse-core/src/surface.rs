@@ -139,6 +139,10 @@ record_surface!(
     detail,
     status,
     running,
+    // A delegate's tool call reads `completed` the second it acks, so a client that
+    // printed `status` said "done" for work that was still running (2026-11-13). This is
+    // the field a client prints.
+    outcome,
     subagent,
     steps,
 );

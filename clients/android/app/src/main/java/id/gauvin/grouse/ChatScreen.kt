@@ -703,18 +703,19 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                             // nothing is live is one you cannot find when you want it. A
                             // chat that never had a delegate shows no pill at all: there is
                             // nothing in the sheet to open (the + sheet still lists it).
-                            if (lanes.isNotEmpty()) {
+                            // LIVE work only, so the badge returns to nothing when it ends.
+                            // It used to say "3 agents" for the life of the chat and, after a
+                            // cancel, kept saying it for work that no longer existed
+                            // (2026-11-13). The sheet itself is still reachable from the
+                            // composer's "+" sheet, so a finished run is not lost.
+                            if (running > 0) {
                                 Surface(
                                     shape = RoundedCornerShape(50),
                                     color = MaterialTheme.colorScheme.secondaryContainer,
                                     modifier = Modifier.clickable { showActivity = true },
                                 ) {
                                     Text(
-                                        when {
-                                            running > 0 -> "$running running"
-                                            lanes.size == 1 -> "1 agent"
-                                            else -> "${lanes.size} agents"
-                                        },
+                                        "$running running",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSecondaryContainer,
                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
@@ -1760,7 +1761,8 @@ fun ActivitySheet(cm: ConnectionManager, onDismiss: () -> Unit) {
             Text("Activity", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(4.dp))
             Text(
-                "Background work in this chat: sub-agents, and delegates still running.",
+                "Background work in this chat: sub-agents, and delegates still running. " +
+                    "Finished runs stay; a run the turn's Stop killed reads \"cancelled\".",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline,
             )
@@ -1775,19 +1777,28 @@ fun ActivitySheet(cm: ConnectionManager, onDismiss: () -> Unit) {
                 )
             }
             LazyColumn(Modifier.fillMaxWidth()) {
-                items(lanes, key = { it.id }) { lane ->
-                    // `running` is the core's answer (a turn is live AND the call is open);
-                    // an `in_progress` row without one is a call whose response never came.
+                // NEWEST FIRST: lanes come in transcript order, so the live one used to be
+                // at the BOTTOM of a list of every delegate this chat ever ran — the top of
+                // the sheet was always ancient finished work.
+                items(lanes.asReversed(), key = { it.id }) { lane ->
+                    // `outcome` is the core's answer, NOT the tool call's status. A delegate's
+                    // call returns its ack ("Delegated to subagent X") a second after it is
+                    // issued, so `status` reads "completed" for the whole time the subagent
+                    // works, and this sheet said "done" the instant it was fired (reported
+                    // 2026-11-13). `cancelled` is set when the turn that delegated it was
+                    // stopped, which kills its subagents with it.
                     val running = lane.running
-                    val badge = when {
-                        running -> "running"
-                        lane.status == "failed" -> "failed"
-                        lane.status == "in_progress" -> "unfinished"
+                    val badge = when (lane.outcome) {
+                        "running" -> "running"
+                        "cancelled" -> "cancelled"
+                        "failed" -> "failed"
+                        "unfinished" -> "unfinished"
                         else -> "done"
                     }
-                    val tint = when {
-                        running -> MaterialTheme.statusColors.connecting
-                        lane.status == "failed" -> MaterialTheme.colorScheme.error
+                    val tint = when (lane.outcome) {
+                        "running" -> MaterialTheme.statusColors.connecting
+                        "failed" -> MaterialTheme.colorScheme.error
+                        "cancelled" -> MaterialTheme.colorScheme.onSurfaceVariant
                         else -> MaterialTheme.statusColors.online
                     }
                     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
@@ -1815,6 +1826,22 @@ fun ActivitySheet(cm: ConnectionManager, onDismiss: () -> Unit) {
                                 lane.detail,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.outline,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(start = 24.dp, top = 2.dp),
+                            )
+                        }
+                        // What it is doing NOW. The child's own tool calls arrive on the
+                        // delegate row while it works, so this is real progress rather than
+                        // a spinner: the last step IS its current one.
+                        if (running) {
+                            val now = lane.steps.lastOrNull()
+                            Text(
+                                if (now != null)
+                                    "now · ${now.name.replace('_', ' ')} · ${now.detail}"
+                                else "working…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.statusColors.connecting,
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.padding(start = 24.dp, top = 2.dp),

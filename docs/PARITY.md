@@ -68,7 +68,7 @@ Anchors are `file#token`; `+` joins more than one (all must resolve). Roots:
 android root = clients/android/app/src/main/java/id/gauvin/grouse
 desktop root = clients/desktop
 
-excluded = 8
+excluded = 10
 
 | surface | android | desktop |
 |---|---|---|
@@ -91,8 +91,9 @@ excluded = 8
 | `work.id` | yes: ChatScreen.kt#key = { it.id } | yes: ui/ChatSidePanel.qml#modelData.id |
 | `work.title` | yes: ChatScreen.kt#lane.title | yes: ui/ChatSidePanel.qml#modelData.title |
 | `work.detail` | yes: ChatScreen.kt#lane.detail | yes: ui/ChatSidePanel.qml#modelData.detail |
-| `work.status` | yes: ChatScreen.kt#lane.status | yes: ui/ChatSidePanel.qml#modelData.status |
+| `work.status` | excluded: the TOOL CALL's lifecycle, and a delegate's call completes its ack in a second — the badge prints `work.outcome` instead (2026-11-13) | excluded: same — `status` is what made the panel say "done" for a running sub-agent |
 | `work.running` | yes: ChatScreen.kt#lane.running | yes: ui/ChatSidePanel.qml#modelData.running |
+| `work.outcome` | yes: ChatScreen.kt#lane.outcome | yes: ui/ChatSidePanel.qml#modelData.outcome |
 | `work.subagent` | yes: ChatScreen.kt#lane.subagent | yes: ui/ChatSidePanel.qml#modelData.subagent |
 | `work.steps` | yes: ChatScreen.kt#lane.steps | yes: ui/ChatSidePanel.qml#modelData.steps |
 | `call.id` | yes: ConnectionManager.kt#c.id | yes: src/manager.cpp#c.value("id") |
