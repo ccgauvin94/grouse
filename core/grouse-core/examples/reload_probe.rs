@@ -20,6 +20,7 @@ use grouse_core::{ConnectionStatus, Core, CoreListener, ItemKind, RefreshMode, S
 struct L;
 
 impl CoreListener for L {
+    fn on_thread_timeline(&self, _label: String, _rows: Vec<grouse_core::TimelineRow>) {}
     fn on_status(&self, s: ConnectionStatus) {
         println!("-- status: {s:?}");
     }

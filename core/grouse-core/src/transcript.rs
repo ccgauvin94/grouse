@@ -2825,6 +2825,7 @@ mod tests {
     }
 
     impl CoreListener for TestListener {
+    fn on_thread_timeline(&self, _label: String, _rows: Vec<crate::TimelineRow>) {}
     fn on_file(&self, _: crate::attachments::FileEvent) {}
         fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
         fn on_thread_ready(&self, _: String, _: String) {}

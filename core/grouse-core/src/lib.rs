@@ -348,6 +348,39 @@ pub struct ActiveWork {
     pub steps: Vec<SubagentStep>,
 }
 
+/// One row of an AREA TIMELINE: the conversation of a thread's own chat interleaved
+/// with the My Day cards for that area and the actions taken on them (CONTRACT §3.8).
+///
+/// The merge happens in the core — see `tasks::merge_timeline` — because the two sources
+/// have different shapes and two renderers that each merged them would disagree about
+/// ties and about unstamped rows, which is the kind of disagreement that reads as a bug.
+#[derive(uniffi::Record, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TimelineRow {
+    /// Epoch seconds. `0` = the source gave no instant (an unstamped chat row), and such
+    /// a row sorts LAST: unknown is not 1970.
+    pub at: i64,
+    /// `item` (a card) | `action` (something done to one) | `attention` (something a
+    /// scheduled run actually said about it) | `chat` (a message in this area's chat).
+    pub kind: String,
+    /// The item id for a card/action/attention row, the transcript item id for chat.
+    pub id: String,
+    /// Chat only: `user` | `agent`.
+    pub role: String,
+    /// The line to show: a card's title, an action's sentence, or the message.
+    pub text: String,
+    /// A card's detail — what the title assumes the reader already knows.
+    pub detail: String,
+    /// A card's own state (`open`/`snoozed`/`done`), or an action's kind
+    /// (`observation`/`decision`/`reaction`/`resolution`).
+    pub state: String,
+    /// A card's kind (`commitment`, `waiting`, `obligation`, …).
+    pub item_kind: String,
+    /// ISO instant when the card is due, or empty.
+    pub due_at: String,
+    /// The card this action belongs to, for an action row.
+    pub item_title: String,
+}
+
 /// One tool call a SUBAGENT made on behalf of a delegate call.
 ///
 /// goose does not expose subagent sessions over ACP (`ACP_VISIBLE_SESSION_TYPES`
@@ -545,6 +578,16 @@ pub trait CoreListener: Send + Sync {
     fn on_usage(&self, used: i64, size: i64, cost: f64, currency: String);
     /// A turn finished (`stop_reason` is the server's).
     fn on_run_ended(&self, session_id: String, stop_reason: String);
+
+    /// An area's timeline arrived: the thread chat's conversation merged with its My Day
+    /// cards and the actions taken on them, oldest first (CONTRACT §3.8). Quiet on
+    /// failure by design — like the context report, a timeline that cannot be read must
+    /// not take the chat down with it; the rows simply keep what they had.
+    ///
+    /// Required, not defaulted: uniffi refuses a default body on an exported trait, so
+    /// every listener states what it does with the rows (a client that has no timeline
+    /// surface accepts and drops them).
+    fn on_thread_timeline(&self, label: String, rows: Vec<TimelineRow>);
     /// A sanitized, sentence-sized chunk of the assistant's visible text, ready
     /// for a client's TTS engine (see `docs/TRANSCRIPT_MODEL.md`). Emitted as
     /// the reply streams (and on the finalizing flush), so a conversation loop
@@ -2021,6 +2064,66 @@ impl Core {
     pub fn tasks_refresh(&self) {
         let this = self.clone();
         crate::roam::runtime().spawn(async move { this.tasks_refresh_now().await });
+    }
+
+    /// An area's whole history as ONE ordered list (CONTRACT §3.8): the thread chat's
+    /// conversation, the My Day cards for that area, and every action taken on them.
+    ///
+    /// Two sources, one clock. The chat rows carry `Item::created` — the server's
+    /// `_meta.goose.created` — and assistant-state answers its cards and actions with its
+    /// own timestamps; both are epoch seconds by the time `tasks::merge_timeline` sorts
+    /// them. That merge lives in the core so the two renderers cannot disagree about ties
+    /// or about unstamped rows.
+    ///
+    /// Async because the cards come from `thread_timeline` over the hidden `auto`-mode
+    /// session My Day already uses; the conversation half is local. The answer arrives on
+    /// `on_thread_timeline`, and a failure is silent on purpose: an unreadable board must
+    /// not take the conversation down with it.
+    pub fn thread_timeline(&self, label: String) {
+        let this = self.clone();
+        crate::roam::runtime().spawn(async move { this.thread_timeline_now(label).await });
+    }
+
+    async fn thread_timeline_now(&self, label: String) {
+        let raw = self
+            .tasks_call(|wire| crate::tasks::timeline_params(wire, &label, 400))
+            .await;
+        let events = raw
+            .as_deref()
+            .ok()
+            .map(crate::tasks::timeline_events)
+            .unwrap_or_default();
+        let rows = crate::tasks::merge_timeline(events, self.timeline_chat());
+        self.inner.listener.on_thread_timeline(label, rows);
+    }
+
+    /// The conversation half of a timeline, from the store the core already holds.
+    ///
+    /// Text rows only: a tool chip is the chat's own business, not something that
+    /// happened to the area, and a thought is scaffolding. `created` is 0 for a row the
+    /// server never stamped, which the merge sorts last rather than dating to 1970.
+    fn timeline_chat(&self) -> Vec<TimelineRow> {
+        let Some(store) = self.inner.hub.displayed_store() else {
+            return Vec::new();
+        };
+        store
+            .rich_transcript()
+            .into_iter()
+            .filter(|item| matches!(item.kind, ItemKind::User | ItemKind::Agent))
+            .filter(|item| !item.text.trim().is_empty())
+            .map(|item| TimelineRow {
+                at: item.created,
+                kind: "chat".to_string(),
+                id: item.id,
+                role: if item.kind == ItemKind::User {
+                    "user".to_string()
+                } else {
+                    "agent".to_string()
+                },
+                text: item.text,
+                ..Default::default()
+            })
+            .collect()
     }
 
     /// The active chat's WORK LANES: its delegate/sub-agent runs, oldest first — work it
@@ -5200,6 +5303,7 @@ mod tests {
     }
 
     impl CoreListener for Events {
+    fn on_thread_timeline(&self, _label: String, _rows: Vec<crate::TimelineRow>) {}
         fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
     fn on_file(&self, _: crate::attachments::FileEvent) {}
         fn on_status(&self, _: ConnectionStatus) {}
@@ -5252,6 +5356,7 @@ mod tests {
     struct ArcListener(Arc<dyn CoreListener>);
 
     impl CoreListener for ArcListener {
+    fn on_thread_timeline(&self, _label: String, _rows: Vec<crate::TimelineRow>) {}
         fn on_file(&self, event: crate::attachments::FileEvent) {
             self.0.on_file(event);
         }

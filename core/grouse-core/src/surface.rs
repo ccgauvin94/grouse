@@ -216,6 +216,7 @@ pub static LISTENER_EVENTS: &[&str] = &[
     "listener.on_thread_ready",
     "listener.on_replay_progress",
     "listener.on_file",
+    "listener.on_thread_timeline",
 ];
 
 /// Every id in the inventory, in one list. What the checker reads.
@@ -269,7 +270,7 @@ mod tests {
             (FILE_FIELDS, 5),
             (TRANSCRIPT_OPS, 6),
             (ITEM_KINDS, 9),
-            (LISTENER_EVENTS, 20),
+            (LISTENER_EVENTS, 21),
         ] {
             assert_eq!(group.len(), n, "{} changed size: {:?}", group.len(), group);
         }

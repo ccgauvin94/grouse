@@ -1294,6 +1294,7 @@ mod tests {
     }
 
     impl CoreListener for Recorder {
+    fn on_thread_timeline(&self, _label: String, _rows: Vec<crate::TimelineRow>) {}
     fn on_file(&self, _: crate::attachments::FileEvent) {}
         fn on_status(&self, _: ConnectionStatus) {}
         fn on_sessions(&self, _: Vec<SessionSummary>) {}
@@ -2582,6 +2583,7 @@ impl crate::CoreListener for NullListener {
     fn on_item(&self, _: crate::TranscriptOp) {}
     fn on_usage(&self, _: i64, _: i64, _: f64, _: String) {}
     fn on_run_ended(&self, _: String, _: String) {}
+    fn on_thread_timeline(&self, _: String, _: Vec<crate::TimelineRow>) {}
     fn on_speak(&self, _: String) {}
     fn on_config(&self, _: Vec<crate::ConfigOption>) {}
     fn on_permission_request(&self, _: crate::PermissionRequest) {}
@@ -2638,6 +2640,10 @@ impl crate::CoreListener for SessionGate {
         // Turn control, not painting: a background turn must still release
         // its chat's in-flight state — which is why the key travels with it.
         self.inner.on_run_ended(session_id, stop_reason);
+    }
+
+    fn on_thread_timeline(&self, label: String, rows: Vec<crate::TimelineRow>) {
+        self.inner.on_thread_timeline(label, rows);
     }
     fn on_speak(&self, text: String) {
         if self.shown() {

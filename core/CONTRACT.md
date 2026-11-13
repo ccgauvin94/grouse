@@ -619,6 +619,36 @@ row — which the core already parses into `SubagentStep`s. `activity()` exposes
   "now · <tool> · <detail>", which is real progress — the sub-agent's own calls arrive
   on this row as it makes them.
 
+### 3.8 An area's timeline (`thread_timeline(label)`)
+
+A thread chat opened from My Day is a CASE, not just a conversation: it starts from the
+card that opened it, the conversation follows, and later cards and the actions taken on
+them land in between. The client renders one vertical list and needs no second call to
+render any row.
+
+- **Sources, one clock.** The chat rows are the core's own transcript (`User`/`Agent`
+  text only — a tool chip is the chat's own business, a thought is scaffolding), stamped
+  with `Item.created` (= goose's `_meta.goose.created`). The cards and actions come from
+  assistant-state's `thread_timeline` tool, which answers items as cards and `pulse` rows
+  as actions, each with its own instant. Both arrive as epoch seconds once parsed.
+- **The merge is in the CORE** (`tasks::merge_timeline`), not in the clients: two
+  renderers that each merged would disagree about ties and about unstamped rows, and that
+  disagreement reads as a bug. Order: the instant, with `0` (unknown) LAST rather than at
+  1970; then cards before actions before attention before chat, because the world changed
+  first and the conversation is the reaction; then the id, so two writes in one second
+  still have one order.
+- **`TimelineRow.kind`** is `item` (a card) | `action` (something done to one, with the
+  pulse's own kind in `state`) | `attention` (something a scheduled run actually said) |
+  `chat` (with `role` `user`/`agent`). A card's `state`, `item_kind` and `due_at` ride
+  along so the UI never has to look them up.
+- **Delivery is an event** (`on_thread_timeline(label, rows)`), async: the cards come from
+  the hidden `auto`-mode session My Day already uses. A failure is silent — an unreadable
+  board must not take the conversation down with it.
+- **Not yet governed by the surface ratchet:** `TimelineRow` is deliberately absent from
+  `surface.rs` until a client renders it, so its fields are not in the parity ledger yet.
+  Add the record there in the same commit as the first screen, or the ledger will pin a
+  shape nobody draws.
+
 ---
 
 ## 4. Session lifecycle (owned by the core)

@@ -86,6 +86,148 @@ pub(crate) fn task_params(wire: &str, limit: u32) -> Value {
     )
 }
 
+/// The area's whole history: its cards and the actions taken on them, oldest first.
+pub(crate) fn timeline_params(wire: &str, label: &str, limit: u32) -> Value {
+    tool_params(
+        wire,
+        "thread_timeline",
+        json!({ "thread": label, "limit": limit }),
+    )
+}
+
+/// One event on an area's timeline, as `thread_timeline` answered it.
+///
+/// Not a uniffi record: the CLIENT never sees this shape. It is merged with the chat
+/// below and crosses as [`crate::TimelineRow`], so the two sources arrive already
+/// ordered instead of each client inventing a merge.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct TimelineEvent {
+    pub at: String,
+    /// `item` | `observation` | `decision` | `reaction` | `resolution` | `attention`
+    pub kind: String,
+    pub item_id: String,
+    pub text: String,
+    pub title: String,
+    pub detail: String,
+    pub state: String,
+    pub item_kind: String,
+    pub due_at: String,
+    pub item_title: String,
+}
+
+/// Parse `thread_timeline`'s answer. A tool that failed yields no events, never an
+/// error: an area with no readable history says nothing rather than taking the chat
+/// down with it.
+pub(crate) fn timeline_events(text: &str) -> Vec<TimelineEvent> {
+    let Value::Array(rows) = serde_json::from_str::<Value>(text).unwrap_or(Value::Null) else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .filter_map(|row| {
+            let string = |name: &str| {
+                row.get(name)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let at = string("at");
+            if at.is_empty() {
+                return None;
+            }
+            Some(TimelineEvent {
+                at,
+                kind: string("kind"),
+                item_id: string("item_id"),
+                text: string("text"),
+                title: string("title"),
+                detail: string("detail"),
+                state: string("state"),
+                item_kind: string("item_kind"),
+                due_at: string("due_at"),
+                item_title: string("item_title"),
+            })
+        })
+        .collect()
+}
+
+/// An ISO-8601 instant as epoch seconds — the clock everything on a timeline shares.
+///
+/// The store holds BOTH `...Z` and `...-06:00` text (109 offset rows live on this box),
+/// so comparing the strings would order a 23:49Z action ahead of a 23:08Z card. Only
+/// what the store actually writes is accepted: `YYYY-MM-DDTHH:MM:SS`, optional
+/// fractional seconds, then `Z` or a numeric offset. Anything else is 0 = unknown, and
+/// an unknown instant sorts last rather than pretending to be 1970.
+pub(crate) fn iso_to_epoch(at: &str) -> i64 {
+    let bytes = at.as_bytes();
+    if bytes.len() < 19 {
+        return 0;
+    }
+    let num = |range: std::ops::Range<usize>| -> Option<i64> {
+        let slice = at.get(range)?;
+        if !slice.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        slice.parse::<i64>().ok()
+    };
+    let (Some(year), Some(month), Some(day)) = (num(0..4), num(5..7), num(8..10)) else {
+        return 0;
+    };
+    let (Some(hour), Some(minute), Some(second)) = (num(11..13), num(14..16), num(17..19)) else {
+        return 0;
+    };
+    if bytes[4] != b'-' || bytes[7] != b'-' || !matches!(bytes[10], b'T' | b' ') {
+        return 0;
+    }
+    if bytes[13] != b':' || bytes[16] != b':' {
+        return 0;
+    }
+    // Fractional seconds, then the zone.
+    let mut rest = &at[19..];
+    if let Some(stripped) = rest.strip_prefix('.') {
+        let digits = stripped.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0 {
+            return 0;
+        }
+        rest = &stripped[digits..];
+    }
+    let offset_seconds = match rest {
+        "Z" | "z" | "" => 0,
+        _ => {
+            let sign = match rest.as_bytes().first() {
+                Some(b'+') => 1,
+                Some(b'-') => -1,
+                _ => return 0,
+            };
+            let body = &rest[1..];
+            let (hh, mm) = if let Some((h, m)) = body.split_once(':') {
+                (h.parse::<i64>().ok(), m.parse::<i64>().ok())
+            } else if body.len() == 4 {
+                (body[0..2].parse::<i64>().ok(), body[2..4].parse::<i64>().ok())
+            } else {
+                (body.parse::<i64>().ok(), Some(0))
+            };
+            let (Some(hh), Some(mm)) = (hh, mm) else {
+                return 0;
+            };
+            sign * (hh * 3600 + mm * 60)
+        }
+    };
+    // Days since the epoch, proleptic Gregorian (the store's range is 2026, but the
+    // arithmetic is correct well beyond it).
+    let (mut y, m) = (year, month);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&day) {
+        return 0;
+    }
+    y -= if m <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    days * 86_400 + hour * 3600 + minute * 60 + second - offset_seconds
+}
+
 pub(crate) fn close_params(wire: &str, id: &str, state: &str, resolution: &str) -> Value {
     tool_params(
         wire,
@@ -1104,5 +1246,155 @@ mod tests {
         // A stamp that cannot be parsed still yields a flag, never a crash.
         let broken: Value = serde_json::from_str(&cached_envelope("garbage")).unwrap();
         assert_eq!(broken["cached"], Value::Bool(true));
+    }
+}
+
+/// Merge the area's events with its conversation into ONE ordered list.
+///
+/// Done here, in the core, for the same reason `activity()` is: two renderers that each
+/// wrote their own merge would disagree about ties and about unknown stamps, and the
+/// disagreement would show up as "the desktop puts that card after the reply".
+///
+/// Order: the instant (epoch seconds), unknown stamps LAST rather than at 1970; then
+/// cards before actions before attention before chat, because the world changed first and
+/// the conversation is the reaction to it; then the id, so two writes in one second still
+/// have one order.
+pub(crate) fn merge_timeline(
+    events: Vec<TimelineEvent>,
+    chat: Vec<crate::TimelineRow>,
+) -> Vec<crate::TimelineRow> {
+    let rank = |kind: &str| match kind {
+        "item" => 0,
+        "chat" => 3,
+        "attention" => 2,
+        _ => 1, // a pulse: observation, decision, reaction, resolution
+    };
+    let mut rows: Vec<crate::TimelineRow> = Vec::with_capacity(events.len() + chat.len());
+    for event in events {
+        let is_card = event.kind == "item";
+        rows.push(crate::TimelineRow {
+            at: iso_to_epoch(&event.at),
+            // A card and an action are different rows on screen; the pulse's OWN kind
+            // rides `state`, so "snoozed" and "completed" stay distinguishable while a
+            // renderer only has to handle two shapes.
+            kind: if is_card { "item".to_string() } else if event.kind == "attention" {
+                "attention".to_string()
+            } else {
+                "action".to_string()
+            },
+            id: event.item_id,
+            role: String::new(),
+            text: if is_card && !event.title.is_empty() { event.title } else { event.text },
+            detail: event.detail,
+            state: if is_card { event.state } else { event.kind },
+            item_kind: event.item_kind,
+            due_at: event.due_at,
+            item_title: event.item_title,
+        });
+    }
+    // The chat half arrives already shaped as `TimelineRow` (the core builds it from its
+    // own transcript), so there is nothing to convert — only to order.
+    rows.extend(chat);
+    rows.sort_by(|a, b| {
+        let at = |r: &crate::TimelineRow| if r.at == 0 { i64::MAX } else { r.at };
+        at(a)
+            .cmp(&at(b))
+            .then_with(|| rank(&a.kind).cmp(&rank(&b.kind)))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    rows
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+
+    /// The store holds `...Z` and `...-06:00` text side by side (109 rows live), so an
+    /// instant has to be compared as an instant: as strings, `23:49Z` sorts before
+    /// `23:08Z` and a case reads out of order.
+    #[test]
+    fn instants_compare_across_offsets() {
+        assert_eq!(iso_to_epoch("1970-01-01T00:00:00Z"), 0);
+        assert_eq!(iso_to_epoch("2026-11-13T13:01:00Z"), 1_794_574_860);
+        // 23:49Z and 16:49-06:00 are the same moment; the offset form must not sort
+        // differently.
+        // 22:49:20Z and 16:49:20-06:00 are the same moment (UTC-6), so the offset form
+        // must not sort as if it were 6 hours later.
+        assert_eq!(
+            iso_to_epoch("2026-11-13T22:49:20Z"),
+            iso_to_epoch("2026-11-13T16:49:20-06:00")
+        );
+        // A later wall-clock time in the same offset is a later instant.
+        assert!(iso_to_epoch("2026-11-13T17:08:00-06:00") > iso_to_epoch("2026-11-13T16:49:20-06:00"));
+        // Fractional seconds round down to the second.
+        assert_eq!(
+            iso_to_epoch("2026-11-13T13:01:00.987654321Z"),
+            iso_to_epoch("2026-11-13T13:01:00Z")
+        );
+        // Garbage is UNKNOWN, never 1970 — that is what keeps an unstamped row at the
+        // bottom instead of at the top of a case.
+        assert_eq!(iso_to_epoch(""), 0);
+        assert_eq!(iso_to_epoch("not a date"), 0);
+        assert_eq!(iso_to_epoch("2026-13-01T00:00:00Z"), 0);
+    }
+
+    fn event(at: &str, kind: &str, id: &str, text: &str) -> TimelineEvent {
+        TimelineEvent { at: at.into(), kind: kind.into(), item_id: id.into(),
+                        text: text.into(), ..Default::default() }
+    }
+
+    fn chat(at: i64, id: &str, role: &str, text: &str) -> crate::TimelineRow {
+        crate::TimelineRow { at, kind: "chat".into(), id: id.into(), role: role.into(),
+                             text: text.into(), ..Default::default() }
+    }
+
+    /// The whole point of the screen: a card, then the conversation it caused, then the
+    /// action that closed it — in time order, whatever order the two sources arrived in.
+    #[test]
+    fn cards_conversation_and_actions_share_one_order() {
+        let events = vec![
+            event("2026-11-13T14:07:03Z", "resolution", "itm_1", "done: Heike owns it"),
+            event("2026-11-13T13:00:00Z", "item", "itm_1", ""),
+            event("2026-11-13T13:32:00Z", "observation", "itm_1", "Rachel dropped it"),
+        ];
+        let chat = vec![
+            // 13:03Z — between the card and the first action, which is the whole point:
+            // the conversation sits where it happened, not in a separate pane.
+            chat(1_794_575_000, "m1", "user", "what happened?"),
+            chat(0, "m2", "agent", "unstamped row"),
+        ];
+        let rows = merge_timeline(events, chat);
+        let order: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
+        assert_eq!(order, vec!["item", "chat", "action", "action", "chat"]);
+        assert_eq!(rows[0].text, "", "a card with no title falls back to its text");
+        let obs = rows.iter().find(|r| r.kind == "action").expect("an action row");
+        assert_eq!(obs.state, "observation", "a pulse keeps its own kind in `state`");
+        assert_eq!(rows.last().unwrap().id, "m2");
+    }
+
+    /// Two writes in one second still have one order, and a card beats the reply it
+    /// prompted.
+    #[test]
+    fn a_tie_is_decided_by_kind_then_id() {
+        let events = vec![
+            event("2026-11-13T13:00:00Z", "observation", "itm_b", "second"),
+            event("2026-11-13T13:00:00Z", "item", "itm_a", "card"),
+        ];
+        let rows = merge_timeline(events, vec![chat(1_794_574_800, "m9", "agent", "reply")]);
+        assert_eq!(rows[0].kind, "item", "the card came first: the reply is the reaction");
+        assert_eq!(rows[1].id, "itm_b");
+        assert_eq!(rows[2].kind, "chat");
+    }
+
+    #[test]
+    fn a_failed_tool_answer_is_no_events_not_a_panic() {
+        assert!(timeline_events("").is_empty());
+        assert!(timeline_events("not json").is_empty());
+        assert!(timeline_events(r#"{"error":"nope"}"#).is_empty());
+        // A row without an instant is dropped rather than sorted to the top.
+        assert!(timeline_events(r#"[{"kind":"item","text":"no at"}]"#).is_empty());
+        let one = timeline_events(r#"[{"at":"2026-11-13T13:00:00Z","kind":"item","title":"Card"}]"#);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].title, "Card");
     }
 }

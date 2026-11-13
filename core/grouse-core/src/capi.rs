@@ -39,7 +39,7 @@ use crate::unstable::GrouseUnstable;
 use crate::{
     ConfigOption, ConnectionStatus, Core, CoreListener, GrouseUnstableListener,
     PermissionOutcome, PermissionRequest, ProjectSummary, Prompt, RefreshMode, SendExpect,
-    ServerConfig, SessionSummary, TranscriptOp,
+    ServerConfig, SessionSummary, TimelineRow, TranscriptOp,
 };
 
 /// Bumped whenever the listener table's layout or a symbol's signature changes.
@@ -251,6 +251,10 @@ pub struct GrouseCoreListener {
     /// report)` with the report as raw JSON (`_goose/unstable/context/report`).
     /// Appended at the END; ABI 13.
     pub on_context_report:
+        Option<extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
+    /// An area's timeline: `(label, rows)` with the merged rows as raw JSON
+    /// (`Vec<TimelineRow>`). Appended at the END; ABI 14.
+    pub on_thread_timeline:
         Option<extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
 }
 
@@ -560,6 +564,13 @@ impl CoreListener for CoreCallbackForwarder {
             }
             grouse_string_free(p);
         }
+    }
+    fn on_thread_timeline(&self, label: String, rows: Vec<TimelineRow>) {
+        // JSON, like every other record list over this ABI: the desktop already owns a
+        // JSON parser for the item stream, and a per-row callback would be a new table
+        // shape for one event.
+        let json = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string());
+        unsafe { cb_str2(table_fn!(self, on_thread_timeline), self.user_data, &label, &json) };
     }
     fn on_replay_progress(&self, session_id: String, loaded: i64, total: i64, done: bool) {
         unsafe {

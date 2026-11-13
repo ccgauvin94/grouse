@@ -13,6 +13,7 @@
 use grouse_core::{ConnectionStatus, Core, CoreListener, ServerConfig};
 struct L;
 impl CoreListener for L {
+    fn on_thread_timeline(&self, _label: String, _rows: Vec<grouse_core::TimelineRow>) {}
     fn on_file(&self, _: grouse_core::FileEvent) {}
     fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
     fn on_status(&self, s: ConnectionStatus) {

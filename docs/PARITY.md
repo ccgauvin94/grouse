@@ -68,7 +68,7 @@ Anchors are `file#token`; `+` joins more than one (all must resolve). Roots:
 android root = clients/android/app/src/main/java/id/gauvin/grouse
 desktop root = clients/desktop
 
-excluded = 12
+excluded = 14
 
 | surface | android | desktop |
 |---|---|---|
@@ -147,6 +147,7 @@ excluded = 12
 | `listener.on_replay_progress` | yes: ConnectionManager.kt#override fun onReplayProgress | yes: src/corebridge.cpp#cb_on_replay_progress |
 | `kind.File` | yes: ConnectionManager.kt#ItemKind.FILE | yes: src/manager.cpp#QLatin1String("File") |
 | `listener.on_file` | yes: ConnectionManager.kt#override fun onFile | yes: src/corebridge.cpp#cb_on_file |
+| `listener.on_thread_timeline` | excluded: the timeline screen is the next commit (core merge + event land first, so the two renderers can be built against a fixed shape) | excluded: same — no desktop timeline surface yet |
 | `ui.chat-file-card` | yes: ChatScreen.kt#fun SharedFileRow | yes: ui/FileCard.qml#objectName: "cardName" |
 | `ui.fileInlineImage` | yes: Files.kt#fun isInlineImage | yes: ui/ImageCard.qml#objectName: "cardImage" |
 | `ui.chat-attachment-card` | yes: Files.kt#AttachmentCard | yes: ui/AttachmentCard.qml#objectName: "cardName" |
