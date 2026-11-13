@@ -1760,15 +1760,16 @@ fun ActivitySheet(cm: ConnectionManager, onDismiss: () -> Unit) {
             Text("Activity", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(4.dp))
             Text(
-                "Sub-agents and work still running in this chat.",
+                "Background work in this chat: sub-agents, and delegates still running.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline,
             )
             Spacer(Modifier.height(12.dp))
             if (lanes.isEmpty()) {
                 Text(
-                    "No sub-agents or background work in this chat. A delegate appears here " +
-                        "while it runs, and stays once it has run.",
+                    "No background work in this chat. A delegate (a sub-agent run) appears " +
+                        "here while it works, and stays once it has finished — ordinary tool " +
+                        "calls never do: they are the turn's own steps, shown in the transcript.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                 )

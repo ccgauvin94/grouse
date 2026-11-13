@@ -349,6 +349,12 @@ struct State {
     /// same index — so this never goes stale short of a `clear`/`replace`,
     /// which rebuild it.
     tool_by_id: HashMap<String, usize>,
+    /// `tool_call_id` → the goose TOOL NAME behind it (`_meta.goose.toolCall.toolName`,
+    /// e.g. `developer__shell` or `delegate`). Display titles are the MODEL's prose, so
+    /// the name is the only way to tell a deliberate background spawn from a step of the
+    /// turn itself (see `Core::activity`). Memory only: it is not part of a cache paint,
+    /// and a call replayed from the server sets it again.
+    tool_names: HashMap<String, String>,
     /// The rows currently held were painted from the on-disk cache and a
     /// `session/load` replay is owed. The replay APPENDS, so the first real
     /// row must drop them wholesale rather than append after them — otherwise
@@ -518,6 +524,7 @@ impl State {
     fn reset(&mut self) {
         self.bubbles.clear();
         self.tool_by_id.clear();
+        self.tool_names.clear();
         self.stream_idx = None;
         self.stream_role.clear();
         self.stream_msg_id.clear();
@@ -927,6 +934,7 @@ impl TranscriptStore {
                 stream_role: String::new(),
                 stream_msg_id: String::new(),
                 tool_by_id: HashMap::new(),
+                tool_names: HashMap::new(),
                 provisional: false,
                 merging: false,
                 merge_anchored: false,
@@ -1314,6 +1322,28 @@ impl TranscriptStore {
             ops
         };
         self.emit_ops(ops);
+    }
+
+    /// Record the goose TOOL NAME behind a call (`_meta.goose.toolCall.toolName`).
+    ///
+    /// Separate from [`TranscriptStore::tool_call`] because the 50-odd call sites that
+    /// only care about the ROW do not carry it (and the tests should not have to
+    /// invent one). The name is what `Core::activity` uses to decide whether a call is
+    /// deliberate background work: a display title is the model's own prose ("checking
+    /// the ssh banner and reverse dns"), so nothing about the title says `shell`.
+    pub fn tool_name(&self, tool_call_id: &str, name: &str) {
+        if name.is_empty() {
+            return;
+        }
+        self.state
+            .lock()
+            .tool_names
+            .insert(tool_call_id.to_string(), name.to_string());
+    }
+
+    /// The tool NAME recorded for a call, when the server sent one.
+    pub fn tool_name_of(&self, tool_call_id: &str) -> Option<String> {
+        self.state.lock().tool_names.get(tool_call_id).cloned()
     }
 
     pub fn tool_call(&self, title: &str, detail: &str, tool_call_id: &str, kind: ToolCallKind) {

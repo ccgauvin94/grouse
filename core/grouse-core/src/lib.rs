@@ -299,8 +299,8 @@ pub struct Item {
     pub seq: u32,
 }
 
-/// One lane of WORK in the active chat: a delegate/sub-agent run, or a tool call still
-/// in flight (CONTRACT §3.7).
+/// One lane of BACKGROUND work in the active chat: a delegate/sub-agent run (CONTRACT
+/// §3.7). An ordinary tool call is a step of the turn, not a lane, however long it runs.
 ///
 /// goose keeps sub-agent SESSIONS out of ACP, so the only place their work appears is
 /// the parent's delegate row (`SubagentStep`s, parsed from `subagent:<id>`
@@ -2007,8 +2007,11 @@ impl Core {
         crate::roam::runtime().spawn(async move { this.tasks_refresh_now().await });
     }
 
-    /// The active chat's WORK LANES: every delegate/sub-agent run and everything still
-    /// in flight, oldest first (CONTRACT §3.7).
+    /// The active chat's WORK LANES: its delegate/sub-agent runs, oldest first — work it
+    /// handed OFF, not the steps it is taking itself (CONTRACT §3.7). An ordinary call,
+    /// even one still in flight, is the transcript's business: its chip is already
+    /// pulsing there, and calling a running `shell` command "background work" was wrong
+    /// enough to generate a bug report (2026-11-12).
     ///
     /// A getter, not an event stream: it is derived from the transcript the core already
     /// holds, so a client asks when its panel is visible and after an item arrives. It
@@ -2053,16 +2056,20 @@ impl Core {
             match item.kind {
                 ItemKind::Tool => {
                     let running = running_now(&item.status, item.seq);
+                    let background = is_background_work(store.tool_name_of(&item.id).as_deref());
                     if let Some(lane) = work_lane(&item.id, &item.text, &item.detail,
-                                                  &item.status, &item.steps, running) {
+                                                  &item.status, &item.steps, running,
+                                                  background) {
                         lanes.push(lane);
                     }
                 }
                 ItemKind::ToolGroup => {
                     for call in &item.calls {
                         let running = running_now(&call.status, call.seq);
+                        let background = is_background_work(store.tool_name_of(&call.id).as_deref());
                         if let Some(lane) = work_lane(&call.id, &call.title, &call.detail,
-                                                      &call.status, &call.steps, running) {
+                                                      &call.status, &call.steps, running,
+                                                      background) {
                             lanes.push(lane);
                         }
                     }
@@ -5040,8 +5047,28 @@ impl crate::session::DispatchHost for Core {
     }
 }
 
-/// One transcript tool call as a work lane, or `None` when there is nothing to report —
-/// a finished call that never had a sub-agent is history, not activity.
+/// Whether a call is DELIBERATE background work: the only background work goose
+/// exposes over ACP is a spawn (a `delegate`), which runs its own session and reports
+/// through the parent's row.
+///
+/// A shell command, a read, an edit — every step of the turn itself — is NOT background
+/// work, even while it runs. The panel used to list any in-flight call, so a chat where
+/// the model was working through a dozen `shell` calls read as a stack of "background
+/// commands", which is not what those are (reported 2026-11-12). The live chip in the
+/// transcript already says a call is running; this panel is for work that is not the
+/// conversation's own next step.
+fn is_background_work(tool_name: Option<&str>) -> bool {
+    // goose's tool ids are `extension__tool` for an extension tool and bare for a
+    // platform one, so compare the last segment. `delegate` is summon's spawn.
+    let Some(name) = tool_name.filter(|name| !name.is_empty()) else {
+        return false;
+    };
+    matches!(name.rsplit("__").next(), Some("delegate"))
+}
+
+/// One transcript tool call as a work lane, or `None` when it is not background work
+/// (see [`is_background_work`]): a step of this turn, however long it runs, is the
+/// transcript's business, not the panel's.
 /// `running` is the caller's judgement, not `status == "in_progress"`: it also needs the
 /// chat to hold a turn AND the call to belong to it (see `Core::activity`). An open call
 /// that fails those tests is a response that never came, and is history.
@@ -5052,8 +5079,12 @@ fn work_lane(
     status: &str,
     steps: &[SubagentStep],
     running: bool,
+    background: bool,
 ) -> Option<ActiveWork> {
-    if steps.is_empty() && !running {
+    // A child step is proof a sub-agent ran, whatever the tool was called; the tool
+    // NAME covers the window before its first child call, when the only evidence is
+    // that this row IS a spawn.
+    if !background && steps.is_empty() {
         return None;
     }
     Some(ActiveWork {
@@ -5446,11 +5477,20 @@ mod tests {
 
         // Finished, no sub-agent → not a lane.
         store.tool_call("Reading a file", "", "call-done", crate::ToolCallKind::Plain);
+        store.tool_name("call-done", "developer__read_file");
         store.tool_update("call-done", "completed", "ok", true);
-        // Running ordinary call → a lane, not a sub-agent (a delegate that has not
-        // called a tool yet must still show up as work in flight).
+        // A shell command RUNNING RIGHT NOW is a step of this turn, not background
+        // work: it must not appear in the panel (2026-11-12, the reason this is a
+        // policy and not "whatever is in flight").
+        store.tool_call("checking the ssh banner", "ssh -v host", "call-shell",
+                        crate::ToolCallKind::Plain);
+        store.tool_name("call-shell", "developer__shell");
+        store.tool_update("call-shell", "in_progress", "", true);
+        // A delegate that has not called a tool yet → a lane, because the tool NAME
+        // says it is a spawn (the title is the model's prose and says nothing).
         store.tool_call("Delegating", "draft the report", "call-delegate",
                         crate::ToolCallKind::Plain);
+        store.tool_name("call-delegate", "delegate");
         store.tool_update("call-delegate", "in_progress", "", true);
         // A delegate with a child step → a SUB-AGENT lane, children kept in order.
         store.tool_call("Delegating again", "check the mail", "call-agent",
@@ -5465,18 +5505,24 @@ mod tests {
         });
         store.tool_update("call-agent", "completed", "done", true);
 
-        // The chat holds no turn here, so an `in_progress` call is a call whose response
-        // never came — the 27 of them in this session are what made the badge say
-        // "26 running" on an idle chat.
+        // The chat holds no turn here, so nothing is RUNNING — the 27 `in_progress` rows
+        // this session had are what made the badge say "26 running" on an idle chat. Both
+        // background rows still SHOW (a delegate is background work whether or not it is
+        // live right now); the shell call does not, because it never was.
         let idle = core.activity();
-        assert_eq!(idle.len(), 1, "only the sub-agent lane survives an idle chat: {idle:?}");
-        assert_eq!(idle[0].id, "call-agent");
-        assert!(!idle[0].running, "nothing is running without a turn");
+        assert_eq!(idle.len(), 2, "the delegate and its sub-agent, both idle: {idle:?}");
+        assert!(!idle.iter().any(|l| l.running), "nothing is running without a turn");
+        assert!(!idle.iter().any(|l| l.id == "call-shell"), "{idle:?}");
 
-        // With a turn live, the same in-progress call IS running work.
+        // With a turn live, the DELEGATE is running work — and the shell call, open
+        // at the same moment, still is not.
         core.inner.state.lock().in_flight.insert(key.clone());
         let lanes = core.activity();
-        assert_eq!(lanes.len(), 2, "one running, one sub-agent: {lanes:?}");
+        assert_eq!(lanes.len(), 2, "a delegate (open), a sub-agent: {lanes:?}");
+        assert!(
+            !lanes.iter().any(|l| l.id == "call-shell"),
+            "a running shell command is not background work: {lanes:?}"
+        );
         let agent = lanes.iter().find(|l| l.id == "call-agent").expect("the sub-agent lane");
         assert!(agent.subagent);
         assert_eq!(agent.status, "completed");

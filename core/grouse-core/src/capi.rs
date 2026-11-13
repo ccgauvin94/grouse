@@ -935,8 +935,9 @@ pub extern "C" fn grouse_tasks_refresh(h: *mut c_void) {
     catch_unwind(AssertUnwindSafe(|| handle(h).core.tasks_refresh())).ok();
 }
 
-/// The active chat's work lanes (CONTRACT §3.7): delegate/sub-agent runs and anything
-/// still in flight, as a JSON array of `ActiveWork`. Empty array when nothing is open.
+/// The active chat's BACKGROUND work lanes (CONTRACT §3.7): its delegate/sub-agent
+/// runs, as a JSON array of `ActiveWork`. An ordinary tool call is a step of the turn,
+/// not a lane, however long it runs. Empty array when nothing is open.
 #[no_mangle]
 pub extern "C" fn grouse_activity(h: *mut c_void) -> *mut c_char {
     catch_unwind(AssertUnwindSafe(|| {

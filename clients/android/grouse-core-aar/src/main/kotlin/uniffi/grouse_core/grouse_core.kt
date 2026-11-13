@@ -1660,7 +1660,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_active_session_id() and 0xFFFF) != 8270) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_activity() and 0xFFFF) != 38874) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_activity() and 0xFFFF) != 54941) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_archive_session() and 0xFFFF) != 46828) {
@@ -2594,8 +2594,11 @@ public interface CoreInterface {
     fun `activeSessionId`(): kotlin.String?
     
     /**
-     * The active chat's WORK LANES: every delegate/sub-agent run and everything still
-     * in flight, oldest first (CONTRACT §3.7).
+     * The active chat's WORK LANES: its delegate/sub-agent runs, oldest first — work it
+     * handed OFF, not the steps it is taking itself (CONTRACT §3.7). An ordinary call,
+     * even one still in flight, is the transcript's business: its chip is already
+     * pulsing there, and calling a running `shell` command "background work" was wrong
+     * enough to generate a bug report (2026-11-12).
      *
      * A getter, not an event stream: it is derived from the transcript the core already
      * holds, so a client asks when its panel is visible and after an item arrives. It
@@ -3134,8 +3137,11 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
-     * The active chat's WORK LANES: every delegate/sub-agent run and everything still
-     * in flight, oldest first (CONTRACT §3.7).
+     * The active chat's WORK LANES: its delegate/sub-agent runs, oldest first — work it
+     * handed OFF, not the steps it is taking itself (CONTRACT §3.7). An ordinary call,
+     * even one still in flight, is the transcript's business: its chip is already
+     * pulsing there, and calling a running `shell` command "background work" was wrong
+     * enough to generate a bug report (2026-11-12).
      *
      * A getter, not an event stream: it is derived from the transcript the core already
      * holds, so a client asks when its panel is visible and after an item arrives. It
@@ -5807,8 +5813,8 @@ public object FfiConverterTypeGrouseUnstable: FfiConverter<GrouseUnstable, Long>
 
 
 /**
- * One lane of WORK in the active chat: a delegate/sub-agent run, or a tool call still
- * in flight (CONTRACT §3.7).
+ * One lane of BACKGROUND work in the active chat: a delegate/sub-agent run (CONTRACT
+ * §3.7). An ordinary tool call is a step of the turn, not a lane, however long it runs.
  *
  * goose keeps sub-agent SESSIONS out of ACP, so the only place their work appears is
  * the parent's delegate row (`SubagentStep`s, parsed from `subagent:<id>`

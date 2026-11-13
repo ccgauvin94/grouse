@@ -504,6 +504,23 @@ pub(crate) fn tool_call_app(
     (!uri.is_empty() && !extension.is_empty()).then(|| (uri.to_string(), extension.to_string()))
 }
 
+/// The goose TOOL NAME behind a tool call (`_meta.goose.toolCall.toolName`), e.g.
+/// `developer__shell` or `delegate`.
+///
+/// The display title is the MODEL's prose ("checking the ssh banner and reverse dns"),
+/// so this is the only honest identity a call carries. `Core::activity` needs it to tell
+/// a deliberate background spawn from a step of the turn itself.
+pub(crate) fn tool_call_name(tool: &agent_client_protocol::schema::v1::ToolCall) -> String {
+    tool.meta
+        .as_ref()
+        .and_then(|meta| meta.get("goose"))
+        .and_then(|goose| goose.get("toolCall"))
+        .and_then(|call| call.get("toolName"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// The live-output chunk on a `tool_call_update` (`_meta.toolNotification`
 /// with `type: live_output`).
 pub(crate) fn tool_live_output(
@@ -2257,6 +2274,10 @@ pub(crate) fn dispatch(
                 }
                 let (kind, detail) = tool_call_kind(&tool);
                 store.tool_call(&tool.title, &detail, &id, kind);
+                // Keep the tool NAME: the title is the model's prose, and the activity
+                // panel needs to know a call is a delegate (background work) rather
+                // than a step of this turn.
+                store.tool_name(&id, &tool_call_name(&tool));
                 // The end-of-turn summarizer labels the turn's plain runs.
                 if let Some(run_id) = store.run_id_for(&id).filter(|_| !paging) {
                     // The call anchors its own run ⇒ it OPENED a step, so the one

@@ -100,7 +100,7 @@ defaulting to real verification; roam byte stream). The UI supplies only
 | `roam_disconnect(label)` | | |
 | `roam_open_session(label, session_id)` | | |
 | `tasks_refresh()` | — | My Day (§3.6): open items, the done tail and handed-over tasks arrive in ONE `on_tasks` |
-| `activity()` | → `Vec<ActiveWork>` | §3.7: the chat's work lanes — delegate/sub-agent runs and every call still in flight, oldest first. A getter over the transcript the core holds (no network, no extra state), so it answers for a roam chat and a replayed one alike |
+| `activity()` | → `Vec<ActiveWork>` | §3.7: the chat's work lanes — delegate/sub-agent runs only (deliberate background work), oldest first. An ordinary call, even one still in flight, is the transcript's business, not a lane. A getter over the transcript the core holds (no network, no extra state), so it answers for a roam chat and a replayed one alike |
 | `tasks_paint()` | → `bool` | My Day from the DISK CACHE, marked `cached: true` on `on_tasks`; `false` when there is none. Called on every open, before (and independently of) `tasks_refresh`, so the tab is never blank while four round trips run — and is filled at all when there is no wire |
 | `task_close(id, state, resolution)` | — | `state` is `done` \| `dropped` \| `expired`; `resolution` is the one line that keeps the next briefing from re-raising it |
 | `task_snooze(id, until, reason)` | — | `until` is an ISO instant |
@@ -567,10 +567,15 @@ ACP (`ACP_VISIBLE_SESSION_TYPES` excludes them), so the only record of a delegat
 child work is the `subagent:<id>` notifications it forwards onto the parent's delegate
 row — which the core already parses into `SubagentStep`s. `activity()` exposes them:
 
-- **A lane is a tool call that reported a sub-agent step OR is still `in_progress`.**
-  A finished call that never had a sub-agent is history, not activity, and is left out.
-  A delegate that has not called a tool yet is therefore "running work", not a
-  sub-agent — nothing has come back to say otherwise, and `subagent: false` says so.
+- **A lane is BACKGROUND work: a tool call that reported a sub-agent step, or one whose
+  goose tool NAME is a spawn (`delegate`, from `_meta.goose.toolCall.toolName`).**
+  Nothing else, however long it runs: a `shell` command, a read, an edit are steps of
+  the turn itself, they already have a live chip in the transcript, and listing them
+  made a working chat read as a stack of "background commands" (reported 2026-11-12).
+  The display title is the MODEL's prose ("checking the ssh banner and reverse dns"),
+  so the tool NAME is the only honest identity — which is why the core records it per
+  call (`TranscriptStore::tool_name`). A delegate that has not called a tool yet is
+  therefore a lane with `subagent: false`: nothing has come back to say otherwise.
 - **Fields:** `id` (the tool call), `title` (the run summary, else the call title),
   `detail` (the call's arguments, flattened to one line and capped), `status`
   (`in_progress` | `completed` | `failed`), `running`, `subagent`, and `steps` — the
@@ -587,8 +592,9 @@ row — which the core already parses into `SubagentStep`s. `activity()` exposes
   extra state: it reads the session's whole transcript, not the painted window, so a
   delegate that started forty rows ago is still listed.
 - **Both kinds have to appear:** a sub-agent run is the thing a user cannot otherwise
-  see, but "background tasks" are usually a delegate still in flight, and an
-  `in_progress` ordinary call is what a long tool run looks like. One list, two badges.
+  see, and a delegate still in flight is the same work before its first child call.
+  One list, two badges — both BACKGROUND. A long ordinary tool run is not a third kind:
+  the transcript's own chip is where it pulses.
 - Clients render it as a panel over the chat (desktop: a docked pane with Tools and
   Activity tabs; Android: a sheet behind a header badge whose count is the live lanes).
 

@@ -11,7 +11,9 @@ import org.kde.kirigami as Kirigami
 // OverlayDrawer it replaced covered the chat, so it had to be dismissed to read.
 //
 // Two tabs, because both answer "what is this chat doing": the tools it may use, and
-// the work in it (delegate/sub-agent lanes and anything still in flight, CONTRACT §3.7).
+// the work it has handed OFF to a background run (delegate/sub-agent lanes, CONTRACT
+// §3.7). An ordinary tool call is a step of the turn and is not a lane, however long it
+// runs: its chip in the transcript is where it pulses.
 Rectangle {
     id: panel
     /// 0 = tools, 1 = activity. Mirrored on the window so the toggle can flip it.
@@ -69,7 +71,7 @@ Rectangle {
             Layout.fillWidth: true
             visible: panel.tab === 1 && panel.workCount === 0
             wrapMode: Text.Wrap
-            text: qsTr("Nothing running. Sub-agents and delegate work show up here while this chat is busy.")
+            text: qsTr("No background work. A delegate (a sub-agent run) shows up here while it works, and stays once it has finished.")
             color: Kirigami.Theme.disabledTextColor
             font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
         }
@@ -112,8 +114,8 @@ Rectangle {
                     contentItem: RowLayout {
                         spacing: Kirigami.Units.smallSpacing
                         Kirigami.Icon {
-                            // A sub-agent is its own lane; anything else still running is
-                            // this chat's own tool call.
+                            // A sub-agent is its own lane; a delegate with no child step
+                            // yet is the same background work, before it reports.
                             source: wdel.wAgent ? "system-users" : "view-refresh"
                             implicitWidth: Kirigami.Units.iconSizes.small
                             implicitHeight: Kirigami.Units.iconSizes.small
