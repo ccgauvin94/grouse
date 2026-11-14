@@ -1929,14 +1929,20 @@ class ConnectionManager private constructor(context: Context) {
      *  id one round trip later, and waiting meant a chat that sat on "Loading…" while
      *  the panel showed a conversation nobody had opened. */
     fun openThreadChat(label: String) {
-        val known = threadSessions.value[label]
-        if (known != null) {
-            openSession(known)
-            // The panel needs the area's rows; a tap can be the first thing after launch.
-            refreshTasks()
-            return
-        }
+        // ALWAYS through the core, even when the id is already known — this used to
+        // `openSession(known)` directly on the known path, which skipped
+        // `Core::open_thread` and with it the notes offer. The consequence was invisible
+        // and permanent: a thread created before the notes existed kept its legacy
+        // one-line seed forever, because the only path that offers notes (`open_thread`)
+        // was never called for a thread that already had an id. Every conversation
+        // opened that way had one clipped sentence of context and the model had to
+        // rediscover the area by tool call (reported 2026-11-13: "threads don't have any
+        // context when replying", on threads from 11-11/11-12 while 11-14 ones were fine).
+        //
+        // `open_thread` itself handles both cases: a known label seeds the notes and
+        // emits on_thread_ready (which binds the chat), a new one creates it first.
         core.openThread(label)
+        // The panel needs the area's rows; a tap can be the first thing after launch.
         refreshTasks()
     }
 
