@@ -2,6 +2,7 @@
 
 package id.gauvin.grouse
 
+import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -202,7 +203,12 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                                 // pre-filled prompt is a message you did not write.
                                 cm.openThreadChat(label)
                                 cm.pendingDraft.value = ""
-                                toChat()
+                                // The TIMELINE, not the chat: an area is a case file, and the
+                                // conversation is one of the things in it.
+                                nav.navigate("thread/" + Uri.encode(label)) {
+                                    launchSingleTop = true
+                                    popUpTo("chat") { inclusive = false }
+                                }
                             },
                         )
                     }

@@ -309,6 +309,24 @@ pub struct Item {
     pub created: i64,
 }
 
+/// The fetch behind [`Core::thread_timeline`].
+///
+/// A free function, not an `async fn` on the `#[uniffi::export]` impl block: uniffi exports
+/// those as `suspend` functions, which pulled kotlinx-coroutines into the generated Android
+/// bindings for a call no client makes directly (the answer arrives on the listener).
+async fn load_thread_timeline(core: &Core, label: String) {
+    let raw = core
+        .tasks_call(|wire| crate::tasks::timeline_params(wire, &label, 400))
+        .await;
+    let events = raw
+        .as_deref()
+        .ok()
+        .map(crate::tasks::timeline_events)
+        .unwrap_or_default();
+    let rows = crate::tasks::merge_timeline(events, core.timeline_chat());
+    core.inner.listener.on_thread_timeline(label, rows);
+}
+
 /// One lane of BACKGROUND work in the active chat: a delegate/sub-agent run (CONTRACT
 /// §3.7). An ordinary tool call is a step of the turn, not a lane, however long it runs.
 ///
@@ -2081,21 +2099,9 @@ impl Core {
     /// not take the conversation down with it.
     pub fn thread_timeline(&self, label: String) {
         let this = self.clone();
-        crate::roam::runtime().spawn(async move { this.thread_timeline_now(label).await });
+        crate::roam::runtime().spawn(async move { load_thread_timeline(&this, label).await });
     }
 
-    async fn thread_timeline_now(&self, label: String) {
-        let raw = self
-            .tasks_call(|wire| crate::tasks::timeline_params(wire, &label, 400))
-            .await;
-        let events = raw
-            .as_deref()
-            .ok()
-            .map(crate::tasks::timeline_events)
-            .unwrap_or_default();
-        let rows = crate::tasks::merge_timeline(events, self.timeline_chat());
-        self.inner.listener.on_thread_timeline(label, rows);
-    }
 
     /// The conversation half of a timeline, from the store the core already holds.
     ///

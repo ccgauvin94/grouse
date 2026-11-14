@@ -362,6 +362,14 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
             }
             composable("chat") { ChatScreen(cm, nav, onOpenDrawer = ::openDrawer) }
             composable("myday") { MyDayScreen(cm, nav, onOpenDrawer = ::openDrawer) }
+            // An AREA opened from My Day is a case, not a chat: its own surface, where the
+            // card, the conversation and the actions taken on them share one timeline
+            // (CONTRACT §3.8). The chat route still exists — the timeline's composer sends
+            // into it — this is only what a My Day tap lands on.
+            composable("thread/{tlabel}") { back ->
+                val label = Uri.decode(back.arguments?.getString("tlabel") ?: "")
+                ThreadTimelineScreen(cm, nav, label)
+            }
             composable("project/{pname}") { back ->
                 val pname = Uri.decode(back.arguments?.getString("pname") ?: "")
                 ProjectScreen(cm, nav, pname)

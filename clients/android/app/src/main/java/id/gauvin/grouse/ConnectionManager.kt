@@ -22,6 +22,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import uniffi.grouse_core.ActiveWork
+import uniffi.grouse_core.TimelineRow
 import uniffi.grouse_core.ConfigOption as CoreConfigOption
 import uniffi.grouse_core.ConnectionStatus
 import uniffi.grouse_core.Core
@@ -378,6 +379,11 @@ class ConnectionManager private constructor(context: Context) {
         // My Day: assistant-state's own items over a deterministic tool call (no
         // model turn), gated by the Assistant switch like the tab itself.
         override fun onTasks(tasks: String) { main.post { onCoreTasks(tasks) } }
+        // The merged area timeline. Dropped unless it is the area on screen: the fetch is
+        // async and a user can leave the screen while it is in flight.
+        override fun onThreadTimeline(label: String, rows: List<TimelineRow>) {
+            main.post { if (label == threadTimelineLabel) threadTimeline.value = rows }
+        }
         // `openThread`'s answer: the conversation for that label. The CORE does not open
         // it — binding a chat is this class's own path (turn state, tools, title), and a
         // core-side switch arrived as a `Ready` for an id this app never asked for, which
@@ -542,6 +548,18 @@ class ConnectionManager private constructor(context: Context) {
      *  roam chat too. Refreshed when a tool row changes (see onCoreItem) and on a turn's
      *  end; the sheet is a plain view of it. */
     val activity = mutableStateOf<List<ActiveWork>>(emptyList())
+
+    /**
+     * An AREA's timeline: its My Day cards, the actions taken on them, and this chat's own
+     * messages, already merged and ordered by the CORE (`thread_timeline`). Empty until the
+     * area's chat is bound and the first fetch answers.
+     *
+     * The merge is not done here on purpose — see CONTRACT §3.8: two clients merging would
+     * disagree about ties and about rows the server never stamped.
+     */
+    val threadTimeline = mutableStateOf<List<TimelineRow>>(emptyList())
+    /** Which area [threadTimeline] belongs to; a late answer for another area is dropped. */
+    private var threadTimelineLabel: String? = null
 
     /** Re-read [activity]. Cheap (a local snapshot, no network), so callers do not batch. */
     fun refreshActivity() {
@@ -1920,6 +1938,19 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Re-read both lists. Idempotent and cheap, so the tab calls it on open, on pull-to-
      *  refresh, and after every action (the server's answer is the only truth). */
+    /** Fetch one area's timeline. The CARD half comes from assistant-state over the hidden
+     *  auto-mode session; the CHAT half is the displayed transcript, so the area's own
+     *  conversation must be bound first (the screen does that before asking). */
+    fun refreshThreadTimeline(label: String) {
+        threadTimelineLabel = label
+        io { core.threadTimeline(label) }
+    }
+
+    fun clearThreadTimeline() {
+        threadTimelineLabel = null
+        threadTimeline.value = emptyList()
+    }
+
     fun refreshTasks() {
         tasksLoading.value = true
         io { core.tasksRefresh() }
