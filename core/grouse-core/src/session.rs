@@ -1294,6 +1294,7 @@ mod tests {
     }
 
     impl CoreListener for Recorder {
+    fn on_sensitivity(&self, _data: String) {}
     fn on_thread_timeline(&self, _label: String, _rows: Vec<crate::TimelineRow>) {}
     fn on_file(&self, _: crate::attachments::FileEvent) {}
         fn on_status(&self, _: ConnectionStatus) {}
@@ -2578,6 +2579,7 @@ pub(crate) struct NullListener;
 
 impl crate::CoreListener for NullListener {
     fn on_file(&self, _: crate::attachments::FileEvent) {}
+    fn on_sensitivity(&self, _: String) {}
     fn on_status(&self, _: crate::ConnectionStatus) {}
     fn on_sessions(&self, _: Vec<crate::SessionSummary>) {}
     fn on_item(&self, _: crate::TranscriptOp) {}
@@ -2615,6 +2617,10 @@ impl SessionGate {
 }
 
 impl crate::CoreListener for SessionGate {
+    fn on_sensitivity(&self, data: String) {
+        // Not chat-scoped: the knob is about the whole board, so it is always forwarded.
+        self.inner.on_sensitivity(data);
+    }
     fn on_file(&self, event: crate::attachments::FileEvent) {
         // Not painting: a fetch was started by a row in THIS chat, so it is
         // forwarded whatever is on screen (a background fetch must not stall).

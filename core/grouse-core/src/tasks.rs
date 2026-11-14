@@ -86,6 +86,23 @@ pub(crate) fn task_params(wire: &str, limit: u32) -> Value {
     )
 }
 
+/// Read (level `""`) or set the surfacing sensitivity, then fetch the preview that says
+/// what each level would do. Two calls on purpose: the set has to land before the preview
+/// is computed or the number the UI shows is the old level's.
+pub(crate) fn sensitivity_params(wire: &str, level: &str) -> Value {
+    let mut args = json!({});
+    if !level.is_empty() {
+        args["level"] = json!(level);
+    }
+    tool_params(wire, "state_sensitivity", args)
+}
+
+/// The 7-day readout: what each level would recommend now, what is only cooling down, and
+/// how often the assistant spoke past the recommendation.
+pub(crate) fn sensitivity_preview_params(wire: &str) -> Value {
+    tool_params(wire, "state_sensitivity_preview", json!({ "days": 7 }))
+}
+
 /// The area's whole history: its cards and the actions taken on them, oldest first.
 pub(crate) fn timeline_params(wire: &str, label: &str, limit: u32) -> Value {
     tool_params(

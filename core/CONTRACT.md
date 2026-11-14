@@ -649,6 +649,30 @@ render any row.
   Add the record there in the same commit as the first screen, or the ledger will pin a
   shape nobody draws.
 
+### 3.9 How much the assistant surfaces (`sensitivity(level)`)
+
+My Day's board is the assistant's opinion about what deserves attention. This is the one
+knob over that opinion: **five levels** — `calm`, `quieter`, `normal`, `keener`, `eager` —
+stored server-side (`assistant-state`'s `setting` table, schema 7) and applied to the
+surfacing policy as a *profile*, not a score threshold. Each level moves four constants
+together (urgent cooldown, nudge-after, the long-silence window, and the "still hot" bar)
+plus the per-run budget, because "tell me about slightly more things" is one judgement. The
+hard daily cap is not a level: it is a stop-loss, and a test pins that it never moves.
+
+- **`sensitivity(level)`** is the intent: `""` reads, a level sets. The set lands BEFORE the
+  preview is fetched, so the numbers on screen always belong to the level on screen.
+- **`on_sensitivity(data)`** answers with the server's own JSON — the current level and,
+  per level, `would_recommend_now`, `held`, `cooling_down`, `next_in_hours`, and the
+  observed `per_day_surfaced` and `overridden` count. A string, not a record: it is a
+  SETTING's answer, not transcript state, and a new number must not move the ABI.
+- **`cooling_down` exists because the first readout lied by omission.** Ranking today's
+  board at five levels returned "1, 1, 1, 2, 2" — nearly identical — because the levels
+  mostly move *cooldowns over hours*, not today's ordering. A knob whose readout cannot
+  show its own effect is a knob nobody turns (measured 2026-11-13).
+- **`overridden` is the hint about which way to drag:** it counts the runs where the model
+  spoke past the recommendation. 33 in a week is evidence the level is set wrong, and it is
+  worth more than any single ranking.
+
 ---
 
 ## 4. Session lifecycle (owned by the core)

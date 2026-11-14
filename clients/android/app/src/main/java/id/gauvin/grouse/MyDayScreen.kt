@@ -3,6 +3,10 @@
 package id.gauvin.grouse
 
 import android.net.Uri
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -135,6 +139,8 @@ fun MyDayScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> U
                     onSend = { text -> cm.askAssistant(text); draft = ""; toChat() },
                 )
             }
+
+            item { SensitivityStrip(cm) }
 
             cm.tasksError.value?.let { msg ->
                 item {
@@ -824,6 +830,87 @@ private fun DoneRow(t: TaskItem) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(start = 20.dp),
+            )
+        }
+    }
+}
+
+/**
+ * How eagerly the assistant surfaces things — the one knob, drawn as what it does.
+ *
+ * Five levels, because that is what the server stores (`state_sensitivity`), and tapping
+ * one moves the cooldowns, the "still hot" bar and the per-run budget together. The line
+ * underneath is the honest part: how many rows are only COOLING DOWN (the class this knob
+ * moves), how many it would recommend right now, the observed rate per day, and how often
+ * the model spoke past the recommendation — which is the number that says which way to
+ * drag. Numbers come from the server's `sensitivity_preview`, so the strip cannot drift
+ * from the policy it is a picture of.
+ */
+@Composable
+private fun SensitivityStrip(cm: ConnectionManager) {
+    val raw = cm.sensitivity.value
+    LaunchedEffect(raw) { if (raw == null) cm.refreshSensitivity() }
+    val data = remember(raw) {
+        raw?.let { runCatching { org.json.JSONObject(it) }.getOrNull() }
+    } ?: return
+    val current = data.optString("current", "normal")
+    val order = listOf("calm", "quieter", "normal", "keener", "eager")
+    val levels = data.optJSONObject("levels")
+    val here = levels?.optJSONObject(current)
+    val cooling = here?.optInt("cooling_down", 0) ?: 0
+    val now = here?.optInt("would_recommend_now", 0) ?: 0
+    val perDay = data.optDouble("per_day_surfaced", 0.0)
+    val overridden = data.optInt("overridden", 0)
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "How much it surfaces",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    current,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                order.forEachIndexed { i, level ->
+                    val selected = level == current
+                    // The bar grows with the level, so the control reads as a dial rather
+                    // than as five buttons: height IS the meaning.
+                    val h = (6 + i * 4).dp
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .height(h)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(
+                                if (selected) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.outlineVariant
+                            )
+                            .clickable { cm.refreshSensitivity(level) }
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                buildString {
+                    append("$cooling cooling")
+                    append(" · $now now")
+                    if (perDay > 0) append(" · ${"%.1f".format(perDay)}/day")
+                    if (overridden > 0) append(" · $overridden overrides 7d")
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
             )
         }
     }

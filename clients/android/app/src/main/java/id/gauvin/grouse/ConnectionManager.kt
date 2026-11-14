@@ -379,6 +379,7 @@ class ConnectionManager private constructor(context: Context) {
         // My Day: assistant-state's own items over a deterministic tool call (no
         // model turn), gated by the Assistant switch like the tab itself.
         override fun onTasks(tasks: String) { main.post { onCoreTasks(tasks) } }
+        override fun onSensitivity(data: String) { main.post { sensitivity.value = data } }
         // The merged area timeline. Dropped unless it is the area on screen: the fetch is
         // async and a user can leave the screen while it is in flight.
         override fun onThreadTimeline(label: String, rows: List<TimelineRow>) {
@@ -520,6 +521,14 @@ class ConnectionManager private constructor(context: Context) {
     /** The My Day tab's two lists (CONTRACT §3.3), straight from assistant-state. Both
      *  arrive in ONE `on_tasks` so the tab never paints a half-updated pair. */
     val openTasks = mutableStateOf<List<TaskItem>>(emptyList())
+
+    /**
+     * The surfacing-sensitivity readout, as the server's JSON: the current level plus what
+     * each level would do on today's board (`state_sensitivity_preview`). Kept raw because
+     * it is a SETTING's answer, not transcript state — the strip reads the fields it needs
+     * and a new number on the server does not need a client change.
+     */
+    val sensitivity = mutableStateOf<String?>(null)
     val doneTasks = mutableStateOf<List<TaskItem>>(emptyList())
     /** Handed-over work: running, or waiting for review (assistant-state `task`). */
     val handedTasks = mutableStateOf<List<AgentTask>>(emptyList())
@@ -1949,6 +1958,12 @@ class ConnectionManager private constructor(context: Context) {
     fun clearThreadTimeline() {
         threadTimelineLabel = null
         threadTimeline.value = emptyList()
+    }
+
+    /** Read the sensitivity readout, or set the level first (`""` = just read). The set
+     *  lands before the preview is computed, so the numbers always match the level shown. */
+    fun refreshSensitivity(level: String? = null) {
+        io { core.sensitivity(level ?: "") }
     }
 
     fun refreshTasks() {

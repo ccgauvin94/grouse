@@ -11,6 +11,7 @@ use grouse_core::{ConnectionStatus, Core, CoreListener, Prompt, PromptBlock, Ser
 struct L;
 
 impl CoreListener for L {
+    fn on_sensitivity(&self, _data: String) {}
     fn on_thread_timeline(&self, _label: String, _rows: Vec<grouse_core::TimelineRow>) {}
     fn on_file(&self, event: grouse_core::FileEvent) {
         println!("-- file event: {event:?}");

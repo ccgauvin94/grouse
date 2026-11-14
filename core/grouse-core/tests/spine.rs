@@ -70,6 +70,7 @@ impl RecordingListener {
 }
 
 impl CoreListener for RecordingListener {
+    fn on_sensitivity(&self, _data: String) {}
     fn on_thread_timeline(&self, _label: String, _rows: Vec<grouse_core::TimelineRow>) {}
     fn on_thread_ready(&self, _: String, _: String) {}
     fn on_file(&self, _: grouse_core::FileEvent) {}

@@ -606,6 +606,13 @@ pub trait CoreListener: Send + Sync {
     /// every listener states what it does with the rows (a client that has no timeline
     /// surface accepts and drops them).
     fn on_thread_timeline(&self, label: String, rows: Vec<TimelineRow>);
+
+    /// The surfacing-sensitivity readout, as the server's own JSON: the current level, and
+    /// what each level would do on today's board (see `state_sensitivity_preview`). A
+    /// string rather than a record because it is a SETTING's answer, not transcript state,
+    /// and the shape can gain a number without moving the ABI. Quiet on failure: a knob
+    /// that cannot be read must not take the board down with it.
+    fn on_sensitivity(&self, data: String);
     /// A sanitized, sentence-sized chunk of the assistant's visible text, ready
     /// for a client's TTS engine (see `docs/TRANSCRIPT_MODEL.md`). Emitted as
     /// the reply streams (and on the finalizing flush), so a conversation loop
@@ -2102,6 +2109,29 @@ impl Core {
         crate::roam::runtime().spawn(async move { load_thread_timeline(&this, label).await });
     }
 
+
+    /// Read — or set, when `level` is not empty — how eagerly the assistant surfaces
+    /// things, and report what each level would do (CONTRACT §3.9).
+    ///
+    /// The set lands FIRST: asking for the preview before the write settles would show the
+    /// old level's numbers under the new level's name, which is the one failure a
+    /// calibration readout cannot afford.
+    pub fn sensitivity(&self, level: String) {
+        let this = self.clone();
+        crate::roam::runtime().spawn(async move {
+            if !level.is_empty() {
+                let _ = this
+                    .tasks_call(|wire| crate::tasks::sensitivity_params(wire, &level))
+                    .await;
+            }
+            let raw = this
+                .tasks_call(crate::tasks::sensitivity_preview_params)
+                .await;
+            if let Ok(data) = raw {
+                this.inner.listener.on_sensitivity(data);
+            }
+        });
+    }
 
     /// The conversation half of a timeline, from the store the core already holds.
     ///
@@ -5309,6 +5339,7 @@ mod tests {
     }
 
     impl CoreListener for Events {
+    fn on_sensitivity(&self, _data: String) {}
     fn on_thread_timeline(&self, _label: String, _rows: Vec<crate::TimelineRow>) {}
         fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
     fn on_file(&self, _: crate::attachments::FileEvent) {}
@@ -5362,6 +5393,7 @@ mod tests {
     struct ArcListener(Arc<dyn CoreListener>);
 
     impl CoreListener for ArcListener {
+    fn on_sensitivity(&self, _data: String) {}
     fn on_thread_timeline(&self, _label: String, _rows: Vec<crate::TimelineRow>) {}
         fn on_file(&self, event: crate::attachments::FileEvent) {
             self.0.on_file(event);

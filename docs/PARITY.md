@@ -68,7 +68,7 @@ Anchors are `file#token`; `+` joins more than one (all must resolve). Roots:
 android root = clients/android/app/src/main/java/id/gauvin/grouse
 desktop root = clients/desktop
 
-excluded = 13
+excluded = 14
 
 | surface | android | desktop |
 |---|---|---|
@@ -148,6 +148,7 @@ excluded = 13
 | `kind.File` | yes: ConnectionManager.kt#ItemKind.FILE | yes: src/manager.cpp#QLatin1String("File") |
 | `listener.on_file` | yes: ConnectionManager.kt#override fun onFile | yes: src/corebridge.cpp#cb_on_file |
 | `listener.on_thread_timeline` | yes: ConnectionManager.kt#override fun onThreadTimeline | excluded: no desktop timeline surface yet — the C ABI slot and trampoline are in, the corebridge wiring is not |
+| `listener.on_sensitivity` | yes: ConnectionManager.kt#override fun onSensitivity | excluded: no desktop sensitivity surface yet — the knob is per-board and the desktop has no My Day strip to put it on |
 | `ui.chat-file-card` | yes: ChatScreen.kt#fun SharedFileRow | yes: ui/FileCard.qml#objectName: "cardName" |
 | `ui.fileInlineImage` | yes: Files.kt#fun isInlineImage | yes: ui/ImageCard.qml#objectName: "cardImage" |
 | `ui.chat-attachment-card` | yes: Files.kt#AttachmentCard | yes: ui/AttachmentCard.qml#objectName: "cardName" |

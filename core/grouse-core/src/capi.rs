@@ -46,7 +46,7 @@ use crate::{
 /// The desktop refuses a library whose value it does not expect — a mismatch is
 /// a callback called with the wrong arity (a garbage pointer), not a compile
 /// error, so it must be caught at load time.
-pub const GROUSE_ABI_VERSION: u32 = 14;
+pub const GROUSE_ABI_VERSION: u32 = 15;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
@@ -256,6 +256,9 @@ pub struct GrouseCoreListener {
     /// (`Vec<TimelineRow>`). Appended at the END; ABI 14.
     pub on_thread_timeline:
         Option<extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
+    /// The surfacing-sensitivity readout, as the server's JSON. Appended at the END;
+    /// ABI 15.
+    pub on_sensitivity: Option<extern "C" fn(*mut c_void, *const c_char)>,
 }
 
 /// Bridges the core's typed listener traits to the installed C table. The raw
@@ -571,6 +574,9 @@ impl CoreListener for CoreCallbackForwarder {
         // shape for one event.
         let json = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string());
         unsafe { cb_str2(table_fn!(self, on_thread_timeline), self.user_data, &label, &json) };
+    }
+    fn on_sensitivity(&self, data: String) {
+        unsafe { cb_str1(table_fn!(self, on_sensitivity), self.user_data, &data) };
     }
     fn on_replay_progress(&self, session_id: String, loaded: i64, total: i64, done: bool) {
         unsafe {
