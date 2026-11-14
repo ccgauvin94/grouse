@@ -1293,6 +1293,14 @@ impl Core {
             // is safe to repeat — and it is how a thread gains an item it did not have last
             // time it was opened.
             self.seed_thread_once(&label);
+            // The structural half: the rows go into the SESSION's prompt, so the thread has
+            // its area even when the record above was never written, or has been
+            // compacted away.
+            let (this_label, this_id) = (label.clone(), id.clone());
+            let this = self.clone();
+            crate::roam::runtime().spawn(async move {
+                this.set_thread_context(&this_label, &this_id).await;
+            });
             self.inner.listener.on_thread_ready(label, id);
             return;
         }
@@ -1301,6 +1309,7 @@ impl Core {
             let notes = this.inner.last_notes.lock().get(&label).cloned();
             match this.create_thread(&label, notes.as_deref()).await {
                 Ok(id) => {
+                    this.set_thread_context(&label, &id).await;
                     this.inner
                         .listener
                         .on_thread_ready(label.clone(), id);
@@ -3293,6 +3302,36 @@ impl Core {
             self.write_thread_notes(label, notes).await;
         }
         Ok(id)
+    }
+
+    /// Put the area's rows into the session's SYSTEM PROMPT, where they cannot be lost.
+    ///
+    /// The notes (below) are a record written into history: once, best-effort, deduped by a
+    /// text search, and summarised away when a thread gets long. This is the channel that
+    /// makes a thread HAVE its area — goose re-sends `system_prompt_extras` on every
+    /// inference, keyed, so a re-set replaces rather than accumulates. One round trip on
+    /// open, and the prompt cache is invalidated when the text changes, so it is done on
+    /// OPEN and not per turn.
+    ///
+    /// Silent on failure, like the notes: a thread still opens and still has its record.
+    async fn set_thread_context(&self, label: &str, session_id: &str) {
+        let Some(notes) = self.inner.last_notes.lock().get(label).cloned() else {
+            return;
+        };
+        let text = crate::tasks::thread_context_text(&notes);
+        if text.is_empty() {
+            return;
+        }
+        let Some(conn) = self.inner.conn.lock().clone() else {
+            return;
+        };
+        let params = crate::tasks::thread_prompt_params(session_id, &text);
+        if let Err(e) = conn
+            .rpc_async("_goose/unstable/session/system-prompt/set", params)
+            .await
+        {
+            eprintln!("[thread-context] {label}: {e}");
+        }
     }
 
     /// Offer a thread's context notes to its conversation.

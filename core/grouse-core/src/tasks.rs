@@ -532,6 +532,40 @@ fn row_note(row: &Value, kind: &str, id: &str, title: &str) -> String {
 /// `once` (write only into an EMPTY conversation) was the previous guard and is gone:
 /// it could never repair a thread whose one truncated line had already landed, which is
 /// exactly the state 2026-11-12 was stuck in.
+/// The whole area as ONE block, for the session's system prompt.
+///
+/// This is the durable channel, and it is why a thread cannot be context-less: the notes
+/// were written into HISTORY (once, best-effort, deduped by a text search, and compactable
+/// away), while a system-prompt extra is re-sent on every inference of that session until
+/// it is replaced or cleared. goose keys `system_prompt_extras` by name and REPLACES on
+/// reuse, which is exactly the semantics a board wants: the same key, today's rows.
+///
+/// One string, not a list: the extras are a `Map<String, String>` per session.
+pub(crate) fn thread_context_text(notes: &[ContextNote]) -> String {
+    notes
+        .iter()
+        .map(|note| note.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// `_goose/unstable/session/system-prompt/set`, mode `append`, keyed so a re-set REPLACES.
+///
+/// Not mode `set`: that replaces goose's own base prompt, which would throw away the agent
+/// persona to add a board. `append` lands under "Additional Instructions" and leaves the
+/// rest alone.
+pub(crate) const THREAD_CONTEXT_KEY: &str = "thread-context";
+
+pub(crate) fn thread_prompt_params(session_id: &str, text: &str) -> Value {
+    json!({
+        "sessionId": session_id,
+        "mode": "append",
+        "key": THREAD_CONTEXT_KEY,
+        "text": text,
+    })
+}
+
 pub(crate) fn note_params(wire: &str, label: &str, text: &str, key: &str) -> Value {
     json!({
         "sessionId": wire,
@@ -1413,5 +1447,37 @@ mod timeline_tests {
         let one = timeline_events(r#"[{"at":"2026-11-13T13:00:00Z","kind":"item","title":"Card"}]"#);
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].title, "Card");
+    }
+}
+
+#[cfg(test)]
+mod thread_context_tests {
+    use super::*;
+
+    /// The block is the notes, joined — and an empty board clears rather than writes a
+    /// blank instruction (an empty `text` means "clear this key" on the wire).
+    #[test]
+    fn the_context_block_is_the_notes_joined() {
+        let notes = vec![
+            ContextNote { key: "thread:a".into(), text: "Area a: one row.".into() },
+            ContextNote { key: "itm_1".into(), text: "  Card title\n\ndetail  ".into() },
+            ContextNote { key: "itm_2".into(), text: "   ".into() },
+        ];
+        assert_eq!(
+            thread_context_text(&notes),
+            "Area a: one row.\n\nCard title\n\ndetail"
+        );
+        assert_eq!(thread_context_text(&[]), "");
+    }
+
+    /// The wire shape: APPEND, never SET (set would replace the agent's own prompt), and a
+    /// stable key so the second board replaces the first instead of stacking behind it.
+    #[test]
+    fn the_prompt_extra_appends_under_a_stable_key() {
+        let p = thread_prompt_params("20260101_1", "Area a: one row.");
+        assert_eq!(p["sessionId"], "20260101_1");
+        assert_eq!(p["mode"], "append");
+        assert_eq!(p["key"], THREAD_CONTEXT_KEY);
+        assert_eq!(p["text"], "Area a: one row.");
     }
 }
