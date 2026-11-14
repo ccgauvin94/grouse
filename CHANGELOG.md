@@ -5,6 +5,16 @@ All notable changes to Grouse are recorded here. The format is based on
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added — every push arrival is recorded, shown or not
+
+- **"Push is broken" is now answerable from the phone.** The sender only ever learns that the
+  UnifiedPush server *accepted* the POST (uppush answers `201 {"success":true}` for a token it
+  knows, `404` for one it does not), so from the console "it never reached the device" and "it
+  arrived and the policy suppressed it" are indistinguishable. `GoosePushService.onMessage` now
+  writes `push <kind> shown=<bool> <summary>` into the same in-app turn log as the turn
+  machinery (long-press a chat title), before the show/hide decision acts on it. No behaviour
+  change; `decideNotify` still owns the decision.
+
 ### Fixed — a roam chat showed another chat's context breakdown
 
 - **The report is now keyed to its chat.** It is one value, so a chat whose measurement had not

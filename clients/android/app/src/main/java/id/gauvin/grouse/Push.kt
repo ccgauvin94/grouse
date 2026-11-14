@@ -83,6 +83,12 @@ class GoosePushService : PushService() {
             cm.store.lastBriefingAt = System.currentTimeMillis()
             cm.store.lastBriefingText = envelope.text
         }
+        // Record every arrival, shown or not, in the same in-app log the turn machinery
+        // writes to (long-press the chat title). "Push is broken" is otherwise unanswerable
+        // from this side: the sender only learns that uppush ACCEPTED the POST, so the two
+        // failure classes — it never reached the device, or it arrived and the policy
+        // suppressed it — look identical from the console.
+        cm.noteApp("push ${envelope.kind} shown=${decision.show} ${decision.summary}")
         if (decision.show) {
             if (envelope.kind == PushKind.TURN) cm.store.pendingPushSessionId = null
             Notifier(this).postMessage(decision.summary, decision.body, envelope.sessionId,
