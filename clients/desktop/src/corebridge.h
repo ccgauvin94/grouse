@@ -178,6 +178,7 @@ public:
         void (*grouse_unstable_resources_read)(void *h, const char *sid, const char *uri, const char *ext);
         void (*grouse_unstable_respond_recipe_params)(void *h, const char *action, const char *values_json);
         void (*grouse_unstable_respond_elicitation)(void *h, const char *action, const char *content_json);
+        void (*grouse_unstable_context_report)(void *h, const char *id);
     };
 
     /// Process-scoped singleton. First call performs the dlopen + symbol
@@ -298,5 +299,9 @@ struct GrouseCoreListener {
     // What fills the chat's context window if it were prompted now: (session_id, JSON).
     // Appended last; ABI 13.
     void (*on_context_report)(void *, const char *, const char *);
+    // An area's timeline: (label, rows JSON). Appended last; ABI 14.
+    void (*on_thread_timeline)(void *, const char *, const char *);
+    // The surfacing-sensitivity readout, as the server's JSON. Appended last; ABI 15.
+    void (*on_sensitivity)(void *, const char *);
 };
 }
