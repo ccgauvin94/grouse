@@ -415,8 +415,12 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
   installed` until `tst_qml` registered `ui/GrouseTheme.qml` itself
   (`GROUSE_THEME_URL`, baked in at configure time for the same
   no-machine-paths reason). A new token-consuming page inherits that for free.
-- No test jobs run in CI (the flatpak workflow builds the bundle only) — run
-  `ctest` locally after touching `src/` or `ui/`.
+- **Nothing in CI runs the DESKTOP's tests.** Six workflows run on every push — Core
+  (`cargo test` + `clippy -D warnings`), Android (`assembleDebug`), Parity, Secrets scan,
+  CodeQL, and Flatpak (bundle) — but none of them runs `ctest` or `qmllint`. So this
+  directory's suites are only as good as a local run: `ctest` after touching `src/`, and
+  `qmllint` + `xvfb-run` after touching `ui/`. A QML type error that qmlcachegen does not
+  reject will reach a user before it reaches CI.
 - Manual QA still applies on top: `qmllint` for static QML errors, `xvfb-run`
   under a real X server for full page load (silence = success), and a smoke test
   against a live `goose serve` for the changed path.
@@ -427,7 +431,9 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
   `git diff` before starting; uncommitted changes may be the other agent's.
 - Never hardcode a machine-specific path into a shared file.
 - **Commit and push your own work when it is coherent.** CI only runs on a pushed ref
-  (`.github/workflows/flatpak.yml` is the only gate, and it builds the bundle — there is no
-  local lint/test gate in CI), so an uncommitted change is an unverified one. Stage the
-  paths you touched rather than `git add -A`: the other agent's in-progress edits are not
-  yours to publish. No force-push, and no `--amend` on a commit that is already pushed.
+  (Core's tests + clippy, the Android build, Parity, Secrets, CodeQL and the Flatpak
+  bundle), so an uncommitted change is an unverified one — and Parity is the one that
+  reads this repo's docs, so a deleted `ui/*.qml` also has to be re-anchored in
+  `docs/PARITY.md`. Stage the paths you touched rather than `git add -A`: the other
+  agent's in-progress edits are not yours to publish. No force-push, and no `--amend`
+  on a commit that is already pushed.
