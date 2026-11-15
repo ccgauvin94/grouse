@@ -60,14 +60,20 @@ mkdir -p grouse-core-prebuild
 # because the toolchain is missing, this is what stops the bundle.
 CORE_LIB=../../core/target/release/libgrouse_core.so
 for sym in grouse_set_image_rescale grouse_send_prompt_with_paths grouse_abi_version; do
-    if ! nm -D "$CORE_LIB" 2>/dev/null | grep -q " T $sym$"; then
+    # NOT `grep -q`: it exits after the first match, `nm` gets SIGPIPE, and with
+    # `set -o pipefail` the pipeline then reports 141 — so this check failed on a
+    # perfectly good core (measured: exit 141 for `grep -q`, exit 0 for plain grep
+    # over the same 802-line symbol table). Redirect instead of asking grep to stop.
+    if ! nm -D "$CORE_LIB" 2>/dev/null | grep " T $sym$" >/dev/null; then
         echo "ERROR: $CORE_LIB does not export $sym — it predates the current core." >&2
         echo "       rebuild: distrobox enter kde-build -- bash -lc \"cargo build --release --manifest-path core/Cargo.toml -p grouse-core\"" >&2
         exit 1
     fi
 done
-# And it must be newer than every core source file, or cargo never ran.
-STALE=$(find ../../core -name '*.rs' -newer "$CORE_LIB" -not -path '*/target/*' | head -1)
+# And it must be newer than every core source file, or cargo never ran. `-print
+# -quit` rather than `| head -1` for the same reason: head would close the pipe and
+# pipefail would fail the assignment (and `set -e` would kill the script).
+STALE=$(find ../../core -name '*.rs' -newer "$CORE_LIB" -not -path '*/target/*' -print -quit)
 if [ -n "$STALE" ]; then
     echo "ERROR: $CORE_LIB is older than $STALE — the bundle would ship a stale core." >&2
     exit 1
