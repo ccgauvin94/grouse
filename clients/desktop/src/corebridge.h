@@ -178,6 +178,10 @@ public:
         void (*grouse_unstable_resources_read)(void *h, const char *sid, const char *uri, const char *ext);
         void (*grouse_unstable_respond_recipe_params)(void *h, const char *action, const char *values_json);
         void (*grouse_unstable_respond_elicitation)(void *h, const char *action, const char *content_json);
+        /// What fills this session's context window if it were prompted right now; the
+        /// answer rides `on_context_report` as raw JSON (ABI 13). Deliberately SILENT on a
+        /// server older than goose 1.58 — that is a missing capability, not a fault.
+        void (*grouse_unstable_context_report)(void *h, const char *session_id);
     };
 
     /// Process-scoped singleton. First call performs the dlopen + symbol
