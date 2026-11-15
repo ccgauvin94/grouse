@@ -5,30 +5,107 @@ import QtQuick.Layouts
 import Grouse 1.0
 import org.kde.kirigami as Kirigami
 
-// The per-chat panel, DOCKED rather than overlaid: it takes a column of the chat
-// area (a SplitView pane, so the divider is draggable) instead of floating over the
-// conversation. That is what lets it stay open while you read and scroll — the
-// OverlayDrawer it replaced covered the chat, so it had to be dismissed to read.
+// The per-chat panel, DOCKED inside the chat frame rather than overlaid: it takes a column
+// of that frame (a SplitView pane, so the divider is draggable) instead of floating over the
+// conversation. That is what lets it stay open while you read and scroll.
 //
-// Two tabs, because both answer "what is this chat doing": the tools it may use, and
-// the work it has handed OFF to a background run (delegate/sub-agent lanes, CONTRACT
-// §3.7). An ordinary tool call is a step of the turn and is not a lane, however long it
-// runs: its chip in the transcript is where it pulses.
+// ONE panel, three stacked sections — what fills the window is full, what tools this chat
+// may use, and what work it has handed OFF to a background run (delegate/sub-agent lanes,
+// CONTRACT §3.7). No tabs: the three questions are asked together ("why is this chat using
+// that much context, and what is it doing?"), and a tab bar made two of them cost a click.
+// Each section collapses independently, and a section with nothing to show contributes only
+// its header (or disappears), so the space goes to the sections that have content.
 Rectangle {
     id: panel
-    /// 0 = tools, 1 = activity. Mirrored on the window so the toggle can flip it.
-    property int tab: 0
 
     color: Kirigami.Theme.alternateBackgroundColor
 
-    // Shown is the moment to ask: the tool list is per SESSION (it changes when you
-    // switch chats) and the activity lanes change with every tool row, so both are
-    // re-read on show and kept current by the core's item stream after that.
+    // Section expansion. Mirrored on the window only through focus(), so a caller can ask
+    // for a section without owning the panel's whole state.
+    property bool contextExpanded: true
+    property bool toolsExpanded: true
+    property bool activityExpanded: true
+
+    /// A session with no context window yet (a fresh chat, or a server that never pushed
+    /// usage) has nothing to say about context, so the section stays out of the way.
+    readonly property bool hasContext: Mgr.contextSize > 0 || Mgr.compacting
+    /// Lanes the panel can LIST (running or finished), and how many are live right now —
+    /// the second is the badge, because a count that never falls back to zero was a claim
+    /// about the present that stopped being true.
+    readonly property int laneCount: Mgr.activity.length
+    readonly property int runningCount: {
+        var lanes = Mgr.activity
+        var n = 0
+        for (var i = 0; i < lanes.length; i++) if (lanes[i].running === true) n++
+        return n
+    }
+
+    signal closeRequested()
+    /// Ask the window to confirm and then send /clear (goose's own "clear the conversation
+    /// history"); the panel does not own a destructive action's dialog.
+    signal clearRequested()
+
+    /// Expand one section. A function, not a property: asking for a section that is
+    /// already open must still work, and a property write of the same value fires nothing.
+    function focus(section) {
+        if (section === 0) panel.contextExpanded = true
+        else if (section === 1) panel.toolsExpanded = true
+        else if (section === 2) panel.activityExpanded = true
+    }
+
+    function percent() {
+        if (Mgr.contextSize <= 0) return 0
+        const p = Mgr.contextUsed * 100 / Mgr.contextSize
+        // One decimal below 10% so a nearly-empty window still reads as progress.
+        return p < 10 ? Math.round(p * 10) / 10 : Math.round(p)
+    }
+
+    // Shown is the moment to ask: the tool list is per SESSION (it changes when you switch
+    // chats), the lanes change with every tool row, and the breakdown is measured server
+    // side — none of them are worth asking for while the panel is hidden.
     onVisibleChanged: {
         if (!visible)
             return
         Mgr.refreshToolGroups()
         Mgr.refreshActivity()
+        if (panel.hasContext)
+            Mgr.requestContextReport()
+    }
+
+    // A section's title row: chevron, name, and whatever number the caller wants beside it.
+    component SectionBar: RowLayout {
+        id: bar
+        property string title: ""
+        property string badge: ""
+        property bool expanded: true
+        signal toggleRequested()
+        Layout.fillWidth: true
+        spacing: Kirigami.Units.smallSpacing
+
+        Controls.Button {
+            flat: true
+            display: Controls.AbstractButton.IconOnly
+            icon.name: bar.expanded ? "arrow-down" : "arrow-right"
+            implicitWidth: Kirigami.Units.gridUnit * 1.25
+            implicitHeight: Kirigami.Units.gridUnit * 1.25
+            onClicked: bar.toggleRequested()
+            ToolTip.visible: hovered
+            ToolTip.text: bar.expanded ? qsTr("Collapse") : qsTr("Expand")
+        }
+        Controls.Label {
+            Layout.fillWidth: true
+            text: bar.title
+            font.bold: true
+            elide: Text.ElideRight
+        }
+        Controls.Label {
+            text: bar.badge
+            visible: text.length > 0
+            opacity: 0.6
+            elide: Text.ElideRight
+            Layout.maximumWidth: bar.width * 0.55
+            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
+        }
     }
 
     ColumnLayout {
@@ -39,48 +116,252 @@ Rectangle {
         RowLayout {
             Layout.fillWidth: true
             spacing: Kirigami.Units.smallSpacing
-            Controls.TabBar {
-                id: tabs
+            Controls.Label {
                 Layout.fillWidth: true
-                currentIndex: panel.tab
-                onCurrentIndexChanged: panel.tab = currentIndex
-                Controls.TabButton {
-                    text: Mgr.tools.length > 0
-                          ? qsTr("Tools (%1)").arg(Mgr.tools.length)
-                          : qsTr("Tools")
-                }
-                // The count is the point of the tab: a glance says whether this chat
-                // has sub-agents/live work without opening it.
-                Controls.TabButton {
-                    text: panel.workCount > 0
-                          ? qsTr("Activity (%1)").arg(panel.workCount)
-                          : qsTr("Activity")
-                }
+                text: qsTr("This chat")
+                opacity: 0.7
+                elide: Text.ElideRight
+                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
             }
             Controls.Button {
                 flat: true
                 display: Controls.AbstractButton.IconOnly
                 icon.name: "dialog-close"
+                onClicked: panel.closeRequested()
                 ToolTip.visible: hovered
                 ToolTip.text: qsTr("Hide this panel")
-                onClicked: panel.closeRequested()
             }
+        }
+
+        // ---- Context: what fills the window, and the two ways to make room ----
+        SectionBar {
+            visible: panel.hasContext
+            title: qsTr("Context")
+            badge: {
+                if (Mgr.compacting) return qsTr("compacting…")
+                if (Mgr.contextSize <= 0) return ""
+                return breakdown.fmtK(Mgr.contextUsed) + " / " + breakdown.fmtK(Mgr.contextSize)
+                        + " · " + panel.percent() + "%"
+            }
+            expanded: panel.contextExpanded
+            onToggleRequested: panel.contextExpanded = !panel.contextExpanded
+        }
+
+        ColumnLayout {
+            visible: panel.hasContext && panel.contextExpanded
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: Kirigami.Units.smallSpacing
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing
+                ContextRing {
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                    Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                    percent: panel.percent()
+                    thickness: 4
+                }
+                Controls.Label {
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                    text: Mgr.compacting
+                          ? (Mgr.compactionStatus ? Mgr.compactionStatus : qsTr("Compacting…"))
+                          : breakdown.fmtK(Mgr.contextUsed) + " / " + breakdown.fmtK(Mgr.contextSize)
+                            + " · " + panel.percent() + "%"
+                    color: panel.percent() >= 90 ? Kirigami.Theme.negativeTextColor
+                                                 : Kirigami.Theme.textColor
+                }
+                Controls.Button {
+                    flat: true
+                    display: Controls.AbstractButton.IconOnly
+                    icon.name: "view-refresh"
+                    onClicked: Mgr.requestContextReport()
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Measure this chat again (the server tokenizes the next request)")
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing
+                Controls.Button {
+                    text: qsTr("Compact")
+                    icon.name: "archive-insert-directory"
+                    enabled: Mgr.online && !Mgr.compacting && !Mgr.prompting && Mgr.contextSize > 0
+                    onClicked: Mgr.compactConversation()
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Summarise the conversation to free most of the window")
+                }
+                // A turn on the wire owns the conversation: clearing or compacting
+                // underneath it is how two writers race for one history.
+                Controls.Button {
+                    text: qsTr("Clear")
+                    icon.name: "edit-clear"
+                    enabled: Mgr.online && !Mgr.compacting && !Mgr.prompting
+                    onClicked: panel.clearRequested()
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Start this chat over with no history")
+                }
+                Item { Layout.fillWidth: true }
+            }
+
+            Controls.ScrollView {
+                id: contextScroll
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                contentWidth: availableWidth
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+                ContextBreakdown {
+                    id: breakdown
+                    width: contextScroll.availableWidth
+                }
+            }
+        }
+
+        Kirigami.Separator { Layout.fillWidth: true }
+
+        // ---- Tools: what this chat may use --------------------------------
+        SectionBar {
+            title: Mgr.tools.length > 0 ? qsTr("Tools (%1)").arg(Mgr.tools.length) : qsTr("Tools")
+            expanded: panel.toolsExpanded
+            onToggleRequested: panel.toolsExpanded = !panel.toolsExpanded
+        }
+
+        ListView {
+            id: toolsList
+            visible: panel.toolsExpanded
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+            spacing: 2
+            model: Mgr.toolGroups
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+            // Column root (not Item): the header row and the expanded subtool column then
+            // stack naturally instead of overlapping.
+            delegate: Column {
+                id: tdel
+                width: ListView.view.width - Kirigami.Units.gridUnit
+                spacing: 2
+                property bool expanded: false
+                readonly property string gName: modelData.name
+                // Session toggles/catalog discovery are keyed by extensionKey, not the
+                // display name (see Manager::ExtDef.key).
+                readonly property string gKey: modelData.key
+                readonly property bool gAttrib: modelData.attrib
+                readonly property bool gEnabled: modelData.enabled
+                readonly property bool gKnown: modelData.known
+                // The expander is about SUB-TOOLS, not attachment (Manager computes it):
+                // unknown catalogues get a peek arrow (the peek attaches the extension for
+                // one round-trip and detaches it — seeing the list costs no context), known
+                // ones only if they really have >=2 tools.
+                readonly property bool gExpandable: modelData.expandable
+
+                RowLayout {
+                    width: parent.width
+                    spacing: Kirigami.Units.smallSpacing
+                    // Fixed-width slot for the expander: hiding the BUTTON alone lets the
+                    // Switch drift left on arrowless rows (an invisible item still claims
+                    // its column). The Item keeps every switch at the same x.
+                    Item {
+                        Layout.preferredWidth: Kirigami.Units.gridUnit
+                        implicitWidth: Kirigami.Units.gridUnit
+                        Layout.preferredHeight: Kirigami.Units.gridUnit * 1.25
+                        Controls.Button {
+                            anchors.centerIn: parent
+                            flat: true
+                            display: Controls.AbstractButton.IconOnly
+                            icon.name: tdel.expanded ? "arrow-down" : "arrow-right"
+                            visible: tdel.gExpandable
+                            onClicked: {
+                                tdel.expanded = !tdel.expanded
+                                if (tdel.expanded && !tdel.gKnown)
+                                    Mgr.discoverToolGroup(tdel.gKey)
+                            }
+                        }
+                    }
+                    Controls.Switch {
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
+                        checked: tdel.gEnabled
+                        onToggled: Mgr.setSessionExtensionEnabled(tdel.gKey, checked)
+                    }
+                    Controls.Label {
+                        text: tdel.gName
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        Layout.fillWidth: true
+                        font.bold: true
+                    }
+                    Controls.Label {
+                        // The count shows on every KNOWN row — expandable or not (the
+                        // background sweep makes rows known without a click); "…" only
+                        // while a row is still unknown.
+                        text: tdel.gKnown
+                              ? (tdel.expanded ? "" : modelData.tools.length + qsTr(" tools"))
+                              : (tdel.gExpandable ? qsTr("…") : "")
+                        opacity: 0.6
+                        horizontalAlignment: Text.AlignRight
+                    }
+                }
+
+                Column {
+                    id: toolsCol
+                    width: parent.width
+                    visible: tdel.expanded
+                    Repeater {
+                        model: tdel.gExpandable ? modelData.tools : []
+                        delegate: RowLayout {
+                            width: parent.width
+                            spacing: Kirigami.Units.smallSpacing
+                            Controls.Switch {
+                                Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
+                                checked: modelData.on
+                                // Ticking a tool on a detached row ATTACHES the extension
+                                // restricted to that tool (see Manager::setSessionToolEnabled)
+                                // — browsing the list and enabling one must not require
+                                // enabling all.
+                                onToggled: Mgr.setSessionToolEnabled(tdel.gKey, modelData.name, checked)
+                            }
+                            Controls.Label {
+                                text: modelData.name
+                                textFormat: Text.PlainText
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Kirigami.Separator { Layout.fillWidth: true }
+
+        // ---- Activity: the chat's work lanes ------------------------------
+        SectionBar {
+            title: qsTr("Activity")
+            badge: panel.runningCount > 0 ? String(panel.runningCount) + qsTr(" running") : ""
+            expanded: panel.activityExpanded
+            onToggleRequested: panel.activityExpanded = !panel.activityExpanded
         }
 
         Controls.Label {
             Layout.fillWidth: true
-            visible: panel.tab === 1 && panel.workCount === 0
+            visible: panel.activityExpanded && panel.laneCount === 0
             wrapMode: Text.Wrap
             text: qsTr("No background work. A delegate (a sub-agent run) shows up here while it works, and stays once it has finished.")
             color: Kirigami.Theme.disabledTextColor
             font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
         }
 
-        // ---- Activity: the chat's work lanes ------------------------------
         ListView {
             id: workList
             objectName: "workList"
-            visible: panel.tab === 1
+            // Only a chat that HAS lanes gets the space: an empty list claiming a third of
+            // the panel is the "dynamic" part failing.
+            visible: panel.activityExpanded && panel.laneCount > 0
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
@@ -158,8 +439,8 @@ Rectangle {
                     font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.82
                 }
 
-                // What it is doing RIGHT NOW: the child's own tool calls arrive on this
-                // row while it works, so the last step is its current one — real progress
+                // What it is doing RIGHT NOW: the child's own tool calls arrive on this row
+                // while it works, so the last step is its current one — real progress
                 // rather than a spinner.
                 Controls.Label {
                     width: parent.width
@@ -205,124 +486,5 @@ Rectangle {
             }
         }
 
-        // ---- Tools: what this chat may use --------------------------------
-              ListView {
-                  id: toolsList
-                  Layout.fillWidth: true
-                  Layout.fillHeight: true
-                  clip: true
-                  spacing: 2
-                  model: Mgr.toolGroups
-                  ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-
-                  // Column root (not Item): the header row and the expanded subtool
-                  // column then stack naturally instead of overlapping.
-                  delegate: Column {
-                      id: tdel
-                      width: ListView.view.width - Kirigami.Units.gridUnit
-                      spacing: 2
-                      property bool expanded: false
-                      readonly property string gName: modelData.name
-                      // Session toggles/catalog discovery are keyed by extensionKey, not the
-                      // display name (see Manager::ExtDef.key).
-                      readonly property string gKey: modelData.key
-                      readonly property bool gAttrib: modelData.attrib
-                      readonly property bool gEnabled: modelData.enabled
-                      readonly property bool gKnown: modelData.known
-                      // The expander is about SUB-TOOLS, not attachment (Manager
-                      // computes it): unknown catalogues get a peek arrow (the peek
-                      // attaches the extension for one round-trip and detaches it —
-                      // seeing the list costs no context), known ones only if they
-                      // really have >=2 tools.
-                      readonly property bool gExpandable: modelData.expandable
-
-                      RowLayout {
-                          width: parent.width
-                          spacing: Kirigami.Units.smallSpacing
-                          // Fixed-width slot for the expander: hiding the BUTTON
-                          // alone lets the Switch drift left on arrowless rows
-                          // (an invisible item still claims its column). The Item
-                          // keeps every switch at the same x.
-                          Item {
-                              Layout.preferredWidth: Kirigami.Units.gridUnit
-                              implicitWidth: Kirigami.Units.gridUnit
-                              Layout.preferredHeight: Kirigami.Units.gridUnit * 1.25
-                              Controls.Button {
-                                  anchors.centerIn: parent
-                                  flat: true
-                                  display: Controls.AbstractButton.IconOnly
-                                  icon.name: tdel.expanded ? "arrow-down" : "arrow-right"
-                                  visible: tdel.gExpandable
-                                  onClicked: {
-                                      tdel.expanded = !tdel.expanded
-                                      if (tdel.expanded && !tdel.gKnown)
-                                          Mgr.discoverToolGroup(tdel.gKey)
-                                  }
-                              }
-                          }
-                          Controls.Switch {
-                              Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
-                              checked: tdel.gEnabled
-                              onToggled: Mgr.setSessionExtensionEnabled(tdel.gKey, checked)
-                          }
-                          Controls.Label {
-                              text: tdel.gName
-                              textFormat: Text.PlainText
-                              elide: Text.ElideRight
-                              Layout.fillWidth: true
-                              font.bold: true
-                          }
-                      Controls.Label {
-                          // The count shows on every KNOWN row — expandable or
-                          // not (the background sweep makes rows known without a
-                          // click); "…" only while a row is still unknown.
-                          text: tdel.gKnown
-                                ? (tdel.expanded ? "" : modelData.tools.length + qsTr(" tools"))
-                                : (tdel.gExpandable ? qsTr("…") : "")
-                          opacity: 0.6
-                          horizontalAlignment: Text.AlignRight
-                      }
-                      }
-
-                      Column {
-                          id: toolsCol
-                          width: parent.width
-                          visible: tdel.expanded
-                          Repeater {
-                              model: tdel.gExpandable ? modelData.tools : []
-                              delegate: RowLayout {
-                                  width: parent.width
-                                  spacing: Kirigami.Units.smallSpacing
-                                  Controls.Switch {
-                                      Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
-                                      checked: modelData.on
-                                      // Ticking a tool on a detached row ATTACHES the
-                                      // extension restricted to that tool (see
-                                      // Manager::setSessionToolEnabled) — browsing the
-                                      // list and enabling one must not require enabling all.
-                                      onToggled: Mgr.setSessionToolEnabled(tdel.gKey, modelData.name, checked)
-                                  }
-                                  Controls.Label {
-                                      text: modelData.name
-                                      textFormat: Text.PlainText
-                                      elide: Text.ElideRight
-                                      Layout.fillWidth: true
-                                  }
-                              }
-                          }
-                      }
-                  }
-              }
     }
-
-    /// The number of lanes RUNNING NOW, for the tab's badge. Live only: a count that never
-    /// falls back to zero (it kept reading "3" after the turn was cancelled) is a claim
-    /// about the present that is not true. The tab still lists finished runs.
-    readonly property int workCount: {
-        var lanes = Mgr.activity
-        var n = 0
-        for (var i = 0; i < lanes.length; i++) if (lanes[i].running === true) n++
-        return n
-    }
-    signal closeRequested()
 }

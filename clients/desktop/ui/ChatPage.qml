@@ -10,7 +10,9 @@ Kirigami.Page {
 
     // Emitted when the user clicks the tools pill; main.qml owns the slide-out panel.
     signal toolsOpenRequested()
-    /// The context footer was tapped: show what fills the window (ContextDialog, declared in main.qml).
+    /// The context donut was tapped: show what fills the window. Answered by the side
+    /// panel's Context section (main.qml opens it), which is also where the breakdown's
+    /// actions live — the reading and the way out of it belong together.
     signal contextBreakdownRequested()
 
     // A fenced code block inside a message row. A RichText TextEdit wraps
@@ -791,69 +793,11 @@ Kirigami.Page {
             }
         }
 
-        // Context usage + compaction status line. Collapses to zero height when
-        // the session has no context window and compaction isn't running.
-        Rectangle {
-            id: contextRow
-            Layout.fillWidth: true
-            visible: Mgr.compacting || Mgr.contextSize > 0
-            implicitHeight: contextRowLayout.implicitHeight + Kirigami.Units.smallSpacing * 2
-            color: "transparent"
-
-            RowLayout {
-                id: contextRowLayout
-                anchors.fill: parent
-                anchors.margins: Kirigami.Units.smallSpacing
-                spacing: Kirigami.Units.smallSpacing
-
-                BusyIndicator {
-                    visible: Mgr.compacting
-                    Layout.preferredWidth: 16
-                    Layout.preferredHeight: 16
-                    running: Mgr.compacting
-                }
-                Controls.Label {
-                    visible: Mgr.compacting
-                    text: Mgr.compactionStatus ? Mgr.compactionStatus : qsTr("Compacting…")
-                    opacity: 0.8
-                    elide: Text.ElideRight
-                    Layout.maximumWidth: contextRowLayout.width - 64
-                }
-                Controls.Label {
-                    id: contextLabel
-                    visible: !Mgr.compacting && Mgr.contextSize > 0
-                    text: page.formatContext()
-                    opacity: page.contextPercent() >= 90 ? 1 : 0.7
-                    color: page.contextPercent() >= 90 ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
-                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8
-                    // The number is only half the story: what FILLS the window is the
-                    // question a near-full bar actually raises.
-                    TapHandler {
-                        onTapped: page.contextBreakdownRequested()
-                    }
-                    HoverHandler {
-                        cursorShape: Qt.PointingHandCursor
-                    }
-                }
-                Item {
-                    Layout.fillWidth: true
-                }
-                Controls.Button {
-                    visible: Mgr.online && Mgr.contextSize > 0 && !Mgr.compacting && !Mgr.prompting
-                    flat: true
-                    icon.name: "edit-clear"
-                    text: qsTr("Compact conversation")
-                    onClicked: Mgr.compactConversation()
-                }
-            }
-        }
-
-        // The context strip is chrome, not transcript: the line below it is
-        // where the chat begins.
-        Kirigami.Separator {
-            Layout.fillWidth: true
-            visible: contextRow.visible
-        }
+        // The context strip is GONE from the transcript. It was a whole chrome row above
+        // the conversation for one number; the monitor is a donut in the composer strip now
+        // (where the model, the effort and the send button already are), and what FILLS the
+        // window — plus Compact and Clear — lives in the side panel's Context section.
+        // Nothing about it is per-turn, so nothing about it belongs above the transcript.
 
         // Pinned MCP-App dock (top): the app's one live view while pinned. The
         // divider on its bottom edge drags to resize (live), ratio persisted per
@@ -2711,6 +2655,60 @@ Kirigami.Page {
                         ToolTip.text: qsTr("Thinking effort for this chat")
                     }
                     Item { Layout.fillWidth: true }
+
+                    // Compaction reports HERE rather than over the transcript: it is a fact
+                    // about the window the donut beside it measures, and the row it used to
+                    // own was chrome above the conversation.
+                    BusyIndicator {
+                        visible: Mgr.compacting
+                        running: Mgr.compacting
+                        Layout.preferredWidth: 14
+                        Layout.preferredHeight: 14
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+                    Controls.Label {
+                        visible: Mgr.compacting
+                        text: Mgr.compactionStatus ? Mgr.compactionStatus : qsTr("Compacting…")
+                        opacity: 0.8
+                        elide: Text.ElideRight
+                        Layout.maximumWidth: 200
+                        font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
+                    }
+
+                    // The context monitor: a donut whose ring is how full the window is,
+                    // with the same reading beside it. Tapping either opens the panel's
+                    // Context section — the number is only half the story, and what FILLS
+                    // the window is the question a near-full ring raises.
+                    RowLayout {
+                        id: contextChip
+                        visible: !Mgr.compacting && Mgr.contextSize > 0
+                        spacing: Theme.spacing.s1
+                        Layout.alignment: Qt.AlignVCenter
+                        ContextRing {
+                            Layout.preferredWidth: 16
+                            Layout.preferredHeight: 16
+                            percent: page.contextPercent()
+                        }
+                        Controls.Label {
+                            text: page.contextPercent() + "%"
+                            color: page.contextPercent() >= 90 ? Kirigami.Theme.negativeTextColor
+                                                               : Kirigami.Theme.disabledTextColor
+                            font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
+                            renderType: Text.NativeRendering
+                        }
+                        // One target for the ring AND the number: two handlers for one
+                        // gesture is how a click lands twice.
+                        TapHandler {
+                            onTapped: page.contextBreakdownRequested()
+                        }
+                        HoverHandler {
+                            id: contextHover
+                            cursorShape: Qt.PointingHandCursor
+                        }
+                        ToolTip.visible: contextHover.hovered
+                        ToolTip.text: page.formatContext() + "\n" + qsTr("What fills the window")
+                    }
+
                     // The connection status moved from the sidebar's bottom to
                     // this strip's right end; the pickers' own ToolTips name them.
                     Controls.Label {
