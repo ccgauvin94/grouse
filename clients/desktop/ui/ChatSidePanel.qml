@@ -47,7 +47,9 @@ Rectangle {
 
     /// Expand one section. A function, not a property: asking for a section that is
     /// already open must still work, and a property write of the same value fires nothing.
-    function focus(section) {
+    /// NOT named `focus`: `Item.focus` is a FINAL property, so a function of that name is
+    /// discarded with "final member focus is overridden" and every caller hits a bool.
+    function focusSection(section) {
         if (section === 0) panel.contextExpanded = true
         else if (section === 1) panel.toolsExpanded = true
         else if (section === 2) panel.activityExpanded = true

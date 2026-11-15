@@ -31,7 +31,7 @@ Controls.ApplicationWindow {
 
     // The per-chat panel (context, tools, activity), open/closed. Kept on the window, not
     // in the panel, so hiding and re-showing it comes back to the sections you left open.
-    // WHICH section a click asked for is a call (`sidePanel.focus(0|1|2)`), not state here:
+    // WHICH section a click asked for is a call (`sidePanel.focusSection(0|1|2)`), not state here:
     // asking for a section that is already open has to work, and a property write of the
     // same value fires nothing.
     property bool sidePanelOpen: false
@@ -782,12 +782,12 @@ Controls.ApplicationWindow {
                             visible: !Mgr.landingPage && !Mgr.myDayVisible
                             onContextBreakdownRequested: {
                                 root.sidePanelOpen = true
-                                sidePanel.focus(0)
+                                sidePanel.focusSection(0)
                             }
                             onToolsOpenRequested: {
                                 root.sidePanelOpen = !root.sidePanelOpen
                                 if (root.sidePanelOpen)
-                                    sidePanel.focus(1)
+                                    sidePanel.focusSection(1)
                             }
                         }
 
