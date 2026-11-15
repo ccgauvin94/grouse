@@ -47,6 +47,7 @@
     <string name="context_additional_instructions">Hints and project instructions</string>
     <string name="context_turn_context">Turn context</string>
     <string name="context_tool_definitions">Tool definitions</string>
+    <string name="context_deferred_tools">Deferred (not loaded)</string>
     <string name="context_compaction_summary">Compaction summary</string>
     <string name="context_messages">Conversation</string>
     <string name="loading_conversation">Loading conversation…</string>

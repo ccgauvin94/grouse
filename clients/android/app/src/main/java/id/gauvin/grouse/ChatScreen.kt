@@ -148,6 +148,9 @@ fun ContextBreakdown(
 ) {
     val total = report.total.coerceAtLeast(1)
     val groups = report.groups()
+    // A withheld-schema group is bigger than the request it belongs to, so the
+    // bar scales to the widest row rather than pinning that one full width.
+    val scale = groups.maxOfOrNull { it.tokens }?.coerceAtLeast(total) ?: total
     // Which categories are open. Empty = the compact view, which is the point: a 600k-token
     // chat has ~40 segments and none of them belong on screen at once.
     val open = remember(report) { mutableStateOf(emptySet<String>()) }
@@ -193,7 +196,7 @@ fun ContextBreakdown(
                 }
                 Box(Modifier.fillMaxWidth().padding(start = 14.dp, top = 2.dp).height(3.dp)
                     .clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
-                    Box(Modifier.fillMaxWidth((group.tokens.toFloat() / total).coerceIn(0f, 1f))
+                    Box(Modifier.fillMaxWidth((group.tokens.toFloat() / scale).coerceIn(0f, 1f))
                         .fillMaxHeight().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)))
                 }
                 if (isOpen) {
@@ -226,6 +229,7 @@ private fun contextCategoryLabel(category: String): String = when (category) {
     "additional_instructions" -> stringResource(R.string.context_additional_instructions)
     "turn_context" -> stringResource(R.string.context_turn_context)
     "tool_definitions" -> stringResource(R.string.context_tool_definitions)
+    "deferred_tools" -> stringResource(R.string.context_deferred_tools)
     "compaction_summary" -> stringResource(R.string.context_compaction_summary)
     "messages" -> stringResource(R.string.context_messages)
     else -> category
