@@ -104,6 +104,26 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
   `threads: {label: sessionId}`; the CORE mints the conversations and
   `grouse_open_thread` is the only way in — a per-device map forked them (2026-11-01,
   "Thread: Global entry" twice, 82 and 99 messages).
+- **The side panel is ONE docked column with three stacked sections, not tabs.** Context
+  (what fills the window, plus Compact and Clear), Tools (what this chat may use), and
+  Activity (delegate/sub-agent lanes). No tab bar: the three questions are asked together
+  ("why is this chat that expensive, and what is it doing?"), and tabs made two of them cost
+  a click. Each section collapses on its own header, and a section with nothing to show
+  (no lanes; no context window yet) contributes no height — the expanded ones take the
+  space. The panel is a SplitView pane INSIDE the chat frame (`chatFrame` in `main.qml`),
+  not a full-height pane of the window: it is part of the conversation surface, not chrome
+  beside it. `sidePanel.focus(0|1|2)` is a function, not window state — asking for a section
+  already open must still work, and a property write of the same value fires nothing.
+- **The context monitor is a donut in the composer strip** (`ContextRing.qml`, same shape and
+  thresholds as Android: comfortable / nearing compaction / at it). Tapping it or the number
+  beside it opens the panel's Context section. The breakdown itself is `ContextBreakdown.qml`,
+  bound to the server's `_goose/unstable/context/report` — a DIFFERENT measurement from the
+  donut (the request goose WOULD send vs. what the provider billed), which is why it says
+  "estimated". **Clear sends `/clear`** (goose's own slash command, "clear the conversation
+  history") as a prompt: there is no ACP intent for it, and the confirm dialog lives in
+  `main.qml` because the panel does not own a destructive action's dialog. Compact stays the
+  dedicated `Mgr.compactConversation()` intent. Both are disabled while a turn is on the wire —
+  a turn owns the conversation, and clearing underneath it is two writers on one history.
 - Per-session transcript/tool caches live in `QStandardPaths::CacheLocation`,
   keyed by sessionId. Reconnects use exponential backoff.
 
@@ -337,6 +357,9 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
 |`ui/main.qml`|Window shell: `Controls.ApplicationWindow` (NOT Kirigami's — its `contentItem` is read-only, so a sidebar+chat split can't be injected there); sidebar + ChatPage/landing page; every dialog instance and inline menu/dialog; landing provider/model ComboBoxes.|
 |`ui/ChatPage.qml`|Transcript ListView with pinned-to-end scroll logic, input bar, mode menu, attachments, ChartBubble, permission routing, and the thread panel a thread chat carries above its transcript.|
 |`ui/MyDayPage.qml`|My Day: the assistant card, the grouped Open list (a label gets a header only when it holds more than one row), the handed-over tasks, Snoozed, Recently done. Rows are Loaders over inline components; `entryModel` is a binding, so a refresh or a toggle rebuilds the sequence once.|
+|`ui/ChatSidePanel.qml`|The per-chat panel: one docked column with Context / Tools / Activity stacked (each collapsible, each hidden when it has nothing to show). `focus(n)` expands a section for a caller.|
+|`ui/ContextRing.qml`|The context donut (Canvas): fill = how full the window is, colour = the same three thresholds as Android. Paint only — the surface around it owns the tap.|
+|`ui/ContextBreakdown.qml`|What fills the window, grouped by goose's category and nested per segment; the totals, the pending-compaction warning and the "estimated" caveat live here too.|
 |`ui/*Dialog.qml`|ConnectDialog, SettingsDialog, ProvidersDialog, GlobalExtensionsDialog, SkillsDialog, RecipesDialog (carries the schedule controls too — no separate Scheduler screen), ProjectDialog, PermissionDialog.|
 |`CMakeLists.txt`|Qt6 (Quick Qml QuickControls2 Widgets DBus Network, plus optional `WebEngineQuick` for inline MCP Apps) + ECM + KF6 (Kirigami CoreAddons); `qt_add_resources` embeds ALL `ui/*.qml`; app install rules only — the test targets live under `tests/` (wired via `include(CTest)` + `add_subdirectory(tests)`).|
 |`id.gauvin.Grouse.json` / `build-flatpak.sh`|Flatpak manifest (org.kde.Platform/Sdk 6.10, `io.qt.qtwebengine.BaseApp`, cmake-ninja Release) + bundle script.|
@@ -403,4 +426,8 @@ distrobox enter kde-build -- bash -lc 'cd build && ctest --output-on-failure'
 - Two agents share this checkout (host + goose container). Check `git status` and
   `git diff` before starting; uncommitted changes may be the other agent's.
 - Never hardcode a machine-specific path into a shared file.
-- Do not commit or push unless asked.
+- **Commit and push your own work when it is coherent.** CI only runs on a pushed ref
+  (`.github/workflows/flatpak.yml` is the only gate, and it builds the bundle — there is no
+  local lint/test gate in CI), so an uncommitted change is an unverified one. Stage the
+  paths you touched rather than `git add -A`: the other agent's in-progress edits are not
+  yours to publish. No force-push, and no `--amend` on a commit that is already pushed.
