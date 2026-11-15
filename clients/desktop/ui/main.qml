@@ -760,8 +760,13 @@ Controls.ApplicationWindow {
                 anchors.topMargin: Theme.spacing.s1
                 color: Kirigami.Theme.backgroundColor
                 border.width: 1
-                border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
-                                                            : Kirigami.Theme.disabledTextColor
+                // A tint of the TEXT colour, not `separatorColor`: this app's palette is
+                // custom and its separator is near-white, so the first build drew a glowing
+                // frame around the conversation (reported 2026-11-15). Same trick as the code
+                // panes and the breakdown bars — an alpha tint composites over whatever is
+                // behind it and stays a hairline in either scheme.
+                border.color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                                      Kirigami.Theme.textColor.b, 0.14)
 
                 Controls.SplitView {
                     // 1px in from the border, so the page's own background does not paint

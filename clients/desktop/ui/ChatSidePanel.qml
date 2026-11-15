@@ -63,14 +63,33 @@ Rectangle {
     // Shown is the moment to ask: the tool list is per SESSION (it changes when you switch
     // chats), the lanes change with every tool row, and the breakdown is measured server
     // side — none of them are worth asking for while the panel is hidden.
-    onVisibleChanged: {
-        if (!visible)
-            return
+    /// Re-read the three sections. Called on show and on a chat switch: `visible` does not
+    /// change when the session does, so onVisibleChanged alone left a panel that stayed open
+    /// across chats describing the PREVIOUS one.
+    function refreshAll() {
         Mgr.refreshToolGroups()
         Mgr.refreshActivity()
         if (panel.hasContext)
             Mgr.requestContextReport()
     }
+
+    onVisibleChanged: {
+        if (visible)
+            panel.refreshAll()
+    }
+
+    Connections {
+        target: Mgr
+        function onCurrentSessionChanged() {
+            if (panel.visible)
+                panel.refreshAll()
+        }
+    }
+
+    // A collapsed section is cheap to re-read and must never show another chat's rows.
+    onToolsExpandedChanged: if (panel.toolsExpanded && panel.visible) Mgr.refreshToolGroups()
+    onActivityExpandedChanged: if (panel.activityExpanded && panel.visible) Mgr.refreshActivity()
+    onContextExpandedChanged: if (panel.contextExpanded && panel.visible) Mgr.requestContextReport()
 
     // A section's title row: chevron, name, and whatever number the caller wants beside it.
     component SectionBar: RowLayout {
@@ -150,6 +169,13 @@ Rectangle {
         ColumnLayout {
             visible: panel.hasContext && panel.contextExpanded
             Layout.fillWidth: true
+            // A nominal preferred height, and NOT its implicit one: a scrollable breakdown
+            // reports the height of everything inside it, and this column handed out space in
+            // proportion to preferred heights — so the Context section ate the whole panel and
+            // left the Tools list at zero (measured on the first build, 2026-11-15). Equal
+            // nominal heights give the expanded sections equal shares, and a collapsed one
+            // still hands its share to the others because it is not in the layout at all.
+            Layout.preferredHeight: Kirigami.Units.gridUnit * 12
             Layout.fillHeight: true
             spacing: Kirigami.Units.smallSpacing
 
@@ -234,6 +260,7 @@ Rectangle {
             id: toolsList
             visible: panel.toolsExpanded
             Layout.fillWidth: true
+            Layout.preferredHeight: Kirigami.Units.gridUnit * 12
             Layout.fillHeight: true
             clip: true
             spacing: 2
@@ -363,6 +390,7 @@ Rectangle {
             // the panel is the "dynamic" part failing.
             visible: panel.activityExpanded && panel.laneCount > 0
             Layout.fillWidth: true
+            Layout.preferredHeight: Kirigami.Units.gridUnit * 12
             Layout.fillHeight: true
             clip: true
             spacing: Kirigami.Units.smallSpacing
