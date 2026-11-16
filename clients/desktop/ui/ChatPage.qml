@@ -1354,21 +1354,28 @@ Kirigami.Page {
                                     opacity: 0.86
                                 }
                                 Column {
+                                    id: userImages
                                     visible: mdel.messageImages.length > 0
+                                    // Explicit width: a Column inside a Column inherits its
+                                    // implicit width, and a delegate that sizes itself from
+                                    // `parent.width` then closes a cycle at ZERO — the
+                                    // thumbnails had a 140px height and a 0px slot.
+                                    width: parent.width
                                     spacing: Kirigami.Units.smallSpacing
                                     Repeater {
                                         model: mdel.messageImages
                                         delegate: Item {
-                                            width: parent.width
+                                            width: userImages.width
                                             height: modelData.image ? 140 : fileChip.implicitHeight
                                             Image {
                                                 id: imgThumb
                                                 visible: modelData.image
                                                 anchors.left: parent.left
                                                 source: modelData.url
-                                                width: Math.min(140, implicitWidth)
+                                                width: Math.min(parent.width, Math.min(180, implicitWidth))
                                                 height: 140
                                                 fillMode: Image.PreserveAspectFit
+                                                asynchronous: true
                                             }
                                             MouseArea {
                                                 anchors.fill: imgThumb

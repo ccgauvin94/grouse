@@ -14,6 +14,7 @@
 #include <cmath>
 
 #include <QDateTime>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QDesktopServices>
 #include <QFile>
@@ -29,6 +30,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMimeDatabase>
+#include <QSaveFile>
 #include <QSet>
 #include <QStandardPaths>
 #include <QTimer>
@@ -1096,6 +1098,46 @@ void Manager::flushQueue()
 }
 
 namespace {
+/// A prompt's image reaches the row as a `data:` URI: the core hands the client the
+/// PIXELS, not a path, so the row can show what was sent without the file still being
+/// there. QML's Image does accept those, but a 2-4 MB base64 string is parsed on every
+/// repaint and — measured on the first desktop build that carried user images — painted
+/// nothing at all. Every other picture this client draws comes from a FILE (an agent's
+/// shared image is downloaded first), so decode once here and hand QML a file URL: the
+/// user's own image then takes exactly the path that is known to work.
+QString materialiseChatImage(const QString &uri)
+{
+    if (!uri.startsWith(QLatin1String("data:")))
+        return uri;
+    const int comma = uri.indexOf(QLatin1Char(','));
+    if (comma < 0)
+        return uri;
+    const QString header = uri.mid(5, comma - 5);   // "image/png;base64"
+    if (!header.endsWith(QLatin1String(";base64")))
+        return uri;
+    const QString mime = header.left(header.size() - 7);
+    const QByteArray bytes = QByteArray::fromBase64(uri.mid(comma + 1).toLatin1());
+    if (bytes.isEmpty())
+        return uri;
+    // Content-addressed, so the same picture sent twice (or replayed) is written once.
+    const QString digest = QString::fromLatin1(
+        QCryptographicHash::hash(bytes, QCryptographicHash::Sha1).toHex().left(16));
+    QString suffix = QMimeDatabase().mimeTypeForName(mime).preferredSuffix();
+    if (suffix.isEmpty())
+        suffix = QStringLiteral("img");
+    QDir dir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+             + QStringLiteral("/chat-images"));
+    if (!dir.exists() && !dir.mkpath(QStringLiteral(".")))
+        return uri;
+    const QString path = dir.filePath(digest + QLatin1Char('.') + suffix);
+    if (!QFileInfo::exists(path)) {
+        QSaveFile out(path);
+        if (!out.open(QIODevice::WriteOnly) || out.write(bytes) != bytes.size() || !out.commit())
+            return uri;   // fall back to the URI: a broken cache must not hide the picture
+    }
+    return QUrl::fromLocalFile(path).toString();
+}
+
 // True for mime types that are really text even though they live under
 // application/* (code, config, data). Everything else that isn't an image is
 // sent as a binary blob.
@@ -3427,11 +3469,18 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
         QVariantList images;
         if (!uris.isEmpty()) {
             for (const auto &uri : uris)
-                images << QVariantMap{{"image", true}, {"url", uri.toString()}};
+                images << QVariantMap{{"image", true},
+                                      {"url", materialiseChatImage(uri.toString())}};
         } else {
-            for (const auto &v : queued)
-                if (v.toMap().value("image").toBool())
-                    images << v;
+            // The older-core fallback carries the same `data:` URIs, so it takes the
+            // same decode: one shape reaches QML, whichever path produced it.
+            for (const auto &v : queued) {
+                const QVariantMap q = v.toMap();
+                if (!q.value("image").toBool())
+                    continue;
+                images << QVariantMap{{"image", true},
+                                      {"url", materialiseChatImage(q.value("url").toString())}};
+            }
         }
         if (!images.isEmpty())
             row["images"] = images;
