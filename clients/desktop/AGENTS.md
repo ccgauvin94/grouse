@@ -110,10 +110,17 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
   ("why is this chat that expensive, and what is it doing?"), and tabs made two of them cost
   a click. Each section collapses on its own header, and a section with nothing to show
   (no lanes; no context window yet) contributes no height — the expanded ones take the
-  space. The panel is a SplitView pane INSIDE the chat frame (`chatFrame` in `main.qml`),
-  not a full-height pane of the window: it is part of the conversation surface, not chrome
-  beside it. `sidePanel.focus(0|1|2)` is a function, not window state — asking for a section
-  already open must still work, and a property write of the same value fires nothing.
+  space, so each section needs the SAME nominal `Layout.preferredHeight`: a ColumnLayout
+  hands out space in proportion to PREFERRED heights, and the Context section's is a whole
+  scrollable breakdown, which otherwise starves the Tools list to zero (measured 2026-11-15).
+  **The panel lives INSIDE `ChatPage`**, in the band between the header bar and the composer
+  (`chatSplit` → `chatBody` | `sidePanel`), not as a pane of the window and not inside the
+  window's SplitView: that is what lets the header (Reload / Tools) and the composer span the
+  chat's full width. `page.sidePanelOpen` owns it; `main.qml` only answers `clearRequested`.
+  `sidePanel.focusSection(0|1|2)` is a function, not state — asking for a section already
+  open must still work. **Do NOT name it `focus`:** `Item.focus` is a FINAL property, so Qt
+  discards a function of that name ("final member focus is overridden") and every caller then
+  hits a bool — silent, and it cost a whole bug report (fixed 2026-11-16).
 - **The context monitor is a donut in the composer strip** (`ContextRing.qml`, same shape and
   thresholds as Android: comfortable / nearing compaction / at it). Tapping it or the number
   beside it opens the panel's Context section. The breakdown itself is `ContextBreakdown.qml`,

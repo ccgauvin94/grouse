@@ -29,13 +29,6 @@ Controls.ApplicationWindow {
     // Sidebar pane: "main" = the home server's sessions, "roam" = roam peers.
     property string sidebarTab: "main"
 
-    // The per-chat panel (context, tools, activity), open/closed. Kept on the window, not
-    // in the panel, so hiding and re-showing it comes back to the sections you left open.
-    // WHICH section a click asked for is a call (`sidePanel.focusSection(0|1|2)`), not state here:
-    // asking for a section that is already open has to work, and a property write of the
-    // same value fires nothing.
-    property bool sidePanelOpen: false
-
     // True while startup is actively connecting / loading the session list;
     // drives the sidebar's "Loading sessions…" overlay.
     function startingUp() {
@@ -91,11 +84,9 @@ Controls.ApplicationWindow {
                 anchors.topMargin: Kirigami.Units.largeSpacing
                 anchors.leftMargin: Kirigami.Units.largeSpacing
                 anchors.rightMargin: Kirigami.Units.largeSpacing
-                // The sidebar's footer sits on the CHAT FRAME's baseline, not the window's:
-                // the frame insets the chat by `s2` of margin plus its 1px border, so a
-                // zero margin here left the footer 9px below the input bar it used to line
-                // up with.
-                anchors.bottomMargin: Theme.spacing.s2 + 1
+                // The chat input reaches the window bottom; keep the sidebar footer on that
+                // same baseline instead of lifting it by the usual panel padding.
+                anchors.bottomMargin: 0
                 spacing: Kirigami.Units.smallSpacing * 1.25
 
                 RowLayout {
@@ -739,175 +730,114 @@ Controls.ApplicationWindow {
             }
         }
 
-        // ----- the chat frame: the transcript AND its panel, one card -----
-        // The panel used to be a third SplitView pane of the WINDOW, which made it read as
-        // chrome hung beside the conversation: full height, edge to edge, a different
-        // surface from the transcript it describes. Inset together in one frame they are one
-        // thing, the divider between them stays draggable, and the panel is as tall as the
-        // chat instead of as tall as the app.
-        //
-        // No radius on the card: Qt Quick's clip is rectangular and the page inside paints
-        // its own square background, so a rounded card could never show its corners.
+        // ----- chat area -----
+        // A direct pane of the window again, edge to edge. The per-chat panel is NOT a pane
+        // of this SplitView any more: it lives inside ChatPage, between the header bar and
+        // the composer, so those two run the chat's full width.
         Item {
-            id: chatFrame
+            id: chatArea
             SplitView.fillWidth: true
             SplitView.fillHeight: true
-
-            Rectangle {
-                id: frameCard
+            clip: true
+            ChatPage {
+                id: chatPage
                 anchors.fill: parent
-                anchors.margins: Theme.spacing.s2
-                anchors.topMargin: Theme.spacing.s1
-                color: Kirigami.Theme.backgroundColor
-                border.width: 1
-                // A tint of the TEXT colour, not `separatorColor`: this app's palette is
-                // custom and its separator is near-white, so the first build drew a glowing
-                // frame around the conversation (reported 2026-11-15). Same trick as the code
-                // panes and the breakdown bars — an alpha tint composites over whatever is
-                // behind it and stays a hairline in either scheme.
-                border.color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
-                                      Kirigami.Theme.textColor.b, 0.14)
+                visible: !Mgr.landingPage && !Mgr.myDayVisible
+                // Clear is destructive: the panel asks, the window confirms.
+                onClearRequested: clearConfirm.open()
+            }
 
-                Controls.SplitView {
-                    // 1px in from the border, so the page's own background does not paint
-                    // over the frame's edge.
-                    anchors.fill: parent
-                    anchors.margins: 1
-                    orientation: Qt.Horizontal
+            // My Day takes the chat area over rather than becoming a fourth column:
+            // it is a surface you go TO and come back from (`Mgr.closeMyDay`), and the
+            // conversation it replaced is one click away in the sidebar.
+            MyDayPage {
+                id: myDayPage
+                anchors.fill: parent
+                visible: Mgr.myDayVisible
+                onCloseItemRequested: (id, title, state) => closeItemDialog.openItem(id, title, state)
+            }
 
-                    // ----- chat area -----
-                    Item {
-                        id: chatArea
-                        SplitView.fillWidth: true
-                        SplitView.fillHeight: true
-                        clip: true
-                        ChatPage {
-                            id: chatPage
-                            anchors.fill: parent
-                            visible: !Mgr.landingPage && !Mgr.myDayVisible
-                            onContextBreakdownRequested: {
-                                root.sidePanelOpen = true
-                                sidePanel.focusSection(0)
-                            }
-                            onToolsOpenRequested: {
-                                root.sidePanelOpen = !root.sidePanelOpen
-                                if (root.sidePanelOpen)
-                                    sidePanel.focusSection(1)
-                            }
-                        }
+            // Landing page: shown until a conversation is committed — cold
+            // start, a disconnect, or after deleting the open chat. Cold start
+            // connects and forms a fresh (empty) staging session, so the
+            // provider/model pickers below have real choices; New chat steps
+            // into that session with the chosen model.
+            ColumnLayout {
+                anchors.centerIn: parent
+                spacing: Kirigami.Units.largeSpacing
+                visible: Mgr.landingPage && !Mgr.myDayVisible
 
-                        // My Day takes the chat area over rather than becoming a fourth column:
-                        // it is a surface you go TO and come back from (`Mgr.closeMyDay`), and the
-                        // conversation it replaced is one click away in the sidebar.
-                        MyDayPage {
-                            id: myDayPage
-                            anchors.fill: parent
-                            visible: Mgr.myDayVisible
-                            onCloseItemRequested: (id, title, state) => closeItemDialog.openItem(id, title, state)
-                        }
-
-                        // Landing page: shown until a conversation is committed — cold
-                        // start, a disconnect, or after deleting the open chat. Cold start
-                        // connects and forms a fresh (empty) staging session, so the
-                        // provider/model pickers below have real choices; New chat steps
-                        // into that session with the chosen model.
-                        ColumnLayout {
-                            anchors.centerIn: parent
-                            spacing: Kirigami.Units.largeSpacing
-                            visible: Mgr.landingPage && !Mgr.myDayVisible
-
-                            BusyIndicator {
-                                Layout.alignment: Qt.AlignHCenter
-                                visible: root.startingUp()
-                                running: root.startingUp()
-                            }
-                            Kirigami.Heading {
-                                text: qsTr("Welcome to Grouse")
-                                level: 2
-                                horizontalAlignment: Text.AlignHCenter
-                                Layout.alignment: Qt.AlignHCenter
-                            }
-                            Controls.Label {
-                                text: root.startingUp() ? qsTr("Connecting…")
-                                      : Mgr.online ? qsTr("Start a new conversation, or pick one from the sidebar.")
-                                      : qsTr("Connect to your goose server to get started.")
-                                horizontalAlignment: Text.AlignHCenter
-                                Layout.alignment: Qt.AlignHCenter
-                                color: Kirigami.Theme.disabledTextColor
-                            }
-                            Controls.Button {
-                                visible: Mgr.online
-                                text: qsTr("New Chat")
-                                icon.name: "document-new"
-                                Layout.alignment: Qt.AlignHCenter
-                                onClicked: Mgr.beginChat()
-                            }
-                            // Provider + model pickers for the chat about to be started.
-                            // Choices come from the staging session's config (Mgr.config).
-                            Controls.Label {
-                                visible: Mgr.online
-                                text: qsTr("Provider")
-                                Layout.alignment: Qt.AlignHCenter
-                                color: Kirigami.Theme.disabledTextColor
-                                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
-                            }
-                            Controls.ComboBox {
-                                visible: Mgr.online
-                                Layout.alignment: Qt.AlignHCenter
-                                implicitWidth: 280
-                                textRole: "name"
-                                // Without a valueRole, currentValue is the model item (a JS
-                                // object), not the value string — provider switches silently
-                                // sent "[object V4ReferenceObject]" to the server.
-                                valueRole: "value"
-                                model: root.landingProviderChoices()
-                                currentIndex: root.landingOptionIndex("provider")
-                                onActivated: Mgr.setConfigOption("provider", currentValue)
-                            }
-                            Controls.Label {
-                                visible: Mgr.online
-                                text: qsTr("Model")
-                                Layout.alignment: Qt.AlignHCenter
-                                color: Kirigami.Theme.disabledTextColor
-                                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
-                            }
-                            Controls.ComboBox {
-                                visible: Mgr.online
-                                Layout.alignment: Qt.AlignHCenter
-                                implicitWidth: 280
-                                textRole: "name"
-                                valueRole: "value"
-                                model: root.landingModelChoices()
-                                currentIndex: root.landingOptionIndex("model")
-                                onActivated: Mgr.setConfigOption("model", currentValue)
-                            }
-                            Controls.Button {
-                                visible: !Mgr.online
-                                text: qsTr("Connect")
-                                icon.name: "network-connect"
-                                Layout.alignment: Qt.AlignHCenter
-                                onClicked: connectDialog.open()
-                            }
-                        }
-                    }
-
-                    // ----- the per-chat panel: context + tools + activity, DOCKED -----
-                    // A SplitView pane, not the OverlayDrawer this used to be: the drawer floated
-                    // OVER the conversation, so reading meant closing it. Docked, the chat narrows
-                    // once and the panel stays out — and the divider between them is draggable,
-                    // which is the KDE way to say "this is a pane, not a popup".
-                    ChatSidePanel {
-                        id: sidePanel
-                        SplitView.preferredWidth: 340
-                        SplitView.minimumWidth: 260
-                        SplitView.maximumWidth: 560
-                        SplitView.fillHeight: true
-                        // No chat, no per-chat panel: on the landing page it would be an empty
-                        // column stealing width from the pickers.
-                        visible: root.sidePanelOpen && !Mgr.landingPage && !Mgr.myDayVisible
-                        onClearRequested: clearConfirm.open()
-                        onCloseRequested: root.sidePanelOpen = false
-                    }
+                BusyIndicator {
+                    Layout.alignment: Qt.AlignHCenter
+                    visible: root.startingUp()
+                    running: root.startingUp()
+                }
+                Kirigami.Heading {
+                    text: qsTr("Welcome to Grouse")
+                    level: 2
+                    horizontalAlignment: Text.AlignHCenter
+                    Layout.alignment: Qt.AlignHCenter
+                }
+                Controls.Label {
+                    text: root.startingUp() ? qsTr("Connecting…")
+                          : Mgr.online ? qsTr("Start a new conversation, or pick one from the sidebar.")
+                          : qsTr("Connect to your goose server to get started.")
+                    horizontalAlignment: Text.AlignHCenter
+                    Layout.alignment: Qt.AlignHCenter
+                    color: Kirigami.Theme.disabledTextColor
+                }
+                Controls.Button {
+                    visible: Mgr.online
+                    text: qsTr("New Chat")
+                    icon.name: "document-new"
+                    Layout.alignment: Qt.AlignHCenter
+                    onClicked: Mgr.beginChat()
+                }
+                // Provider + model pickers for the chat about to be started.
+                // Choices come from the staging session's config (Mgr.config).
+                Controls.Label {
+                    visible: Mgr.online
+                    text: qsTr("Provider")
+                    Layout.alignment: Qt.AlignHCenter
+                    color: Kirigami.Theme.disabledTextColor
+                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
+                }
+                Controls.ComboBox {
+                    visible: Mgr.online
+                    Layout.alignment: Qt.AlignHCenter
+                    implicitWidth: 280
+                    textRole: "name"
+                    // Without a valueRole, currentValue is the model item (a JS
+                    // object), not the value string — provider switches silently
+                    // sent "[object V4ReferenceObject]" to the server.
+                    valueRole: "value"
+                    model: root.landingProviderChoices()
+                    currentIndex: root.landingOptionIndex("provider")
+                    onActivated: Mgr.setConfigOption("provider", currentValue)
+                }
+                Controls.Label {
+                    visible: Mgr.online
+                    text: qsTr("Model")
+                    Layout.alignment: Qt.AlignHCenter
+                    color: Kirigami.Theme.disabledTextColor
+                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
+                }
+                Controls.ComboBox {
+                    visible: Mgr.online
+                    Layout.alignment: Qt.AlignHCenter
+                    implicitWidth: 280
+                    textRole: "name"
+                    valueRole: "value"
+                    model: root.landingModelChoices()
+                    currentIndex: root.landingOptionIndex("model")
+                    onActivated: Mgr.setConfigOption("model", currentValue)
+                }
+                Controls.Button {
+                    visible: !Mgr.online
+                    text: qsTr("Connect")
+                    icon.name: "network-connect"
+                    Layout.alignment: Qt.AlignHCenter
+                    onClicked: connectDialog.open()
                 }
             }
         }

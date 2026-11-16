@@ -8,12 +8,25 @@ import org.kde.kirigami as Kirigami
 Kirigami.Page {
     id: page
 
-    // Emitted when the user clicks the tools pill; main.qml owns the slide-out panel.
-    signal toolsOpenRequested()
-    /// The context donut was tapped: show what fills the window. Answered by the side
-    /// panel's Context section (main.qml opens it), which is also where the breakdown's
-    /// actions live — the reading and the way out of it belong together.
-    signal contextBreakdownRequested()
+    /// The per-chat panel (context, tools, activity), open/closed. It lives INSIDE this
+    /// page, in the band between the header and the composer, so those two bars can run the
+    /// chat's full width: they are about the conversation, not about a column of it.
+    property bool sidePanelOpen: false
+
+    /// Clear is destructive, so its confirmation lives with the window's other dialogs;
+    /// the panel asks here and main.qml answers.
+    signal clearRequested()
+
+    /// The tools pill and the context donut both open this panel, onto their own section.
+    function toggleToolsPanel() {
+        page.sidePanelOpen = !page.sidePanelOpen
+        if (page.sidePanelOpen)
+            sidePanel.focusSection(1)
+    }
+    function showContextPanel() {
+        page.sidePanelOpen = true
+        sidePanel.focusSection(0)
+    }
 
     // A fenced code block inside a message row. A RichText TextEdit wraps
     // everything, so a long line disappeared under a scrollless bubble: the
@@ -788,7 +801,7 @@ Kirigami.Page {
                     icon.name: "settings-configure"
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Configure tools for this chat")
-                    onClicked: page.toolsOpenRequested()
+                    onClicked: page.toggleToolsPanel()
                 }
             }
         }
@@ -799,1686 +812,1716 @@ Kirigami.Page {
         // window — plus Compact and Clear — lives in the side panel's Context section.
         // Nothing about it is per-turn, so nothing about it belongs above the transcript.
 
-        // Pinned MCP-App dock (top): the app's one live view while pinned. The
-        // divider on its bottom edge drags to resize (live), ratio persisted per
-        // session.
-        Item {
-            id: topDock
-            Layout.fillWidth: true
-            readonly property string appKey: page.pins && page.pins.top !== undefined ? page.pins.top : ""
-            visible: appKey.length > 0
-            property real ratio: 0.35
-            readonly property real persistedRatio: page.pins && page.pins.topRatio !== undefined
-                                                    ? page.pins.topRatio : 0.35
-            Component.onCompleted: ratio = persistedRatio
-            onPersistedRatioChanged: if (!topDrag.active) ratio = persistedRatio
-            Layout.preferredHeight: visible ? Math.round(ratio * pageColumn.height) : 0
-
-            Rectangle { anchors.fill: parent; color: Kirigami.Theme.alternateBackgroundColor }
-
-            ColumnLayout {
-                anchors.fill: parent
-                anchors.bottomMargin: topHandle.height
-                spacing: 2
-                RowLayout {
-                    Layout.fillWidth: true
-                    Layout.leftMargin: Kirigami.Units.smallSpacing
-                    Layout.rightMargin: Kirigami.Units.smallSpacing
-                    Layout.topMargin: Kirigami.Units.smallSpacing
-                    Controls.Label {
-                        text: qsTr("Pinned · top")
-                        Layout.fillWidth: true
-                        elide: Text.ElideRight
-                        color: Kirigami.Theme.disabledTextColor
-                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
-                    }
-                    Controls.Button { text: qsTr("Unpin"); onClicked: Mgr.unpinApp("top") }
-                }
-                Loader {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    active: topDock.visible
-                    source: "AppView.qml"
-                    onLoaded: if (item) item.appKey = topDock.appKey
-                }
-            }
-
-            Rectangle {
-                id: topHandle
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                height: 12
-                color: "transparent"
-                Rectangle {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    height: 1
-                    color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
-                                                         : Kirigami.Theme.disabledTextColor
-                }
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 44
-                    height: 5
-                    radius: height / 2
-                    color: topHover.hovered || topDrag.active
-                           ? Kirigami.Theme.highlightColor : Kirigami.Theme.disabledTextColor
-                    opacity: topHover.hovered || topDrag.active ? 1 : 0.55
-                }
-                property real lastY: 0
-                HoverHandler { id: topHover; cursorShape: Qt.SizeVerCursor }
-                DragHandler {
-                    id: topDrag
-                    target: null
-                    onActiveChanged: {
-                        if (active) topHandle.lastY = centroid.scenePosition.y
-                        else Mgr.setPinRatio("top", topDock.ratio)
-                    }
-                    onCentroidChanged: if (active) {
-                        var y = centroid.scenePosition.y
-                        topDock.ratio = Math.max(0.15, Math.min(0.85,
-                            topDock.ratio + (y - topHandle.lastY) / pageColumn.height))
-                        topHandle.lastY = y
-                    }
-                }
-            }
-        }
-
-        // A thread chat's rows, above its own conversation: what the area holds, so
-        // the chat about it is read in context. Collapsed by default — the panel is
-        // a reminder of the thread, not the subject of the chat.
-        Rectangle {
-            id: threadPanel
-            readonly property string label: Mgr.currentThreadLabel
-            readonly property var items: page.threadRows(Mgr.myDayOpen, threadPanel.label)
-            readonly property var tasks: page.threadRows(Mgr.myDayHanded, threadPanel.label)
-            // OPEN by default: a thread chat exists so the area's cards sit right
-            // there, above the conversation. Collapsed made the panel read as a chip
-            // that had to be discovered before it said anything.
-            property bool expanded: true
-            onLabelChanged: expanded = true
-            Layout.fillWidth: true
-            Layout.topMargin: Kirigami.Units.smallSpacing
-            Layout.preferredHeight: visible ? panelCol.implicitHeight + Theme.spacing.s2 : 0
-            visible: label.length > 0 && (items.length + tasks.length) > 0
-            radius: Theme.radius.md
-            color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
-                           Kirigami.Theme.textColor.b, 0.05)
-
-            ColumnLayout {
-                id: panelCol
-                anchors.fill: parent
-                anchors.margins: Theme.spacing.s2
-                spacing: Theme.spacing.half
-
-                // The MouseArea is the row, not an overlay inside it: a layout
-                // positions and sizes its own children, so `anchors.fill: parent` on
-                // a MouseArea placed in the RowLayout is undefined behavior (Qt warns
-                // and the hit area is then the layout's business, not ours).
-                MouseArea {
-                    id: threadHeader
-                    Layout.fillWidth: true
-                    implicitHeight: headerRow.implicitHeight
-                    onClicked: threadPanel.expanded = !threadPanel.expanded
-
-                    RowLayout {
-                        id: headerRow
-                        anchors.fill: parent
-                        spacing: Theme.spacing.s2
-                        Controls.Label {
-                            text: Mgr.threadName(threadPanel.label)
-                            textFormat: Text.PlainText
-                            elide: Text.ElideRight
-                            font.weight: Font.DemiBold
-                            Layout.fillWidth: true
-                            renderType: Text.NativeRendering
-                        }
-                        Controls.Label {
-                            readonly property var parts: {
-                                const p = []
-                                if (threadPanel.items.length > 0)
-                                    p.push(qsTr("%1 open").arg(threadPanel.items.length))
-                                if (threadPanel.tasks.length > 0)
-                                    p.push(qsTr("%1 handed over").arg(threadPanel.tasks.length))
-                                return p
-                            }
-                            text: parts.join(" · ")
-                            color: Kirigami.Theme.disabledTextColor
-                            font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.8))
-                            renderType: Text.NativeRendering
-                        }
-                        Kirigami.Icon {
-                            source: threadPanel.expanded ? "arrow-down" : "arrow-right"
-                            implicitWidth: 12
-                            implicitHeight: 12
-                        }
-                    }
-                }
-
-                Repeater {
-                    model: threadPanel.expanded
-                           ? (threadPanel.tasks.length + threadPanel.items.length) : 0
-                    delegate: Controls.Label {
-                        // Handed-over work first, then the open loops: one is waiting
-                        // for a look, the other is waiting for the world.
-                        readonly property var task: index < threadPanel.tasks.length
-                                                    ? threadPanel.tasks[index] : null
-                        readonly property var item: task === null
-                            ? threadPanel.items[index - threadPanel.tasks.length] : null
-                        Layout.fillWidth: true
-                        topPadding: Theme.spacing.half
-                        textFormat: Text.PlainText
-                        wrapMode: Text.Wrap
-                        maximumLineCount: 2
-                        elide: Text.ElideRight
-                        font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.9))
-                        color: task !== null ? Kirigami.Theme.textColor
-                                             : Kirigami.Theme.disabledTextColor
-                        text: task !== null
-                              ? ((task.state === "review" ? qsTr("ready · ") : qsTr("working · "))
-                                 + task.title
-                                 + ((task.result || "").length > 0 ? " — " + task.result : ""))
-                              : (item.title + ((Mgr.rowMeta(item, false)).length > 0
-                                               ? " — " + Mgr.rowMeta(item, false) : ""))
-                    }
-                }
-            }
-        }
-
-        Column {
-            visible: Mgr.messageModel.count === 0
-            Layout.fillWidth: true
-            Layout.topMargin: Kirigami.Units.largeSpacing
-            spacing: Kirigami.Units.smallSpacing
-
-            BusyIndicator {
-                anchors.horizontalCenter: parent.horizontalCenter
-                visible: page.startingUp()
-                running: page.startingUp()
-            }
-            Controls.Label {
-                text: page.startingUp() ? page.busyLabel()
-                      : (Mgr.online && Mgr.messageModel.count === 0
-                         ? qsTr("Start a new conversation") : page.hintText)
-                anchors.horizontalCenter: parent.horizontalCenter
-                horizontalAlignment: Text.AlignHCenter
-                color: Kirigami.Theme.disabledTextColor
-                font.pixelSize: Math.max(12, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.92))
-                renderType: Text.NativeRendering
-            }
-        }
-
-        // Chat list, wrapped so the scroll-to-bottom button can overlay it.
-        // The bottom margin keeps the last message (and the waiting indicator)
-        // from colliding with the input bar.
-        Item {
+        // ----- the chat's middle band: everything between the header and the composer ----
+        // The panel lives HERE rather than beside the whole page, so the header bar and the
+        // composer run the chat's full width — they belong to the conversation, not to one
+        // column of it. The divider between transcript and panel is still draggable.
+        SplitView {
+            id: chatSplit
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.bottomMargin: Kirigami.Units.largeSpacing
+            orientation: Qt.Horizontal
 
-            ListView {
-            id: list
-            anchors.fill: parent
-            clip: true
-            model: Mgr.messageModel
-            spacing: Kirigami.Units.largeSpacing
-            boundsBehavior: Flickable.StopAtBounds
-            // Track pin state only from real user scrolls (wheel/drag/flick all
-            // set `moving`); the programmatic reset on messagesChanged and the
-            // positionViewAtEnd jump don't, so they can't clear the pin.
-            onContentYChanged: {
-                if (list.moving)
-                    pinnedToEnd = list.atYEnd
-                page.maybeLoadOlder()
-            }
-            onCountChanged: page.applySessionScroll()
-            // The end moves as rows measure and images decode: every height change while
-            // pinned is one more pass of the pin (pinToEnd is a no-op if a chain is running).
-            onContentHeightChanged: {
-                page.applySessionScroll()
-                if (page.pinnedToEnd)
-                    page.pinToEnd()
-            }
-            onHeightChanged: page.applySessionScroll()
-            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-            // A bounded cache with recycling, not "keep everything realized".
-            // The model only ever holds the core's 60-item window, but every
-            // scroll-up prepends another 40 (CLIENT_WINDOW / load_older), so a
-            // long read grew the live set without limit — and each row
-            // instantiates all four bubble variants. 20000px kept every one of
-            // them alive and repolished for the life of the session. 2000px
-            // still leaves ~2 screens of slack in each direction, which is what
-            // kept the scrollbar from collapsing as delegates died mid-drag,
-            // and reuseItems recycles the ones that do leave the window instead
-            // of tearing them down and rebuilding them on the way back.
-            cacheBuffer: 2000
-            reuseItems: true
+            ColumnLayout {
+                id: chatBody
+                SplitView.fillWidth: true
+                SplitView.fillHeight: true
+                spacing: 0
 
-            // The waiting bubble is an INLINE footer row: it participates in
-            // contentHeight, so positionViewAtEnd reveals the last message and
-            // the bubble together and neither is ever covered.
-            footer: Rectangle {
-                visible: Mgr.prompting
-                width: ListView.view ? ListView.view.width : 0
-                height: visible ? waitRow.implicitHeight + Kirigami.Units.smallSpacing : 0
-                color: "transparent"
-                Row {
-                    id: waitRow
-                    anchors.left: parent.left
-                    anchors.leftMargin: Kirigami.Units.largeSpacing * 1.5
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: Kirigami.Units.smallSpacing
-                    Rectangle {
-                        width: waitInner.implicitWidth + Kirigami.Units.smallSpacing * 2
-                        height: waitInner.implicitHeight + Kirigami.Units.smallSpacing
-                        radius: 16
-                        color: Kirigami.Theme.alternateBackgroundColor
-                        border.color: Kirigami.Theme.disabledTextColor
-                        border.width: 1
-                        Row {
-                            id: waitInner
-                            anchors.centerIn: parent
-                            spacing: Kirigami.Units.smallSpacing
-                            BusyIndicator {
-                                id: busy
-                                width: 18
-                                height: 18
-                                running: Mgr.prompting
-                            }
+                // Pinned MCP-App dock (top): the app's one live view while pinned. The
+                // divider on its bottom edge drags to resize (live), ratio persisted per
+                // session.
+                Item {
+                    id: topDock
+                    Layout.fillWidth: true
+                    readonly property string appKey: page.pins && page.pins.top !== undefined ? page.pins.top : ""
+                    visible: appKey.length > 0
+                    property real ratio: 0.35
+                    readonly property real persistedRatio: page.pins && page.pins.topRatio !== undefined
+                                                            ? page.pins.topRatio : 0.35
+                    Component.onCompleted: ratio = persistedRatio
+                    onPersistedRatioChanged: if (!topDrag.active) ratio = persistedRatio
+                    Layout.preferredHeight: visible ? Math.round(ratio * pageColumn.height) : 0
+
+                    Rectangle { anchors.fill: parent; color: Kirigami.Theme.alternateBackgroundColor }
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.bottomMargin: topHandle.height
+                        spacing: 2
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.leftMargin: Kirigami.Units.smallSpacing
+                            Layout.rightMargin: Kirigami.Units.smallSpacing
+                            Layout.topMargin: Kirigami.Units.smallSpacing
                             Controls.Label {
-                                text: {
-                                    const base = qsTr("Grouse is working…")
-                                    // Debug readout rides on the same label rather than a
-                                    // second row, which would shift the bubble's height
-                                    // every second while a turn streams.
-                                    const diag = (Mgr.debugTools && page.turnDiagText.length > 0)
-                                                 ? "  ·  " + page.turnDiagText : ""
-                                    return base + diag
-                                }
-                                // PlainText: the diag carries tool/model-supplied text and
-                                // AutoText would parse it as markup.
-                                textFormat: Text.PlainText
-                                opacity: 0.8
+                                text: qsTr("Pinned · top")
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
+                                color: Kirigami.Theme.disabledTextColor
+                                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
+                            }
+                            Controls.Button { text: qsTr("Unpin"); onClicked: Mgr.unpinApp("top") }
+                        }
+                        Loader {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            active: topDock.visible
+                            source: "AppView.qml"
+                            onLoaded: if (item) item.appKey = topDock.appKey
+                        }
+                    }
+
+                    Rectangle {
+                        id: topHandle
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        height: 12
+                        color: "transparent"
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            height: 1
+                            color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
+                                                                 : Kirigami.Theme.disabledTextColor
+                        }
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 44
+                            height: 5
+                            radius: height / 2
+                            color: topHover.hovered || topDrag.active
+                                   ? Kirigami.Theme.highlightColor : Kirigami.Theme.disabledTextColor
+                            opacity: topHover.hovered || topDrag.active ? 1 : 0.55
+                        }
+                        property real lastY: 0
+                        HoverHandler { id: topHover; cursorShape: Qt.SizeVerCursor }
+                        DragHandler {
+                            id: topDrag
+                            target: null
+                            onActiveChanged: {
+                                if (active) topHandle.lastY = centroid.scenePosition.y
+                                else Mgr.setPinRatio("top", topDock.ratio)
+                            }
+                            onCentroidChanged: if (active) {
+                                var y = centroid.scenePosition.y
+                                topDock.ratio = Math.max(0.15, Math.min(0.85,
+                                    topDock.ratio + (y - topHandle.lastY) / pageColumn.height))
+                                topHandle.lastY = y
                             }
                         }
                     }
                 }
-            }
 
-            // Inline delegate (a separate-file delegate loses the `model`
-            // context for root-object bindings; inline works). Reads role names
-            // from the MessageListModel via `model.<role>`.
-            delegate: Item {
-                id: mdel
-                width: ListView.view.width
-
-                readonly property string messageRole: model.role ? model.role : ""
-                readonly property string messageText: model.text ? model.text : ""
-                readonly property string messageHtml: model.html ? model.html : ""
-                // Roles are CONTEXT properties on a delegate, not members of the
-                // delegate Item: a role read as `mdel.blocks` is always undefined, whatever the
-                // model holds. That silently killed the fenced-code render — a row
-                // with code is given `blocks` and deliberately no `html`, so the flat
-                // TextEdit's `messageHtml || messageText` fell back to raw markdown
-                // and the code panes got undefined. Wrapped like every other role.
-                readonly property var messageBlocks: model.blocks ? model.blocks : []
-                readonly property string messageTitle: model.title ? model.title : ""
-                readonly property string messageDetail: model.detail ? model.detail : ""
-                readonly property string messageOutput: model.output ? model.output : ""
-                readonly property string messageStatus: model.status ? model.status : ""
-                readonly property var messageImages: model.images ? model.images : []
-                // Non-image attachments: {name, kind, icon, size, subtitle}
-                readonly property var messageFiles: model.files ? model.files : []
-                readonly property string messageUsage: model.usage ? String(model.usage) : ""
-                readonly property string messageChartData: model.chartData ? String(model.chartData) : ""
-                readonly property string messageAppHtml: model.appHtml ? String(model.appHtml) : ""
-                readonly property string messageAppKey: model.appKey ? String(model.appKey) : ""
-                readonly property var messageCalls: model.calls ? model.calls : []
-                // A delegate's child activity (the SUBAGENT's own tool calls): the
-                // server keeps subagent sessions off ACP and forwards these onto the
-                // delegate row, so this IS the child's visible work.
-                readonly property var messageSteps: model.steps ? model.steps : []
-                // A tool run's framing (issue #13): the one-line label and the
-                // thinking the core absorbed into it.
-                readonly property string messageSummary: model.summary ? model.summary : ""
-                readonly property string messageStepThought: model.stepThought ? model.stepThought : ""
-
-                readonly property bool isUser: mdel.messageRole === "user"
-                readonly property bool isAgent: mdel.messageRole === "agent"
-                readonly property bool isTool: mdel.messageRole === "tool"
-                readonly property bool isToolGroup: mdel.messageRole === "toolgroup"
-                readonly property bool isThought: mdel.messageRole === "thought"
-                readonly property bool isError: mdel.messageRole === "error"
-                readonly property bool isChart: mdel.messageRole === "chart"
-                readonly property bool isMcpApp: mdel.messageRole === "mcpapp"
-                // A file the SERVER shared: the row is a reference, and the card
-                // is also the download (see FileCard.qml).
-                readonly property bool isFile: mdel.messageRole === "file"
-                readonly property var fileRef: mdel.messageFiles.length > 0 ? mdel.messageFiles[0] : ({})
-                readonly property var fileMeta: mdel.isFile
-                    ? page.fileCardInfo(String(fileRef.path || ""), String(fileRef.name || ""),
-                                        String(fileRef.mime || ""), Number(fileRef.size || 0))
-                    : ({})
-                readonly property var fileProgress: mdel.isFile
-                    ? page.fileState(String(fileRef.path || "")) : ({})
-                // A shared IMAGE is the reply's own content, so it paints inline and
-                // is fetched without a tap (ImageCard). Anything else keeps the
-                // download card.
-                readonly property bool inlineFileImage: mdel.isFile
-                    && page.inlineImage(String(fileRef.mime || ""), String(fileRef.name || ""),
-                                        Number(fileRef.size || 0))
-                // True when QtWebEngine was compiled in: MCP Apps render inline
-                // (AppView) instead of the browser-handoff chip.
-                readonly property bool inlineApps: Mgr.inlineAppsEnabled()
-
-                // A native Canvas chart reserves ~220-266px depending on type + title.
-                readonly property real chartH: (function() {
-                    if (mdel.messageChartData.length === 0) return 140
-                    var spec = null
-                    try { spec = JSON.parse(mdel.messageChartData) } catch (e) { return 140 }
-                    var base = (spec.type === "pie" || spec.type === "doughnut") ? 240 : 220
-                    if (spec.options && spec.options.title && spec.options.title.text) base += 26
-                    return base
-                })()
-
-                readonly property real pad: Kirigami.Units.smallSpacing * 1.5
-                readonly property real gap: Kirigami.Units.largeSpacing * 1.5
-                // QQC2's vertical scrollbar overlays the ListView viewport;
-                // reserve its width so bubbles/chips never sit underneath it.
-                readonly property real scrollbarReserve: Kirigami.Units.gridUnit * 1.5
-                readonly property real maxW: Math.max(0, mdel.width - mdel.gap * 2 - mdel.scrollbarReserve)
-                readonly property real bubbleW: Math.min(mdel.maxW, 620)
-                readonly property real userBubbleW: Math.min(mdel.maxW * 0.72, 520)
-                readonly property real agentBubbleW: Math.min(mdel.maxW, 720)
-                readonly property int truncOutput: 4000   // perf/scroll cap for tool output
-
-                // Tool chips start collapsed. The open state lives in the
-                // message model (ExpandedRole) — keyed by a stable row uid —
-                // so it survives both scrolling away and the row being
-                // recycled under reuseItems.
-                readonly property bool toolOpen: !!model.expanded
-                // Thoughts start collapsed, even mid-turn; the open state lives
-                // in the message model (ExpandedRole) so it survives scrolling.
-                readonly property bool thoughtOpen: !!model.expanded
-
-                function shortOutput() {
-                    return mdel.messageOutput.length > mdel.truncOutput
-                        ? mdel.messageOutput.substring(0, mdel.truncOutput) + "…"
-                        : mdel.messageOutput
-                }
-                function statusText() {
-                    return mdel.messageStatus === "completed" ? ("✓ " + qsTr("done"))
-                         : mdel.messageStatus === "failed" ? qsTr("failed") : mdel.messageStatus
-                }
-                function groupTitle() {
-                    // The run's own label first — the model's framing of what it
-                    // was doing. The call-count fallback is only for a run with
-                    // nothing to draw on.
-                    if (mdel.messageSummary.length > 0) return mdel.messageSummary
-                    if (mdel.messageCalls.length === 0) return qsTr("Tool calls")
-                    var first = String(mdel.messageCalls[0].title || qsTr("call"))
-                    var same = true
-                    for (var i = 1; i < mdel.messageCalls.length; i++) {
-                        if (String(mdel.messageCalls[i].title || qsTr("call")) !== first) {
-                            same = false
-                            break
-                        }
-                    }
-                    return same ? mdel.messageCalls.length + " × " + first
-                                : mdel.messageCalls.length + " " + qsTr("tool calls")
-                }
-                function callStatus(call) {
-                    return call.status === "completed" ? "✓ " + qsTr("done")
-                         : call.status === "failed" ? qsTr("failed") : call.status
-                }
-                function toolChipTitle() {
-                    // A lone call framed by the model's thinking reads as that
-                    // framing; otherwise the raw tool title is all there is.
-                    if (mdel.messageSummary.length > 0) return mdel.messageSummary
-                    return qsTr("Tool") + ": " + (mdel.messageTitle || qsTr("call"))
-                }
-
-                height: mdel.isUser ? userBubble.implicitHeight
-                     : mdel.isAgent ? agentBubble.implicitHeight
-                     : mdel.isTool ? toolChip.implicitHeight
-                     : mdel.isToolGroup ? toolGroupChip.implicitHeight
-                     : mdel.isThought ? thoughtBlock.implicitHeight
-                     : mdel.isChart ? mdel.chartH + mdel.pad * 2
-                     : mdel.isMcpApp ? mcpAppChip.implicitHeight
-                     : mdel.isFile ? (mdel.inlineFileImage ? imageCard.implicitHeight
-                                                           : fileCard.implicitHeight)
-                     : errorBanner.implicitHeight
-
-                // The selectable bubble text under the cursor (user or agent).
-                // When the message rendered as blocks (fenced code), the target
-                // is the blocks column's one editable — with several chunks the
-                // selection lives in whichever has focus, not a single bubble.
-                readonly property bool hasBlocks:
-                    (mdel.isUser || mdel.isAgent) && mdel.messageBlocks.length > 0
-
-                // The selectable bubble text under the cursor (user or agent).
-                // When the message rendered as blocks (fenced code), the
-                // editable lives in the blocks column (its first prose chunk;
-                // the code panes select independently). The menu's
-                // select-all/copy targets switch away from the flat bubble.
-                readonly property var msgEdit: mdel.hasBlocks
-                    ? (mdel.isUser ? userBlocks.editable : agentBlocks.editable)
-                    : (mdel.isUser ? userText : agentText)
-
-                // Right-click menu for the bubble text. Copy takes the selection when
-                // there is one, else the whole message.
-                Controls.Menu {
-                    id: msgMenu
-                    Controls.MenuItem {
-                        text: qsTr("Copy")
-                        enabled: mdel.messageText.length > 0
-                        onTriggered: {
-                            const e = mdel.msgEdit
-                            if (e.selectedText.length > 0) {
-                                e.copy()
-                            } else {
-                                e.selectAll()
-                                e.copy()
-                                e.deselect()
-                            }
-                        }
-                    }
-                    Controls.MenuItem {
-                        text: qsTr("Select all")
-                        enabled: mdel.messageText.length > 0
-                        onTriggered: mdel.msgEdit.selectAll()
-                    }
-                    Controls.MenuSeparator { visible: mdel.isAgent }
-                    Controls.MenuItem {
-                        text: qsTr("Show stats")
-                        visible: mdel.isAgent
-                        enabled: mdel.messageUsage.length > 0
-                        onTriggered: statsPopup.open()
-                    }
-                }
-
-                // ---------------- user bubble (right) ----------------
+                // A thread chat's rows, above its own conversation: what the area holds, so
+                // the chat about it is read in context. Collapsed by default — the panel is
+                // a reminder of the thread, not the subject of the chat.
                 Rectangle {
-                    id: userBubble
-                    visible: mdel.isUser
-                    anchors.top: parent.top
-                    anchors.right: parent.right
-                    anchors.rightMargin: mdel.gap + mdel.scrollbarReserve
-                    width: mdel.userBubbleW
-                    implicitHeight: userCol.implicitHeight + mdel.pad * 2
-                    radius: Theme.radius.xl
-                    color: Kirigami.Theme.highlightColor
-                    clip: true
+                    id: threadPanel
+                    readonly property string label: Mgr.currentThreadLabel
+                    readonly property var items: page.threadRows(Mgr.myDayOpen, threadPanel.label)
+                    readonly property var tasks: page.threadRows(Mgr.myDayHanded, threadPanel.label)
+                    // OPEN by default: a thread chat exists so the area's cards sit right
+                    // there, above the conversation. Collapsed made the panel read as a chip
+                    // that had to be discovered before it said anything.
+                    property bool expanded: true
+                    onLabelChanged: expanded = true
+                    Layout.fillWidth: true
+                    Layout.topMargin: Kirigami.Units.smallSpacing
+                    Layout.preferredHeight: visible ? panelCol.implicitHeight + Theme.spacing.s2 : 0
+                    visible: label.length > 0 && (items.length + tasks.length) > 0
+                    radius: Theme.radius.md
+                    color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                                   Kirigami.Theme.textColor.b, 0.05)
 
-                    Column {
-                        id: userCol
+                    ColumnLayout {
+                        id: panelCol
                         anchors.fill: parent
-                        anchors.margins: mdel.pad
-                        spacing: 2
-                        Controls.Label {
-                            text: qsTr("You")
-                            font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
-                            renderType: Text.NativeRendering
-                            color: Kirigami.Theme.highlightedTextColor
-                            opacity: 0.86
-                        }
-                        Column {
-                            visible: mdel.messageImages.length > 0
-                            spacing: Kirigami.Units.smallSpacing
-                            Repeater {
-                                model: mdel.messageImages
-                                delegate: Item {
-                                    width: parent.width
-                                    height: modelData.image ? 140 : fileChip.implicitHeight
-                                    Image {
-                                        id: imgThumb
-                                        visible: modelData.image
-                                        anchors.left: parent.left
-                                        source: modelData.url
-                                        width: Math.min(140, implicitWidth)
-                                        height: 140
-                                        fillMode: Image.PreserveAspectFit
-                                    }
-                                    MouseArea {
-                                        anchors.fill: imgThumb
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            imageViewer.image = modelData.url
-                                            imageViewer.open()
-                                        }
-                                    }
-                                    Rectangle {
-                                        id: fileChip
-                                        visible: !modelData.image
-                                        anchors.left: parent.left
-                                        height: 26
-                                        width: fileChipRow.implicitWidth + Kirigami.Units.smallSpacing * 2
-                                        radius: 6
-                                        color: Qt.lighter(Kirigami.Theme.highlightColor, 1.7)
-                                        Row {
-                                            id: fileChipRow
-                                            anchors.centerIn: parent
-                                            spacing: Kirigami.Units.smallSpacing
-                                            Kirigami.Icon {
-                                                source: "text-x-generic"
-                                                implicitWidth: 16
-                                                implicitHeight: 16
-                                            }
-                                            Controls.Label {
-                                                text: modelData.name
-                                                elide: Text.ElideRight
-                                                color: Kirigami.Theme.highlightedTextColor
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // The files that rode this prompt, as cards: icon, name,
-                        // kind and size. Drawn from the core's own record, so a
-                        // replayed row still shows them — this bubble used to
-                        // show NOTHING for a non-image attachment, because the
-                        // send-time chip queue was only ever populated for
-                        // prompts that also carried blocks.
-                        Column {
-                            id: userFiles
-                            visible: mdel.messageFiles.length > 0
-                            width: parent.width
-                            spacing: Kirigami.Units.smallSpacing
-                            Repeater {
-                                model: mdel.messageFiles
-                                AttachmentCard {
-                                    width: userFiles.width
-                                    name: modelData.name
-                                    icon: modelData.icon
-                                    subtitle: modelData.subtitle
-                                    fillColor: Qt.rgba(1, 1, 1, 0.14)
-                                    foreground: Kirigami.Theme.highlightedTextColor
-                                }
-                            }
-                        }
-                        // A TextEdit (not a Label) so the text is selectable; right-click
-                        // opens the copy menu. A message with fenced code renders as a
-                        // BlocksColumn instead — the two are siblings so the bubble
-                        // Column lays out whichever is visible.
-                        TextEdit {
-                            id: userText
-                            text: mdel.messageHtml || mdel.messageText
-                            visible: !mdel.hasBlocks
-                            // PlainText until the row is finalized: with RichText, Qt
-                            // re-parses + reshapes the WHOLE accumulated message on every
-                            // streamed chunk (quadratic). html is empty while a turn
-                            // streams and is set once at finalize.
-                            textFormat: mdel.messageHtml.length > 0 ? Text.RichText : Text.PlainText
-                            width: mdel.userBubbleW - mdel.pad * 2
-                            wrapMode: TextEdit.Wrap
-                            readOnly: true
-                            selectByMouse: true
-                            persistentSelection: true
-                            cursorVisible: false
-                            color: Kirigami.Theme.highlightedTextColor
-                            selectionColor: Kirigami.Theme.highlightColor
-                            selectedTextColor: Kirigami.Theme.highlightedTextColor
-                            renderType: Text.NativeRendering
-                            onLinkActivated: Qt.openUrlExternally(link)
-                            TapHandler {
-                                acceptedButtons: Qt.RightButton
-                                onTapped: msgMenu.popup()
-                            }
-                        }
-                        // The split render of a message that carries fenced code:
-                        // prose chunks + CodeFence panes, laid out by the same bubble
-                        // Column as the flat TextEdit above.
-                        BlocksColumn {
-                            id: userBlocks
-                            visible: mdel.hasBlocks
-                            width: mdel.userBubbleW - mdel.pad * 2
-                            blocks: mdel.messageBlocks
-                            userStyle: true
-                        }
-                    }
-                }
+                        anchors.margins: Theme.spacing.s2
+                        spacing: Theme.spacing.half
 
-                // ---------------- agent bubble (left) ----------------
+                        // The MouseArea is the row, not an overlay inside it: a layout
+                        // positions and sizes its own children, so `anchors.fill: parent` on
+                        // a MouseArea placed in the RowLayout is undefined behavior (Qt warns
+                        // and the hit area is then the layout's business, not ours).
+                        MouseArea {
+                            id: threadHeader
+                            Layout.fillWidth: true
+                            implicitHeight: headerRow.implicitHeight
+                            onClicked: threadPanel.expanded = !threadPanel.expanded
 
-                // ---------------- agent bubble (left) ----------------
-                Rectangle {
-                    id: agentBubble
-                    visible: mdel.isAgent
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.leftMargin: mdel.gap
-                    width: mdel.agentBubbleW
-                    implicitHeight: agentCol.implicitHeight + mdel.pad * 2
-                    radius: Theme.radius.xl
-                    color: Kirigami.Theme.alternateBackgroundColor
-                    border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
-                                                                : Kirigami.Theme.disabledTextColor
-                    border.width: 1
-                    clip: true
-
-                    Column {
-                        id: agentCol
-                        anchors.fill: parent
-                        anchors.margins: mdel.pad
-                        spacing: 2
-                        Controls.Label {
-                            text: qsTr("Goose")
-                            font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
-                            font.weight: Font.DemiBold
-                            renderType: Text.NativeRendering
-                            color: Kirigami.Theme.disabledTextColor
-                        }
-                        // Selectable; a plain left-click (a tap, not a drag — a drag
-                        // selects text) reveals this reply's stats, and right-click opens
-                        // the copy menu.
-                        TextEdit {
-                            id: agentText
-                            text: mdel.messageHtml || mdel.messageText
-                            visible: !mdel.hasBlocks
-                            // PlainText while streaming (see the user bubble note above);
-                            // RichText once finalize has rendered the markdown to html.
-                            textFormat: mdel.messageHtml.length > 0 ? Text.RichText : Text.PlainText
-                            width: mdel.agentBubbleW - mdel.pad * 2
-                            wrapMode: TextEdit.Wrap
-                            readOnly: true
-                            selectByMouse: true
-                            persistentSelection: true
-                            cursorVisible: false
-                            color: Kirigami.Theme.textColor
-                            selectionColor: Kirigami.Theme.highlightColor
-                            selectedTextColor: Kirigami.Theme.highlightedTextColor
-                            renderType: Text.NativeRendering
-                            onLinkActivated: Qt.openUrlExternally(link)
-                            TapHandler {
-                                acceptedButtons: Qt.LeftButton
-                                onTapped: {
-                                    statsPopup.x = point.position.x + 8
-                                    statsPopup.y = point.position.y + 8
-                                    statsPopup.open()
-                                }
-                            }
-                            TapHandler {
-                                acceptedButtons: Qt.RightButton
-                                onTapped: msgMenu.popup()
-                            }
-                            // Stats used to sit permanently under the reply. They are
-                            // diagnostics — interesting when asking "why was that slow",
-                            // noise the rest of the time — so they surface on demand
-                            // instead of shifting the conversation as they appear.
-                            Controls.Popup {
-                                id: statsPopup
-                                padding: Kirigami.Units.smallSpacing
-                                closePolicy: Controls.Popup.CloseOnEscape | Controls.Popup.CloseOnPressOutside
+                            RowLayout {
+                                id: headerRow
+                                anchors.fill: parent
+                                spacing: Theme.spacing.s2
                                 Controls.Label {
-                                    text: mdel.messageUsage.length > 0
-                                          ? mdel.messageUsage
-                                          : qsTr("No stats recorded for this message")
-                                    color: Kirigami.Theme.textColor
-                                    font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.85))
+                                    text: Mgr.threadName(threadPanel.label)
+                                    textFormat: Text.PlainText
+                                    elide: Text.ElideRight
+                                    font.weight: Font.DemiBold
+                                    Layout.fillWidth: true
                                     renderType: Text.NativeRendering
                                 }
-                            }
-                        }
-                        // The split render, agent side. Tapping the proseChunk opens
-                        // the stats popup exactly as the flat bubble does, so a message
-                        // with code behaves the same as one without.
-                        BlocksColumn {
-                            id: agentBlocks
-                            visible: mdel.hasBlocks
-                            width: mdel.agentBubbleW - mdel.pad * 2
-                            blocks: mdel.messageBlocks
-                            TapHandler {
-                                acceptedButtons: Qt.LeftButton
-                                onTapped: (tap) => {
-                                    statsPopup.x = tap.position.x + 8
-                                    statsPopup.y = tap.position.y + 8
-                                    statsPopup.open()
+                                Controls.Label {
+                                    readonly property var parts: {
+                                        const p = []
+                                        if (threadPanel.items.length > 0)
+                                            p.push(qsTr("%1 open").arg(threadPanel.items.length))
+                                        if (threadPanel.tasks.length > 0)
+                                            p.push(qsTr("%1 handed over").arg(threadPanel.tasks.length))
+                                        return p
+                                    }
+                                    text: parts.join(" · ")
+                                    color: Kirigami.Theme.disabledTextColor
+                                    font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.8))
+                                    renderType: Text.NativeRendering
+                                }
+                                Kirigami.Icon {
+                                    source: threadPanel.expanded ? "arrow-down" : "arrow-right"
+                                    implicitWidth: 12
+                                    implicitHeight: 12
                                 }
                             }
-                            TapHandler {
-                                acceptedButtons: Qt.RightButton
-                                onTapped: msgMenu.popup()
+                        }
+
+                        Repeater {
+                            model: threadPanel.expanded
+                                   ? (threadPanel.tasks.length + threadPanel.items.length) : 0
+                            delegate: Controls.Label {
+                                // Handed-over work first, then the open loops: one is waiting
+                                // for a look, the other is waiting for the world.
+                                readonly property var task: index < threadPanel.tasks.length
+                                                            ? threadPanel.tasks[index] : null
+                                readonly property var item: task === null
+                                    ? threadPanel.items[index - threadPanel.tasks.length] : null
+                                Layout.fillWidth: true
+                                topPadding: Theme.spacing.half
+                                textFormat: Text.PlainText
+                                wrapMode: Text.Wrap
+                                maximumLineCount: 2
+                                elide: Text.ElideRight
+                                font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.9))
+                                color: task !== null ? Kirigami.Theme.textColor
+                                                     : Kirigami.Theme.disabledTextColor
+                                text: task !== null
+                                      ? ((task.state === "review" ? qsTr("ready · ") : qsTr("working · "))
+                                         + task.title
+                                         + ((task.result || "").length > 0 ? " — " + task.result : ""))
+                                      : (item.title + ((Mgr.rowMeta(item, false)).length > 0
+                                                       ? " — " + Mgr.rowMeta(item, false) : ""))
                             }
                         }
                     }
                 }
-                // ---------------- tool chip ----------------
-                Rectangle {
-                    id: toolChip
-                    visible: mdel.isTool
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.leftMargin: mdel.gap
-                    width: Math.min(mdel.agentBubbleW * 0.78, 560)
-                    implicitHeight: chipCol.implicitHeight + mdel.pad * 2
-                    radius: Theme.radius.lg
-                    color: Qt.lighter(Kirigami.Theme.backgroundColor, 1.18)
-                    border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
-                                                                : Kirigami.Theme.disabledTextColor
-                    border.width: 1
 
-                    Column {
-                        id: chipCol
-                        anchors.fill: parent
-                        anchors.margins: mdel.pad
-                        spacing: 0
-                        RowLayout {
-                            height: Kirigami.Units.gridUnit * 1.25
-                            width: parent.width
+                Column {
+                    visible: Mgr.messageModel.count === 0
+                    Layout.fillWidth: true
+                    Layout.topMargin: Kirigami.Units.largeSpacing
+                    spacing: Kirigami.Units.smallSpacing
+
+                    BusyIndicator {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        visible: page.startingUp()
+                        running: page.startingUp()
+                    }
+                    Controls.Label {
+                        text: page.startingUp() ? page.busyLabel()
+                              : (Mgr.online && Mgr.messageModel.count === 0
+                                 ? qsTr("Start a new conversation") : page.hintText)
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        horizontalAlignment: Text.AlignHCenter
+                        color: Kirigami.Theme.disabledTextColor
+                        font.pixelSize: Math.max(12, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.92))
+                        renderType: Text.NativeRendering
+                    }
+                }
+
+                // Chat list, wrapped so the scroll-to-bottom button can overlay it.
+                // The bottom margin keeps the last message (and the waiting indicator)
+                // from colliding with the input bar.
+                Item {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    Layout.bottomMargin: Kirigami.Units.largeSpacing
+
+                    ListView {
+                    id: list
+                    anchors.fill: parent
+                    clip: true
+                    model: Mgr.messageModel
+                    spacing: Kirigami.Units.largeSpacing
+                    boundsBehavior: Flickable.StopAtBounds
+                    // Track pin state only from real user scrolls (wheel/drag/flick all
+                    // set `moving`); the programmatic reset on messagesChanged and the
+                    // positionViewAtEnd jump don't, so they can't clear the pin.
+                    onContentYChanged: {
+                        if (list.moving)
+                            pinnedToEnd = list.atYEnd
+                        page.maybeLoadOlder()
+                    }
+                    onCountChanged: page.applySessionScroll()
+                    // The end moves as rows measure and images decode: every height change while
+                    // pinned is one more pass of the pin (pinToEnd is a no-op if a chain is running).
+                    onContentHeightChanged: {
+                        page.applySessionScroll()
+                        if (page.pinnedToEnd)
+                            page.pinToEnd()
+                    }
+                    onHeightChanged: page.applySessionScroll()
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    // A bounded cache with recycling, not "keep everything realized".
+                    // The model only ever holds the core's 60-item window, but every
+                    // scroll-up prepends another 40 (CLIENT_WINDOW / load_older), so a
+                    // long read grew the live set without limit — and each row
+                    // instantiates all four bubble variants. 20000px kept every one of
+                    // them alive and repolished for the life of the session. 2000px
+                    // still leaves ~2 screens of slack in each direction, which is what
+                    // kept the scrollbar from collapsing as delegates died mid-drag,
+                    // and reuseItems recycles the ones that do leave the window instead
+                    // of tearing them down and rebuilding them on the way back.
+                    cacheBuffer: 2000
+                    reuseItems: true
+
+                    // The waiting bubble is an INLINE footer row: it participates in
+                    // contentHeight, so positionViewAtEnd reveals the last message and
+                    // the bubble together and neither is ever covered.
+                    footer: Rectangle {
+                        visible: Mgr.prompting
+                        width: ListView.view ? ListView.view.width : 0
+                        height: visible ? waitRow.implicitHeight + Kirigami.Units.smallSpacing : 0
+                        color: "transparent"
+                        Row {
+                            id: waitRow
+                            anchors.left: parent.left
+                            anchors.leftMargin: Kirigami.Units.largeSpacing * 1.5
+                            anchors.verticalCenter: parent.verticalCenter
                             spacing: Kirigami.Units.smallSpacing
-                            Kirigami.Icon {
-                                source: "configure"
-                                implicitWidth: 16
-                                implicitHeight: 16
-                                Layout.alignment: Qt.AlignVCenter
-                            }
-                            Controls.Label {
-                                text: mdel.toolChipTitle()
-                                textFormat: Text.PlainText
-                                font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.88))
-                                renderType: Text.NativeRendering
-                                color: Kirigami.Theme.disabledTextColor
-                                elide: Text.ElideRight
-                                verticalAlignment: Text.AlignVCenter
-                                Layout.fillWidth: true
-                            }
-                            Controls.Label {
-                                visible: mdel.messageSteps.length > 0
-                                text: mdel.messageSteps.length + " " + qsTr("steps")
-                                textFormat: Text.PlainText
-                                color: Kirigami.Theme.disabledTextColor
-                                font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
-                                renderType: Text.NativeRendering
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                            Controls.Label {
-                                id: statusLabel
-                                text: mdel.statusText()
-                                textFormat: Text.PlainText
-                                color: mdel.messageStatus === "failed" ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.disabledTextColor
-                                font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
-                                renderType: Text.NativeRendering
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                        }
-                        // The thinking the core folded into this chip: it is the
-                        // chip's label, so opening the chip shows what the model
-                        // was actually reasoning.
-                        //
-                        // Every label showing model/tool text below is PlainText: QQC2's
-                        // AutoText default parses markup-looking content as rich text, so
-                        // prompt-injected tool output echoed into a thought could render
-                        // <img src=…> and fire an outbound request. Nothing here is meant to
-                        // be rich (the transcript bubbles set their textFormat explicitly too).
-                        Controls.Label {
-                            visible: mdel.toolOpen && mdel.messageStepThought.length > 0
-                            text: mdel.messageStepThought
-                            textFormat: Text.PlainText
-                            width: parent.width
-                            wrapMode: Text.Wrap
-                            opacity: 0.8
-                            bottomPadding: mdel.pad
-                        }
-                        // What the SUBAGENT did under this call (a delegate): goose
-                        // keeps the child session off ACP and forwards its tool calls
-                        // here, so this list is the delegate's visible work.
-                        Column {
-                            visible: mdel.toolOpen && mdel.messageSteps.length > 0
-                            width: parent.width
-                            bottomPadding: mdel.pad
-                            Controls.Label {
-                                text: qsTr("subagent")
-                                textFormat: Text.PlainText
-                                color: Kirigami.Theme.highlightColor
-                                font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
-                            }
-                            Repeater {
-                                model: mdel.messageSteps
-                                delegate: Row {
-                                    width: parent.width
+                            Rectangle {
+                                width: waitInner.implicitWidth + Kirigami.Units.smallSpacing * 2
+                                height: waitInner.implicitHeight + Kirigami.Units.smallSpacing
+                                radius: 16
+                                color: Kirigami.Theme.alternateBackgroundColor
+                                border.color: Kirigami.Theme.disabledTextColor
+                                border.width: 1
+                                Row {
+                                    id: waitInner
+                                    anchors.centerIn: parent
                                     spacing: Kirigami.Units.smallSpacing
-                                    Controls.Label {
-                                        text: "· " + String(modelData.name || "").replace(/_/g, " ")
-                                        textFormat: Text.PlainText
-                                        font.weight: Font.DemiBold
+                                    BusyIndicator {
+                                        id: busy
+                                        width: 18
+                                        height: 18
+                                        running: Mgr.prompting
                                     }
                                     Controls.Label {
-                                        text: modelData.detail || ""
+                                        text: {
+                                            const base = qsTr("Grouse is working…")
+                                            // Debug readout rides on the same label rather than a
+                                            // second row, which would shift the bubble's height
+                                            // every second while a turn streams.
+                                            const diag = (Mgr.debugTools && page.turnDiagText.length > 0)
+                                                         ? "  ·  " + page.turnDiagText : ""
+                                            return base + diag
+                                        }
+                                        // PlainText: the diag carries tool/model-supplied text and
+                                        // AutoText would parse it as markup.
                                         textFormat: Text.PlainText
-                                        elide: Text.ElideRight
-                                        width: Math.max(0, parent.width - parent.children[0].implicitWidth
-                                                        - parent.spacing)
-                                        font.family: "monospace"
-                                        color: Kirigami.Theme.disabledTextColor
-                                    }
-                                }
-                            }
-                        }
-                        Controls.Label {
-                            visible: mdel.toolOpen && mdel.messageOutput.length > 0
-                            text: (mdel.messageDetail.length > 0 ? mdel.messageDetail + "\n\n" : "") + mdel.shortOutput()
-                            textFormat: Text.PlainText
-                            width: parent.width
-                            wrapMode: Text.Wrap
-                            opacity: 0.8
-                            font.family: "monospace"
-                        }
-                        Controls.Button {
-                            visible: mdel.toolOpen
-                            flat: true
-                            text: qsTr("Hide raw details")
-                            height: Kirigami.Units.gridUnit * 1.25
-                            onClicked: Mgr.messageModel.toggleExpanded(index)
-                        }
-                    }
-                    TapHandler { onTapped: Mgr.messageModel.toggleExpanded(index) }
-                }
-
-                // Consecutive tool calls share one compact activity chip. Expanding
-                // it reveals each call's input/output while preserving individual
-                // statuses and streaming output.
-                Rectangle {
-                    id: toolGroupChip
-                    visible: mdel.isToolGroup
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.leftMargin: mdel.gap
-                    width: Math.min(mdel.agentBubbleW * 0.78, 560)
-                    implicitHeight: groupCol.implicitHeight + mdel.pad * 2
-                    radius: Theme.radius.lg
-                    color: Qt.lighter(Kirigami.Theme.backgroundColor, 1.18)
-                    border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
-                                                                : Kirigami.Theme.disabledTextColor
-                    border.width: 1
-
-                    Column {
-                        id: groupCol
-                        anchors.fill: parent
-                        anchors.margins: mdel.pad
-                        spacing: Kirigami.Units.smallSpacing
-
-                        RowLayout {
-                            width: parent.width
-                            height: Kirigami.Units.gridUnit * 1.25
-                            spacing: Kirigami.Units.smallSpacing
-                            // Same wrench as the single-call tool chip: the
-                            // grouped chip must read as a tool activity too.
-                            Kirigami.Icon {
-                                source: "configure"
-                                implicitWidth: 16
-                                implicitHeight: 16
-                                Layout.alignment: Qt.AlignVCenter
-                            }
-                            Controls.Label {
-                                text: mdel.groupTitle()
-                                textFormat: Text.PlainText
-                                Layout.fillWidth: true
-                                elide: Text.ElideRight
-                                color: Kirigami.Theme.textColor
-                                font.weight: Font.DemiBold
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                            Controls.Label {
-                                id: groupStatus
-                                text: mdel.toolOpen ? qsTr("hide") : qsTr("show")
-                                color: Kirigami.Theme.disabledTextColor
-                                font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                        }
-
-                        Column {
-                            visible: mdel.toolOpen
-                            width: parent.width
-                            spacing: Kirigami.Units.smallSpacing
-                            // The loop, in order: each call is preceded by the
-                            // thinking the core absorbed for IT, so a long run
-                            // reads as think → act → think → act rather than as a
-                            // wall of "Thinking" blocks beside a wall of chips.
-                            Repeater {
-                                model: mdel.messageCalls
-                                delegate: Column {
-                                    width: parent.width
-                                    spacing: 2
-                                    Controls.Label {
-                                        visible: !!modelData.thought
-                                        text: modelData.thought || ""
-                                        textFormat: Text.PlainText
-                                        width: parent.width
-                                        wrapMode: Text.Wrap
                                         opacity: 0.8
                                     }
-                                    Row {
-                                        width: parent.width
-                                        Controls.Label {
-                                            text: modelData.title || qsTr("Tool call")
-                                            textFormat: Text.PlainText
-                                            width: parent.width - callStatusLabel.implicitWidth - parent.spacing
-                                            elide: Text.ElideRight
-                                            font.weight: Font.DemiBold
+                                }
+                            }
+                        }
+                    }
+
+                    // Inline delegate (a separate-file delegate loses the `model`
+                    // context for root-object bindings; inline works). Reads role names
+                    // from the MessageListModel via `model.<role>`.
+                    delegate: Item {
+                        id: mdel
+                        width: ListView.view.width
+
+                        readonly property string messageRole: model.role ? model.role : ""
+                        readonly property string messageText: model.text ? model.text : ""
+                        readonly property string messageHtml: model.html ? model.html : ""
+                        // Roles are CONTEXT properties on a delegate, not members of the
+                        // delegate Item: a role read as `mdel.blocks` is always undefined, whatever the
+                        // model holds. That silently killed the fenced-code render — a row
+                        // with code is given `blocks` and deliberately no `html`, so the flat
+                        // TextEdit's `messageHtml || messageText` fell back to raw markdown
+                        // and the code panes got undefined. Wrapped like every other role.
+                        readonly property var messageBlocks: model.blocks ? model.blocks : []
+                        readonly property string messageTitle: model.title ? model.title : ""
+                        readonly property string messageDetail: model.detail ? model.detail : ""
+                        readonly property string messageOutput: model.output ? model.output : ""
+                        readonly property string messageStatus: model.status ? model.status : ""
+                        readonly property var messageImages: model.images ? model.images : []
+                        // Non-image attachments: {name, kind, icon, size, subtitle}
+                        readonly property var messageFiles: model.files ? model.files : []
+                        readonly property string messageUsage: model.usage ? String(model.usage) : ""
+                        readonly property string messageChartData: model.chartData ? String(model.chartData) : ""
+                        readonly property string messageAppHtml: model.appHtml ? String(model.appHtml) : ""
+                        readonly property string messageAppKey: model.appKey ? String(model.appKey) : ""
+                        readonly property var messageCalls: model.calls ? model.calls : []
+                        // A delegate's child activity (the SUBAGENT's own tool calls): the
+                        // server keeps subagent sessions off ACP and forwards these onto the
+                        // delegate row, so this IS the child's visible work.
+                        readonly property var messageSteps: model.steps ? model.steps : []
+                        // A tool run's framing (issue #13): the one-line label and the
+                        // thinking the core absorbed into it.
+                        readonly property string messageSummary: model.summary ? model.summary : ""
+                        readonly property string messageStepThought: model.stepThought ? model.stepThought : ""
+
+                        readonly property bool isUser: mdel.messageRole === "user"
+                        readonly property bool isAgent: mdel.messageRole === "agent"
+                        readonly property bool isTool: mdel.messageRole === "tool"
+                        readonly property bool isToolGroup: mdel.messageRole === "toolgroup"
+                        readonly property bool isThought: mdel.messageRole === "thought"
+                        readonly property bool isError: mdel.messageRole === "error"
+                        readonly property bool isChart: mdel.messageRole === "chart"
+                        readonly property bool isMcpApp: mdel.messageRole === "mcpapp"
+                        // A file the SERVER shared: the row is a reference, and the card
+                        // is also the download (see FileCard.qml).
+                        readonly property bool isFile: mdel.messageRole === "file"
+                        readonly property var fileRef: mdel.messageFiles.length > 0 ? mdel.messageFiles[0] : ({})
+                        readonly property var fileMeta: mdel.isFile
+                            ? page.fileCardInfo(String(fileRef.path || ""), String(fileRef.name || ""),
+                                                String(fileRef.mime || ""), Number(fileRef.size || 0))
+                            : ({})
+                        readonly property var fileProgress: mdel.isFile
+                            ? page.fileState(String(fileRef.path || "")) : ({})
+                        // A shared IMAGE is the reply's own content, so it paints inline and
+                        // is fetched without a tap (ImageCard). Anything else keeps the
+                        // download card.
+                        readonly property bool inlineFileImage: mdel.isFile
+                            && page.inlineImage(String(fileRef.mime || ""), String(fileRef.name || ""),
+                                                Number(fileRef.size || 0))
+                        // True when QtWebEngine was compiled in: MCP Apps render inline
+                        // (AppView) instead of the browser-handoff chip.
+                        readonly property bool inlineApps: Mgr.inlineAppsEnabled()
+
+                        // A native Canvas chart reserves ~220-266px depending on type + title.
+                        readonly property real chartH: (function() {
+                            if (mdel.messageChartData.length === 0) return 140
+                            var spec = null
+                            try { spec = JSON.parse(mdel.messageChartData) } catch (e) { return 140 }
+                            var base = (spec.type === "pie" || spec.type === "doughnut") ? 240 : 220
+                            if (spec.options && spec.options.title && spec.options.title.text) base += 26
+                            return base
+                        })()
+
+                        readonly property real pad: Kirigami.Units.smallSpacing * 1.5
+                        readonly property real gap: Kirigami.Units.largeSpacing * 1.5
+                        // QQC2's vertical scrollbar overlays the ListView viewport;
+                        // reserve its width so bubbles/chips never sit underneath it.
+                        readonly property real scrollbarReserve: Kirigami.Units.gridUnit * 1.5
+                        readonly property real maxW: Math.max(0, mdel.width - mdel.gap * 2 - mdel.scrollbarReserve)
+                        readonly property real bubbleW: Math.min(mdel.maxW, 620)
+                        readonly property real userBubbleW: Math.min(mdel.maxW * 0.72, 520)
+                        readonly property real agentBubbleW: Math.min(mdel.maxW, 720)
+                        readonly property int truncOutput: 4000   // perf/scroll cap for tool output
+
+                        // Tool chips start collapsed. The open state lives in the
+                        // message model (ExpandedRole) — keyed by a stable row uid —
+                        // so it survives both scrolling away and the row being
+                        // recycled under reuseItems.
+                        readonly property bool toolOpen: !!model.expanded
+                        // Thoughts start collapsed, even mid-turn; the open state lives
+                        // in the message model (ExpandedRole) so it survives scrolling.
+                        readonly property bool thoughtOpen: !!model.expanded
+
+                        function shortOutput() {
+                            return mdel.messageOutput.length > mdel.truncOutput
+                                ? mdel.messageOutput.substring(0, mdel.truncOutput) + "…"
+                                : mdel.messageOutput
+                        }
+                        function statusText() {
+                            return mdel.messageStatus === "completed" ? ("✓ " + qsTr("done"))
+                                 : mdel.messageStatus === "failed" ? qsTr("failed") : mdel.messageStatus
+                        }
+                        function groupTitle() {
+                            // The run's own label first — the model's framing of what it
+                            // was doing. The call-count fallback is only for a run with
+                            // nothing to draw on.
+                            if (mdel.messageSummary.length > 0) return mdel.messageSummary
+                            if (mdel.messageCalls.length === 0) return qsTr("Tool calls")
+                            var first = String(mdel.messageCalls[0].title || qsTr("call"))
+                            var same = true
+                            for (var i = 1; i < mdel.messageCalls.length; i++) {
+                                if (String(mdel.messageCalls[i].title || qsTr("call")) !== first) {
+                                    same = false
+                                    break
+                                }
+                            }
+                            return same ? mdel.messageCalls.length + " × " + first
+                                        : mdel.messageCalls.length + " " + qsTr("tool calls")
+                        }
+                        function callStatus(call) {
+                            return call.status === "completed" ? "✓ " + qsTr("done")
+                                 : call.status === "failed" ? qsTr("failed") : call.status
+                        }
+                        function toolChipTitle() {
+                            // A lone call framed by the model's thinking reads as that
+                            // framing; otherwise the raw tool title is all there is.
+                            if (mdel.messageSummary.length > 0) return mdel.messageSummary
+                            return qsTr("Tool") + ": " + (mdel.messageTitle || qsTr("call"))
+                        }
+
+                        height: mdel.isUser ? userBubble.implicitHeight
+                             : mdel.isAgent ? agentBubble.implicitHeight
+                             : mdel.isTool ? toolChip.implicitHeight
+                             : mdel.isToolGroup ? toolGroupChip.implicitHeight
+                             : mdel.isThought ? thoughtBlock.implicitHeight
+                             : mdel.isChart ? mdel.chartH + mdel.pad * 2
+                             : mdel.isMcpApp ? mcpAppChip.implicitHeight
+                             : mdel.isFile ? (mdel.inlineFileImage ? imageCard.implicitHeight
+                                                                   : fileCard.implicitHeight)
+                             : errorBanner.implicitHeight
+
+                        // The selectable bubble text under the cursor (user or agent).
+                        // When the message rendered as blocks (fenced code), the target
+                        // is the blocks column's one editable — with several chunks the
+                        // selection lives in whichever has focus, not a single bubble.
+                        readonly property bool hasBlocks:
+                            (mdel.isUser || mdel.isAgent) && mdel.messageBlocks.length > 0
+
+                        // The selectable bubble text under the cursor (user or agent).
+                        // When the message rendered as blocks (fenced code), the
+                        // editable lives in the blocks column (its first prose chunk;
+                        // the code panes select independently). The menu's
+                        // select-all/copy targets switch away from the flat bubble.
+                        readonly property var msgEdit: mdel.hasBlocks
+                            ? (mdel.isUser ? userBlocks.editable : agentBlocks.editable)
+                            : (mdel.isUser ? userText : agentText)
+
+                        // Right-click menu for the bubble text. Copy takes the selection when
+                        // there is one, else the whole message.
+                        Controls.Menu {
+                            id: msgMenu
+                            Controls.MenuItem {
+                                text: qsTr("Copy")
+                                enabled: mdel.messageText.length > 0
+                                onTriggered: {
+                                    const e = mdel.msgEdit
+                                    if (e.selectedText.length > 0) {
+                                        e.copy()
+                                    } else {
+                                        e.selectAll()
+                                        e.copy()
+                                        e.deselect()
+                                    }
+                                }
+                            }
+                            Controls.MenuItem {
+                                text: qsTr("Select all")
+                                enabled: mdel.messageText.length > 0
+                                onTriggered: mdel.msgEdit.selectAll()
+                            }
+                            Controls.MenuSeparator { visible: mdel.isAgent }
+                            Controls.MenuItem {
+                                text: qsTr("Show stats")
+                                visible: mdel.isAgent
+                                enabled: mdel.messageUsage.length > 0
+                                onTriggered: statsPopup.open()
+                            }
+                        }
+
+                        // ---------------- user bubble (right) ----------------
+                        Rectangle {
+                            id: userBubble
+                            visible: mdel.isUser
+                            anchors.top: parent.top
+                            anchors.right: parent.right
+                            anchors.rightMargin: mdel.gap + mdel.scrollbarReserve
+                            width: mdel.userBubbleW
+                            implicitHeight: userCol.implicitHeight + mdel.pad * 2
+                            radius: Theme.radius.xl
+                            color: Kirigami.Theme.highlightColor
+                            clip: true
+
+                            Column {
+                                id: userCol
+                                anchors.fill: parent
+                                anchors.margins: mdel.pad
+                                spacing: 2
+                                Controls.Label {
+                                    text: qsTr("You")
+                                    font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
+                                    renderType: Text.NativeRendering
+                                    color: Kirigami.Theme.highlightedTextColor
+                                    opacity: 0.86
+                                }
+                                Column {
+                                    visible: mdel.messageImages.length > 0
+                                    spacing: Kirigami.Units.smallSpacing
+                                    Repeater {
+                                        model: mdel.messageImages
+                                        delegate: Item {
+                                            width: parent.width
+                                            height: modelData.image ? 140 : fileChip.implicitHeight
+                                            Image {
+                                                id: imgThumb
+                                                visible: modelData.image
+                                                anchors.left: parent.left
+                                                source: modelData.url
+                                                width: Math.min(140, implicitWidth)
+                                                height: 140
+                                                fillMode: Image.PreserveAspectFit
+                                            }
+                                            MouseArea {
+                                                anchors.fill: imgThumb
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    imageViewer.image = modelData.url
+                                                    imageViewer.open()
+                                                }
+                                            }
+                                            Rectangle {
+                                                id: fileChip
+                                                visible: !modelData.image
+                                                anchors.left: parent.left
+                                                height: 26
+                                                width: fileChipRow.implicitWidth + Kirigami.Units.smallSpacing * 2
+                                                radius: 6
+                                                color: Qt.lighter(Kirigami.Theme.highlightColor, 1.7)
+                                                Row {
+                                                    id: fileChipRow
+                                                    anchors.centerIn: parent
+                                                    spacing: Kirigami.Units.smallSpacing
+                                                    Kirigami.Icon {
+                                                        source: "text-x-generic"
+                                                        implicitWidth: 16
+                                                        implicitHeight: 16
+                                                    }
+                                                    Controls.Label {
+                                                        text: modelData.name
+                                                        elide: Text.ElideRight
+                                                        color: Kirigami.Theme.highlightedTextColor
+                                                    }
+                                                }
+                                            }
                                         }
-                                        Controls.Label {
-                                            id: callStatusLabel
-                                            text: mdel.callStatus(modelData)
-                                            textFormat: Text.PlainText
-                                            color: modelData.status === "failed" ? Kirigami.Theme.negativeTextColor
-                                                                                  : Kirigami.Theme.disabledTextColor
+                                    }
+                                }
+                                // The files that rode this prompt, as cards: icon, name,
+                                // kind and size. Drawn from the core's own record, so a
+                                // replayed row still shows them — this bubble used to
+                                // show NOTHING for a non-image attachment, because the
+                                // send-time chip queue was only ever populated for
+                                // prompts that also carried blocks.
+                                Column {
+                                    id: userFiles
+                                    visible: mdel.messageFiles.length > 0
+                                    width: parent.width
+                                    spacing: Kirigami.Units.smallSpacing
+                                    Repeater {
+                                        model: mdel.messageFiles
+                                        AttachmentCard {
+                                            width: userFiles.width
+                                            name: modelData.name
+                                            icon: modelData.icon
+                                            subtitle: modelData.subtitle
+                                            fillColor: Qt.rgba(1, 1, 1, 0.14)
+                                            foreground: Kirigami.Theme.highlightedTextColor
                                         }
+                                    }
+                                }
+                                // A TextEdit (not a Label) so the text is selectable; right-click
+                                // opens the copy menu. A message with fenced code renders as a
+                                // BlocksColumn instead — the two are siblings so the bubble
+                                // Column lays out whichever is visible.
+                                TextEdit {
+                                    id: userText
+                                    text: mdel.messageHtml || mdel.messageText
+                                    visible: !mdel.hasBlocks
+                                    // PlainText until the row is finalized: with RichText, Qt
+                                    // re-parses + reshapes the WHOLE accumulated message on every
+                                    // streamed chunk (quadratic). html is empty while a turn
+                                    // streams and is set once at finalize.
+                                    textFormat: mdel.messageHtml.length > 0 ? Text.RichText : Text.PlainText
+                                    width: mdel.userBubbleW - mdel.pad * 2
+                                    wrapMode: TextEdit.Wrap
+                                    readOnly: true
+                                    selectByMouse: true
+                                    persistentSelection: true
+                                    cursorVisible: false
+                                    color: Kirigami.Theme.highlightedTextColor
+                                    selectionColor: Kirigami.Theme.highlightColor
+                                    selectedTextColor: Kirigami.Theme.highlightedTextColor
+                                    renderType: Text.NativeRendering
+                                    onLinkActivated: Qt.openUrlExternally(link)
+                                    TapHandler {
+                                        acceptedButtons: Qt.RightButton
+                                        onTapped: msgMenu.popup()
+                                    }
+                                }
+                                // The split render of a message that carries fenced code:
+                                // prose chunks + CodeFence panes, laid out by the same bubble
+                                // Column as the flat TextEdit above.
+                                BlocksColumn {
+                                    id: userBlocks
+                                    visible: mdel.hasBlocks
+                                    width: mdel.userBubbleW - mdel.pad * 2
+                                    blocks: mdel.messageBlocks
+                                    userStyle: true
+                                }
+                            }
+                        }
+
+                        // ---------------- agent bubble (left) ----------------
+
+                        // ---------------- agent bubble (left) ----------------
+                        Rectangle {
+                            id: agentBubble
+                            visible: mdel.isAgent
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.leftMargin: mdel.gap
+                            width: mdel.agentBubbleW
+                            implicitHeight: agentCol.implicitHeight + mdel.pad * 2
+                            radius: Theme.radius.xl
+                            color: Kirigami.Theme.alternateBackgroundColor
+                            border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
+                                                                        : Kirigami.Theme.disabledTextColor
+                            border.width: 1
+                            clip: true
+
+                            Column {
+                                id: agentCol
+                                anchors.fill: parent
+                                anchors.margins: mdel.pad
+                                spacing: 2
+                                Controls.Label {
+                                    text: qsTr("Goose")
+                                    font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
+                                    font.weight: Font.DemiBold
+                                    renderType: Text.NativeRendering
+                                    color: Kirigami.Theme.disabledTextColor
+                                }
+                                // Selectable; a plain left-click (a tap, not a drag — a drag
+                                // selects text) reveals this reply's stats, and right-click opens
+                                // the copy menu.
+                                TextEdit {
+                                    id: agentText
+                                    text: mdel.messageHtml || mdel.messageText
+                                    visible: !mdel.hasBlocks
+                                    // PlainText while streaming (see the user bubble note above);
+                                    // RichText once finalize has rendered the markdown to html.
+                                    textFormat: mdel.messageHtml.length > 0 ? Text.RichText : Text.PlainText
+                                    width: mdel.agentBubbleW - mdel.pad * 2
+                                    wrapMode: TextEdit.Wrap
+                                    readOnly: true
+                                    selectByMouse: true
+                                    persistentSelection: true
+                                    cursorVisible: false
+                                    color: Kirigami.Theme.textColor
+                                    selectionColor: Kirigami.Theme.highlightColor
+                                    selectedTextColor: Kirigami.Theme.highlightedTextColor
+                                    renderType: Text.NativeRendering
+                                    onLinkActivated: Qt.openUrlExternally(link)
+                                    TapHandler {
+                                        acceptedButtons: Qt.LeftButton
+                                        onTapped: {
+                                            statsPopup.x = point.position.x + 8
+                                            statsPopup.y = point.position.y + 8
+                                            statsPopup.open()
+                                        }
+                                    }
+                                    TapHandler {
+                                        acceptedButtons: Qt.RightButton
+                                        onTapped: msgMenu.popup()
+                                    }
+                                    // Stats used to sit permanently under the reply. They are
+                                    // diagnostics — interesting when asking "why was that slow",
+                                    // noise the rest of the time — so they surface on demand
+                                    // instead of shifting the conversation as they appear.
+                                    Controls.Popup {
+                                        id: statsPopup
+                                        padding: Kirigami.Units.smallSpacing
+                                        closePolicy: Controls.Popup.CloseOnEscape | Controls.Popup.CloseOnPressOutside
+                                        Controls.Label {
+                                            text: mdel.messageUsage.length > 0
+                                                  ? mdel.messageUsage
+                                                  : qsTr("No stats recorded for this message")
+                                            color: Kirigami.Theme.textColor
+                                            font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.85))
+                                            renderType: Text.NativeRendering
+                                        }
+                                    }
+                                }
+                                // The split render, agent side. Tapping the proseChunk opens
+                                // the stats popup exactly as the flat bubble does, so a message
+                                // with code behaves the same as one without.
+                                BlocksColumn {
+                                    id: agentBlocks
+                                    visible: mdel.hasBlocks
+                                    width: mdel.agentBubbleW - mdel.pad * 2
+                                    blocks: mdel.messageBlocks
+                                    TapHandler {
+                                        acceptedButtons: Qt.LeftButton
+                                        onTapped: (tap) => {
+                                            statsPopup.x = tap.position.x + 8
+                                            statsPopup.y = tap.position.y + 8
+                                            statsPopup.open()
+                                        }
+                                    }
+                                    TapHandler {
+                                        acceptedButtons: Qt.RightButton
+                                        onTapped: msgMenu.popup()
+                                    }
+                                }
+                            }
+                        }
+                        // ---------------- tool chip ----------------
+                        Rectangle {
+                            id: toolChip
+                            visible: mdel.isTool
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.leftMargin: mdel.gap
+                            width: Math.min(mdel.agentBubbleW * 0.78, 560)
+                            implicitHeight: chipCol.implicitHeight + mdel.pad * 2
+                            radius: Theme.radius.lg
+                            color: Qt.lighter(Kirigami.Theme.backgroundColor, 1.18)
+                            border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
+                                                                        : Kirigami.Theme.disabledTextColor
+                            border.width: 1
+
+                            Column {
+                                id: chipCol
+                                anchors.fill: parent
+                                anchors.margins: mdel.pad
+                                spacing: 0
+                                RowLayout {
+                                    height: Kirigami.Units.gridUnit * 1.25
+                                    width: parent.width
+                                    spacing: Kirigami.Units.smallSpacing
+                                    Kirigami.Icon {
+                                        source: "configure"
+                                        implicitWidth: 16
+                                        implicitHeight: 16
+                                        Layout.alignment: Qt.AlignVCenter
                                     }
                                     Controls.Label {
-                                        visible: !!modelData.detail || !!modelData.output
-                                        text: (modelData.detail || "")
-                                              + (modelData.output ? "\n" + modelData.output : "")
+                                        text: mdel.toolChipTitle()
                                         textFormat: Text.PlainText
-                                        width: parent.width
-                                        wrapMode: Text.Wrap
-                                        font.family: "monospace"
+                                        font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.88))
+                                        renderType: Text.NativeRendering
                                         color: Kirigami.Theme.disabledTextColor
+                                        elide: Text.ElideRight
+                                        verticalAlignment: Text.AlignVCenter
+                                        Layout.fillWidth: true
                                     }
-                                    // A delegate inside the run carries its child's
-                                    // work (goose forwards subagent tool calls onto
-                                    // the parent row; child sessions are not on ACP).
+                                    Controls.Label {
+                                        visible: mdel.messageSteps.length > 0
+                                        text: mdel.messageSteps.length + " " + qsTr("steps")
+                                        textFormat: Text.PlainText
+                                        color: Kirigami.Theme.disabledTextColor
+                                        font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
+                                        renderType: Text.NativeRendering
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    Controls.Label {
+                                        id: statusLabel
+                                        text: mdel.statusText()
+                                        textFormat: Text.PlainText
+                                        color: mdel.messageStatus === "failed" ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.disabledTextColor
+                                        font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
+                                        renderType: Text.NativeRendering
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                }
+                                // The thinking the core folded into this chip: it is the
+                                // chip's label, so opening the chip shows what the model
+                                // was actually reasoning.
+                                //
+                                // Every label showing model/tool text below is PlainText: QQC2's
+                                // AutoText default parses markup-looking content as rich text, so
+                                // prompt-injected tool output echoed into a thought could render
+                                // <img src=…> and fire an outbound request. Nothing here is meant to
+                                // be rich (the transcript bubbles set their textFormat explicitly too).
+                                Controls.Label {
+                                    visible: mdel.toolOpen && mdel.messageStepThought.length > 0
+                                    text: mdel.messageStepThought
+                                    textFormat: Text.PlainText
+                                    width: parent.width
+                                    wrapMode: Text.Wrap
+                                    opacity: 0.8
+                                    bottomPadding: mdel.pad
+                                }
+                                // What the SUBAGENT did under this call (a delegate): goose
+                                // keeps the child session off ACP and forwards its tool calls
+                                // here, so this list is the delegate's visible work.
+                                Column {
+                                    visible: mdel.toolOpen && mdel.messageSteps.length > 0
+                                    width: parent.width
+                                    bottomPadding: mdel.pad
+                                    Controls.Label {
+                                        text: qsTr("subagent")
+                                        textFormat: Text.PlainText
+                                        color: Kirigami.Theme.highlightColor
+                                        font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
+                                    }
                                     Repeater {
-                                        model: modelData.steps ? modelData.steps : []
+                                        model: mdel.messageSteps
                                         delegate: Row {
                                             width: parent.width
                                             spacing: Kirigami.Units.smallSpacing
                                             Controls.Label {
                                                 text: "· " + String(modelData.name || "").replace(/_/g, " ")
                                                 textFormat: Text.PlainText
-                                                opacity: 0.75
+                                                font.weight: Font.DemiBold
                                             }
                                             Controls.Label {
                                                 text: modelData.detail || ""
                                                 textFormat: Text.PlainText
                                                 elide: Text.ElideRight
-                                                width: Math.max(0, parent.width
-                                                                - parent.children[0].implicitWidth
+                                                width: Math.max(0, parent.width - parent.children[0].implicitWidth
                                                                 - parent.spacing)
                                                 font.family: "monospace"
-                                                font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.85))
                                                 color: Kirigami.Theme.disabledTextColor
                                             }
+                                        }
+                                    }
+                                }
+                                Controls.Label {
+                                    visible: mdel.toolOpen && mdel.messageOutput.length > 0
+                                    text: (mdel.messageDetail.length > 0 ? mdel.messageDetail + "\n\n" : "") + mdel.shortOutput()
+                                    textFormat: Text.PlainText
+                                    width: parent.width
+                                    wrapMode: Text.Wrap
+                                    opacity: 0.8
+                                    font.family: "monospace"
+                                }
+                                Controls.Button {
+                                    visible: mdel.toolOpen
+                                    flat: true
+                                    text: qsTr("Hide raw details")
+                                    height: Kirigami.Units.gridUnit * 1.25
+                                    onClicked: Mgr.messageModel.toggleExpanded(index)
+                                }
+                            }
+                            TapHandler { onTapped: Mgr.messageModel.toggleExpanded(index) }
+                        }
+
+                        // Consecutive tool calls share one compact activity chip. Expanding
+                        // it reveals each call's input/output while preserving individual
+                        // statuses and streaming output.
+                        Rectangle {
+                            id: toolGroupChip
+                            visible: mdel.isToolGroup
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.leftMargin: mdel.gap
+                            width: Math.min(mdel.agentBubbleW * 0.78, 560)
+                            implicitHeight: groupCol.implicitHeight + mdel.pad * 2
+                            radius: Theme.radius.lg
+                            color: Qt.lighter(Kirigami.Theme.backgroundColor, 1.18)
+                            border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
+                                                                        : Kirigami.Theme.disabledTextColor
+                            border.width: 1
+
+                            Column {
+                                id: groupCol
+                                anchors.fill: parent
+                                anchors.margins: mdel.pad
+                                spacing: Kirigami.Units.smallSpacing
+
+                                RowLayout {
+                                    width: parent.width
+                                    height: Kirigami.Units.gridUnit * 1.25
+                                    spacing: Kirigami.Units.smallSpacing
+                                    // Same wrench as the single-call tool chip: the
+                                    // grouped chip must read as a tool activity too.
+                                    Kirigami.Icon {
+                                        source: "configure"
+                                        implicitWidth: 16
+                                        implicitHeight: 16
+                                        Layout.alignment: Qt.AlignVCenter
+                                    }
+                                    Controls.Label {
+                                        text: mdel.groupTitle()
+                                        textFormat: Text.PlainText
+                                        Layout.fillWidth: true
+                                        elide: Text.ElideRight
+                                        color: Kirigami.Theme.textColor
+                                        font.weight: Font.DemiBold
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    Controls.Label {
+                                        id: groupStatus
+                                        text: mdel.toolOpen ? qsTr("hide") : qsTr("show")
+                                        color: Kirigami.Theme.disabledTextColor
+                                        font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.82))
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                }
+
+                                Column {
+                                    visible: mdel.toolOpen
+                                    width: parent.width
+                                    spacing: Kirigami.Units.smallSpacing
+                                    // The loop, in order: each call is preceded by the
+                                    // thinking the core absorbed for IT, so a long run
+                                    // reads as think → act → think → act rather than as a
+                                    // wall of "Thinking" blocks beside a wall of chips.
+                                    Repeater {
+                                        model: mdel.messageCalls
+                                        delegate: Column {
+                                            width: parent.width
+                                            spacing: 2
+                                            Controls.Label {
+                                                visible: !!modelData.thought
+                                                text: modelData.thought || ""
+                                                textFormat: Text.PlainText
+                                                width: parent.width
+                                                wrapMode: Text.Wrap
+                                                opacity: 0.8
+                                            }
+                                            Row {
+                                                width: parent.width
+                                                Controls.Label {
+                                                    text: modelData.title || qsTr("Tool call")
+                                                    textFormat: Text.PlainText
+                                                    width: parent.width - callStatusLabel.implicitWidth - parent.spacing
+                                                    elide: Text.ElideRight
+                                                    font.weight: Font.DemiBold
+                                                }
+                                                Controls.Label {
+                                                    id: callStatusLabel
+                                                    text: mdel.callStatus(modelData)
+                                                    textFormat: Text.PlainText
+                                                    color: modelData.status === "failed" ? Kirigami.Theme.negativeTextColor
+                                                                                          : Kirigami.Theme.disabledTextColor
+                                                }
+                                            }
+                                            Controls.Label {
+                                                visible: !!modelData.detail || !!modelData.output
+                                                text: (modelData.detail || "")
+                                                      + (modelData.output ? "\n" + modelData.output : "")
+                                                textFormat: Text.PlainText
+                                                width: parent.width
+                                                wrapMode: Text.Wrap
+                                                font.family: "monospace"
+                                                color: Kirigami.Theme.disabledTextColor
+                                            }
+                                            // A delegate inside the run carries its child's
+                                            // work (goose forwards subagent tool calls onto
+                                            // the parent row; child sessions are not on ACP).
+                                            Repeater {
+                                                model: modelData.steps ? modelData.steps : []
+                                                delegate: Row {
+                                                    width: parent.width
+                                                    spacing: Kirigami.Units.smallSpacing
+                                                    Controls.Label {
+                                                        text: "· " + String(modelData.name || "").replace(/_/g, " ")
+                                                        textFormat: Text.PlainText
+                                                        opacity: 0.75
+                                                    }
+                                                    Controls.Label {
+                                                        text: modelData.detail || ""
+                                                        textFormat: Text.PlainText
+                                                        elide: Text.ElideRight
+                                                        width: Math.max(0, parent.width
+                                                                        - parent.children[0].implicitWidth
+                                                                        - parent.spacing)
+                                                        font.family: "monospace"
+                                                        font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.85))
+                                                        color: Kirigami.Theme.disabledTextColor
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            TapHandler { onTapped: Mgr.messageModel.toggleExpanded(index) }
+                        }
+
+                        // ---------------- chart bubble ----------------
+                        Rectangle {
+                            id: chartBubble
+                            visible: mdel.isChart
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.leftMargin: mdel.gap
+                            width: mdel.bubbleW
+                            height: mdel.chartH + mdel.pad * 2
+                            radius: 16
+                            color: Kirigami.Theme.alternateBackgroundColor
+                            border.color: Kirigami.Theme.disabledTextColor
+                            border.width: 1
+                            clip: true
+
+                            ChartBubble {
+                                anchors.fill: parent
+                                anchors.margins: mdel.pad
+                                chartSpec: mdel.messageChartData
+                                title: mdel.messageTitle
+                            }
+                        }
+
+                        // ---------------- MCP-App bubble ----------------
+                        // With QtWebEngine (flatpak base app / native package) the app renders
+                        // inline in a WebEngineView on the loopback bridge URL. Without it the
+                        // same URL (or a temp file) opens in the system browser instead, and
+                        // this stays a chip. height: the view cannot size itself from content
+                        // (size-changed relay is a follow-up), so a generous fixed frame with
+                        // in-page scroll.
+                        Rectangle {
+                            id: mcpAppChip
+                            visible: mdel.isMcpApp
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.leftMargin: mdel.gap
+                            // Use the whole chat column (capped on an ultrawide window) so a
+                            // dashboard isn't squeezed into a phone-width strip.
+                            width: Math.min(mdel.maxW, 900)
+                            // Inline when WebEngine is compiled in AND the template has
+                            // arrived; else the status chip (browser handoff on tap). A
+                            // pinned app is not drawn here at all — its live view is the
+                            // docked pane, so the row collapses to a slim bar.
+                            // Reactive on page.pins: a bare Mgr.appPinned() call has no
+                            // signal dependency, so the chip never re-evaluated after an
+                            // unpin and stayed stuck on "Unpin".
+                            readonly property string pinnedSlot: page.pins
+                                ? (page.pins.top === mdel.messageAppKey ? "top"
+                                   : (page.pins.bottom === mdel.messageAppKey ? "bottom" : ""))
+                                : ""
+                            readonly property bool pinned: pinnedSlot.length > 0
+                            property bool inlineShow: !pinned && mdel.inlineApps && mdel.messageAppHtml.length > 0
+                            // Fill the chat viewport: the app uses the window, scrolling in
+                            // place when its content is taller.
+                            readonly property real maxViewH: Math.max(240, list.height - 32)
+                            property real viewH: maxViewH
+                            implicitHeight: pinned ? pinnedBar.implicitHeight + mdel.pad * 2
+                                          : inlineShow ? viewH + mdel.pad * 2
+                                                       : mcpCol.implicitHeight + mdel.pad * 2
+                            radius: Theme.radius.sm
+                            color: Qt.lighter(Kirigami.Theme.backgroundColor, 1.18)
+                            border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
+                                                                        : Kirigami.Theme.disabledTextColor
+                            border.width: 1
+                            clip: true
+
+                            // Pinned stand-in: one line, not a second live view.
+                            RowLayout {
+                                id: pinnedBar
+                                visible: mcpAppChip.pinned
+                                anchors.fill: parent
+                                anchors.margins: mdel.pad
+                                Controls.Label {
+                                    text: qsTr("Pinned") + " · " + mdel.pinnedSlot
+                                          + ": " + (mdel.messageTitle || qsTr("MCP app"))
+                                    textFormat: Text.PlainText
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                    color: Kirigami.Theme.disabledTextColor
+                                }
+                                Controls.Button {
+                                    text: qsTr("Unpin")
+                                    onClicked: Mgr.unpinApp(mdel.pinnedSlot)
+                                }
+                            }
+
+                            Column {
+                                id: mcpCol
+                                visible: !mcpAppChip.inlineShow && !mcpAppChip.pinned
+                                anchors.fill: parent
+                                anchors.margins: mdel.pad
+                                spacing: 0
+                                Row {
+                                    height: Kirigami.Units.gridUnit * 1.25
+                                    width: parent.width
+                                    Controls.Label {
+                                        text: qsTr("Visualization") + ": " + (mdel.messageTitle || qsTr("call"))
+                                        textFormat: Text.PlainText
+                                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.9
+                                        color: Kirigami.Theme.disabledTextColor
+                                        elide: Text.ElideRight
+                                        width: parent.width - mcpStatus.implicitWidth - parent.spacing
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    Controls.Label {
+                                        id: mcpStatus
+                                        text: mdel.messageStatus === "failed" ? qsTr("failed")
+                                             : mdel.messageAppHtml.length > 0 ? qsTr("template ready")
+                                             : mdel.messageStatus
+                                        color: mdel.messageStatus === "failed" ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.disabledTextColor
+                                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                }
+                                Controls.Label {
+                                    visible: mdel.toolOpen
+                                    text: mdel.messageDetail
+                                    textFormat: Text.PlainText
+                                    width: parent.width
+                                    wrapMode: Text.Wrap
+                                    opacity: 0.8
+                                    font.family: "monospace"
+                                }
+                                RowLayout {
+                                    visible: mdel.messageAppHtml.length > 0 && mdel.toolOpen
+                                    width: parent.width
+                                    spacing: Kirigami.Units.smallSpacing
+                                    Controls.Label {
+                                        // org.kde.Platform ships no QtWebEngine, so the app renders
+                                        // in the user's browser — but interactively: grouse serves the
+                                        // page over loopback with a host shim (AppBridgeServer), so
+                                        // ui/initialize resolves and ui/message posts back into this chat.
+                                        text: qsTr("Opens in your browser with a live bridge back to this chat.")
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.Wrap
+                                        opacity: 0.6
+                                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8
+                                    }
+                                    Controls.Button {
+                                        text: qsTr("Open App")
+                                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
+                                        onClicked: Mgr.openAppInHtml(mdel.messageAppKey)
+                                    }
+                                }
+                            }
+
+                            Loader {
+                                id: mcpAppView
+                                anchors.fill: parent
+                                anchors.margins: mdel.pad
+                                // Loaded by source STRING, not a Component: when WebEngine
+                                // is compiled out (mgrInlineApps false) the loader is never
+                                // active, so AppView.qml — and its QtWebEngine import — is
+                                // never fetched. That would fail to load in the base
+                                // runtime without the base app.
+                                active: mcpAppChip.inlineShow
+                                source: "AppView.qml"
+                                onLoaded: if (item) item.appKey = mdel.messageAppKey
+                            }
+
+                            // Floating pin control. Composited over the WebEngine texture,
+                            // so it stays clickable; pinning moves the live view to the dock.
+                            Controls.ToolButton {
+                                visible: mcpAppChip.inlineShow
+                                anchors.top: parent.top
+                                anchors.right: parent.right
+                                anchors.margins: 4
+                                icon.name: "window-pin"
+                                onClicked: pinMenu.open()
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("Pin this app to the top or bottom")
+                                Menu {
+                                    id: pinMenu
+                                    MenuItem {
+                                        text: qsTr("Pin to top")
+                                        onTriggered: Mgr.pinApp(mdel.messageAppKey, "top")
+                                    }
+                                    MenuItem {
+                                        text: qsTr("Pin to bottom")
+                                        onTriggered: Mgr.pinApp(mdel.messageAppKey, "bottom")
+                                    }
+                                }
+                            }
+
+                            TapHandler {
+                                enabled: !mcpAppChip.inlineShow && !mcpAppChip.pinned
+                                onTapped: Mgr.messageModel.toggleExpanded(index)
+                            }
+                        }
+
+                        // ---------------- collapsible thinking ----------------
+                        Item {
+                            id: thoughtBlock
+                            visible: mdel.isThought
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.leftMargin: mdel.gap
+                            anchors.right: parent.right
+                            anchors.rightMargin: mdel.gap + mdel.scrollbarReserve
+                            implicitHeight: thoughtCol.implicitHeight
+
+                            Column {
+                                id: thoughtCol
+                                width: parent.width
+                                spacing: 0
+                                Controls.Button {
+                                    flat: true
+                                    text: mdel.thoughtOpen ? qsTr("Thinking") + " -" : qsTr("Thinking") + " >"
+                                    height: Kirigami.Units.gridUnit * 1.25
+                                    onClicked: Mgr.messageModel.toggleExpanded(index)
+                                    opacity: 0.7
+                                }
+                                Controls.Label {
+                                    visible: mdel.thoughtOpen
+                                    text: mdel.messageText
+                                    textFormat: Text.PlainText
+                                    width: parent.width
+                                    wrapMode: Text.Wrap
+                                    opacity: 0.7
+                                    font.italic: true
+                                }
+                            }
+                        }
+
+                        // ---------------- shared file card ----------------
+                        // A file the SERVER shared: name, type and size came down with
+                        // the tool call; the bytes did not (a blob in a tool result is
+                        // stored in the session, replayed on every open and shown to the
+                        // model). The card is the download.
+                        FileCard {
+                            id: fileCard
+                            visible: mdel.isFile && !mdel.inlineFileImage
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.leftMargin: mdel.gap
+                            width: Math.min(mdel.maxW, 440)
+                            fileName: String(mdel.fileMeta.name || mdel.messageText)
+                            icon: String(mdel.fileMeta.icon || "application-octet-stream")
+                            subtitle: String(mdel.fileMeta.subtitle || "")
+                            phase: String(mdel.fileProgress.state || "idle")
+                            received: Number(mdel.fileProgress.received || 0)
+                            total: Number(mdel.fileProgress.total || 0)
+                            failure: String(mdel.fileProgress.failure || "")
+                            onDownloadRequested: page.downloadFile(
+                                mdel, String(mdel.fileRef.path || ""), String(mdel.fileRef.name || ""),
+                                String(mdel.fileRef.mime || ""), String(mdel.fileRef.sha256 || ""))
+                            onOpenRequested: {
+                                const local = String(mdel.fileProgress.localPath || "")
+                                if (local.length > 0)
+                                    Qt.openUrlExternally("file://" + local)
+                            }
+                        }
+
+                        // ---------------- shared image, inline ----------------
+                        // The same reference, painted as the picture: an image a reply shares is
+                        // part of the reply, so it arrives without a tap and reads at a glance.
+                        ImageCard {
+                            id: imageCard
+                            objectName: "imageCard"
+                            visible: mdel.isFile && mdel.inlineFileImage
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.leftMargin: mdel.gap
+                            width: Math.min(mdel.maxW, 440)
+                            fileName: String(mdel.fileRef.name || mdel.messageText)
+                            subtitle: String(mdel.fileMeta.subtitle || "")
+                            imagePath: String(mdel.fileProgress.localPath || "")
+                            phase: String(mdel.fileProgress.state || "idle")
+                            received: Number(mdel.fileProgress.received || 0)
+                            total: Number(mdel.fileProgress.total || 0)
+                            failure: String(mdel.fileProgress.failure || "")
+                            // Fetch as the row appears. A delegate is created when the row comes
+                            // into view, which is exactly when the bytes are wanted; the guard
+                            // keeps a re-created delegate from starting a second fetch (the map
+                            // already holds `downloading`/`saved` from the first).
+                            Component.onCompleted: {
+                                if (!visible || String(mdel.fileProgress.state || "") !== "")
+                                    return
+                                page.downloadFile(
+                                    mdel, String(mdel.fileRef.path || ""), String(mdel.fileRef.name || ""),
+                                    String(mdel.fileRef.mime || ""), String(mdel.fileRef.sha256 || ""))
+                            }
+                            onDownloadRequested: page.downloadFile(
+                                mdel, String(mdel.fileRef.path || ""), String(mdel.fileRef.name || ""),
+                                String(mdel.fileRef.mime || ""), String(mdel.fileRef.sha256 || ""))
+                            // No `onOpenRequested` handler on purpose: the card opens its own
+                            // enlarged view, so wiring the system viewer here too would open the
+                            // picture twice, in two different applications.
+                        }
+
+                        // ---------------- error banner ----------------
+                        Rectangle {
+                            id: errorBanner
+                            visible: mdel.isError
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.leftMargin: mdel.gap
+                            anchors.right: parent.right
+                            anchors.rightMargin: mdel.gap + mdel.scrollbarReserve
+                            implicitHeight: errCol.implicitHeight + mdel.pad
+                            radius: 6
+                            color: Kirigami.Theme.negativeBackgroundColor
+
+                            Controls.Label {
+                                id: errCol
+                                text: mdel.messageText
+                                textFormat: Text.PlainText
+                                color: Kirigami.Theme.negativeTextColor
+                                wrapMode: Text.Wrap
+                                anchors.fill: parent
+                                anchors.margins: mdel.pad
+                            }
+                        }
+                    }
+                }
+
+                    // One-click jump back to the bottom when the user has scrolled up
+                    // more than a viewport's worth of content. atYEnd is the Flickable's
+                    // own verdict and is the authority here: with recycled delegates a
+                    // pooled row's height is an average estimate, so re-deriving "is
+                    // there content below" from contentHeight minus contentY could claim
+                    // overflow while the list sat at its end (arrow showing with nowhere
+                    // left to scroll).
+                    Controls.Button {
+                        id: jumpToBottomButton
+                        icon.name: "go-down"
+                        display: Controls.AbstractButton.IconOnly
+                        visible: !list.atYEnd
+                        z: 2
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        anchors.rightMargin: Kirigami.Units.largeSpacing + Kirigami.Units.gridUnit * 1.5
+                        anchors.bottomMargin: Kirigami.Units.largeSpacing
+                        onClicked: {
+                            // Pin first, then let pinToEnd converge: an animation would land on the
+                            // end as it is measured at this instant, and a row that measures after
+                            // that leaves the reader short of it (the "press it twice" bug).
+                            pinnedToEnd = true
+                            page.pinToEnd()
+                            if (page.scrollSession.length > 0)
+                                page.scrollMem[page.scrollSession] = 0
+                        }
+                    }
+
+                }
+
+                // Pinned MCP-App dock (bottom): same as the top dock, divider on its top
+                // edge (dragging up grows it).
+                Item {
+                    id: bottomDock
+                    Layout.fillWidth: true
+                    readonly property string appKey: page.pins && page.pins.bottom !== undefined ? page.pins.bottom : ""
+                    visible: appKey.length > 0
+                    property real ratio: 0.35
+                    readonly property real persistedRatio: page.pins && page.pins.bottomRatio !== undefined
+                                                            ? page.pins.bottomRatio : 0.35
+                    Component.onCompleted: ratio = persistedRatio
+                    onPersistedRatioChanged: if (!bottomDrag.active) ratio = persistedRatio
+                    Layout.preferredHeight: visible ? Math.round(ratio * pageColumn.height) : 0
+
+                    Rectangle { anchors.fill: parent; color: Kirigami.Theme.alternateBackgroundColor }
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.topMargin: bottomHandle.height
+                        spacing: 2
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.leftMargin: Kirigami.Units.smallSpacing
+                            Layout.rightMargin: Kirigami.Units.smallSpacing
+                            Controls.Label {
+                                text: qsTr("Pinned · bottom")
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
+                                color: Kirigami.Theme.disabledTextColor
+                                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
+                            }
+                            Controls.Button { text: qsTr("Unpin"); onClicked: Mgr.unpinApp("bottom") }
+                        }
+                        Loader {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            active: bottomDock.visible
+                            source: "AppView.qml"
+                            onLoaded: if (item) item.appKey = bottomDock.appKey
+                        }
+                    }
+
+                    Rectangle {
+                        id: bottomHandle
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        height: 12
+                        color: "transparent"
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            height: 1
+                            color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
+                                                                 : Kirigami.Theme.disabledTextColor
+                        }
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 44
+                            height: 5
+                            radius: height / 2
+                            color: bottomHover.hovered || bottomDrag.active
+                                   ? Kirigami.Theme.highlightColor : Kirigami.Theme.disabledTextColor
+                            opacity: bottomHover.hovered || bottomDrag.active ? 1 : 0.55
+                        }
+                        property real lastY: 0
+                        HoverHandler { id: bottomHover; cursorShape: Qt.SizeVerCursor }
+                        DragHandler {
+                            id: bottomDrag
+                            target: null
+                            onActiveChanged: {
+                                if (active) bottomHandle.lastY = centroid.scenePosition.y
+                                else Mgr.setPinRatio("bottom", bottomDock.ratio)
+                            }
+                            onCentroidChanged: if (active) {
+                                var y = centroid.scenePosition.y
+                                bottomDock.ratio = Math.max(0.15, Math.min(0.85,
+                                    bottomDock.ratio - (y - bottomHandle.lastY) / pageColumn.height))
+                                bottomHandle.lastY = y
+                            }
+                        }
+                    }
+                }
+
+                // Pending file attachments: removable chips above the input. Images
+                // show a thumbnail; other files show a generic icon + name.
+                Item {
+                    id: attachmentsArea
+                    Layout.fillWidth: true
+                    visible: page.pendingFiles.length > 0
+                    implicitHeight: attachRow.implicitHeight + Kirigami.Units.smallSpacing
+                    clip: true
+
+                    Row {
+                        id: attachRow
+                        anchors.fill: parent
+                        anchors.topMargin: Kirigami.Units.smallSpacing
+                        anchors.leftMargin: Kirigami.Units.smallSpacing
+                        anchors.rightMargin: Kirigami.Units.smallSpacing
+                        spacing: Kirigami.Units.smallSpacing
+                        Repeater {
+                            model: page.pendingFiles
+                            Rectangle {
+                                id: pendingChip
+                                height: Kirigami.Units.gridUnit * 3
+                                width: (page.isImageFile(modelData) ? 60 : 24)
+                                       + 170 + Kirigami.Units.gridUnit * 1.25
+                                       + Kirigami.Units.smallSpacing * 5
+                                radius: 8
+                                color: Kirigami.Theme.alternateBackgroundColor
+                                border.color: Kirigami.Theme.disabledTextColor
+                                border.width: 1
+                                // Same classification the sent bubble uses, so the chip
+                                // you pick is the card you end up seeing: the icon
+                                // follows the file's kind and the size is on the line
+                                // below, rather than a generic sheet icon and a bare
+                                // name. Declared here (not on the Row) because the
+                                // children read it as `pendingChip.card`.
+                                readonly property var card: page.isImageFile(modelData)
+                                    ? ({}) : Mgr.attachmentCard(modelData)
+                                Row {
+                                    anchors.fill: parent
+                                    anchors.margins: Kirigami.Units.smallSpacing
+                                    spacing: Kirigami.Units.smallSpacing
+                                    Image {
+                                        id: thumb
+                                        visible: page.isImageFile(modelData)
+                                        source: "file://" + modelData
+                                        width: 60
+                                        height: parent.height
+                                        fillMode: Image.PreserveAspectFit
+                                    }
+                                    Kirigami.Icon {
+                                        visible: !page.isImageFile(modelData)
+                                        source: page.isImageFile(modelData) ? "" : pendingChip.card.icon
+                                        implicitWidth: 24
+                                        implicitHeight: 24
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                    Column {
+                                        width: 170
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        spacing: 0
+                                        Controls.Label {
+                                            text: page.fileBaseName(modelData)
+                                            width: parent.width
+                                            elide: Text.ElideRight
+                                        }
+                                        Controls.Label {
+                                            visible: !page.isImageFile(modelData)
+                                            text: page.isImageFile(modelData) ? "" : pendingChip.card.subtitle
+                                            width: parent.width
+                                            elide: Text.ElideRight
+                                            opacity: 0.7
+                                            font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.8))
+                                        }
+                                    }
+                                    Controls.Button {
+                                        id: removeThumb
+                                        width: Kirigami.Units.gridUnit * 1.25
+                                        height: parent.height
+                                        text: "✕"
+                                        flat: true
+                                        onClicked: page.removePendingFile(index)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Parked messages: one card each, sliding up above the input bar. A send while a
+                // turn runs PARKS — it does not steer — because a steer REDIRECTS the reply being
+                // written, which has to be this card's button and not a side effect of send.
+                Column {
+                    id: queuedArea
+                    Layout.fillWidth: true
+                    Layout.leftMargin: Kirigami.Units.largeSpacing
+                    Layout.rightMargin: Kirigami.Units.largeSpacing
+                    Layout.topMargin: Kirigami.Units.smallSpacing
+                    spacing: Kirigami.Units.smallSpacing
+                    visible: queuedRepeater.count > 0
+                    // No container-level slide here: `implicitHeight` is READ-ONLY, and a
+                    // Behavior on it is rejected with "Invalid property assignment", which
+                    // takes the whole ChatPage down (every chat renders empty). Each card
+                    // already animates its own entry (opacity + translate) below, which is
+                    // the effect this line was after.
+
+                    Repeater {
+                        id: queuedRepeater
+                        model: Mgr.queuedSends
+                        // Ids only ever move forward, so the seen-set can be dropped whole once
+                        // nothing is queued (it exists purely to suppress a repeat slide).
+                        onCountChanged: if (count === 0) page.queuedSeen = ({})
+                        delegate: Item {
+                            id: queuedSlot
+                            width: queuedArea.width
+                            height: queuedCard.height
+
+                            Rectangle {
+                                id: queuedCard
+                                width: parent.width
+                                // Height follows the column, whose own implicit height already
+                                // accounts for the wrapped text at this width and the margins.
+                                height: queuedCol.implicitHeight + GrouseTheme.spacing.s4
+                                radius: GrouseTheme.radius.md
+                                color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                                               Kirigami.Theme.textColor.b, page.queuedCardFillAlpha)
+                                border.color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                                                      Kirigami.Theme.textColor.b, page.queuedCardBorderAlpha)
+                                opacity: 0
+                                // A translate (not y) so the slide never disturbs the Column's
+                                // own layout slot — the card moves, the space is already there.
+                                transform: Translate { id: queuedSlide; y: 0 }
+                                // A Repeater rebuilds EVERY delegate whenever the model is
+                                // republished — i.e. on any queue change — so only a genuinely new
+                                // card may slide; the ones already on screen settle in place.
+                                Component.onCompleted: {
+                                    if (page.queuedSeen[modelData.id]) {
+                                        queuedCard.opacity = 1
+                                    } else {
+                                        page.queuedSeen[modelData.id] = true
+                                        queuedEnter.start()
+                                    }
+                                }
+
+                                ParallelAnimation {
+                                    id: queuedEnter
+                                    NumberAnimation {
+                                        target: queuedCard; property: "opacity"
+                                        from: 0; to: 1; duration: 140
+                                    }
+                                    NumberAnimation {
+                                        target: queuedSlide; property: "y"
+                                        from: queuedCard.height; to: 0
+                                        duration: 220; easing.type: Easing.OutCubic
+                                    }
+                                }
+
+                                // Three bands, not one row: the message gets the card's full
+                                // width (it used to share a RowLayout with the buttons, which is
+                                // why it broke off mid-sentence under the Steer button), the
+                                // header says what the card IS, and the actions sit out of the
+                                // reading path.
+                                ColumnLayout {
+                                    id: queuedCol
+                                    anchors.fill: parent
+                                    anchors.margins: GrouseTheme.spacing.s2
+                                    spacing: Kirigami.Units.smallSpacing
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: Kirigami.Units.smallSpacing
+
+                                        Rectangle {
+                                            radius: height / 2
+                                            color: Qt.rgba(Kirigami.Theme.highlightColor.r,
+                                                           Kirigami.Theme.highlightColor.g,
+                                                           Kirigami.Theme.highlightColor.b,
+                                                           page.queuedBadgeFillAlpha)
+                                            implicitWidth: queuedTag.implicitWidth + Kirigami.Units.smallSpacing * 2
+                                            implicitHeight: queuedTag.implicitHeight + Kirigami.Units.smallSpacing * 0.5
+                                            Controls.Label {
+                                                id: queuedTag
+                                                anchors.centerIn: parent
+                                                text: qsTr("Queued")
+                                                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8
+                                                font.bold: true
+                                            }
+                                        }
+                                        Controls.Label {
+                                            Layout.fillWidth: true
+                                            text: page.queuedNote(modelData.attachments)
+                                            opacity: 0.7
+                                            elide: Text.ElideRight
+                                            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
+                                        }
+                                        Controls.ToolButton {
+                                            icon.name: "window-close"
+                                            display: Controls.AbstractButton.IconOnly
+                                            implicitWidth: Kirigami.Units.gridUnit * 1.5
+                                            implicitHeight: Kirigami.Units.gridUnit * 1.5
+                                            onClicked: Mgr.cancelQueued(modelData.id)
+                                            ToolTip.visible: hovered
+                                            ToolTip.text: qsTr("Discard this queued message")
+                                        }
+                                    }
+
+                                    Controls.Label {
+                                        Layout.fillWidth: true
+                                        text: modelData.text.length > 0 ? modelData.text : qsTr("Attachment")
+                                        textFormat: Text.PlainText
+                                        wrapMode: Text.Wrap
+                                        // Three lines, then an ellipsis: enough to recognise the
+                                        // message without the card pushing the composer down.
+                                        maximumLineCount: 3
+                                        elide: Text.ElideRight
+                                    }
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: Kirigami.Units.smallSpacing
+                                        Item { Layout.fillWidth: true }
+                                        Controls.Button {
+                                            text: qsTr("Steer")
+                                            icon.name: "media-playback-start"
+                                            display: Controls.AbstractButton.TextBesideIcon
+                                            // A steer carries text only, so a message with an
+                                            // attachment can never be promoted — it keeps waiting
+                                            // rather than losing its file silently.
+                                            enabled: page.canSteer && modelData.attachments <= 0
+                                            onClicked: Mgr.steerQueued(modelData.id)
+                                            ToolTip.visible: hovered
+                                            ToolTip.text: modelData.attachments > 0
+                                                          ? qsTr("A steer carries text only — this message keeps its attachment and waits for the turn to end.")
+                                                          : qsTr("Redirect the running turn: it answers this instead")
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                    TapHandler { onTapped: Mgr.messageModel.toggleExpanded(index) }
                 }
 
-                // ---------------- chart bubble ----------------
-                Rectangle {
-                    id: chartBubble
-                    visible: mdel.isChart
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.leftMargin: mdel.gap
-                    width: mdel.bubbleW
-                    height: mdel.chartH + mdel.pad * 2
-                    radius: 16
-                    color: Kirigami.Theme.alternateBackgroundColor
-                    border.color: Kirigami.Theme.disabledTextColor
-                    border.width: 1
-                    clip: true
-
-                    ChartBubble {
-                        anchors.fill: parent
-                        anchors.margins: mdel.pad
-                        chartSpec: mdel.messageChartData
-                        title: mdel.messageTitle
-                    }
-                }
-
-                // ---------------- MCP-App bubble ----------------
-                // With QtWebEngine (flatpak base app / native package) the app renders
-                // inline in a WebEngineView on the loopback bridge URL. Without it the
-                // same URL (or a temp file) opens in the system browser instead, and
-                // this stays a chip. height: the view cannot size itself from content
-                // (size-changed relay is a follow-up), so a generous fixed frame with
-                // in-page scroll.
-                Rectangle {
-                    id: mcpAppChip
-                    visible: mdel.isMcpApp
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.leftMargin: mdel.gap
-                    // Use the whole chat column (capped on an ultrawide window) so a
-                    // dashboard isn't squeezed into a phone-width strip.
-                    width: Math.min(mdel.maxW, 900)
-                    // Inline when WebEngine is compiled in AND the template has
-                    // arrived; else the status chip (browser handoff on tap). A
-                    // pinned app is not drawn here at all — its live view is the
-                    // docked pane, so the row collapses to a slim bar.
-                    // Reactive on page.pins: a bare Mgr.appPinned() call has no
-                    // signal dependency, so the chip never re-evaluated after an
-                    // unpin and stayed stuck on "Unpin".
-                    readonly property string pinnedSlot: page.pins
-                        ? (page.pins.top === mdel.messageAppKey ? "top"
-                           : (page.pins.bottom === mdel.messageAppKey ? "bottom" : ""))
-                        : ""
-                    readonly property bool pinned: pinnedSlot.length > 0
-                    property bool inlineShow: !pinned && mdel.inlineApps && mdel.messageAppHtml.length > 0
-                    // Fill the chat viewport: the app uses the window, scrolling in
-                    // place when its content is taller.
-                    readonly property real maxViewH: Math.max(240, list.height - 32)
-                    property real viewH: maxViewH
-                    implicitHeight: pinned ? pinnedBar.implicitHeight + mdel.pad * 2
-                                  : inlineShow ? viewH + mdel.pad * 2
-                                               : mcpCol.implicitHeight + mdel.pad * 2
-                    radius: Theme.radius.sm
-                    color: Qt.lighter(Kirigami.Theme.backgroundColor, 1.18)
-                    border.color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
-                                                                : Kirigami.Theme.disabledTextColor
-                    border.width: 1
-                    clip: true
-
-                    // Pinned stand-in: one line, not a second live view.
-                    RowLayout {
-                        id: pinnedBar
-                        visible: mcpAppChip.pinned
-                        anchors.fill: parent
-                        anchors.margins: mdel.pad
-                        Controls.Label {
-                            text: qsTr("Pinned") + " · " + mdel.pinnedSlot
-                                  + ": " + (mdel.messageTitle || qsTr("MCP app"))
-                            textFormat: Text.PlainText
-                            Layout.fillWidth: true
-                            elide: Text.ElideRight
-                            color: Kirigami.Theme.disabledTextColor
-                        }
-                        Controls.Button {
-                            text: qsTr("Unpin")
-                            onClicked: Mgr.unpinApp(mdel.pinnedSlot)
-                        }
-                    }
-
-                    Column {
-                        id: mcpCol
-                        visible: !mcpAppChip.inlineShow && !mcpAppChip.pinned
-                        anchors.fill: parent
-                        anchors.margins: mdel.pad
-                        spacing: 0
-                        Row {
-                            height: Kirigami.Units.gridUnit * 1.25
-                            width: parent.width
-                            Controls.Label {
-                                text: qsTr("Visualization") + ": " + (mdel.messageTitle || qsTr("call"))
-                                textFormat: Text.PlainText
-                                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.9
-                                color: Kirigami.Theme.disabledTextColor
-                                elide: Text.ElideRight
-                                width: parent.width - mcpStatus.implicitWidth - parent.spacing
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                            Controls.Label {
-                                id: mcpStatus
-                                text: mdel.messageStatus === "failed" ? qsTr("failed")
-                                     : mdel.messageAppHtml.length > 0 ? qsTr("template ready")
-                                     : mdel.messageStatus
-                                color: mdel.messageStatus === "failed" ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.disabledTextColor
-                                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                        }
-                        Controls.Label {
-                            visible: mdel.toolOpen
-                            text: mdel.messageDetail
-                            textFormat: Text.PlainText
-                            width: parent.width
-                            wrapMode: Text.Wrap
-                            opacity: 0.8
-                            font.family: "monospace"
-                        }
-                        RowLayout {
-                            visible: mdel.messageAppHtml.length > 0 && mdel.toolOpen
-                            width: parent.width
-                            spacing: Kirigami.Units.smallSpacing
-                            Controls.Label {
-                                // org.kde.Platform ships no QtWebEngine, so the app renders
-                                // in the user's browser — but interactively: grouse serves the
-                                // page over loopback with a host shim (AppBridgeServer), so
-                                // ui/initialize resolves and ui/message posts back into this chat.
-                                text: qsTr("Opens in your browser with a live bridge back to this chat.")
-                                Layout.fillWidth: true
-                                wrapMode: Text.Wrap
-                                opacity: 0.6
-                                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8
-                            }
-                            Controls.Button {
-                                text: qsTr("Open App")
-                                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
-                                onClicked: Mgr.openAppInHtml(mdel.messageAppKey)
-                            }
-                        }
-                    }
-
-                    Loader {
-                        id: mcpAppView
-                        anchors.fill: parent
-                        anchors.margins: mdel.pad
-                        // Loaded by source STRING, not a Component: when WebEngine
-                        // is compiled out (mgrInlineApps false) the loader is never
-                        // active, so AppView.qml — and its QtWebEngine import — is
-                        // never fetched. That would fail to load in the base
-                        // runtime without the base app.
-                        active: mcpAppChip.inlineShow
-                        source: "AppView.qml"
-                        onLoaded: if (item) item.appKey = mdel.messageAppKey
-                    }
-
-                    // Floating pin control. Composited over the WebEngine texture,
-                    // so it stays clickable; pinning moves the live view to the dock.
-                    Controls.ToolButton {
-                        visible: mcpAppChip.inlineShow
-                        anchors.top: parent.top
-                        anchors.right: parent.right
-                        anchors.margins: 4
-                        icon.name: "window-pin"
-                        onClicked: pinMenu.open()
-                        ToolTip.visible: hovered
-                        ToolTip.text: qsTr("Pin this app to the top or bottom")
-                        Menu {
-                            id: pinMenu
-                            MenuItem {
-                                text: qsTr("Pin to top")
-                                onTriggered: Mgr.pinApp(mdel.messageAppKey, "top")
-                            }
-                            MenuItem {
-                                text: qsTr("Pin to bottom")
-                                onTriggered: Mgr.pinApp(mdel.messageAppKey, "bottom")
-                            }
-                        }
-                    }
-
-                    TapHandler {
-                        enabled: !mcpAppChip.inlineShow && !mcpAppChip.pinned
-                        onTapped: Mgr.messageModel.toggleExpanded(index)
-                    }
-                }
-
-                // ---------------- collapsible thinking ----------------
-                Item {
-                    id: thoughtBlock
-                    visible: mdel.isThought
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.leftMargin: mdel.gap
-                    anchors.right: parent.right
-                    anchors.rightMargin: mdel.gap + mdel.scrollbarReserve
-                    implicitHeight: thoughtCol.implicitHeight
-
-                    Column {
-                        id: thoughtCol
-                        width: parent.width
-                        spacing: 0
-                        Controls.Button {
-                            flat: true
-                            text: mdel.thoughtOpen ? qsTr("Thinking") + " -" : qsTr("Thinking") + " >"
-                            height: Kirigami.Units.gridUnit * 1.25
-                            onClicked: Mgr.messageModel.toggleExpanded(index)
-                            opacity: 0.7
-                        }
-                        Controls.Label {
-                            visible: mdel.thoughtOpen
-                            text: mdel.messageText
-                            textFormat: Text.PlainText
-                            width: parent.width
-                            wrapMode: Text.Wrap
-                            opacity: 0.7
-                            font.italic: true
-                        }
-                    }
-                }
-
-                // ---------------- shared file card ----------------
-                // A file the SERVER shared: name, type and size came down with
-                // the tool call; the bytes did not (a blob in a tool result is
-                // stored in the session, replayed on every open and shown to the
-                // model). The card is the download.
-                FileCard {
-                    id: fileCard
-                    visible: mdel.isFile && !mdel.inlineFileImage
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.leftMargin: mdel.gap
-                    width: Math.min(mdel.maxW, 440)
-                    fileName: String(mdel.fileMeta.name || mdel.messageText)
-                    icon: String(mdel.fileMeta.icon || "application-octet-stream")
-                    subtitle: String(mdel.fileMeta.subtitle || "")
-                    phase: String(mdel.fileProgress.state || "idle")
-                    received: Number(mdel.fileProgress.received || 0)
-                    total: Number(mdel.fileProgress.total || 0)
-                    failure: String(mdel.fileProgress.failure || "")
-                    onDownloadRequested: page.downloadFile(
-                        mdel, String(mdel.fileRef.path || ""), String(mdel.fileRef.name || ""),
-                        String(mdel.fileRef.mime || ""), String(mdel.fileRef.sha256 || ""))
-                    onOpenRequested: {
-                        const local = String(mdel.fileProgress.localPath || "")
-                        if (local.length > 0)
-                            Qt.openUrlExternally("file://" + local)
-                    }
-                }
-
-                // ---------------- shared image, inline ----------------
-                // The same reference, painted as the picture: an image a reply shares is
-                // part of the reply, so it arrives without a tap and reads at a glance.
-                ImageCard {
-                    id: imageCard
-                    objectName: "imageCard"
-                    visible: mdel.isFile && mdel.inlineFileImage
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.leftMargin: mdel.gap
-                    width: Math.min(mdel.maxW, 440)
-                    fileName: String(mdel.fileRef.name || mdel.messageText)
-                    subtitle: String(mdel.fileMeta.subtitle || "")
-                    imagePath: String(mdel.fileProgress.localPath || "")
-                    phase: String(mdel.fileProgress.state || "idle")
-                    received: Number(mdel.fileProgress.received || 0)
-                    total: Number(mdel.fileProgress.total || 0)
-                    failure: String(mdel.fileProgress.failure || "")
-                    // Fetch as the row appears. A delegate is created when the row comes
-                    // into view, which is exactly when the bytes are wanted; the guard
-                    // keeps a re-created delegate from starting a second fetch (the map
-                    // already holds `downloading`/`saved` from the first).
-                    Component.onCompleted: {
-                        if (!visible || String(mdel.fileProgress.state || "") !== "")
-                            return
-                        page.downloadFile(
-                            mdel, String(mdel.fileRef.path || ""), String(mdel.fileRef.name || ""),
-                            String(mdel.fileRef.mime || ""), String(mdel.fileRef.sha256 || ""))
-                    }
-                    onDownloadRequested: page.downloadFile(
-                        mdel, String(mdel.fileRef.path || ""), String(mdel.fileRef.name || ""),
-                        String(mdel.fileRef.mime || ""), String(mdel.fileRef.sha256 || ""))
-                    // No `onOpenRequested` handler on purpose: the card opens its own
-                    // enlarged view, so wiring the system viewer here too would open the
-                    // picture twice, in two different applications.
-                }
-
-                // ---------------- error banner ----------------
-                Rectangle {
-                    id: errorBanner
-                    visible: mdel.isError
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.leftMargin: mdel.gap
-                    anchors.right: parent.right
-                    anchors.rightMargin: mdel.gap + mdel.scrollbarReserve
-                    implicitHeight: errCol.implicitHeight + mdel.pad
-                    radius: 6
-                    color: Kirigami.Theme.negativeBackgroundColor
-
-                    Controls.Label {
-                        id: errCol
-                        text: mdel.messageText
-                        textFormat: Text.PlainText
-                        color: Kirigami.Theme.negativeTextColor
-                        wrapMode: Text.Wrap
-                        anchors.fill: parent
-                        anchors.margins: mdel.pad
-                    }
-                }
-            }
-        }
-
-            // One-click jump back to the bottom when the user has scrolled up
-            // more than a viewport's worth of content. atYEnd is the Flickable's
-            // own verdict and is the authority here: with recycled delegates a
-            // pooled row's height is an average estimate, so re-deriving "is
-            // there content below" from contentHeight minus contentY could claim
-            // overflow while the list sat at its end (arrow showing with nowhere
-            // left to scroll).
-            Controls.Button {
-                id: jumpToBottomButton
-                icon.name: "go-down"
-                display: Controls.AbstractButton.IconOnly
-                visible: !list.atYEnd
-                z: 2
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                anchors.rightMargin: Kirigami.Units.largeSpacing + Kirigami.Units.gridUnit * 1.5
-                anchors.bottomMargin: Kirigami.Units.largeSpacing
-                onClicked: {
-                    // Pin first, then let pinToEnd converge: an animation would land on the
-                    // end as it is measured at this instant, and a row that measures after
-                    // that leaves the reader short of it (the "press it twice" bug).
-                    pinnedToEnd = true
-                    page.pinToEnd()
-                    if (page.scrollSession.length > 0)
-                        page.scrollMem[page.scrollSession] = 0
-                }
             }
 
-        }
-
-        // Pinned MCP-App dock (bottom): same as the top dock, divider on its top
-        // edge (dragging up grows it).
-        Item {
-            id: bottomDock
-            Layout.fillWidth: true
-            readonly property string appKey: page.pins && page.pins.bottom !== undefined ? page.pins.bottom : ""
-            visible: appKey.length > 0
-            property real ratio: 0.35
-            readonly property real persistedRatio: page.pins && page.pins.bottomRatio !== undefined
-                                                    ? page.pins.bottomRatio : 0.35
-            Component.onCompleted: ratio = persistedRatio
-            onPersistedRatioChanged: if (!bottomDrag.active) ratio = persistedRatio
-            Layout.preferredHeight: visible ? Math.round(ratio * pageColumn.height) : 0
-
-            Rectangle { anchors.fill: parent; color: Kirigami.Theme.alternateBackgroundColor }
-
-            ColumnLayout {
-                anchors.fill: parent
-                anchors.topMargin: bottomHandle.height
-                spacing: 2
-                RowLayout {
-                    Layout.fillWidth: true
-                    Layout.leftMargin: Kirigami.Units.smallSpacing
-                    Layout.rightMargin: Kirigami.Units.smallSpacing
-                    Controls.Label {
-                        text: qsTr("Pinned · bottom")
-                        Layout.fillWidth: true
-                        elide: Text.ElideRight
-                        color: Kirigami.Theme.disabledTextColor
-                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
-                    }
-                    Controls.Button { text: qsTr("Unpin"); onClicked: Mgr.unpinApp("bottom") }
-                }
-                Loader {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    active: bottomDock.visible
-                    source: "AppView.qml"
-                    onLoaded: if (item) item.appKey = bottomDock.appKey
-                }
-            }
-
-            Rectangle {
-                id: bottomHandle
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                height: 12
-                color: "transparent"
-                Rectangle {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    height: 1
-                    color: Kirigami.Theme.separatorColor ? Kirigami.Theme.separatorColor
-                                                         : Kirigami.Theme.disabledTextColor
-                }
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 44
-                    height: 5
-                    radius: height / 2
-                    color: bottomHover.hovered || bottomDrag.active
-                           ? Kirigami.Theme.highlightColor : Kirigami.Theme.disabledTextColor
-                    opacity: bottomHover.hovered || bottomDrag.active ? 1 : 0.55
-                }
-                property real lastY: 0
-                HoverHandler { id: bottomHover; cursorShape: Qt.SizeVerCursor }
-                DragHandler {
-                    id: bottomDrag
-                    target: null
-                    onActiveChanged: {
-                        if (active) bottomHandle.lastY = centroid.scenePosition.y
-                        else Mgr.setPinRatio("bottom", bottomDock.ratio)
-                    }
-                    onCentroidChanged: if (active) {
-                        var y = centroid.scenePosition.y
-                        bottomDock.ratio = Math.max(0.15, Math.min(0.85,
-                            bottomDock.ratio - (y - bottomHandle.lastY) / pageColumn.height))
-                        bottomHandle.lastY = y
-                    }
-                }
-            }
-        }
-
-        // Pending file attachments: removable chips above the input. Images
-        // show a thumbnail; other files show a generic icon + name.
-        Item {
-            id: attachmentsArea
-            Layout.fillWidth: true
-            visible: page.pendingFiles.length > 0
-            implicitHeight: attachRow.implicitHeight + Kirigami.Units.smallSpacing
-            clip: true
-
-            Row {
-                id: attachRow
-                anchors.fill: parent
-                anchors.topMargin: Kirigami.Units.smallSpacing
-                anchors.leftMargin: Kirigami.Units.smallSpacing
-                anchors.rightMargin: Kirigami.Units.smallSpacing
-                spacing: Kirigami.Units.smallSpacing
-                Repeater {
-                    model: page.pendingFiles
-                    Rectangle {
-                        id: pendingChip
-                        height: Kirigami.Units.gridUnit * 3
-                        width: (page.isImageFile(modelData) ? 60 : 24)
-                               + 170 + Kirigami.Units.gridUnit * 1.25
-                               + Kirigami.Units.smallSpacing * 5
-                        radius: 8
-                        color: Kirigami.Theme.alternateBackgroundColor
-                        border.color: Kirigami.Theme.disabledTextColor
-                        border.width: 1
-                        // Same classification the sent bubble uses, so the chip
-                        // you pick is the card you end up seeing: the icon
-                        // follows the file's kind and the size is on the line
-                        // below, rather than a generic sheet icon and a bare
-                        // name. Declared here (not on the Row) because the
-                        // children read it as `pendingChip.card`.
-                        readonly property var card: page.isImageFile(modelData)
-                            ? ({}) : Mgr.attachmentCard(modelData)
-                        Row {
-                            anchors.fill: parent
-                            anchors.margins: Kirigami.Units.smallSpacing
-                            spacing: Kirigami.Units.smallSpacing
-                            Image {
-                                id: thumb
-                                visible: page.isImageFile(modelData)
-                                source: "file://" + modelData
-                                width: 60
-                                height: parent.height
-                                fillMode: Image.PreserveAspectFit
-                            }
-                            Kirigami.Icon {
-                                visible: !page.isImageFile(modelData)
-                                source: page.isImageFile(modelData) ? "" : pendingChip.card.icon
-                                implicitWidth: 24
-                                implicitHeight: 24
-                                anchors.verticalCenter: parent.verticalCenter
-                            }
-                            Column {
-                                width: 170
-                                anchors.verticalCenter: parent.verticalCenter
-                                spacing: 0
-                                Controls.Label {
-                                    text: page.fileBaseName(modelData)
-                                    width: parent.width
-                                    elide: Text.ElideRight
-                                }
-                                Controls.Label {
-                                    visible: !page.isImageFile(modelData)
-                                    text: page.isImageFile(modelData) ? "" : pendingChip.card.subtitle
-                                    width: parent.width
-                                    elide: Text.ElideRight
-                                    opacity: 0.7
-                                    font.pixelSize: Math.max(10, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.8))
-                                }
-                            }
-                            Controls.Button {
-                                id: removeThumb
-                                width: Kirigami.Units.gridUnit * 1.25
-                                height: parent.height
-                                text: "✕"
-                                flat: true
-                                onClicked: page.removePendingFile(index)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Parked messages: one card each, sliding up above the input bar. A send while a
-        // turn runs PARKS — it does not steer — because a steer REDIRECTS the reply being
-        // written, which has to be this card's button and not a side effect of send.
-        Column {
-            id: queuedArea
-            Layout.fillWidth: true
-            Layout.leftMargin: Kirigami.Units.largeSpacing
-            Layout.rightMargin: Kirigami.Units.largeSpacing
-            Layout.topMargin: Kirigami.Units.smallSpacing
-            spacing: Kirigami.Units.smallSpacing
-            visible: queuedRepeater.count > 0
-            // No container-level slide here: `implicitHeight` is READ-ONLY, and a
-            // Behavior on it is rejected with "Invalid property assignment", which
-            // takes the whole ChatPage down (every chat renders empty). Each card
-            // already animates its own entry (opacity + translate) below, which is
-            // the effect this line was after.
-
-            Repeater {
-                id: queuedRepeater
-                model: Mgr.queuedSends
-                // Ids only ever move forward, so the seen-set can be dropped whole once
-                // nothing is queued (it exists purely to suppress a repeat slide).
-                onCountChanged: if (count === 0) page.queuedSeen = ({})
-                delegate: Item {
-                    id: queuedSlot
-                    width: queuedArea.width
-                    height: queuedCard.height
-
-                    Rectangle {
-                        id: queuedCard
-                        width: parent.width
-                        // Height follows the column, whose own implicit height already
-                        // accounts for the wrapped text at this width and the margins.
-                        height: queuedCol.implicitHeight + GrouseTheme.spacing.s4
-                        radius: GrouseTheme.radius.md
-                        color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
-                                       Kirigami.Theme.textColor.b, page.queuedCardFillAlpha)
-                        border.color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
-                                              Kirigami.Theme.textColor.b, page.queuedCardBorderAlpha)
-                        opacity: 0
-                        // A translate (not y) so the slide never disturbs the Column's
-                        // own layout slot — the card moves, the space is already there.
-                        transform: Translate { id: queuedSlide; y: 0 }
-                        // A Repeater rebuilds EVERY delegate whenever the model is
-                        // republished — i.e. on any queue change — so only a genuinely new
-                        // card may slide; the ones already on screen settle in place.
-                        Component.onCompleted: {
-                            if (page.queuedSeen[modelData.id]) {
-                                queuedCard.opacity = 1
-                            } else {
-                                page.queuedSeen[modelData.id] = true
-                                queuedEnter.start()
-                            }
-                        }
-
-                        ParallelAnimation {
-                            id: queuedEnter
-                            NumberAnimation {
-                                target: queuedCard; property: "opacity"
-                                from: 0; to: 1; duration: 140
-                            }
-                            NumberAnimation {
-                                target: queuedSlide; property: "y"
-                                from: queuedCard.height; to: 0
-                                duration: 220; easing.type: Easing.OutCubic
-                            }
-                        }
-
-                        // Three bands, not one row: the message gets the card's full
-                        // width (it used to share a RowLayout with the buttons, which is
-                        // why it broke off mid-sentence under the Steer button), the
-                        // header says what the card IS, and the actions sit out of the
-                        // reading path.
-                        ColumnLayout {
-                            id: queuedCol
-                            anchors.fill: parent
-                            anchors.margins: GrouseTheme.spacing.s2
-                            spacing: Kirigami.Units.smallSpacing
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: Kirigami.Units.smallSpacing
-
-                                Rectangle {
-                                    radius: height / 2
-                                    color: Qt.rgba(Kirigami.Theme.highlightColor.r,
-                                                   Kirigami.Theme.highlightColor.g,
-                                                   Kirigami.Theme.highlightColor.b,
-                                                   page.queuedBadgeFillAlpha)
-                                    implicitWidth: queuedTag.implicitWidth + Kirigami.Units.smallSpacing * 2
-                                    implicitHeight: queuedTag.implicitHeight + Kirigami.Units.smallSpacing * 0.5
-                                    Controls.Label {
-                                        id: queuedTag
-                                        anchors.centerIn: parent
-                                        text: qsTr("Queued")
-                                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8
-                                        font.bold: true
-                                    }
-                                }
-                                Controls.Label {
-                                    Layout.fillWidth: true
-                                    text: page.queuedNote(modelData.attachments)
-                                    opacity: 0.7
-                                    elide: Text.ElideRight
-                                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
-                                }
-                                Controls.ToolButton {
-                                    icon.name: "window-close"
-                                    display: Controls.AbstractButton.IconOnly
-                                    implicitWidth: Kirigami.Units.gridUnit * 1.5
-                                    implicitHeight: Kirigami.Units.gridUnit * 1.5
-                                    onClicked: Mgr.cancelQueued(modelData.id)
-                                    ToolTip.visible: hovered
-                                    ToolTip.text: qsTr("Discard this queued message")
-                                }
-                            }
-
-                            Controls.Label {
-                                Layout.fillWidth: true
-                                text: modelData.text.length > 0 ? modelData.text : qsTr("Attachment")
-                                textFormat: Text.PlainText
-                                wrapMode: Text.Wrap
-                                // Three lines, then an ellipsis: enough to recognise the
-                                // message without the card pushing the composer down.
-                                maximumLineCount: 3
-                                elide: Text.ElideRight
-                            }
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: Kirigami.Units.smallSpacing
-                                Item { Layout.fillWidth: true }
-                                Controls.Button {
-                                    text: qsTr("Steer")
-                                    icon.name: "media-playback-start"
-                                    display: Controls.AbstractButton.TextBesideIcon
-                                    // A steer carries text only, so a message with an
-                                    // attachment can never be promoted — it keeps waiting
-                                    // rather than losing its file silently.
-                                    enabled: page.canSteer && modelData.attachments <= 0
-                                    onClicked: Mgr.steerQueued(modelData.id)
-                                    ToolTip.visible: hovered
-                                    ToolTip.text: modelData.attachments > 0
-                                                  ? qsTr("A steer carries text only — this message keeps its attachment and waits for the turn to end.")
-                                                  : qsTr("Redirect the running turn: it answers this instead")
-                                }
-                            }
-                        }
-                    }
-                }
+            ChatSidePanel {
+                id: sidePanel
+                SplitView.preferredWidth: 340
+                SplitView.minimumWidth: 260
+                SplitView.maximumWidth: 560
+                SplitView.fillHeight: true
+                visible: page.sidePanelOpen
+                onCloseRequested: page.sidePanelOpen = false
+                onClearRequested: page.clearRequested()
             }
         }
 
@@ -2699,7 +2742,7 @@ Kirigami.Page {
                         // One target for the ring AND the number: two handlers for one
                         // gesture is how a click lands twice.
                         TapHandler {
-                            onTapped: page.contextBreakdownRequested()
+                            onTapped: page.showContextPanel()
                         }
                         HoverHandler {
                             id: contextHover
