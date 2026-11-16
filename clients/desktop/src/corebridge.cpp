@@ -178,7 +178,7 @@ bool CoreBridge::resolve()
     // The listener table's layout and the symbol signatures are the contract.
     // An older core (or a stale GROUSE_CORE) is refused before any callback can
     // be invoked with the wrong arity.
-    static constexpr unsigned kExpectedAbiVersion = 14;
+    static constexpr unsigned kExpectedAbiVersion = 15;
     if (!a.grouse_abi_version) {
         qWarning() << "CoreBridge: core library predates the ABI version symbol; refusing it";
         return false;
@@ -434,6 +434,13 @@ void CoreBridge::installListener()
         cb_on_thread_ready,
         cb_on_extension_catalog,
         cb_on_context_report,
+        // The area timeline and the surfacing knob are Android-side surfaces for
+        // now (docs/PARITY.md marks both excluded here). The slots are carried
+        // null so the table's LAYOUT still matches the core's with ABI 14 and 15:
+        // the core reads this struct by its own definition, so a short table is an
+        // out-of-bounds read the version gate exists to prevent.
+        nullptr,   // on_thread_timeline (ABI 14)
+        nullptr,   // on_sensitivity (ABI 15)
     };
     m_listener = &table;
 

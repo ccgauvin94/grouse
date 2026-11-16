@@ -302,5 +302,9 @@ struct GrouseCoreListener {
     // What fills the chat's context window if it were prompted now: (session_id, JSON).
     // Appended last; ABI 13.
     void (*on_context_report)(void *, const char *, const char *);
+    // An area's timeline: (label, rows JSON). Appended last; ABI 14.
+    void (*on_thread_timeline)(void *, const char *, const char *);
+    // The surfacing-sensitivity readout, as the server's JSON. Appended last; ABI 15.
+    void (*on_sensitivity)(void *, const char *);
 };
 }

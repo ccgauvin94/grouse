@@ -68,9 +68,8 @@ Item {
     // hidden while its value changed has no frame to show when it comes back.
     Component.onCompleted: canvas.requestPaint()
 
-    Connections {
-        target: Kirigami.Theme
-        // Light/dark switch: both colours above are derived from the palette.
-        function onColorSchemeChanged() { canvas.requestPaint() }
-    }
+    // No light/dark hook is needed: both colours above are BINDINGS on the palette, so a
+    // scheme switch changes them and the on*ColorChanged handlers repaint. (A Connections
+    // on `Kirigami.Theme.colorSchemeChanged` would never fire — that signal does not exist
+    // on the theme singleton, and this app drives a custom palette anyway.)
 }
