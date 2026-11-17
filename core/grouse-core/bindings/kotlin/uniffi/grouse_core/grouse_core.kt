@@ -1754,7 +1754,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_new_session() and 0xFFFF) != 6666) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_new_session_with_mode() and 0xFFFF) != 34051) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_new_session_with_mode() and 0xFFFF) != 34744) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_open_session() and 0xFFFF) != 21069) {
@@ -2829,7 +2829,7 @@ public interface CoreInterface {
     fun `newSession`(`recipeId`: kotlin.String?, `projectId`: kotlin.String?)
     
     /**
-     * A chat started in a mode (`dev` / `plan`). The mode rides `_meta.tags` on
+     * A chat started in a mode (`dev`; `chat` is the default). The mode rides `_meta.tags` on
      * `session/new`: the server stores it, filters on it, and never returns it, so
      * creation is the only moment it can be written until upstream adds a mutation.
      */
@@ -3623,7 +3623,7 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
-     * A chat started in a mode (`dev` / `plan`). The mode rides `_meta.tags` on
+     * A chat started in a mode (`dev`; `chat` is the default). The mode rides `_meta.tags` on
      * `session/new`: the server stores it, filters on it, and never returns it, so
      * creation is the only moment it can be written until upstream adds a mutation.
      */override fun `newSessionWithMode`(`recipeId`: kotlin.String?, `projectId`: kotlin.String?, `mode`: kotlin.String?)
