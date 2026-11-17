@@ -1422,6 +1422,17 @@ pub extern "C" fn grouse_unstable_session_project(h: *mut c_void, id: *const c_c
     catch_unwind(AssertUnwindSafe(|| handle(h).unstable.session_project(id, project_id))).ok();
 }
 
+/// Plan mode on/off for a session: a system-prompt extra (see
+/// `GrouseUnstable::set_plan_mode`). Temporary shape — no state marker to read back.
+#[no_mangle]
+pub extern "C" fn grouse_unstable_set_plan_mode(h: *mut c_void, session_id: *const c_char, on: i32) {
+    let Some(session_id) = (unsafe { c_param(session_id) }).map(str::to_owned) else { return };
+    catch_unwind(AssertUnwindSafe(|| {
+        handle(h).unstable.set_plan_mode(session_id, on != 0)
+    }))
+    .ok();
+}
+
 #[no_mangle]
 pub extern "C" fn grouse_unstable_list_tools(h: *mut c_void, session_id: *const c_char) {
     let Some(session_id) = (unsafe { c_param(session_id) }).map(str::to_owned) else { return };

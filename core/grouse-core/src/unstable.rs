@@ -24,6 +24,19 @@ use crate::GrouseUnstableListener;
 /// Constructed independently of [`crate::Core`]; the live connection is resolved per call
 /// through `spine::current_conn()`, so these intents no-op (or error) while disconnected —
 /// exactly like the desktop's guarded `rpc` calls.
+/// What plan mode tells the model. ONE string, in the core, so the two clients
+/// cannot drift into giving the agent different instructions for the same flag.
+///
+/// Instructed, not enforced: nothing here can stop a tool call. Enforcement would be
+/// per-session tool switches (a re-prefill per switch) or a `PreToolUse` hook (which
+/// is project-scoped and cannot see this flag at all).
+pub const PLAN_MODE_INSTRUCTIONS: &str = "PLAN MODE. Investigate before touching anything: \
+read, search, and run read-only commands freely. Do NOT create, edit, delete or move \
+files, install packages, change git state, or run anything that mutates the system. \
+When you have enough, answer with a short numbered plan — the files you will touch, \
+the change to each, the risks, and how it will be verified — then stop. The user \
+approves the plan before any edit happens.";
+
 #[derive(uniffi::Object)]
 pub struct GrouseUnstable {
     listener: Arc<dyn GrouseUnstableListener>,
@@ -158,6 +171,34 @@ impl GrouseUnstable {
 
     /// Move a session between projects (`None` un-files — an explicit JSON null, never
     /// an omitted key); re-lists projects so the sidebar reflects the change.
+    /// Plan mode, the TEMPORARY shape: a system-prompt extra on the session.
+    ///
+    /// `_goose/unstable/session/system-prompt/set` (mode `append`, key `plan`) is
+    /// upstream's method and upstream classifies it **keep** (#11451 — Berd uses it
+    /// for persona handoff), and it is the only lever that is mutable at runtime,
+    /// model-visible, re-sent on every inference and persisted on the session. That
+    /// is why plan mode can exist at all before session metadata can be mutated.
+    ///
+    /// What it does NOT do is give the client a state marker it can read back:
+    /// there is no getter, so each client mirrors the flag locally and the
+    /// transcript is the cross-device record. `off` sends empty text, which clears
+    /// the key (there is no Clear mode).
+    pub fn set_plan_mode(&self, session_id: String, on: bool) {
+        let Some(conn) = self.route(&session_id) else {
+            return;
+        };
+        self.call(
+            &*conn,
+            "_goose/unstable/session/system-prompt/set",
+            json!({
+                "sessionId": session_id,
+                "mode": "append",
+                "key": "plan",
+                "text": if on { PLAN_MODE_INSTRUCTIONS } else { "" },
+            }),
+        );
+    }
+
     pub fn session_project(&self, session_id: String, project_id: Option<String>) {
         let Some(conn) = self.route(&session_id) else { return };
         self.call(
@@ -1467,6 +1508,34 @@ mod tests {
             &[
                 ("_goose/unstable/session/project/update", json!({"sessionId": "s1", "projectId": null})),
                 ("_goose/unstable/sources/list", json!({"type": "project"})),
+            ],
+        );
+    }
+
+    #[test]
+    fn plan_mode_is_a_prompt_extra_that_clears_with_empty_text() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        stub.script(vec![Ok(Value::Null), Ok(Value::Null)]);
+        let (g, _rec) = harness(stub.clone());
+
+        g.set_plan_mode("s1".to_string(), true);
+        g.set_plan_mode("s1".to_string(), false);
+
+        // On: append the instruction under the plan key. Off: the SAME key with empty
+        // text, which is how goose clears an extra (there is no Clear mode).
+        assert_calls(
+            &stub,
+            &[
+                (
+                    "_goose/unstable/session/system-prompt/set",
+                    json!({"sessionId": "s1", "mode": "append", "key": "plan",
+                           "text": PLAN_MODE_INSTRUCTIONS}),
+                ),
+                (
+                    "_goose/unstable/session/system-prompt/set",
+                    json!({"sessionId": "s1", "mode": "append", "key": "plan", "text": ""}),
+                ),
             ],
         );
     }
