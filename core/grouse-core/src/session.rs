@@ -866,7 +866,6 @@ pub(crate) fn summary_from_fields(
         archived,
         // Stamped by whoever knows the mode sets: a row never carries its tags
         // back, so `parse_sessions` cannot see one.
-        mode: None,
     })
 }
 

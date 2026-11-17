@@ -119,7 +119,6 @@ pub enum ConnectionStatus {
 /// A session list entry (CONTRACT §3.2/§3.3).
 #[derive(uniffi::Record, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SessionSummary {
-    mode: None,
     pub id: String,
     pub title: String,
     /// Server timestamp; the core compares it against its transcript cache.
