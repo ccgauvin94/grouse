@@ -920,6 +920,10 @@ Controls.ApplicationWindow {
         function onPermissionRequested() {
             permissionDialog.pendingToolCallId = Mgr.permissionToolCallId()
             permissionDialog.appTitle = Mgr.permissionTitle()
+            // Assigned, not bound: `Mgr.permissionOptions()` is an invokable, so a
+            // binding on it would be evaluated once at start-up (empty) and the dialog
+            // would never show the server's own answers — see PermissionDialog.qml.
+            permissionDialog.options = Mgr.permissionOptions()
             permissionDialog.open()
         }
         // A form the server is parked on (elicitation or recipe parameters).

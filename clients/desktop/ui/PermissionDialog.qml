@@ -10,6 +10,27 @@ Controls.Dialog {
 
     property string pendingToolCallId: ""
     property string appTitle: ""
+    // The server's OWN answers for this request (allow once / always allow / deny…),
+    // assigned by whoever raises the dialog.
+    //
+    // It is a property, NOT a `Mgr.permissionOptions()` call in the delegate below.
+    // A QML binding that calls an invokable reads no property, so QML evaluates it
+    // exactly once — when this dialog instance is created at app start, while nothing
+    // is pending — and never again. The list stayed empty for the life of the process
+    // and the dialog showed only the static Deny, whatever the server offered.
+    property var options: []
+
+    /** A kind as words. The server names its options by id ("allow_once"), which is
+     *  not something to put on a button. */
+    function optionLabel(kind) {
+        switch (kind) {
+        case "allow_once": return qsTr("Allow once")
+        case "allow_always": return qsTr("Always allow")
+        case "reject_once": return qsTr("Deny")
+        case "reject_always": return qsTr("Always deny")
+        default: return qsTr("Deny")
+        }
+    }
 
     contentItem: Column {
         width: 420
@@ -31,9 +52,12 @@ Controls.Dialog {
         }
 
         Repeater {
-            model: Mgr.permissionOptions()
+            model: dialog.options
             delegate: Controls.Button {
-                text: modelData.name
+                // The core's flat record is snake_case (`option_id`), like every other
+                // record the client reads; QML's `modelData.optionId` was undefined, so
+                // an allow button would have answered with an empty id — i.e. a denial.
+                text: dialog.optionLabel(modelData.kind)
                 // NO textFormat here: `Controls.Button` has no such property, and
                 // assigning one does not merely warn — the whole type fails to
                 // construct, which takes `PermissionDialog` (and therefore
@@ -44,28 +68,40 @@ Controls.Dialog {
                 flat: true
                 width: parent.width
                 onClicked: {
-                    Mgr.respondPermission(dialog.pendingToolCallId, modelData.optionId)
+                    // Clear the id FIRST: onClosed answers an empty dialog with a
+                    // denial, so a clicked option would otherwise be answered twice
+                    // (allow, then cancel).
+                    const id = dialog.pendingToolCallId
+                    dialog.pendingToolCallId = ""
+                    Mgr.respondPermission(id, modelData.option_id)
                     dialog.close()
                 }
             }
         }
 
         Controls.Button {
+            // Every goose request carries its own options, so this is the fallback for
+            // a server that sends none. A dismissal is a denial, so one button covers
+            // Escape, the close box and this.
+            visible: dialog.options.length === 0
             text: qsTr("Deny")
             flat: true
             width: parent.width
             onClicked: {
-                Mgr.respondPermission(dialog.pendingToolCallId, "")
+                const id = dialog.pendingToolCallId
+                dialog.pendingToolCallId = ""
+                Mgr.respondPermission(id, "")
                 dialog.close()
             }
         }
     }
 
     onClosed: {
-        // Any other dismissal (Escape) is also a denial.
+        // Any other dismissal (Escape, the window's close box) is also a denial.
         if (pendingToolCallId.length > 0) {
-            Mgr.respondPermission(pendingToolCallId, "")
+            const id = pendingToolCallId
             pendingToolCallId = ""
+            Mgr.respondPermission(id, "")
         }
     }
 }
