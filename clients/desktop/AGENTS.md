@@ -227,9 +227,11 @@ distrobox enter kde-build -- bash -lc 'cmake -B build -S . -DCMAKE_BUILD_TYPE=De
 - Fresh container needs `qt6-qtbase-devel qt6-qtdeclarative-devel
   qt6-qtwebsockets-devel kf6-kirigami-devel kf6-kcoreaddons-devel
   kf6-krunner-devel kf6-kservice-devel kf6-ki18n-devel extra-cmake-modules
-  kf6-qqc2-desktop-style` (CMakeLists runs `find_package(ECM REQUIRED)`; without
+  kf6-qqc2-desktop-style qt6-qtsvg` (CMakeLists runs `find_package(ECM REQUIRED)`; without
   the last one the `org.kde.desktop` QQuickStyle in `main.cpp` fails to load:
   "module org.kde.desktop is not installed") plus `xorg-x11-server-Xvfb`.
+  `qt6-qtsvg` is what renders the app's own SVG icon (`ui/icons/dev-mode-symbolic.svg`);
+  without the image plugin it draws nothing at all — no error, just an empty slot.
 - Quick static QML check (catches "X is not a type" without a display):
 
 ```sh

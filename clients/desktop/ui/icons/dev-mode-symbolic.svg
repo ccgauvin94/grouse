@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The dev-session marker: a "< / >" glyph drawn as an ICON (strokes, not three
+     characters), so it scales with the icon set and picks up the theme colour.
+     Symbolic on purpose: Kirigami.Icon recolours a *-symbolic.svg by its `color`,
+     which a plain picture cannot do — a fixed-colour SVG would be invisible in one
+     of the two schemes. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <g fill="none" stroke="#000000" stroke-width="1.6"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M5.5 4 L2.2 8 L5.5 12"/>
+    <path d="M9.6 3 L6.4 13"/>
+    <path d="M10.5 4 L13.8 8 L10.5 12"/>
+  </g>
+</svg>

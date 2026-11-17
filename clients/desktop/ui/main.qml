@@ -625,13 +625,15 @@ Controls.ApplicationWindow {
                                             // "</>" marks a dev session. The mode is fixed at
                                             // creation (a tag the server stores and never
                                             // returns), so this is a readout, not a toggle.
-                                            Controls.Label {
+                                            // The dev marker is an ICON (`</>` strokes in the
+                                            // app's own resources), not three characters: it
+                                            // scales with the icon set and takes the theme colour.
+                                            Kirigami.Icon {
                                                 visible: dev === true
-                                                text: "</>"
-                                                font.family: "monospace"
-                                                font.pixelSize: root.sidebarSmallTextSize
+                                                source: "qrc:/icons/dev-mode-symbolic.svg"
                                                 color: Kirigami.Theme.highlightColor
-                                                renderType: Text.NativeRendering
+                                                implicitWidth: Kirigami.Units.iconSizes.small
+                                                implicitHeight: Kirigami.Units.iconSizes.small
                                             }
                                             Controls.Label {
                                                 text: title
@@ -734,7 +736,8 @@ Controls.ApplicationWindow {
                                 onTriggered: Mgr.newChatInMode("")
                             }
                             Controls.MenuItem {
-                                text: qsTr("New dev chat  </>")
+                                text: qsTr("New dev chat")
+                                icon.source: "qrc:/icons/dev-mode-symbolic.svg"
                                 onTriggered: Mgr.newChatInMode("dev")
                             }
                         }
