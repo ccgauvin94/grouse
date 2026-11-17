@@ -1063,6 +1063,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_new_session(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_new_session_with_mode(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_open_session(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_open_session_inner(
@@ -1086,6 +1088,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_grouse_core_checksum_method_core_roam_new_session(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_roam_new_session_in(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_core_roam_new_session_with_mode(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_roam_open_session(
     ): Int
@@ -1204,6 +1208,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_grouse_core_checksum_method_grouseunstable_session_project(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_set_extension_enabled(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_grouseunstable_set_plan_mode(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_sources_create(
     ): Int
@@ -1382,6 +1388,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_new_session(`ptr`: Long,`recipeId`: RustBuffer.ByValue,`projectId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_core_new_session_with_mode(`ptr`: Long,`recipeId`: RustBuffer.ByValue,`projectId`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_grouse_core_fn_method_core_open_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_open_session_inner(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`forceReplay`: Byte,uniffi_out_err: UniffiRustCallStatus, 
@@ -1405,6 +1413,8 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_method_core_roam_new_session(`ptr`: Long,`label`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_roam_new_session_in(`ptr`: Long,`label`: RustBuffer.ByValue,`cwd`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_core_roam_new_session_with_mode(`ptr`: Long,`label`: RustBuffer.ByValue,`cwd`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_roam_open_session(`ptr`: Long,`label`: RustBuffer.ByValue,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1535,6 +1545,8 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_method_grouseunstable_session_project(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`projectId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_set_extension_enabled(`ptr`: Long,`configKey`: RustBuffer.ByValue,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_grouseunstable_set_plan_mode(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`on`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_sources_create(`ptr`: Long,`sourceType`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`description`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1742,6 +1754,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_new_session() and 0xFFFF) != 6666) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_grouse_core_checksum_method_core_new_session_with_mode() and 0xFFFF) != 34051) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_grouse_core_checksum_method_core_open_session() and 0xFFFF) != 21069) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1776,6 +1791,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_roam_new_session_in() and 0xFFFF) != 18714) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_core_roam_new_session_with_mode() and 0xFFFF) != 38645) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_roam_open_session() and 0xFFFF) != 26278) {
@@ -1949,10 +1967,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_session_info() and 0xFFFF) != 30682) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_session_project() and 0xFFFF) != 5880) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_session_project() and 0xFFFF) != 35093) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_set_extension_enabled() and 0xFFFF) != 32807) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_set_plan_mode() and 0xFFFF) != 4949) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_create() and 0xFFFF) != 63216) {
@@ -2808,6 +2829,13 @@ public interface CoreInterface {
     fun `newSession`(`recipeId`: kotlin.String?, `projectId`: kotlin.String?)
     
     /**
+     * A chat started in a mode (`dev` / `plan`). The mode rides `_meta.tags` on
+     * `session/new`: the server stores it, filters on it, and never returns it, so
+     * creation is the only moment it can be written until upstream adds a mutation.
+     */
+    fun `newSessionWithMode`(`recipeId`: kotlin.String?, `projectId`: kotlin.String?, `mode`: kotlin.String?)
+    
+    /**
      * `session/load` with the session's real cwd (resolved: cache → probe →
      * session/list, never guessed); a fresh cached transcript renders
      * instantly, otherwise the load replays it.
@@ -2895,6 +2923,13 @@ public interface CoreInterface {
      * same config cwd `roam_new_session` uses.
      */
     fun `roamNewSessionIn`(`label`: kotlin.String, `cwd`: kotlin.String)
+    
+    /**
+     * A fresh session on a roam peer, in a mode (`grouse.mode`: dev). The tag rides
+     * `session/new` on THAT peer, so a roam chat is a dev chat exactly like a local
+     * one — the mode is stored by the peer's own goose.
+     */
+    fun `roamNewSessionWithMode`(`label`: kotlin.String, `cwd`: kotlin.String, `mode`: kotlin.String?)
     
     /**
      * Open a session on a roam peer; the peer becomes the chat owner until a
@@ -3588,6 +3623,26 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
+     * A chat started in a mode (`dev` / `plan`). The mode rides `_meta.tags` on
+     * `session/new`: the server stores it, filters on it, and never returns it, so
+     * creation is the only moment it can be written until upstream adds a mutation.
+     */override fun `newSessionWithMode`(`recipeId`: kotlin.String?, `projectId`: kotlin.String?, `mode`: kotlin.String?)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_new_session_with_mode(
+        it,
+        
+        FfiConverterOptionalString.lower(`recipeId`),
+        FfiConverterOptionalString.lower(`projectId`),
+        FfiConverterOptionalString.lower(`mode`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * `session/load` with the session's real cwd (resolved: cache → probe →
      * session/list, never guessed); a fresh cached transcript renders
      * instantly, otherwise the load replays it.
@@ -3808,6 +3863,26 @@ open class Core: Disposable, AutoCloseable, CoreInterface
         
         FfiConverterString.lower(`label`),
         FfiConverterString.lower(`cwd`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * A fresh session on a roam peer, in a mode (`grouse.mode`: dev). The tag rides
+     * `session/new` on THAT peer, so a roam chat is a dev chat exactly like a local
+     * one — the mode is stored by the peer's own goose.
+     */override fun `roamNewSessionWithMode`(`label`: kotlin.String, `cwd`: kotlin.String, `mode`: kotlin.String?)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_roam_new_session_with_mode(
+        it,
+        
+        FfiConverterString.lower(`label`),
+        FfiConverterString.lower(`cwd`),
+        FfiConverterOptionalString.lower(`mode`),_status)
 }
     }
     
@@ -5053,10 +5128,6 @@ public interface GrouseUnstableInterface {
      */
     fun `sessionInfo`(`sessionId`: kotlin.String)
     
-    /**
-     * Move a session between projects (`None` un-files — an explicit JSON null, never
-     * an omitted key); re-lists projects so the sidebar reflects the change.
-     */
     fun `sessionProject`(`sessionId`: kotlin.String, `projectId`: kotlin.String?)
     
     /**
@@ -5066,6 +5137,24 @@ public interface GrouseUnstableInterface {
      * new enabled state.
      */
     fun `setExtensionEnabled`(`configKey`: kotlin.String, `enabled`: kotlin.Boolean)
+    
+    /**
+     * Move a session between projects (`None` un-files — an explicit JSON null, never
+     * an omitted key); re-lists projects so the sidebar reflects the change.
+     * Plan mode, the TEMPORARY shape: a system-prompt extra on the session.
+     *
+     * `_goose/unstable/session/system-prompt/set` (mode `append`, key `plan`) is
+     * upstream's method and upstream classifies it **keep** (#11451 — Berd uses it
+     * for persona handoff), and it is the only lever that is mutable at runtime,
+     * model-visible, re-sent on every inference and persisted on the session. That
+     * is why plan mode can exist at all before session metadata can be mutated.
+     *
+     * What it does NOT do is give the client a state marker it can read back:
+     * there is no getter, so each client mirrors the flag locally and the
+     * transcript is the cross-device record. `off` sends empty text, which clears
+     * the key (there is no Clear mode).
+     */
+    fun `setPlanMode`(`sessionId`: kotlin.String, `on`: kotlin.Boolean)
     
     /**
      * Create a project or skill (`target.scope: "global"`); re-lists the touched family.
@@ -5736,11 +5825,7 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
     
     
 
-    
-    /**
-     * Move a session between projects (`None` un-files — an explicit JSON null, never
-     * an omitted key); re-lists projects so the sidebar reflects the change.
-     */override fun `sessionProject`(`sessionId`: kotlin.String, `projectId`: kotlin.String?)
+    override fun `sessionProject`(`sessionId`: kotlin.String, `projectId`: kotlin.String?)
         = 
     callWithHandle {
     uniffiRustCall() { _status ->
@@ -5769,6 +5854,36 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
         
         FfiConverterString.lower(`configKey`),
         FfiConverterBoolean.lower(`enabled`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Move a session between projects (`None` un-files — an explicit JSON null, never
+     * an omitted key); re-lists projects so the sidebar reflects the change.
+     * Plan mode, the TEMPORARY shape: a system-prompt extra on the session.
+     *
+     * `_goose/unstable/session/system-prompt/set` (mode `append`, key `plan`) is
+     * upstream's method and upstream classifies it **keep** (#11451 — Berd uses it
+     * for persona handoff), and it is the only lever that is mutable at runtime,
+     * model-visible, re-sent on every inference and persisted on the session. That
+     * is why plan mode can exist at all before session metadata can be mutated.
+     *
+     * What it does NOT do is give the client a state marker it can read back:
+     * there is no getter, so each client mirrors the flag locally and the
+     * transcript is the cross-device record. `off` sends empty text, which clears
+     * the key (there is no Clear mode).
+     */override fun `setPlanMode`(`sessionId`: kotlin.String, `on`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_grouseunstable_set_plan_mode(
+        it,
+        
+        FfiConverterString.lower(`sessionId`),
+        FfiConverterBoolean.lower(`on`),_status)
 }
     }
     
@@ -7024,6 +7139,15 @@ data class SessionSummary (
     var `hasNew`: kotlin.Boolean
     , 
     /**
+     * The session's mode (`grouse.mode`: `chat` / `dev`; `chat` is the default and is
+     * chat. **Derived, not read**: the server carries no tags back on a row, so the
+     * core learns modes by asking which sessions match each known value and stamps
+     * the answer here. That also means a mode is fixed at creation — see
+     * [`crate::session::MODE_TAG_KEY`].
+     */
+    var `mode`: kotlin.String?
+    , 
+    /**
      * True when the session is archived (goose stamps `_meta.archivedAt` and
      * `session/list` has no archived filter — the flag lets UIs list and
      * restore archived chats instead of dropping them). Always false for
@@ -7055,6 +7179,7 @@ public object FfiConverterTypeSessionSummary: FfiConverterRustBuffer<SessionSumm
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
         )
     }
@@ -7069,6 +7194,7 @@ public object FfiConverterTypeSessionSummary: FfiConverterRustBuffer<SessionSumm
             FfiConverterString.allocationSize(value.`model`) +
             FfiConverterBoolean.allocationSize(value.`hasRecipe`) +
             FfiConverterBoolean.allocationSize(value.`hasNew`) +
+            FfiConverterOptionalString.allocationSize(value.`mode`) +
             FfiConverterBoolean.allocationSize(value.`archived`)
     )
 
@@ -7082,6 +7208,7 @@ public object FfiConverterTypeSessionSummary: FfiConverterRustBuffer<SessionSumm
             FfiConverterString.write(value.`model`, buf)
             FfiConverterBoolean.write(value.`hasRecipe`, buf)
             FfiConverterBoolean.write(value.`hasNew`, buf)
+            FfiConverterOptionalString.write(value.`mode`, buf)
             FfiConverterBoolean.write(value.`archived`, buf)
     }
 }

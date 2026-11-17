@@ -1401,7 +1401,7 @@ impl Core {
         self.new_session_with_mode(recipe_id, project_id, None);
     }
 
-    /// A chat started in a mode (`dev` / `plan`). The mode rides `_meta.tags` on
+    /// A chat started in a mode (`dev`; `chat` is the default). The mode rides `_meta.tags` on
     /// `session/new`: the server stores it, filters on it, and never returns it, so
     /// creation is the only moment it can be written until upstream adds a mutation.
     pub fn new_session_with_mode(
