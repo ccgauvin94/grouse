@@ -2272,8 +2272,15 @@ fn session_list_follows_the_cursor_instead_of_stopping_at_the_first_page() {
         vec!["sess-e2e".to_string(), "sess-old".to_string()],
         "both pages must arrive, in the server's order"
     );
-    // And the cursor is what asked for it: one request without, one with.
-    let lists = server.frames_for("session/list");
+    // And the cursor is what asked for it: one request without, one with. The
+    // list also probes each NON-DEFAULT mode (a tag filter), because a session row
+    // never carries its tags back — those are separate requests, so count the
+    // unfiltered walk only.
+    let lists: Vec<_> = server
+        .frames_for("session/list")
+        .into_iter()
+        .filter(|frame| frame.pointer("/params/_meta/tags").is_none())
+        .collect();
     assert_eq!(lists.len(), 2, "one page per request: {lists:?}");
     assert_eq!(
         lists[1].pointer("/params/cursor").and_then(Value::as_str),
