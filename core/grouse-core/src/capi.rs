@@ -784,6 +784,35 @@ pub extern "C" fn grouse_new_session(
     });
 }
 
+/// `grouse_new_session`, plus a mode tag written at creation (`grouse.mode`:
+/// `dev` / `plan`).
+///
+/// A separate symbol rather than a fourth argument: the C ABI is a hand-written
+/// mirror of the uniffi surface and the deployed client links against the old
+/// signature. `mode` may be null; an unknown value is dropped by the core, so a
+/// typo cannot produce a tag nothing filters on.
+#[no_mangle]
+pub extern "C" fn grouse_new_session_with_mode(
+    h: *mut c_void,
+    recipe_id: *const c_char,
+    project_id: *const c_char,
+    mode: *const c_char,
+    out_err: *mut *mut c_char,
+) {
+    if !out_err.is_null() {
+        unsafe { *out_err = std::ptr::null_mut() };
+    }
+    let recipe_id = unsafe { c_param(recipe_id) }.map(str::to_owned);
+    let project_id = unsafe { c_param(project_id) }.map(str::to_owned);
+    let mode = unsafe { c_param(mode) }.map(str::to_owned);
+    catch_unwind(AssertUnwindSafe(|| {
+        handle(h).core.new_session_with_mode(recipe_id, project_id, mode)
+    }))
+    .unwrap_or_else(|_| {
+        set_err(out_err, "panic in grouse_new_session_with_mode");
+    });
+}
+
 #[no_mangle]
 pub extern "C" fn grouse_open_session(h: *mut c_void, session_id: *const c_char) {
     let Some(session_id) = (unsafe { c_param(session_id) }).map(str::to_owned) else { return };

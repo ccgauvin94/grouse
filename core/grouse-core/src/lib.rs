@@ -136,6 +136,12 @@ pub struct SessionSummary {
     /// True while the session has backgrounded content the UI has not shown
     /// yet — the green-dot indicator (hub staging, for any transport).
     pub has_new: bool,
+    /// The session's mode (`grouse.mode`: `dev` / `plan`), absent for an ordinary
+    /// chat. **Derived, not read**: the server carries no tags back on a row, so the
+    /// core learns modes by asking which sessions match each known value and stamps
+    /// the answer here. That also means a mode is fixed at creation — see
+    /// [`crate::session::MODE_TAG_KEY`].
+    pub mode: Option<String>,
     /// True when the session is archived (goose stamps `_meta.archivedAt` and
     /// `session/list` has no archived filter — the flag lets UIs list and
     /// restore archived chats instead of dropping them). Always false for
@@ -1083,6 +1089,55 @@ pub(crate) fn install_panic_log() {
     });
 }
 
+/// Walk every page of `session/list` (a page is 50 rows, and the cursor is opaque).
+/// `tags` filters server-side, which is the only way to READ a tag: this server
+/// stores tags and filters on them but never returns one on a row.
+///
+/// `None` means "no answer at all" — a failed FIRST page has to stay
+/// distinguishable from an empty list, or the drawer reads as "every chat was
+/// deleted".
+async fn walk_session_list(
+    conn: &crate::spine::Conn,
+    tags: &[(String, String)],
+) -> Option<Vec<Value>> {
+    let mut rows: Vec<Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut cursor: Option<String> = None;
+    let mut answered = false;
+    for _ in 0..crate::session::SESSION_LIST_MAX_PAGES {
+        let Ok(reply) = conn
+            .rpc_async(
+                "session/list",
+                crate::spine::session_list_params(cursor.as_deref(), tags),
+            )
+            .await
+        else {
+            break;
+        };
+        answered = true;
+        if let Some(page) = reply.get("sessions").and_then(Value::as_array) {
+            for row in page {
+                // The cursor is (sort_at, id), so pages should not overlap — but a
+                // session touched mid-walk can, and a duplicate row is worse than a
+                // repeated id check.
+                let id = row
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if seen.insert(id) {
+                    rows.push(row.clone());
+                }
+            }
+        }
+        match reply.get("nextCursor").and_then(Value::as_str) {
+            Some(next) if !next.is_empty() => cursor = Some(next.to_string()),
+            _ => break,
+        }
+    }
+    answered.then_some(rows)
+}
+
 #[uniffi::export]
 impl Core {
     /// Construct the core. The UI supplies its `CacheDir` (CONTRACT §7.4):
@@ -1342,6 +1397,18 @@ impl Core {
     /// exists, reuse it live — no `old.shutdown()` race. Only falls back to a
     /// full reconnect when the wire is down or the server identity changed.
     pub fn new_session(&self, recipe_id: Option<String>, project_id: Option<String>) {
+        self.new_session_with_mode(recipe_id, project_id, None);
+    }
+
+    /// A chat started in a mode (`dev` / `plan`). The mode rides `_meta.tags` on
+    /// `session/new`: the server stores it, filters on it, and never returns it, so
+    /// creation is the only moment it can be written until upstream adds a mutation.
+    pub fn new_session_with_mode(
+        &self,
+        recipe_id: Option<String>,
+        project_id: Option<String>,
+        mode: Option<String>,
+    ) {
         *self.inner.active_peer_label.write() = None;
         self.reset_chat_state();
         if let Some(store) = self.store() {
@@ -1359,8 +1426,12 @@ impl Core {
                 let cfg = config.clone();
                 let rid = recipe_id.clone();
                 let pid = project_id.clone();
+                let md = mode.clone();
                 crate::roam::runtime().spawn(async move {
-                    match conn.live_new_session_async(rid.clone(), pid.clone()).await {
+                    match conn
+                        .live_new_session_async(rid.clone(), pid.clone(), md.clone())
+                        .await
+                    {
                         Ok(_session_id) => {
                             this.save_cache();
                             this.probe_stamp();
@@ -1376,6 +1447,7 @@ impl Core {
                                 ConnectSpec::New {
                                     recipe_id: rid,
                                     project_id: pid,
+                                    mode: md,
                                     display: true,
                                 },
                                 false,
@@ -1392,6 +1464,7 @@ impl Core {
             ConnectSpec::New {
                 recipe_id,
                 project_id,
+                mode,
                 display: true,
             },
             false,
@@ -1584,47 +1657,31 @@ impl Core {
         };
         let core = self.clone();
         crate::roam::runtime().spawn(async move {
-            let mut rows: Vec<Value> = Vec::new();
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let mut cursor: Option<String> = None;
-            let mut answered = false;
-            for _ in 0..crate::session::SESSION_LIST_MAX_PAGES {
-                let Ok(reply) = conn
-                    .rpc_async(
-                        "session/list",
-                        crate::spine::session_list_params(cursor.as_deref()),
-                    )
-                    .await
-                else {
-                    break;
-                };
-                answered = true;
-                if let Some(page) = reply.get("sessions").and_then(Value::as_array) {
-                    for row in page {
-                        // The cursor is (sort_at, id), so pages should not overlap — but a
-                        // session touched mid-walk can, and a duplicate row in the drawer is
-                        // a worse failure than a repeated id check.
-                        let id = row
-                            .get("sessionId")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string();
-                        if seen.insert(id) {
-                            rows.push(row.clone());
-                        }
-                    }
-                }
-                match reply.get("nextCursor").and_then(Value::as_str) {
-                    Some(next) if !next.is_empty() => cursor = Some(next.to_string()),
-                    _ => break,
-                }
-            }
-            // A failed FIRST page must stay "no answer" (nothing painted) rather than an
-            // empty drawer that reads like every chat was deleted.
-            if !answered {
+            let Some(rows) = walk_session_list(&conn, &[]).await else {
                 return;
+            };
+            // A mode is a TAG, and this server writes tags and filters on them but
+            // never returns one, so the only truthful read is to ask which sessions
+            // carry each value. Two extra walks on a refresh, none on anything else —
+            // and only when there is a list to decorate.
+            let mut modes = Map::new();
+            if !rows.is_empty() {
+                for value in crate::session::MODE_VALUES {
+                    let filter = [(
+                        crate::session::MODE_TAG_KEY.to_string(),
+                        (*value).to_string(),
+                    )];
+                    let Some(matched) = walk_session_list(&conn, &filter).await else {
+                        continue;
+                    };
+                    let ids: Vec<Value> = matched
+                        .iter()
+                        .filter_map(|row| row.get("sessionId").cloned())
+                        .collect();
+                    modes.insert((*value).to_string(), Value::Array(ids));
+                }
             }
-            core.on_sessions_reply(json!({ "sessions": rows }));
+            core.on_sessions_reply(json!({ "sessions": rows, "modes": modes }));
         });
     }
 
@@ -4473,6 +4530,22 @@ impl Core {
 
     fn on_sessions_reply(&self, reply: Value) {
         let (mut sessions, cwds, updated) = crate::spine::parse_sessions(&reply);
+        // Modes arrive out of band (`{"dev": [ids], "plan": [ids]}`) because a tag
+        // is write-only on this server: the only read path is a filtered list per
+        // known value. The first value that claims a session wins.
+        if let Some(modes) = reply.get("modes").and_then(Value::as_object) {
+            for session in &mut sessions {
+                for (mode, ids) in modes {
+                    let claims = ids.as_array().is_some_and(|ids| {
+                        ids.iter().any(|id| id.as_str() == Some(session.id.as_str()))
+                    });
+                    if claims {
+                        session.mode = Some(mode.clone());
+                        break;
+                    }
+                }
+            }
+        }
         for session in &mut sessions {
             session.has_new = self.inner.hub.has_new(&session.id);
         }

@@ -275,6 +275,10 @@ pub(crate) enum ConnectSpec {
     New {
         recipe_id: Option<String>,
         project_id: Option<String>,
+        /// A client tag written at creation (`grouse.mode`): the server stores it
+        /// and filters on it, so it is the only way a chat can carry a mode at all
+        /// until upstream grows a mutation.
+        mode: Option<String>,
         /// Show the new (empty) session. False for the throwaway session a
         /// cold `connect()` creates on its way to the real resume: the cached
         /// chat the UI already painted must stay on screen.
@@ -293,8 +297,15 @@ fn session_new_params(
     config: &ServerConfig,
     recipe_id: Option<&str>,
     project_id: Option<&str>,
+    mode: Option<&str>,
 ) -> Value {
-    crate::session::session_new_params(&config.client_id, &config.cwd, recipe_id, project_id)
+    crate::session::session_new_params(
+        &config.client_id,
+        &config.cwd,
+        recipe_id,
+        project_id,
+        mode,
+    )
 }
 
 struct ConnInner {
@@ -728,12 +739,14 @@ impl Conn {
             Some(ConnectSpec::New {
                 recipe_id,
                 project_id,
+                mode,
                 display,
             }) => {
-                self.start_new_session(&cx, recipe_id, project_id, display).await?;
+                self.start_new_session(&cx, recipe_id, project_id, mode, display)
+                    .await?;
             }
             None => {
-                self.start_new_session(&cx, None, None, true).await?;
+                self.start_new_session(&cx, None, None, None, true).await?;
             }
         }
 
@@ -754,12 +767,14 @@ impl Conn {
         cx: &ConnectionTo<Agent>,
         recipe_id: Option<String>,
         project_id: Option<String>,
+        mode: Option<String>,
         display: bool,
     ) -> Result<(), AcpError> {
         let params = session_new_params(
             &self.inner.config,
             recipe_id.as_deref(),
             project_id.as_deref(),
+            mode.as_deref(),
         );
         let reply: Value = cx
             .send_request(UntypedMessage::new("session/new", params)?)
@@ -793,11 +808,13 @@ impl Conn {
         &self,
         recipe_id: Option<String>,
         project_id: Option<String>,
+        mode: Option<String>,
     ) -> Result<String, AcpError> {
         let params = session_new_params(
             &self.inner.config,
             recipe_id.as_deref(),
             project_id.as_deref(),
+            mode.as_deref(),
         );
         let reply: Value = self.rpc_async("session/new", params).await?;
         let session_id = reply
@@ -819,7 +836,7 @@ impl Conn {
         &self,
         project_id: Option<&str>,
     ) -> Result<String, AcpError> {
-        let params = session_new_params(&self.inner.config, None, project_id);
+        let params = session_new_params(&self.inner.config, None, project_id, None);
         let reply: Value = self.rpc_async("session/new", params).await?;
         Ok(reply
             .get("sessionId")
@@ -1131,8 +1148,8 @@ pub(crate) fn initialize_params() -> Value {
 }
 
 /// The `session/list` params: list user + ACP sessions (desktop listSessions).
-pub(crate) fn session_list_params(cursor: Option<&str>) -> Value {
-    crate::session::session_list_params(cursor)
+pub(crate) fn session_list_params(cursor: Option<&str>, tags: &[(String, String)]) -> Value {
+    crate::session::session_list_params(cursor, tags)
 }
 
 #[cfg(test)]
@@ -1178,7 +1195,7 @@ mod tests {
             initial_recipe_id: None,
             initial_project_id: None,
         };
-        let p = session_new_params(&cfg, Some("r-1"), Some("proj-9"));
+        let p = session_new_params(&cfg, Some("r-1"), Some("proj-9"), Some("dev"));
         assert_eq!(
             p.pointer("/_meta/client").and_then(Value::as_str),
             Some("grouse-desktop")

@@ -1088,7 +1088,7 @@ impl RoamPeer {
         // The remote goose's session/new deserializer REQUIRES mcpServers
         // (a missing field is a hard protocol error, not a default) — the
         // shared builder sends it for every transport.
-        let params = crate::session::session_new_params("grouse", cwd, None, None);
+        let params = crate::session::session_new_params("grouse", cwd, None, None, None);
         let reply = cx
             .send_request(UntypedMessage::new("session/new", params)?)
             .block_task()

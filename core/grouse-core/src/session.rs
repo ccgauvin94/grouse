@@ -137,8 +137,23 @@ pub(crate) const SESSION_LIST_MAX_PAGES: usize = 40;
 /// message, and this box's Assistant thread chats and scheduled runs fill that page
 /// on their own, so a project's own conversations fall off the bottom and a client
 /// grouping by project draws one row where there used to be five.
-pub(crate) fn session_list_params(cursor: Option<&str>) -> Value {
-    let mut params = json!({ "_meta": { "types": ["user", "acp"] } });
+pub(crate) fn session_list_params(cursor: Option<&str>, tags: &[(String, String)]) -> Value {
+    let mut meta = Map::new();
+    meta.insert(
+        "types".into(),
+        Value::Array(vec![
+            Value::String("user".into()),
+            Value::String("acp".into()),
+        ]),
+    );
+    if !tags.is_empty() {
+        let mut wanted = Map::new();
+        for (key, value) in tags {
+            wanted.insert(key.clone(), Value::String(value.clone()));
+        }
+        meta.insert("tags".into(), Value::Object(wanted));
+    }
+    let mut params = json!({ "_meta": Value::Object(meta) });
     if let Some(cursor) = cursor.filter(|c| !c.is_empty()) {
         params["cursor"] = Value::String(cursor.to_string());
     }
@@ -175,6 +190,20 @@ pub(crate) fn session_list_meta() -> Map<String, Value> {
 /// goose itself, later) cannot collide with it.
 pub const PROJECT_TAG_KEY: &str = "grouse.project";
 
+/// The tag key that carries a session's MODE — `dev`, `plan`, or absent.
+///
+/// A mode is a client-owned profile (a tag), not a goose feature: goose stores it
+/// and filters on it, nothing else. **It is fixed at creation**, because the server
+/// we speak to exposes `_meta.tags` on `session/new` and as a `session/list` filter
+/// but carries no tags back on a row and has no mutation method — so there is
+/// nothing to update a mode WITH. Flipping a mode in place waits on upstream.
+pub const MODE_TAG_KEY: &str = "grouse.mode";
+
+/// The modes this client knows. Closed on purpose: the only way to learn a
+/// session's mode is to ask which sessions carry each value (one filtered
+/// `session/list` per value), so an open vocabulary would cost a walk per word.
+pub const MODE_VALUES: &[&str] = &["dev", "plan"];
+
 /// `session/new`. `_meta.client` present ⇒ goose's `SessionType::User`, so the
 /// desktop/CLI can see these chats. `recipeId` starts a recipe session;
 /// `projectId` is persisted at creation (the stock-goose project bridge) and
@@ -184,22 +213,36 @@ pub(crate) fn session_new_params(
     cwd: &str,
     recipe_id: Option<&str>,
     project_id: Option<&str>,
+    mode: Option<&str>,
 ) -> Value {
     let mut meta = Map::new();
     meta.insert("client".into(), Value::String(client_id.to_string()));
     if let Some(recipe) = recipe_id.filter(|r| !r.is_empty()) {
         meta.insert("recipeId".into(), Value::String(recipe.to_string()));
     }
-    if let Some(project) = project_id.filter(|p| !p.is_empty()) {
+    let project = project_id.map(str::trim).filter(|p| !p.is_empty());
+    // An unknown mode is dropped rather than stored: a typo would otherwise become
+    // a tag nothing filters on, invisible to every UI.
+    let mode = mode
+        .map(str::trim)
+        .filter(|m| MODE_VALUES.contains(m));
+    if let Some(project) = project {
         meta.insert("projectId".into(), Value::String(project.to_string()));
-        // The forward-compatible half. A server that predates client tags ignores
-        // unknown `_meta` keys (verified against goose 1.56.0), so this costs
-        // nothing today and means a chat filed from now on is already tagged the
-        // day tags become the only mechanism. It is also why no backfill exists for
-        // older chats: `session_tags` is written only by `session/new` until
-        // upstream adds a mutation.
+    }
+    // The forward-compatible half. A server that predates client tags ignores
+    // unknown `_meta` keys (verified against goose 1.56.0), so this costs nothing
+    // today and means a chat filed or started from now on is already tagged the day
+    // tags become the only mechanism. It is also why no backfill exists for older
+    // chats: `session_tags` is written only by `session/new` until upstream adds a
+    // mutation.
+    if project.is_some() || mode.is_some() {
         let mut tags = Map::new();
-        tags.insert(PROJECT_TAG_KEY.to_string(), Value::String(project.to_string()));
+        if let Some(project) = project {
+            tags.insert(PROJECT_TAG_KEY.to_string(), Value::String(project.to_string()));
+        }
+        if let Some(mode) = mode {
+            tags.insert(MODE_TAG_KEY.to_string(), Value::String(mode.to_string()));
+        }
         meta.insert("tags".into(), Value::Object(tags));
     }
     json!({
@@ -814,6 +857,9 @@ pub(crate) fn summary_from_fields(
         has_recipe,
         has_new: false,
         archived,
+        // Stamped by whoever knows the mode sets: a row never carries its tags
+        // back, so `parse_sessions` cannot see one.
+        mode: None,
     })
 }
 
@@ -1105,7 +1151,7 @@ mod tests {
         // column still drives instruction injection, the tag is what survives its
         // retirement. Writing both at creation is the whole P0 — and a server that
         // predates tags just ignores the key.
-        let params = session_new_params("grouse-test", "/w", None, Some("media"));
+        let params = session_new_params("grouse-test", "/w", None, Some("media"), None);
         assert_eq!(
             params.pointer("/_meta/projectId").and_then(Value::as_str),
             Some("media")
@@ -1119,9 +1165,53 @@ mod tests {
         assert_eq!(PROJECT_TAG_KEY, "grouse.project");
 
         // No project, no tag: an unfiled chat must not grow an empty bag.
-        let unfiled = session_new_params("grouse-test", "/w", Some("recipe-1"), None);
+        let unfiled = session_new_params("grouse-test", "/w", Some("recipe-1"), None, None);
         assert!(unfiled.pointer("/_meta/tags").is_none());
         assert!(unfiled.pointer("/_meta/projectId").is_none());
+    }
+
+    #[test]
+    fn a_new_session_can_carry_a_mode_tag() {
+        // A mode is a client tag written ONCE, at creation: this server stores and
+        // filters on tags but returns none and cannot mutate one, so creation is the
+        // only moment a chat can be given a mode at all.
+        let dev = session_new_params("grouse-test", "/w", None, None, Some("dev"));
+        assert_eq!(
+            dev.pointer("/_meta/tags/grouse.mode").and_then(Value::as_str),
+            Some("dev")
+        );
+        // A mode rides alongside a project rather than replacing its tag.
+        let both = session_new_params("grouse-test", "/w", None, Some("media"), Some("plan"));
+        assert_eq!(
+            both.pointer("/_meta/tags/grouse.project").and_then(Value::as_str),
+            Some("media")
+        );
+        assert_eq!(
+            both.pointer("/_meta/tags/grouse.mode").and_then(Value::as_str),
+            Some("plan")
+        );
+        // An unknown mode is dropped: a typo must not mint a tag nothing filters on.
+        let typo = session_new_params("grouse-test", "/w", None, None, Some("devel"));
+        assert!(typo.pointer("/_meta/tags").is_none());
+        assert_eq!(MODE_VALUES, &["dev", "plan"]);
+    }
+
+    #[test]
+    fn a_session_list_can_filter_on_tags() {
+        // The read path for a tag: ask which sessions carry it. This is the only
+        // truthful way to learn a mode, given a row never comes back with tags.
+        let plain = session_list_params(None, &[]);
+        assert!(plain.pointer("/_meta/tags").is_none());
+        assert_eq!(plain.pointer("/_meta/types/0").and_then(Value::as_str), Some("user"));
+        let filtered = session_list_params(
+            Some("cur"),
+            &[(MODE_TAG_KEY.to_string(), "dev".to_string())],
+        );
+        assert_eq!(
+            filtered.pointer("/_meta/tags/grouse.mode").and_then(Value::as_str),
+            Some("dev")
+        );
+        assert_eq!(filtered.pointer("/cursor").and_then(Value::as_str), Some("cur"));
     }
 
     #[test]
