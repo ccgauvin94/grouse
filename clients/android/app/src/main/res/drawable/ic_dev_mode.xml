@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The dev-session marker: a "< / >" glyph drawn as an ICON (strokes, not three
+     characters), so it scales with the icon set and takes the theme colour through
+     Compose's Icon tint. Same three strokes as the desktop's dev-mode-symbolic.svg,
+     so the two clients mark a dev chat with the same mark. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="16dp"
+    android:height="16dp"
+    android:viewportWidth="16"
+    android:viewportHeight="16">
+    <path
+        android:pathData="M5.5,4 L2.2,8 L5.5,12"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M9.6,3 L6.4,13"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M10.5,4 L13.8,8 L10.5,12"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

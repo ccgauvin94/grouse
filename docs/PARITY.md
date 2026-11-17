@@ -68,7 +68,7 @@ Anchors are `file#token`; `+` joins more than one (all must resolve). Roots:
 android root = clients/android/app/src/main/java/id/gauvin/grouse
 desktop root = clients/desktop
 
-excluded = 16
+excluded = 14
 
 | surface | android | desktop |
 |---|---|---|
@@ -159,5 +159,5 @@ excluded = 16
 | `ui.my-day-thread-chat` | yes: ConnectionManager.kt#fun openThreadChat | yes: src/manager.cpp#grouse_open_thread |
 | `ui.chat-scroll-pinned` | yes: ChatScreen.kt#var follow by remember | yes: ui/ChatPage.qml#function pinPass |
 | `ui.tools-sheet-catalog` | yes: ConnectionManager.kt#fun onExtensionCatalog | yes: src/manager.cpp#void Manager::coreOnExtensionCatalog |
-| `ui.dev-mode` | excluded: writing the mode tag, the `</>` marker in the drawer, the chat/dev choice at creation and the roam equivalents are desktop-only in this PR (2026-11-16); the Android half is the next change, and this line comes out then | yes: ui/main.qml#newChatInMode+ui/main.qml#dev-mode-symbolic |
-| `ui.plan-mode` | excluded: same — the session's Plan toggle and the four-answer plan popup (Approve / Approve and compact / Edit / Cancel), gated on the model's `[plan-ready]` line, are desktop-only in this PR; Android next | yes: ui/main.qml#planDialog.openWith+ui/PlanDialog.qml#signal editRequested |
+| `ui.dev-mode` | yes: Drawer.kt#ic_dev_mode+ConnectionManager.kt#fun newRoamSession | yes: ui/main.qml#newChatInMode+ui/main.qml#dev-mode-symbolic |
+| `ui.plan-mode` | yes: ChatScreen.kt#fun PlanSheet+ConnectionManager.kt#fun approvePlan | yes: ui/main.qml#planDialog.openWith+ui/PlanDialog.qml#signal editRequested |
