@@ -622,12 +622,12 @@ Controls.ApplicationWindow {
                                         RowLayout {
                                             width: parent.width
                                             spacing: 2
-                                            // "<>" marks a dev session. The mode is fixed at
+                                            // "</>" marks a dev session. The mode is fixed at
                                             // creation (a tag the server stores and never
                                             // returns), so this is a readout, not a toggle.
                                             Controls.Label {
                                                 visible: dev === true
-                                                text: "<>"
+                                                text: "</>"
                                                 font.family: "monospace"
                                                 font.pixelSize: root.sidebarSmallTextSize
                                                 color: Kirigami.Theme.highlightColor
@@ -734,7 +734,7 @@ Controls.ApplicationWindow {
                                 onTriggered: Mgr.newChatInMode("")
                             }
                             Controls.MenuItem {
-                                text: qsTr("New dev chat  <>")
+                                text: qsTr("New dev chat  </>")
                                 onTriggered: Mgr.newChatInMode("dev")
                             }
                         }
