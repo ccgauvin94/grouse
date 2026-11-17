@@ -320,6 +320,14 @@ struct PeerInner {
     sessions: Vec<SessionSummary>,
     /// The raw (unprefixed) id of the session opened on this peer, if any.
     open_session_id: Option<String>,
+    /// The mode the OPEN session was created in, when this client created it.
+    ///
+    /// A mode is a tag, and a tag is write-only: the list cannot tell us, and a chat
+    /// this client just made is EMPTY — goose's `session/list` omits empty sessions, so
+    /// the per-mode walk below cannot see it either. Local knowledge covers the gap
+    /// until the session has a message and the walk catches up. Cleared when a
+    /// different session is opened, so the synthetic row cannot inherit it.
+    open_session_mode: Option<String>,
     /// Each listed session's working directory, keyed by RAW session id
     /// (populated from `session/list`; `session/load` must use the session's
     /// own cwd — the main connection's `last_config` cwd is empty on a
@@ -360,6 +368,7 @@ impl PeerInner {
             status: ConnectionStatus::Connecting,
             sessions: Vec::new(),
             open_session_id: None,
+            open_session_mode: None,
             resume_pending: None,
             session_cwds: HashMap::new(),
             active_run: None,
@@ -891,7 +900,7 @@ impl RoamPeer {
 
         self.emit_status("connecting: listing sessions");
         let list: ListSessionsResponse =
-            match tokio::time::timeout(PHASE_TIMEOUT, list_all_peer_sessions(&cx)).await {
+            match tokio::time::timeout(PHASE_TIMEOUT, list_all_peer_sessions(&cx, &[])).await {
                 Ok(Ok(reply)) => reply,
                 Ok(Err(error)) => {
                     eprintln!(
@@ -909,7 +918,10 @@ impl RoamPeer {
                         .data("handshake timed out waiting for session/list reply"));
                 }
             };
-        self.apply_sessions(&list);
+        // A tag is write-only, so a peer's modes cost one filtered list per known
+        // non-default value. Best-effort: a failed walk leaves rows reading as chats.
+        let modes = peer_session_modes(&cx).await;
+        self.apply_sessions_with_modes(&list, &modes);
 
         // Resume owed from a supervised reconnect: re-open the session that
         // was live when the link died (the peer mirror of the main
@@ -990,8 +1002,9 @@ impl RoamPeer {
                     // peer; re-fetch its list so the drawer reflects it. The
                     // remote goose does not reliably notify us of our own
                     // mutation, so we re-list explicitly.
-                    if let Ok(list) = list_all_peer_sessions(&cx).await {
-                        self.apply_sessions(&list);
+                    if let Ok(list) = list_all_peer_sessions(&cx, &[]).await {
+                        let modes = peer_session_modes(&cx).await;
+                        self.apply_sessions_with_modes(&list, &modes);
                     }
                 }
                 PeerCommand::Close => break,
@@ -1035,6 +1048,9 @@ impl RoamPeer {
         {
             let mut inner = self.inner.lock();
             inner.open_session_id = Some(raw.clone());
+            // This is a session that already exists on the peer, so its mode is the
+            // walk's business, not a mode this client wrote.
+            inner.open_session_mode = None;
             if !cwd.is_empty() {
                 // Remember the resolved cwd for the hidden summarizer session.
                 inner.session_cwds.insert(raw.clone(), cwd.clone());
@@ -1076,6 +1092,7 @@ impl RoamPeer {
                 // session, and a blank replacement is the defect (grouse#19).
                 // Keep the painted cache and report against the prefixed id.
                 self.inner.lock().open_session_id = None;
+                self.inner.lock().open_session_mode = None;
                 self.listener.on_session_open_failed(
                     format!("roam:{}:{}", self.label, raw),
                     format!("session/load failed: {error}"),
@@ -1117,6 +1134,10 @@ impl RoamPeer {
         {
             let mut inner = self.inner.lock();
             inner.open_session_id = Some(sid.clone());
+            // What the tag was written with. The synthetic row reads this because a
+            // chat with no messages is in neither the peer's list nor the mode walk.
+            inner.open_session_mode =
+                mode.map(str::to_string).filter(|m| !m.is_empty());
             // The hidden summarizer needs this session's own cwd on the peer.
             inner.session_cwds.insert(sid.clone(), cwd.to_string());
         }
@@ -1133,11 +1154,14 @@ impl RoamPeer {
         // never learns it exists (and cannot route a chat to it). Re-list.
         let relist = tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            list_all_peer_sessions(cx),
+            list_all_peer_sessions(cx, &[]),
         )
         .await;
         if let Ok(Ok(list)) = relist {
-            self.apply_sessions(&list);
+            // The new chat is empty, so the mode walk cannot see it yet —
+            // `open_session_mode` (set below) is what the synthetic row reads.
+            let modes = peer_session_modes(cx).await;
+            self.apply_sessions_with_modes(&list, &modes);
         }
         Ok(())
     }
@@ -1159,7 +1183,21 @@ impl RoamPeer {
 
     /// `session/list` arrived: store it, flip to Ready, emit. Browse mode — no
     /// session is auto-opened here (open only via `open_session`).
+    ///
+    /// [`Self::apply_sessions_with_modes`] for the paths that have not walked modes —
+    /// the tests, and any caller with nothing to say about them.
+    #[cfg(test)]
     fn apply_sessions(&self, list: &ListSessionsResponse) {
+        self.apply_sessions_with_modes(list, &HashMap::new());
+    }
+
+    /// [`Self::apply_sessions`] plus the per-mode walk's answer: raw session id ->
+    /// mode, for the sessions that are NOT plain chats.
+    fn apply_sessions_with_modes(
+        &self,
+        list: &ListSessionsResponse,
+        modes: &HashMap<String, String>,
+    ) {
         let mut cwds = HashMap::new();
         let mut sessions: Vec<SessionSummary> = list
             .sessions
@@ -1169,6 +1207,15 @@ impl RoamPeer {
                 cwds.insert(id.clone(), crate::session::info_cwd(s));
                 let mut summary = crate::session::summary_from_info(Some(&self.label), s)?;
                 summary.has_new = self.hub.has_new(&summary.id);
+                // The effective mode, never absent: an untagged chat IS a chat, the same
+                // rule the main connection applies, so a client does not have to
+                // re-derive the default for a peer's rows.
+                summary.mode = Some(
+                    modes
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| crate::session::DEFAULT_MODE.to_string()),
+                );
                 Some(summary)
             })
             .collect();
@@ -1186,7 +1233,10 @@ impl RoamPeer {
                     sessions.insert(
                         0,
                         SessionSummary {
-                            mode: None,
+                            // Local knowledge: this client created the session, so it
+                            // knows the mode the tag was written with. An empty chat is
+                            // in neither the peer's list nor the per-mode walk.
+                            mode: inner.open_session_mode.clone(),
                             id: app_id,
                             title: String::new(),
                             updated_at: String::new(),
@@ -1505,10 +1555,6 @@ pub(crate) fn active_peer<'a>(
     peers.iter().find(|peer| &peer.label == label)
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 /// Every page of a peer's `session/list`, merged into one reply.
 ///
 /// The peer's goose pages at 50 rows ordered by last message, exactly like the main
@@ -1516,14 +1562,18 @@ pub(crate) fn active_peer<'a>(
 /// draws one row where there used to be five (see `Core::list_sessions`). A first page
 /// that FAILS is an error — the caller reports it — while a later page that fails keeps
 /// what was already collected, so one bad cursor cannot blank the list.
+///
+/// `tags` narrows every page to sessions carrying those pairs — the only read a tag
+/// has, and how a peer's modes are learned.
 async fn list_all_peer_sessions(
     cx: &agent_client_protocol::ConnectionTo<Agent>,
+    tags: &[(String, String)],
 ) -> Result<ListSessionsResponse, AcpError> {
     let mut all: Vec<SessionInfo> = Vec::new();
     let mut cursor: Option<String> = None;
     let mut first = true;
     for _ in 0..crate::session::SESSION_LIST_MAX_PAGES {
-        let mut req = ListSessionsRequest::new().meta(crate::session::session_list_meta());
+        let mut req = ListSessionsRequest::new().meta(crate::session::session_list_meta(tags));
         if let Some(next) = cursor.clone() {
             req = req.cursor(next);
         }
@@ -1546,6 +1596,37 @@ async fn list_all_peer_sessions(
         }
     }
     Ok(ListSessionsResponse::new(all))
+}
+
+/// Which of a peer's sessions are NOT plain chats, by raw session id.
+///
+/// A mode is a tag, and this server writes tags and filters on them but never returns
+/// one on a row — so the only read is one filtered `session/list` per known non-default
+/// value, the same walk the main connection does. A failure here is NOT fatal: the list
+/// still renders, and the affected rows simply read as chats.
+///
+/// Known gap, shared with the main wire: goose omits empty sessions from `session/list`,
+/// so a chat with no messages yet is invisible to this walk. [`PeerInner::open_session_mode`]
+/// covers the one this client just created.
+async fn peer_session_modes(
+    cx: &agent_client_protocol::ConnectionTo<Agent>,
+) -> HashMap<String, String> {
+    let mut modes = HashMap::new();
+    for value in crate::session::MODE_VALUES
+        .iter()
+        .filter(|value| **value != crate::session::DEFAULT_MODE)
+    {
+        let tags = [(
+            crate::session::MODE_TAG_KEY.to_string(),
+            (*value).to_string(),
+        )];
+        if let Ok(list) = list_all_peer_sessions(cx, &tags).await {
+            for info in list.sessions {
+                modes.insert(info.session_id.to_string(), (*value).to_string());
+            }
+        }
+    }
+    modes
 }
 
 #[cfg(test)]
@@ -2169,6 +2250,62 @@ mod tests {
                 .any(|e| e == "peer_status laptop disconnected"),
             "a clean end surfaces disconnected: {events:?}"
         );
+    }
+
+    #[test]
+    fn peer_rows_carry_an_effective_mode() {
+        // A mode is a tag, and a tag is write-only: the walk's answer arrives out of
+        // band (raw session id -> mode) and is stamped on the row. Every row it did
+        // not claim reads as the DEFAULT, never `None` — the same rule the main
+        // connection applies, so no client has to re-derive "absent means chat".
+        let listener = test_listener();
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let mut modes = HashMap::new();
+        modes.insert("s2".to_string(), "dev".to_string());
+        peer.apply_sessions_with_modes(
+            &list_response(&[
+                ("s1", "Plain", "2026-01-01T00:00:00Z"),
+                ("s2", "Dev", "2026-01-02T00:00:00Z"),
+            ]),
+            &modes,
+        );
+
+        let sessions = peer.inner.lock().sessions.clone();
+        let mode_of = |raw: &str| {
+            sessions
+                .iter()
+                .find(|s| s.id == format!("roam:laptop:{raw}"))
+                .and_then(|s| s.mode.clone())
+        };
+        assert_eq!(mode_of("s2").as_deref(), Some("dev"));
+        assert_eq!(mode_of("s1").as_deref(), Some("chat"));
+    }
+
+    #[test]
+    fn an_empty_new_chat_keeps_the_mode_it_was_created_with() {
+        // goose's session/list omits sessions with no messages, so a chat this client
+        // just created is unioned in from local knowledge — including its mode, which
+        // neither the list nor the per-mode walk can see yet.
+        let listener = test_listener();
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        {
+            let mut inner = peer.inner.lock();
+            inner.open_session_id = Some("s9".to_string());
+            inner.open_session_mode = Some("dev".to_string());
+        }
+        peer.apply_sessions_with_modes(
+            &list_response(&[("s1", "Other", "2026-01-01T00:00:00Z")]),
+            &HashMap::new(),
+        );
+
+        let sessions = peer.inner.lock().sessions.clone();
+        let fresh = sessions
+            .iter()
+            .find(|s| s.id == "roam:laptop:s9")
+            .expect("the open-but-empty chat is unioned into the list");
+        assert_eq!(fresh.mode.as_deref(), Some("dev"));
     }
 
     #[test]

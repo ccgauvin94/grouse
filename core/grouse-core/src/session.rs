@@ -161,8 +161,9 @@ pub(crate) fn session_list_params(cursor: Option<&str>, tags: &[(String, String)
 }
 
 /// The same filter as a typed `ListSessionsRequest` meta map (the SDK's typed
-/// request path).
-pub(crate) fn session_list_meta() -> Map<String, Value> {
+/// request path). `tags` narrows the list to sessions carrying every pair — the
+/// only read a tag has (`session/list` never returns one on a row).
+pub(crate) fn session_list_meta(tags: &[(String, String)]) -> Map<String, Value> {
     let mut meta = Map::new();
     meta.insert(
         "types".into(),
@@ -171,6 +172,13 @@ pub(crate) fn session_list_meta() -> Map<String, Value> {
             Value::String("acp".into()),
         ]),
     );
+    if !tags.is_empty() {
+        let mut wanted = Map::new();
+        for (key, value) in tags {
+            wanted.insert(key.clone(), Value::String(value.clone()));
+        }
+        meta.insert("tags".into(), Value::Object(wanted));
+    }
     meta
 }
 
