@@ -230,6 +230,45 @@ QString Manager::wsUrl() const
              host().trimmed(), port().trimmed());
 }
 
+bool Manager::devChat() const
+{
+    if (m_currentSessionId.isEmpty())
+        return false;
+    for (const auto &value : m_sessions) {
+        const QVariantMap row = value.toMap();
+        if (row.value("sessionId").toString() == m_currentSessionId)
+            return row.value("mode").toString() == QLatin1String("dev");
+    }
+    return false;
+}
+
+bool Manager::planMode() const
+{
+    return !m_currentSessionId.isEmpty() && m_planSessions.contains(m_currentSessionId);
+}
+
+/// Plan mode, the TEMPORARY shape: a system-prompt extra on the session.
+///
+/// The model's side is server-side and shared by every client (the extra is persisted and
+/// merged into each inference); the CLIENT's side is a local mirror, because goose has no
+/// getter for extras. The transcript is the cross-device record — see grouse#35.
+void Manager::setPlanMode(bool on)
+{
+    if (m_currentSessionId.isEmpty())
+        return;
+    if (on)
+        m_planSessions.insert(m_currentSessionId);
+    else
+        m_planSessions.remove(m_currentSessionId);
+    emit planModeChanged();
+    if (!m_bridge || !m_bridge->isAvailable()
+        || !m_bridge->api().grouse_unstable_set_plan_mode)
+        return;
+    const QByteArray sid = m_currentSessionId.toUtf8();
+    m_bridge->api().grouse_unstable_set_plan_mode(m_bridge->handle(), sid.constData(),
+                                                  on ? 1 : 0);
+}
+
 QString Manager::currentSessionTitle() const
 {
     if (!m_currentSessionTitle.isEmpty())
@@ -2361,6 +2400,9 @@ void Manager::coreOnSessions(const QString &json)
         m["messageCount"] = o.value("message_count").toVariant();
         m["hasRecipe"] = o.value("has_recipe").toBool();
         m["archived"] = o.value("archived").toBool();
+        // The core DERIVES this (`grouse.mode`: chat | dev): the server returns no tags
+        // on a row, so the core asks which sessions match the value and stamps it.
+        m["mode"] = o.value("mode").toString();
         m["peer"] = m_activePeerLabel;
         sessions << m;
     }

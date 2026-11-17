@@ -109,6 +109,11 @@ class Manager : public QObject
      *  threshold of 70%...", "goose is compacting the conversation..."), or its
      *  completion text. Empty when idle. */
     Q_PROPERTY(QString compactionStatus READ compactionStatus NOTIFY compactingChanged)
+    /// True when the open chat is a dev chat (`grouse.mode=dev`, derived by the core).
+    Q_PROPERTY(bool devChat READ devChat NOTIFY currentSessionChanged)
+    /// Plan mode for the open chat. Temporary shape: the model's flag is server-side,
+    /// ours is a local mirror (no getter exists), so this can be stale after a switch.
+    Q_PROPERTY(bool planMode READ planMode NOTIFY planModeChanged)
     Q_PROPERTY(int contextUsed READ contextUsed NOTIFY contextChanged)
     Q_PROPERTY(int contextSize READ contextSize NOTIFY contextChanged)
     Q_PROPERTY(QVariant availableCommands READ availableCommands NOTIFY commandsChanged)
@@ -263,6 +268,8 @@ public:
     Q_INVOKABLE void cancelTurn();
     /** Compact the conversation history (goose /compact command). */
     Q_INVOKABLE void compactConversation();
+    /// Turn plan mode on/off for the open chat (system-prompt extra; see grouse#35).
+    Q_INVOKABLE void setPlanMode(bool on);
     /** Serialize a session and write it to `filePath` (JSON). */
     Q_INVOKABLE void exportSessionTo(const QString &sessionId, const QString &filePath);
     Q_INVOKABLE void respondPermission(const QString &toolCallId, const QString &optionId);
@@ -420,6 +427,8 @@ public:
     QString activeRunId() const { return m_activeRunId; }
     bool compacting() const { return m_compacting; }
     QString compactionStatus() const { return m_compactionStatus; }
+    bool devChat() const;
+    bool planMode() const;
     int contextUsed() const { return m_contextUsed; }
     int contextSize() const { return m_contextSize; }
     QVariant availableCommands() const { return m_availableCommands; }
@@ -623,6 +632,7 @@ signals:
     void toolsChanged();
     void toolGroupsChanged();
     void activityChanged();
+    void planModeChanged();
     void contextReportChanged();
     void globalExtensionsChanged();
     void currentSessionChanged();
@@ -819,6 +829,9 @@ private:
     QHash<QString, QString> m_activeRunIds;
 
     QVariantList m_sessions;
+    /// Session ids the user has put into plan mode in THIS process. A mirror, not the
+    /// source of truth: goose keeps the real flag (a prompt extra) with no read path.
+    QSet<QString> m_planSessions;
     QVariantList m_projects;
     /// Roam session id -> the title the peer's session/list carries. The peer
     /// list is the ONLY place a roam session's human title arrives (there is no
