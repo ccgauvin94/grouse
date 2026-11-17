@@ -880,7 +880,9 @@ Controls.ApplicationWindow {
         // The trigger is the end of a turn in a plan-mode chat: no new server event is
         // needed, and it is the moment the plan exists.
         function onPromptingChanged() {
-            if (!Mgr.prompting && Mgr.planMode && Mgr.online
+            // The MODEL says when a plan is ready (`[plan-ready]`); a plan-mode turn that
+            // ends with a question must not open this.
+            if (!Mgr.prompting && Mgr.planMode && Mgr.online && Mgr.planReady()
                     && Mgr.currentSessionId.length > 0 && !planDialog.opened) {
                 const text = Mgr.lastAgentText()
                 if (text.length > 0)

@@ -1433,6 +1433,14 @@ pub extern "C" fn grouse_unstable_set_plan_mode(h: *mut c_void, session_id: *con
     .ok();
 }
 
+/// Whether an agent reply signals a finished plan (`[plan-ready]` on its own line).
+/// Pure function, no handle: both clients must agree on the signal.
+#[no_mangle]
+pub extern "C" fn grouse_plan_ready(text: *const c_char) -> i32 {
+    let Some(text) = (unsafe { c_param(text) }) else { return 0 };
+    i32::from(crate::unstable::plan_ready(&text))
+}
+
 #[no_mangle]
 pub extern "C" fn grouse_unstable_list_tools(h: *mut c_void, session_id: *const c_char) {
     let Some(session_id) = (unsafe { c_param(session_id) }).map(str::to_owned) else { return };

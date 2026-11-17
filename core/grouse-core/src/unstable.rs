@@ -33,11 +33,27 @@ use crate::GrouseUnstableListener;
 pub const PLAN_MODE_INSTRUCTIONS: &str = "PLAN MODE. Investigate before touching anything: \
 read, search, and run read-only commands freely. Do NOT create, edit, delete or move \
 files, install packages, change git state, or run anything that mutates the system. \
-When you have enough, answer with a short numbered plan — the files you will touch, \
-the change to each, the risks, and how it will be verified — then stop. The user \
-approves the plan before any edit happens.";
+While you are still gathering context or you need something from the user, answer \
+normally and do NOT signal readiness. When — and only when — you have a complete plan \
+the user can approve, write it as a short numbered list (the files you will touch, the \
+change to each, the risks, how it will be verified) and end your reply with a final line \
+containing only [plan-ready]. Nothing may follow that line.";
 
-#[derive(uniffi::Object)]
+/// The line that says "a complete plan is above, waiting for approval".
+///
+/// The popup must not open after every plan-mode turn — a clarifying question is not a
+/// plan. So readiness is something the MODEL states, not something the client guesses
+/// from the shape of the reply: one sentinel line, looked for by exact match, and the
+/// instruction above tells it not to write that line until the plan is complete.
+pub const PLAN_READY_MARKER: &str = "[plan-ready]";
+
+/// Whether a reply signals a finished plan. Case-insensitive, whole-line, so prose that
+/// happens to mention the marker is not mistaken for the signal.
+pub fn plan_ready(text: &str) -> bool {
+    text.lines()
+        .any(|line| line.trim().eq_ignore_ascii_case(PLAN_READY_MARKER))
+}
+
 pub struct GrouseUnstable {
     listener: Arc<dyn GrouseUnstableListener>,
     /// Deregisters the server-request listener when this object goes away.
@@ -1510,6 +1526,16 @@ mod tests {
                 ("_goose/unstable/sources/list", json!({"type": "project"})),
             ],
         );
+    }
+
+    #[test]
+    fn readiness_is_a_whole_line_signal_not_a_guess() {
+        assert!(plan_ready("1. do a thing\n2. verify it\n[plan-ready]"));
+        assert!(plan_ready("  [PLAN-READY]  "));
+        // Prose that mentions it is not the signal — the whole line has to be the marker.
+        assert!(!plan_ready("then I will write [plan-ready] at the end"));
+        assert!(!plan_ready("a clarifying question?"));
+        assert_eq!(PLAN_READY_MARKER, "[plan-ready]");
     }
 
     #[test]

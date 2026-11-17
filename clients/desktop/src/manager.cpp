@@ -230,6 +230,14 @@ QString Manager::wsUrl() const
              host().trimmed(), port().trimmed());
 }
 
+bool Manager::planReady() const
+{
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_plan_ready)
+        return false;
+    const QByteArray text = lastAgentText().toUtf8();
+    return m_bridge->api().grouse_plan_ready(text.constData()) != 0;
+}
+
 QString Manager::lastAgentText() const
 {
     if (!m_messageModel)
@@ -1221,6 +1229,26 @@ void Manager::flushQueue()
 }
 
 namespace {
+/// Drop the plan sentinel from displayed agent text.
+///
+/// `[plan-ready]` is a handshake between the agent and the client (see the core's
+/// `PLAN_READY_MARKER`), so it belongs in the signal and not in the transcript. Only the
+/// LAST matching line goes: a reply that quotes the marker mid-text keeps it.
+QString stripPlanSentinel(const QString &text)
+{
+    static const QString marker = QStringLiteral("[plan-ready]");
+    QStringList lines = text.split(QLatin1Char('\n'));
+    for (int i = lines.size() - 1; i >= 0; --i) {
+        if (lines.at(i).trimmed().compare(marker, Qt::CaseInsensitive) == 0) {
+            lines.removeAt(i);
+            break;
+        }
+    }
+    while (!lines.isEmpty() && lines.last().trimmed().isEmpty())
+        lines.removeLast();
+    return lines.join(QLatin1Char('\n'));
+}
+
 /// A prompt's image reaches the row as a `data:` URI: the core hands the client the
 /// PIXELS, not a path, so the row can show what was sent without the file still being
 /// there. QML's Image does accept those, but a 2-4 MB base64 string is parsed on every
@@ -3575,7 +3603,10 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
                          : kind == QLatin1String("Thought") ? QStringLiteral("thought")
                          : kind == QLatin1String("Error")   ? QStringLiteral("error")
                                                             : QStringLiteral("agent");
-    QVariantMap row{{"id", id}, {"role", role}, {"text", text}, {"output", output},
+    // The plan sentinel is a SIGNAL, not content: it tells the client a plan is ready to
+    // approve, and showing it would read as debris in the reply.
+    const QString shown = role == QLatin1String("agent") ? stripPlanSentinel(text) : text;
+    QVariantMap row{{"id", id}, {"role", role}, {"text", shown}, {"output", output},
                     {"html", QString()}, {"seq", seq}};
     if (role == QLatin1String("thought"))
         row["thought"] = true;

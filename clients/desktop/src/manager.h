@@ -272,6 +272,9 @@ public:
     Q_INVOKABLE void setPlanMode(bool on);
     /// The newest agent message's text — what the plan popup shows.
     Q_INVOKABLE QString lastAgentText() const;
+    /// True when the newest agent reply ends with the plan sentinel — the popup's trigger,
+    /// so a clarifying question in plan mode does not open it.
+    Q_INVOKABLE bool planReady() const;
     /// Leave plan mode and start executing; `compact` folds the exploration away first.
     Q_INVOKABLE void approvePlan(bool compact);
     /** Serialize a session and write it to `filePath` (JSON). */
