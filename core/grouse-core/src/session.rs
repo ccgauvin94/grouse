@@ -1258,6 +1258,7 @@ mod tests {
         // The column holds what a client sent; being lenient about case/whitespace
         // costs nothing and the cost of being wrong is one hidden chat either way.
         let mk = |pid: Option<&str>| SessionSummary {
+            mode: None,
             id: "s".into(),
             title: "t".into(),
             updated_at: String::new(),

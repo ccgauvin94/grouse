@@ -271,6 +271,7 @@ impl CacheStore {
                     cwds.insert(id.clone(), cwd.to_string());
                 }
                 Some(SessionSummary {
+                    mode: None,
                     id,
                     title: el.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
                     updated_at: el.get("updatedAt").and_then(Value::as_str).unwrap_or("").to_string(),
@@ -631,6 +632,7 @@ mod tests {
         let dir = temp_cache_dir("directory");
         let store = CacheStore::new(dir.clone());
         let sessions = vec![SessionSummary {
+            mode: None,
             id: "sess/1".into(),
             title: "Chat one".into(),
             updated_at: "2026-08-12T10:00:00Z".into(),

@@ -607,6 +607,7 @@ impl RoamPeer {
             .sessions
             .iter()
             .map(|s| SessionSummary {
+                mode: None,
                 id: s.id.clone(),
                 title: s.title.clone(),
                 updated_at: s.updated_at.clone(),
@@ -1175,6 +1176,7 @@ impl RoamPeer {
                     sessions.insert(
                         0,
                         SessionSummary {
+                            mode: None,
                             id: app_id,
                             title: String::new(),
                             updated_at: String::new(),
@@ -2599,6 +2601,7 @@ mod tests {
         let (peer, _cmd_rx) =
             offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(false))));
         peer.inner.lock().sessions.push(SessionSummary {
+            mode: None,
             id: "roam:laptop:s1".to_string(),
             title: "old title".to_string(),
             updated_at: "2026-08-23T10:00:00Z".to_string(),

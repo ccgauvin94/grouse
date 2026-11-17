@@ -119,6 +119,7 @@ pub enum ConnectionStatus {
 /// A session list entry (CONTRACT §3.2/§3.3).
 #[derive(uniffi::Record, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SessionSummary {
+    mode: None,
     pub id: String,
     pub title: String,
     /// Server timestamp; the core compares it against its transcript cache.
@@ -1233,6 +1234,7 @@ impl Core {
         let (_, ready_rx) = self.connect_impl(
             config.clone(),
             ConnectSpec::New {
+                mode: None,
                 recipe_id: config.initial_recipe_id.clone(),
                 project_id: config.initial_project_id.clone(),
                 // Cold start: the cached chat already painted stays on screen.
@@ -1664,7 +1666,7 @@ impl Core {
             // never returns one, so the only truthful read is to ask which sessions
             // carry each value. Two extra walks on a refresh, none on anything else —
             // and only when there is a list to decorate.
-            let mut modes = Map::new();
+            let mut modes = serde_json::Map::new();
             if !rows.is_empty() {
                 for value in crate::session::MODE_VALUES {
                     let filter = [(
