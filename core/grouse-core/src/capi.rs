@@ -1438,7 +1438,7 @@ pub extern "C" fn grouse_unstable_set_plan_mode(h: *mut c_void, session_id: *con
 #[no_mangle]
 pub extern "C" fn grouse_plan_ready(text: *const c_char) -> i32 {
     let Some(text) = (unsafe { c_param(text) }) else { return 0 };
-    i32::from(crate::unstable::plan_ready(&text))
+    i32::from(crate::unstable::plan_ready(text))
 }
 
 #[no_mangle]
