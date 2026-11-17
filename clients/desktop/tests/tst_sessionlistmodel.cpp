@@ -24,6 +24,7 @@ private slots:
     void peerSessionsGroupLast();
     void unchangedListDoesNotResetModel();
     void collapsedSectionsRoundTrip();
+    void devRoleFollowsTheSessionMode();
 };
 
 static QVariantMap session(const QString &id, const QString &title,
@@ -66,7 +67,9 @@ void TstSessionListModel::roleNamesUseLowercaseSessionFields()
     QVERIFY2(names.key("projectid") != 0, "projectid role");
     QVERIFY2(names.key("header") != 0, "header role");
     QVERIFY2(names.key("collapsed") != 0, "collapsed role");
-    QCOMPARE(names.size(), 11);
+    QVERIFY2(names.key("dev") != 0, "dev role");
+    // A ratchet: a new role must be looked at here, not slip in unread.
+    QCOMPARE(names.size(), 12);
 }
 
 void TstSessionListModel::groupsProjectsThenChats()
@@ -284,6 +287,36 @@ void TstSessionListModel::collapsedSectionsRoundTrip()
     // Re-applying the identical set is a no-op (no needless reset).
     restored.setCollapsedSections(model.collapsedSections());
     QCOMPARE(resetSpy.count(), 1);
+}
+
+void TstSessionListModel::devRoleFollowsTheSessionMode()
+{
+    // The core stamps an EFFECTIVE mode on every row ("chat" when the per-mode walk
+    // claimed nothing), because a tag is never returned with a session. The drawer
+    // renders the `</>` marker off this role, so a row with no mode must read false
+    // rather than leak an invalid QVariant into QML.
+    SessionListModel model;
+    QVariantMap dev = session(QStringLiteral("s-dev"), QStringLiteral("Dev chat"),
+                              QStringLiteral("2026-08-02"));
+    dev["mode"] = QStringLiteral("dev");
+    QVariantMap chat = session(QStringLiteral("s-chat"), QStringLiteral("Plain chat"),
+                               QStringLiteral("2026-08-01"));
+    chat["mode"] = QStringLiteral("chat");
+    QVariantMap bare = session(QStringLiteral("s-bare"), QStringLiteral("No mode"),
+                               QStringLiteral("2026-08-01"));
+    model.setSessions(QVariantList{dev, chat, bare});
+
+    int devRows = 0;
+    for (int r = 0; r < model.rowCount(); ++r) {
+        const QModelIndex i = model.index(r, 0);
+        if (model.data(i, SessionListModel::HeaderRole).toBool())
+            continue;
+        if (model.data(i, SessionListModel::DevRole).toBool())
+            ++devRows;
+        if (model.data(i, SessionListModel::SessionIdRole).toString() == QLatin1String("s-dev"))
+            QCOMPARE(model.data(i, SessionListModel::DevRole).toBool(), true);
+    }
+    QCOMPARE(devRows, 1);
 }
 
 QTEST_MAIN(TstSessionListModel)

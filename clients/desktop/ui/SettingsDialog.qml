@@ -231,6 +231,20 @@ Controls.Dialog {
                 }
             }
 
+            Controls.Label {
+                text: qsTr("Dev")
+                font.bold: true
+                Kirigami.FormData.label: ""
+                Layout.topMargin: Kirigami.Units.gridUnit
+            }
+            Controls.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                color: Kirigami.Theme.disabledTextColor
+                Kirigami.FormData.label: ""
+                text: qsTr("A dev session is a chat started in the dev mode, written as a session tag at creation and not changeable afterwards. There is nothing to configure here yet — dev-only behaviour (plan mode, the code advisor, a changes panel) is per-chat today. When those grow settings, they belong in this section rather than in the chat.")
+            }
+
             Kirigami.Separator {
                 Layout.fillWidth: true
                 Layout.topMargin: Kirigami.Units.smallSpacing

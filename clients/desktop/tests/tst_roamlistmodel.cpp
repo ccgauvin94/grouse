@@ -15,6 +15,7 @@ private slots:
     void removePeerClearsRows();
     void statusUpdatesByIdentity();
     void everyDeclaredRoleIsValidForBothRowTypes();
+    void devRoleFollowsThePeerRowMode();
 };
 
 QVariant rowValue(const RoamListModel &m, int row, int role)
@@ -128,6 +129,25 @@ void TstRoamListModel::everyDeclaredRoleIsValidForBothRowTypes()
                                     .arg(QString::fromUtf8(it.value()))));
         }
     }
+}
+
+void TstRoamListModel::devRoleFollowsThePeerRowMode()
+{
+    // A peer's rows carry the mode the core derived for them (a tag is never
+    // returned with a session, so the core asks which sessions match). A row with no
+    // mode reads false, and a peer header is never a dev row.
+    RoamListModel m;
+    m.addPeer(QStringLiteral("ws"));
+    m.setPeerSessions(QStringLiteral("ws"), QVariantList{
+        QVariantMap{{"sessionId", "s1"}, {"title", "Dev"}, {"mode", "dev"}},
+        QVariantMap{{"sessionId", "s2"}, {"title", "Chat"}, {"mode", "chat"}},
+        QVariantMap{{"sessionId", "s3"}, {"title", "Older core"}},
+    });
+    m.togglePeer(QStringLiteral("ws"));
+    QCOMPARE(rowValue(m, 0, RoamListModel::DevRole).toBool(), false);   // header
+    QCOMPARE(rowValue(m, 1, RoamListModel::DevRole).toBool(), true);
+    QCOMPARE(rowValue(m, 2, RoamListModel::DevRole).toBool(), false);
+    QCOMPARE(rowValue(m, 3, RoamListModel::DevRole).toBool(), false);
 }
 
 QTEST_GUILESS_MAIN(TstRoamListModel)
