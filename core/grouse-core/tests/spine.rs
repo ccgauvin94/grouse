@@ -1186,6 +1186,7 @@ fn cold_start_emits_cached_directory() {
     std::env::set_var("XDG_DATA_HOME", &data_dir);
     let cache = grouse_core::cache::CacheStore::new(data_dir.join("grouse"));
     let sessions = vec![grouse_core::SessionSummary {
+        mode: None,
         id: "sess-c".into(),
         title: "Cached Chat".into(),
         updated_at: "2026-08-12T10:00:00Z".into(),
@@ -1226,6 +1227,7 @@ fn cold_start_emits_cached_directory_from_supplied_dir() {
     let _ = std::fs::remove_dir_all(&dir);
     let cache = grouse_core::cache::CacheStore::new(dir.clone());
     let sessions = vec![grouse_core::SessionSummary {
+        mode: None,
         id: "sess-d".into(),
         title: "Supplied Chat".into(),
         updated_at: "2026-08-13T11:00:00Z".into(),
