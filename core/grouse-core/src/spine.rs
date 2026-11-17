@@ -1210,7 +1210,7 @@ mod tests {
         );
 
         // Absent/empty ids are omitted, never emitted as `""`.
-        let p = session_new_params(&cfg, None, Some(""));
+        let p = session_new_params(&cfg, None, Some(""), None);
         assert!(p.pointer("/_meta/recipeId").is_none());
         assert!(p.pointer("/_meta/projectId").is_none());
     }
