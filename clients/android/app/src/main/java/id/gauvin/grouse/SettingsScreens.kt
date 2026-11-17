@@ -387,6 +387,16 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                     "turn state while a reply is being generated.")
             }
 
+            // Dev sessions have their own settings home, separate from chat: what makes a
+            // chat "dev" is a mode tag, and its features (plan mode today, an advisor and a
+            // changes panel next) are per-chat toggles that will want defaults. Empty on
+            // purpose — the section exists so those land here rather than in the chat.
+            SettingsSection("Dev") {
+                SettingCaption("Dev sessions are chats created with the dev mode. Nothing to " +
+                    "configure here yet: plan mode is a per-chat toggle in the composer, and " +
+                    "dev-only settings will live in this section.")
+            }
+
             Spacer(Modifier.height(24.dp))
         }
     }

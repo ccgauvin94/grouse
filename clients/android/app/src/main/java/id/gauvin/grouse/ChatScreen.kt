@@ -63,6 +63,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Folder
@@ -546,6 +547,24 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
     }
     cm.permissions.firstOrNull()?.let { req ->
         PermissionSheet(req, onChoose = { cm.answerPermission(req, it) })
+    }
+
+    // The model says a plan is complete (`[plan-ready]`); the core parks that as
+    // `pendingPlan`. Answered in the chat, not from a notification: the plan is the
+    // transcript above it, and "Edit" means "keep talking in this chat".
+    cm.pendingPlan.value?.let { (planSession, plan) ->
+        if (planSession == cm.currentSession.value) {
+            PlanSheet(
+                plan = plan,
+                onApprove = { compact ->
+                    cm.dismissPlan()
+                    cm.approvePlan(compact)
+                },
+                // Cancel and Edit both leave plan mode ON: not yet is not "stop
+                // planning", and Edit is the same chat continuing as a plan iteration.
+                onDismiss = cm::dismissPlan,
+            )
+        }
     }
 
     if (showActivity) {
@@ -1330,6 +1349,23 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                             val modelOpt = cm.config.value.firstOrNull { it.id == "model" }
                             ModelPill(modelOpt, cm.knownModels.value, cm::setOption,
                                 onOpenSheet = { showModelSheet = true })
+                            // Plan mode is a DEV-session behaviour, so the toggle only
+                            // exists in a dev chat. Tinted while on: it changes what every
+                            // turn does (a system-prompt extra on the server), which the
+                            // composer should say at a glance.
+                            if (cm.devChat) {
+                                Spacer(Modifier.width(6.dp))
+                                val planOn = cm.planMode
+                                FilterChip(
+                                    selected = planOn,
+                                    onClick = { cm.setPlanMode(!planOn) },
+                                    label = { Text("Plan", style = MaterialTheme.typography.labelMedium) },
+                                    leadingIcon = {
+                                        Icon(Icons.Filled.Checklist, contentDescription = null,
+                                            modifier = Modifier.size(14.dp))
+                                    },
+                                )
+                            }
                             Spacer(Modifier.weight(1f))
                             // Conversation mode: one tap in, one tap out. A plain Box, not a
                             // Button — a Button's own clickable consumes the press (and a
@@ -1659,6 +1695,61 @@ fun PermissionSheet(req: AcpEvent.Permission, onChoose: (String?) -> Unit) {
                     Button(onClick = { onChoose(opt.optionId) },
                         modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) { Text(prettyOption(opt.label)) }
                 }
+            }
+        }
+    }
+}
+
+/** A finished plan, waiting for an answer.
+ *
+ *  Opened when the model ends a plan-mode turn with `[plan-ready]` on its own line — a
+ *  plan turn that ends with a question must not raise this, which is why the trigger is
+ *  the model's own line rather than "a turn ended in a plan chat". Approving turns plan
+ *  mode OFF; Cancel and Edit leave it ON, because "not yet" is not "stop planning" and
+ *  Edit is the same chat continuing as an iteration.
+ *
+ *  "Approve and compact" reclaims context first: a plan followed by its implementation is
+ *  exactly when the context is longest, and the go-ahead is parked behind that
+ *  compaction so it is sent when the summary lands, not before. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PlanSheet(plan: String, onApprove: (compact: Boolean) -> Unit, onDismiss: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
+            Text("Plan ready", style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(4.dp))
+            Text("Approve to let it start on the plan.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (plan.isNotBlank()) {
+                Spacer(Modifier.height(10.dp))
+                // Capped + internally scrollable: a plan is prose, and prose must not push
+                // the answers below the sheet's reachable area.
+                Surface(color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Text(plan, style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier
+                            .heightIn(max = 240.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(10.dp))
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Button(onClick = { onApprove(false) },
+                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                Text("Approve")
+            }
+            OutlinedButton(onClick = { onApprove(true) },
+                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                Text("Approve and compact")
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                // Both are "keep going in this chat, plan mode still on" — Edit is the
+                // one that says so, Cancel is the one that says "not now".
+                TextButton(onClick = onDismiss) { Text("Edit plan") }
+                Spacer(Modifier.width(8.dp))
+                TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
             }
         }
     }

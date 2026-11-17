@@ -5,6 +5,29 @@ All notable changes to Grouse are recorded here. The format is based on
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added — dev mode on the phone, and plan mode with it
+
+- **A dev chat is created, not converted.** The drawer's "New chat" row is a choice now
+  (chat / dev chat) and the landing page offers the dev variant beside "New chat"; on a roam
+  peer the same choice rides `session/new` on THAT peer. A mode is a `grouse.mode` tag written
+  at creation and our goose has no mutation for tags, so creation is the only moment it can be
+  chosen — which is why it is nowhere else.
+- **`</>` marks a dev session** in the drawer (free chats and project chats alike), from the
+  mode the core derives for every row.
+- **Plan mode**: a "Plan" chip in the composer, on dev chats only, that writes
+  `_goose/unstable/session/system-prompt/set` (key `plan`) and keeps a local mirror, exactly
+  like the desktop. A finished plan opens a sheet with Approve / Approve and compact / Edit
+  plan / Cancel; approving turns plan mode off, the other two leave it on so the chat can keep
+  iterating.
+- **The popup waits for the model, not for a turn.** It opens when the reply carries
+  `[plan-ready]` on its own line — `GrouseUnstable.plan_ready`, the same predicate the desktop
+  uses, now exported through uniffi as well as the C ABI — so a plan-mode turn that ends with a
+  clarifying question leaves the chat alone. The sentinel is stripped from the transcript and
+  from the sheet: it is a handshake, not content.
+- **Settings has a Dev section**, empty on purpose, like the desktop's.
+
+grouse 0.2.110 (versionCode 214).
+
 ### Fixed — the desktop could only say no
 
 - **Tool approval offers the server's own answers again.** The dialog listed the request's

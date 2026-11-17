@@ -1169,6 +1169,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_list_tools(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_grouseunstable_plan_ready(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_providers_list(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_recipes_delete(
@@ -1506,6 +1508,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_list_tools(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_grouseunstable_plan_ready(`ptr`: Long,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_grouse_core_fn_method_grouseunstable_providers_list(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_recipes_delete(`ptr`: Long,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1911,6 +1915,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_list_tools() and 0xFFFF) != 33901) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_plan_ready() and 0xFFFF) != 51272) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_providers_list() and 0xFFFF) != 51277) {
@@ -5019,6 +5026,16 @@ public interface GrouseUnstableInterface {
     fun `listTools`(`sessionId`: kotlin.String)
     
     /**
+     * Does this reply signal a finished plan (see [`PLAN_READY_MARKER`])?
+     *
+     * A pure predicate, on this object because plan mode's whole surface lives here: the
+     * client has the reply text and nothing else can answer it, and both clients must
+     * answer it the SAME way or one of them pops a plan popup after a clarifying
+     * question. The answer is the sentinel, not the shape of the reply.
+     */
+    fun `planReady`(`text`: kotlin.String): kotlin.Boolean
+    
+    /**
      * The server's provider inventory; surfaces as `on_providers(json)`.
      *
      * This is the authority on which providers exist, which are usable, and what
@@ -5509,6 +5526,28 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
 }
     }
     
+    
+
+    
+    /**
+     * Does this reply signal a finished plan (see [`PLAN_READY_MARKER`])?
+     *
+     * A pure predicate, on this object because plan mode's whole surface lives here: the
+     * client has the reply text and nothing else can answer it, and both clients must
+     * answer it the SAME way or one of them pops a plan popup after a clarifying
+     * question. The answer is the sentinel, not the shape of the reply.
+     */override fun `planReady`(`text`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_grouseunstable_plan_ready(
+        it,
+        
+        FfiConverterString.lower(`text`),_status)
+}
+    }
+    )
+    }
     
 
     

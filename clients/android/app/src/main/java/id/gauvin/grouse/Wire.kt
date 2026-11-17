@@ -103,6 +103,8 @@ internal fun SessionSummary.toInfo(): SessionInfo = SessionInfo(
     projectId = projectId,
     hasNew = hasNew,
     archived = archived,
+    // Effective mode from the core (`dev`, or `chat` when nothing claimed the row).
+    mode = mode.orEmpty().ifBlank { "chat" },
 )
 
 /** RFC3339/ISO8601 `updatedAt` -> epoch millis for chronological sorting. The server's

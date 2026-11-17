@@ -74,7 +74,16 @@ data class SessionInfo(
      *  Archived chats stay reachable under the drawer's ARCHIVED section and
      *  can be restored via unarchive. */
     val archived: Boolean = false,
-)
+    /** The session's MODE, `chat` or `dev` (the `grouse.mode` tag). Effective, never
+     *  blank: the core asks which sessions carry each known value, because a tag is
+     *  never returned with a row, and stamps the answer. A mode is fixed at creation —
+     *  our goose has no mutation for tags — so this is a readout, not a setting. */
+    val mode: String = "chat",
+) {
+    /** A dev session: it carries the mode tag, which is what gates the dev-only UI
+     *  (plan mode today). An unknown/absent mode is a plain chat. */
+    val isDev: Boolean get() = mode == "dev"
+}
 
 /** One assistant-state item — an open loop, a waiting-on, an obligation — as the My
  *  Day tab paints it. Deliberately slim: raw evidence and provenance stay on the

@@ -406,8 +406,8 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                     nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
                 })
             }
-            composable("landing") { LandingScreen(cm, onOpenDrawer = ::openDrawer, onNewChat = {
-                cm.newSession()
+            composable("landing") { LandingScreen(cm, onOpenDrawer = ::openDrawer, onNewChat = { mode ->
+                cm.newSession(mode = mode)
                 nav.navigate("chat") { launchSingleTop = true; popUpTo("landing") { inclusive = true } }
             }, onOpenAssistant = {
                 cm.openAssistant()

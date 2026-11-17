@@ -216,6 +216,16 @@ impl GrouseUnstable {
         );
     }
 
+    /// Does this reply signal a finished plan (see [`PLAN_READY_MARKER`])?
+    ///
+    /// A pure predicate, on this object because plan mode's whole surface lives here: the
+    /// client has the reply text and nothing else can answer it, and both clients must
+    /// answer it the SAME way or one of them pops a plan popup after a clarifying
+    /// question. The answer is the sentinel, not the shape of the reply.
+    pub fn plan_ready(&self, text: String) -> bool {
+        plan_ready(&text)
+    }
+
     pub fn session_project(&self, session_id: String, project_id: Option<String>) {
         let Some(conn) = self.route(&session_id) else { return };
         self.call(

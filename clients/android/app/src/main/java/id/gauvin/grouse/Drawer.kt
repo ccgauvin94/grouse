@@ -46,6 +46,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.ui.res.painterResource
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Build
@@ -116,6 +119,9 @@ import kotlinx.serialization.json.contentOrNull
 fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (String) -> Unit,
     query: String = "", onClearQuery: () -> Unit = {}) {
     var showNewProject by remember { mutableStateOf(false) }
+    // The creation row asks which KIND of chat: a mode is written at `session/new` and
+    // cannot be changed afterwards (goose has no tag mutation), so it is chosen here.
+    var showNewChat by remember { mutableStateOf(false) }
     var actionsFor by remember { mutableStateOf<SessionInfo?>(null) }
     // Expansion is the user's own state, kept in the store so the drawer opens the way it
     // was left instead of resetting every launch. rememberSaveable carries it through
@@ -196,6 +202,14 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
             verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    // "</>" marks a dev session. A readout, not a toggle: the mode is a tag
+                    // written at creation and our goose cannot change one afterwards.
+                    if (s.isDev) {
+                        Icon(painterResource(R.drawable.ic_dev_mode), contentDescription = "dev session",
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(4.dp))
+                    }
                     Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.bodyLarge,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -326,7 +340,26 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
                     modifier = Modifier.padding(start = 10.dp, top = 16.dp, bottom = 2.dp))
             }
         }
-        if (!searching) item { addRow("New chat", indent = false) { cm.newSession(); onOpen() } }
+        if (!searching) item {
+            Box {
+                addRow("New chat", indent = false) { showNewChat = true }
+                DropdownMenu(expanded = showNewChat, onDismissRequest = { showNewChat = false }) {
+                    DropdownMenuItem(
+                        text = { Text("New chat") },
+                        onClick = { showNewChat = false; cm.newSession(); onOpen() },
+                    )
+                    DropdownMenuItem(
+                        leadingIcon = {
+                            Icon(painterResource(R.drawable.ic_dev_mode), contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.primary)
+                        },
+                        text = { Text("New dev chat") },
+                        onClick = { showNewChat = false; cm.newSession(mode = "dev"); onOpen() },
+                    )
+                }
+            }
+        }
         // Remote (roam peer) sessions no longer render here — the Roam tab owns them.
         items(freeChats, key = { "s:" + it.sessionId }) { s -> sessionRow(s, indent = false) }
         if (nothingFound) {
@@ -355,8 +388,16 @@ private fun ProjectSessionRow(s: SessionInfo, onOpen: () -> Unit, onLongPress: (
         .padding(start = 30.dp, end = 12.dp).padding(vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.bodyLarge,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (s.isDev) {
+                    Icon(painterResource(R.drawable.ic_dev_mode), contentDescription = "dev session",
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(4.dp))
+                }
+                Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
             if (s.snippet.isNotBlank())
                 Text(s.snippet, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,

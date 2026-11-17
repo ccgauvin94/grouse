@@ -75,6 +75,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -144,7 +145,9 @@ internal fun modeBlurb(value: String): String = when (value) {
 fun LandingScreen(
     cm: ConnectionManager,
     onOpenDrawer: () -> Unit,
-    onNewChat: () -> Unit,
+    // The mode rides `session/new` and cannot change afterwards, so the choice is
+    // made here: null is a plain chat, "dev" a dev session (the drawer's `</>` row).
+    onNewChat: (String?) -> Unit,
     onOpenAssistant: () -> Unit,
     onOpenSession: (String) -> Unit,
 ) {
@@ -181,10 +184,21 @@ fun LandingScreen(
                     modifier = Modifier.padding(top = 8.dp))
             }
             item {
-                Button(onClick = onNewChat, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                Button(onClick = { onNewChat(null) }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
                     Icon(Icons.Filled.Add, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text(stringResource(R.string.new_chat))
+                }
+            }
+            // A dev session: same chat, with the dev mode tag written at creation. It is
+            // what the `</>` marker in the drawer denotes and what gates plan mode.
+            item {
+                OutlinedButton(onClick = { onNewChat("dev") },
+                    modifier = Modifier.fillMaxWidth().height(48.dp)) {
+                    Icon(painterResource(R.drawable.ic_dev_mode), contentDescription = null,
+                        modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("New dev chat")
                 }
             }
             if (cm.assistantEnabled.value) {
