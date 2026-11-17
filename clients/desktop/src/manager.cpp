@@ -2659,6 +2659,9 @@ void Manager::coreOnRoamSessions(const QString &label, const QString &json)
         m["projectId"] = projectKey(o.value("project_id").toString());
         m["hasRecipe"] = o.value("has_recipe").toBool();
         m["archived"] = o.value("archived").toBool();
+        // The effective mode the core stamped on this row ("chat" when the peer's
+        // per-mode walk claimed nothing) — the roam sidebar's `</>` marker.
+        m["mode"] = o.value("mode").toString();
         m["peer"] = label;
         sessions << m;
     }

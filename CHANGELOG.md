@@ -5,6 +5,48 @@ All notable changes to Grouse are recorded here. The format is based on
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed — the desktop could only say no
+
+- **Tool approval offers the server's own answers again.** The dialog listed the request's
+  options with a `Repeater` bound to `Mgr.permissionOptions()` — an invokable, so QML evaluated
+  it once, when the dialog was constructed at start-up, while nothing was pending. The list
+  stayed empty for the life of the process and the only button left was the static "Deny": every
+  approval on the desktop was really a denial. The options are now a property, assigned when the
+  request arrives, and the buttons are labelled from the option's *kind* ("Allow once",
+  "Always allow", …) instead of its id (`allow_once`).
+- **An allow answer carries an option id.** The delegate read `modelData.optionId`, but the
+  core's record is snake_case (`option_id`) like every other one, so a populated button would
+  have answered with `undefined` — i.e. a denial again. The id is also cleared before closing,
+  so `onClosed` (which denies) cannot answer the same request twice.
+- **The desktop did not link at all.** `flushAfterCompaction()` was declared inside
+  `signals:`, so moc emitted a definition beside the one in `manager.cpp` and the link failed
+  with `multiple definition`. It is a method ("Approve and compact" defers the go-ahead until
+  the compaction clears), not a signal; it moved out of the signal block.
+
+### Added — dev sessions on a peer, and a marker that is right in both drawers
+
+- **The `</>` marker was in the wrong drawer.** It sat in the Roam list's delegate, where the
+  model had no `dev` role — an undefined reference per row, so it could never paint — while the
+  main session list, which is where local dev chats appear, had no marker at all. Both lists
+  render it now, and both models resolve the role (`SessionListModel::DevRole`,
+  `RoamListModel::DevRole`).
+- **A roam peer's sessions carry their mode.** A mode is a `grouse.mode` tag: written at
+  `session/new`, filtered on, never returned with a row. A peer's rows were therefore all
+  "unknown", so the marker had nothing to read. The core now walks the known non-default values
+  over each peer's `session/list` on connect and on relist (one filtered request per value, best
+  effort — a failed walk just leaves the rows reading as chats) and stamps the effective mode on
+  every row. A chat this client creates but that has no messages yet is invisible to both the
+  peer's list and the walk, so its mode is remembered locally until the server's own row appears.
+- **New chats in a mode, on a peer too.** The peer row's "New Chat" is a menu now (chat / new
+  dev chat / a directory of your choosing), and the directory dialog gained a "Dev session"
+  box — a mode is fixed at creation, so the choice has to be made there, exactly like the local
+  sidebar's New Chat. The long-press gesture it replaces is preserved as a menu item.
+- **Settings has a Dev section.** Empty on purpose: dev-only behaviour (plan mode, the code
+  advisor, a changes panel) is per-chat today, and their settings belong there rather than in
+  the chat.
+
+grouse 0.2.109 (versionCode 213).
+
 ### Added — every push arrival is recorded, shown or not
 
 - **"Push is broken" is now answerable from the phone.** The sender only ever learns that the

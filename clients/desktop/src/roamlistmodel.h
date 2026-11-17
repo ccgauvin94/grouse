@@ -25,6 +25,7 @@ public:
         MessageCountRole,
         CwdRole,
         ExpandedRole,                     // header: drop-down open?
+        DevRole,                          // session: started in `dev` mode
     };
 
     struct Peer {

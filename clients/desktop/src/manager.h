@@ -622,6 +622,9 @@ public:
     void coreOnProviders(const QString &json);
     void coreOnSessionProbe(const QString &sid, const QString &u, qint64 n);
     void coreOnToolResult(const QString &text, int isError);
+    /** "Approve and compact" in the plan popup: the go-ahead waits for the
+     *  compaction to clear, then sends (see approvePlan). */
+    void flushAfterCompaction();
     void coreOnError(const QString &method, const QString &message);
 
 signals:
@@ -640,7 +643,6 @@ signals:
     void toolGroupsChanged();
     void activityChanged();
     void planModeChanged();
-    void flushAfterCompaction();
     void contextReportChanged();
     void globalExtensionsChanged();
     void currentSessionChanged();

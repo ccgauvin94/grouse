@@ -329,14 +329,31 @@ Controls.ApplicationWindow {
                             anchors.leftMargin: Kirigami.Units.smallSpacing + del.nest * Kirigami.Units.gridUnit * 0.5
                             anchors.rightMargin: Kirigami.Units.smallSpacing + Kirigami.Units.gridUnit * 1.5
                             spacing: 3
-                            Controls.Label {
-                                text: title
-                                textFormat: Text.PlainText
+                            RowLayout {
                                 width: parent.width
-                                elide: Text.ElideRight
-                                font.weight: del.sel ? Font.DemiBold : Font.Normal
-                                font.pixelSize: root.sidebarTextSize
-                                renderType: Text.NativeRendering
+                                spacing: 2
+                                // "</>" marks a dev session. The mode is fixed at
+                                // creation (a tag the server stores and never returns),
+                                // so this is a readout, not a toggle — the choice is at
+                                // "New Chat", not here. An ICON (`</>` strokes in the
+                                // app's own resources), not three characters: it scales
+                                // with the icon set and takes the theme colour.
+                                Kirigami.Icon {
+                                    visible: dev === true
+                                    source: "qrc:/icons/dev-mode-symbolic.svg"
+                                    color: Kirigami.Theme.highlightColor
+                                    implicitWidth: Kirigami.Units.iconSizes.small
+                                    implicitHeight: Kirigami.Units.iconSizes.small
+                                }
+                                Controls.Label {
+                                    text: title
+                                    textFormat: Text.PlainText
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                    font.weight: del.sel ? Font.DemiBold : Font.Normal
+                                    font.pixelSize: root.sidebarTextSize
+                                    renderType: Text.NativeRendering
+                                }
                             }
                             Controls.Label {
                                 // Header rows lack the snippet/messagecount roles — guard
@@ -563,30 +580,41 @@ Controls.ApplicationWindow {
                                             ToolTip.text: status
                                         }
                                         Controls.ToolButton {
+                                            id: roamNewButton
                                             text: qsTr("New Chat")
                                             display: Controls.AbstractButton.TextBesideIcon
                                             icon.name: "document-new"
                                             font.pixelSize: root.sidebarSmallTextSize
                                             ToolTip.visible: hovered
-                                            ToolTip.text: qsTr("New Chat on this peer — long-press to choose a working directory")
-                                            // Long-press opens the cwd dialog; the
-                                            // hold timer guards the trailing click
-                                            // so a hold never also starts a chat.
-                                            property bool held: false
-                                            Timer {
-                                                id: holdTimer
-                                                interval: 500
-                                                onTriggered: {
-                                                    parent.held = true
-                                                    roamNewChatDialog.targetLabel = label
-                                                    roamNewChatDialog.suggestedCwd = Mgr.workingDir
-                                                    roamNewChatDialog.open()
+                                            ToolTip.text: qsTr("New Chat on this peer — chat, dev, or in a chosen directory")
+                                            // A menu, not a bare click: a mode is written at
+                                            // `session/new` and cannot be changed afterwards, so
+                                            // the choice has to happen here — the same shape as
+                                            // the local sidebar's New Chat.
+                                            onClicked: roamNewMenu.popup()
+                                            Controls.Menu {
+                                                id: roamNewMenu
+                                                y: roamNewButton.height
+                                                Controls.MenuItem {
+                                                    text: qsTr("New chat")
+                                                    onTriggered: Mgr.newRoamSession(label)
+                                                }
+                                                Controls.MenuItem {
+                                                    text: qsTr("New dev chat")
+                                                    icon.source: "qrc:/icons/dev-mode-symbolic.svg"
+                                                    onTriggered: Mgr.newRoamSessionWithMode(label, "", "dev")
+                                                }
+                                                Controls.MenuSeparator {}
+                                                Controls.MenuItem {
+                                                    text: qsTr("New chat in a directory…")
+                                                    onTriggered: {
+                                                        roamNewChatDialog.targetLabel = label
+                                                        roamNewChatDialog.suggestedCwd = Mgr.workingDir
+                                                        roamNewChatDialog.mode = ""
+                                                        roamNewChatDialog.open()
+                                                    }
                                                 }
                                             }
-                                            onPressed: { held = false; holdTimer.restart() }
-                                            onReleased: holdTimer.stop()
-                                            onCanceled: holdTimer.stop()
-                                            onClicked: { if (!held) Mgr.newRoamSession(label) }
                                         }
                                         Controls.ToolButton {
                                             text: qsTr("Remove")
@@ -892,6 +920,10 @@ Controls.ApplicationWindow {
         function onPermissionRequested() {
             permissionDialog.pendingToolCallId = Mgr.permissionToolCallId()
             permissionDialog.appTitle = Mgr.permissionTitle()
+            // Assigned, not bound: `Mgr.permissionOptions()` is an invokable, so a
+            // binding on it would be evaluated once at start-up (empty) and the dialog
+            // would never show the server's own answers — see PermissionDialog.qml.
+            permissionDialog.options = Mgr.permissionOptions()
             permissionDialog.open()
         }
         // A form the server is parked on (elicitation or recipe parameters).
@@ -1168,9 +1200,13 @@ Controls.ApplicationWindow {
         standardButtons: Controls.Dialog.Ok | Controls.Dialog.Cancel
         property string targetLabel: ""
         property string suggestedCwd: ""
-        onAccepted: Mgr.newRoamSessionIn(targetLabel, roamCwdField.text)
+        // "" (chat) or "dev" — written as the session's tag by THAT peer's goose, and
+        // fixed for the session's life, which is why the choice lives at creation.
+        property string mode: ""
+        onAccepted: Mgr.newRoamSessionWithMode(targetLabel, roamCwdField.text, mode)
         onOpened: {
             roamCwdField.text = suggestedCwd
+            roamDevBox.checked = roamNewChatDialog.mode === "dev"
             roamCwdField.selectAll()
             roamCwdField.forceActiveFocus()
         }
@@ -1182,6 +1218,14 @@ Controls.ApplicationWindow {
                 Layout.fillWidth: true
                 placeholderText: qsTr("e.g. /home/colin/projects/foo")
                 onAccepted: roamNewChatDialog.accept()
+            }
+            Controls.CheckBox {
+                id: roamDevBox
+                text: qsTr("Dev session")
+                // Assigned in onOpened, NOT bound to `mode`: the toggle writes `mode`,
+                // so a binding here would re-enter its own signal.
+                checked: false
+                onToggled: roamNewChatDialog.mode = checked ? "dev" : ""
             }
         }
     }

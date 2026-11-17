@@ -28,6 +28,7 @@ QHash<int, QByteArray> RoamListModel::roleNames() const
         {MessageCountRole, "messageCount"},
         {CwdRole, "cwd"},
         {ExpandedRole, "expanded"},
+        {DevRole, "dev"},
     };
 }
 
@@ -53,6 +54,7 @@ QVariant RoamListModel::data(const QModelIndex &index, int role) const
             case SnippetRole: return QString();
             case MessageCountRole: return p.sessions.size();
             case CwdRole: return QString();
+            case DevRole: return false;             // a peer is not a mode
             case SessionIdRole: return QString();   // a header is a peer, not a chat
             default: return QVariant();
             }
@@ -72,6 +74,11 @@ QVariant RoamListModel::data(const QModelIndex &index, int role) const
             case SnippetRole: return s.value(QStringLiteral("snippet")).toString();
             case MessageCountRole: return s.value(QStringLiteral("messageCount")).toInt();
             case CwdRole: return s.value(QStringLiteral("cwd")).toString();
+            // A dev session, from the core's derived `mode` (the `grouse.mode` tag).
+            // The peer never returns a tag on a row, so the core learns it by asking
+            // which sessions match, and stamps an effective mode on every row.
+            case DevRole:
+                return s.value(QStringLiteral("mode")).toString() == QLatin1String("dev");
             // Same reason as the header branch: a session row still evaluates the
             // hidden header's `status` bindings, so these must be defined too.
             case StatusRole: return p.status;
