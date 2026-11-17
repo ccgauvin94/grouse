@@ -19,11 +19,6 @@ use serde_json::{json, Value};
 use crate::spine::{self, PendingRequest, RpcConn};
 use crate::GrouseUnstableListener;
 
-/// The unstable `_goose/unstable/...` shim (CONTRACT §5), retiring with `grouse-unstable`.
-///
-/// Constructed independently of [`crate::Core`]; the live connection is resolved per call
-/// through `spine::current_conn()`, so these intents no-op (or error) while disconnected —
-/// exactly like the desktop's guarded `rpc` calls.
 /// What plan mode tells the model. ONE string, in the core, so the two clients
 /// cannot drift into giving the agent different instructions for the same flag.
 ///
@@ -54,6 +49,12 @@ pub fn plan_ready(text: &str) -> bool {
         .any(|line| line.trim().eq_ignore_ascii_case(PLAN_READY_MARKER))
 }
 
+/// The unstable `_goose/unstable/...` shim (CONTRACT §5), retiring with `grouse-unstable`.
+///
+/// Constructed independently of [`crate::Core`]; the live connection is resolved per call
+/// through `spine::current_conn()`, so these intents no-op (or error) while disconnected —
+/// exactly like the desktop's guarded `rpc` calls.
+#[derive(uniffi::Object)]
 pub struct GrouseUnstable {
     listener: Arc<dyn GrouseUnstableListener>,
     /// Deregisters the server-request listener when this object goes away.
