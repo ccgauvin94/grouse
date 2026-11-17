@@ -190,7 +190,7 @@ pub(crate) fn session_list_meta() -> Map<String, Value> {
 /// goose itself, later) cannot collide with it.
 pub const PROJECT_TAG_KEY: &str = "grouse.project";
 
-/// The tag key that carries a session's MODE — `dev`, `plan`, or absent.
+/// The tag key that carries a session's MODE — `dev`, `chat`, or absent (chat).
 ///
 /// A mode is a client-owned profile (a tag), not a goose feature: goose stores it
 /// and filters on it, nothing else. **It is fixed at creation**, because the server
@@ -199,10 +199,17 @@ pub const PROJECT_TAG_KEY: &str = "grouse.project";
 /// nothing to update a mode WITH. Flipping a mode in place waits on upstream.
 pub const MODE_TAG_KEY: &str = "grouse.mode";
 
-/// The modes this client knows. Closed on purpose: the only way to learn a
-/// session's mode is to ask which sessions carry each value (one filtered
-/// `session/list` per value), so an open vocabulary would cost a walk per word.
-pub const MODE_VALUES: &[&str] = &["dev", "plan"];
+/// The modes this client knows: `chat` (the default, and what an absent tag means)
+/// or `dev`. Plan is NOT a mode — it is a behaviour inside dev.
+///
+/// Closed on purpose: the only way to learn a session's mode is to ask which
+/// sessions carry each value (one filtered `session/list` per value), so an open
+/// vocabulary would cost a walk per word.
+pub const MODE_VALUES: &[&str] = &["chat", "dev"];
+
+/// An untagged session is a normal chat. The read path only walks the modes that
+/// are NOT the default, because "absent" already says chat.
+pub const DEFAULT_MODE: &str = "chat";
 
 /// `session/new`. `_meta.client` present ⇒ goose's `SessionType::User`, so the
 /// desktop/CLI can see these chats. `recipeId` starts a recipe session;
@@ -1181,19 +1188,26 @@ mod tests {
             Some("dev")
         );
         // A mode rides alongside a project rather than replacing its tag.
-        let both = session_new_params("grouse-test", "/w", None, Some("media"), Some("plan"));
+        let both = session_new_params("grouse-test", "/w", None, Some("media"), Some("dev"));
         assert_eq!(
             both.pointer("/_meta/tags/grouse.project").and_then(Value::as_str),
             Some("media")
         );
         assert_eq!(
             both.pointer("/_meta/tags/grouse.mode").and_then(Value::as_str),
-            Some("plan")
+            Some("dev")
         );
         // An unknown mode is dropped: a typo must not mint a tag nothing filters on.
         let typo = session_new_params("grouse-test", "/w", None, None, Some("devel"));
         assert!(typo.pointer("/_meta/tags").is_none());
-        assert_eq!(MODE_VALUES, &["dev", "plan"]);
+        assert_eq!(MODE_VALUES, &["chat", "dev"]);
+        assert_eq!(DEFAULT_MODE, "chat");
+        // "chat" is the default, so an explicit chat tag is legal but redundant.
+        let chat = session_new_params("grouse-test", "/w", None, None, Some("chat"));
+        assert_eq!(
+            chat.pointer("/_meta/tags/grouse.mode").and_then(Value::as_str),
+            Some("chat")
+        );
     }
 
     #[test]

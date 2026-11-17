@@ -137,7 +137,7 @@ pub struct SessionSummary {
     /// True while the session has backgrounded content the UI has not shown
     /// yet — the green-dot indicator (hub staging, for any transport).
     pub has_new: bool,
-    /// The session's mode (`grouse.mode`: `dev` / `plan`), absent for an ordinary
+    /// The session's mode (`grouse.mode`: `chat` / `dev`; `chat` is the default and is
     /// chat. **Derived, not read**: the server carries no tags back on a row, so the
     /// core learns modes by asking which sessions match each known value and stamps
     /// the answer here. That also means a mode is fixed at creation — see
@@ -1668,10 +1668,13 @@ impl Core {
             // and only when there is a list to decorate.
             let mut modes = serde_json::Map::new();
             if !rows.is_empty() {
-                for value in crate::session::MODE_VALUES {
+                for value in crate::session::MODE_VALUES
+                    .iter()
+                    .filter(|value| **value != crate::session::DEFAULT_MODE)
+                {
                     let filter = [(
                         crate::session::MODE_TAG_KEY.to_string(),
-                        (*value).to_string(),
+                        (**value).to_string(),
                     )];
                     let Some(matched) = walk_session_list(&conn, &filter).await else {
                         continue;
@@ -1680,7 +1683,7 @@ impl Core {
                         .iter()
                         .filter_map(|row| row.get("sessionId").cloned())
                         .collect();
-                    modes.insert((*value).to_string(), Value::Array(ids));
+                    modes.insert((**value).to_string(), Value::Array(ids));
                 }
             }
             core.on_sessions_reply(json!({ "sessions": rows, "modes": modes }));
@@ -4549,6 +4552,11 @@ impl Core {
             }
         }
         for session in &mut sessions {
+            // The effective mode, never absent: an untagged chat IS a chat, and a
+            // client should not have to re-derive the default in three places.
+            if session.mode.is_none() {
+                session.mode = Some(crate::session::DEFAULT_MODE.to_string());
+            }
             session.has_new = self.inner.hub.has_new(&session.id);
         }
         {
