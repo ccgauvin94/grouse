@@ -2051,6 +2051,39 @@ impl Core {
         peer.new_session(cwd);
     }
 
+    /// A fresh session on a roam peer, in a mode (`grouse.mode`: dev). The tag rides
+    /// `session/new` on THAT peer, so a roam chat is a dev chat exactly like a local
+    /// one — the mode is stored by the peer's own goose.
+    pub fn roam_new_session_with_mode(
+        &self,
+        label: String,
+        cwd: String,
+        mode: Option<String>,
+    ) {
+        let peer = self
+            .inner
+            .peers
+            .lock()
+            .iter()
+            .find(|peer| peer.label() == label)
+            .cloned();
+        let Some(peer) = peer else { return };
+        *self.inner.active_peer_label.write() = Some(label);
+        let trimmed = cwd.trim();
+        let cwd = if trimmed.is_empty() {
+            self.inner
+                .state
+                .lock()
+                .last_config
+                .as_ref()
+                .map(|config| config.cwd.clone())
+                .unwrap_or_default()
+        } else {
+            trimmed.to_string()
+        };
+        peer.new_session_in_mode(cwd, mode);
+    }
+
     /// Answer a permission request (CONTRACT §5); routes to the active peer
     /// when one owns the chat.
     pub fn respond_permission(&self, tool_call_id: String, outcome: PermissionOutcome) {

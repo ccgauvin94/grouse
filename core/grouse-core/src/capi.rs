@@ -1288,6 +1288,23 @@ pub extern "C" fn grouse_roam_new_session(h: *mut c_void, label: *const c_char) 
 
 /// New chat on a roam peer in a caller-chosen working dir (long-press on the
 /// new-chat button). NULL/empty `cwd` falls back to the config cwd.
+/// A roam peer's new chat, in a mode (`grouse.mode`: dev / chat / null).
+#[no_mangle]
+pub extern "C" fn grouse_roam_new_session_with_mode(
+    h: *mut c_void,
+    label: *const c_char,
+    cwd: *const c_char,
+    mode: *const c_char,
+) {
+    let Some(label) = (unsafe { c_param(label) }).map(str::to_owned) else { return };
+    let cwd = unsafe { c_param(cwd) }.map(str::to_owned).unwrap_or_default();
+    let mode = unsafe { c_param(mode) }.map(str::to_owned);
+    catch_unwind(AssertUnwindSafe(|| {
+        handle(h).core.roam_new_session_with_mode(label, cwd, mode)
+    }))
+    .ok();
+}
+
 #[no_mangle]
 pub extern "C" fn grouse_roam_new_session_cwd(
     h: *mut c_void,

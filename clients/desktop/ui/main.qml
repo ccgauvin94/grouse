@@ -619,13 +619,28 @@ Controls.ApplicationWindow {
                                         anchors.leftMargin: Kirigami.Units.gridUnit
                                         anchors.rightMargin: Kirigami.Units.smallSpacing
                                         spacing: 2
-                                        Controls.Label {
-                                            text: title
-                                            textFormat: Text.PlainText
+                                        RowLayout {
                                             width: parent.width
-                                            elide: Text.ElideRight
-                                            font.pixelSize: root.sidebarTextSize
-                                            renderType: Text.NativeRendering
+                                            spacing: 2
+                                            // "<>" marks a dev session. The mode is fixed at
+                                            // creation (a tag the server stores and never
+                                            // returns), so this is a readout, not a toggle.
+                                            Controls.Label {
+                                                visible: dev === true
+                                                text: "<>"
+                                                font.family: "monospace"
+                                                font.pixelSize: root.sidebarSmallTextSize
+                                                color: Kirigami.Theme.highlightColor
+                                                renderType: Text.NativeRendering
+                                            }
+                                            Controls.Label {
+                                                text: title
+                                                textFormat: Text.PlainText
+                                                Layout.fillWidth: true
+                                                elide: Text.ElideRight
+                                                font.pixelSize: root.sidebarTextSize
+                                                renderType: Text.NativeRendering
+                                            }
                                         }
                                         Controls.Label {
                                             text: snippet && snippet.length > 0 ? snippet
@@ -704,11 +719,25 @@ Controls.ApplicationWindow {
                         onClicked: Mgr.openMyDay()
                     }
 
+                    // A mode is written at `session/new` and cannot be changed after,
+                    // so the choice belongs here rather than in the chat.
                     Controls.Button {
                         text: qsTr("New Chat")
                         icon.name: "document-new"
                         Layout.fillWidth: true
-                        onClicked: Mgr.newChat()
+                        onClicked: newChatMenu.popup()
+                        Controls.Menu {
+                            id: newChatMenu
+                            y: parent.height
+                            Controls.MenuItem {
+                                text: qsTr("New chat")
+                                onTriggered: Mgr.newChatInMode("")
+                            }
+                            Controls.MenuItem {
+                                text: qsTr("New dev chat  <>")
+                                onTriggered: Mgr.newChatInMode("dev")
+                            }
+                        }
                     }
 
                 // Connect lives here; Disconnect lives in Settings.

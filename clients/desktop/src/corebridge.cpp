@@ -85,6 +85,7 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_connect);
     RESOLVE(grouse_disconnect);
     RESOLVE(grouse_new_session);
+    RESOLVE(grouse_new_session_with_mode);
     RESOLVE(grouse_open_session);
     RESOLVE(grouse_refresh_session);
     RESOLVE(grouse_list_sessions);
@@ -133,6 +134,7 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_roam_open_session);
     RESOLVE(grouse_roam_new_session);
     RESOLVE(grouse_roam_new_session_cwd);
+    RESOLVE(grouse_roam_new_session_with_mode);
     RESOLVE(grouse_identity_generate);
     RESOLVE(grouse_identity_public_key);
     RESOLVE(grouse_card_fingerprint);

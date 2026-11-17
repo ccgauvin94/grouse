@@ -26,6 +26,7 @@ QHash<int, QByteArray> SessionListModel::roleNames() const
         {HeaderRole, "header"},
         {CollapsedRole, "collapsed"},
         {CountRole, "count"},
+        {DevRole, "dev"},
     };
 }
 
@@ -46,6 +47,10 @@ QVariant SessionListModel::data(const QModelIndex &index, int role) const
     case HeaderRole: return m.value("header").toBool();
     case CollapsedRole: return m.value("collapsed").toBool();
     case CountRole: return m.value("count").toInt();
+    // A dev session, from the core's derived `mode` (`grouse.mode`): the server
+    // never returns a tag, so the core asks which sessions match the value and
+    // stamps every row with an effective mode ("chat" when nothing matched).
+    case DevRole: return m.value("mode").toString() == QLatin1String("dev");
     default: return {};
     }
 }

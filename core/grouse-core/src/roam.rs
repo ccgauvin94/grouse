@@ -268,6 +268,8 @@ enum PeerCommand {
     },
     NewSession {
         cwd: String,
+        /// `grouse.mode` written at creation on THIS peer (dev, or None for chat).
+        mode: Option<String>,
     },
     Relist,
     Close,
@@ -690,11 +692,18 @@ impl RoamPeer {
     /// into the peer's command loop, like the desktop's `openRoamSession`.
     /// Same Ready-or-Connecting gate: queued commands ride the reconnect.
     pub fn new_session(&self, cwd: String) {
+        self.new_session_in_mode(cwd, None);
+    }
+
+    /// The same, in a mode (`grouse.mode`: dev). The mode is a tag written on
+    /// `session/new` — the peer's goose stores it and filters on it, so a roam chat
+    /// can be a dev chat exactly like a local one.
+    pub fn new_session_in_mode(&self, cwd: String, mode: Option<String>) {
         match self.status() {
             ConnectionStatus::Ready | ConnectionStatus::Connecting => {}
             _ => return,
         }
-        let _ = self.cmd_tx.send(PeerCommand::NewSession { cwd });
+        let _ = self.cmd_tx.send(PeerCommand::NewSession { cwd, mode });
     }
 
     /// Disconnect the peer: FIN + cancel the stream (unblocks the reader),
@@ -968,8 +977,8 @@ impl RoamPeer {
                         self.fail(format!("roam session/open: {error}"));
                     }
                 }
-                PeerCommand::NewSession { cwd } => {
-                    match self.create_session(&cx, &cwd, true).await {
+                PeerCommand::NewSession { cwd, mode } => {
+                    match self.create_session(&cx, &cwd, mode.as_deref(), true).await {
                         Ok(()) => {}
                         Err(error) => {
                             self.fail(format!("roam session/new: {error}"));
@@ -1084,12 +1093,13 @@ impl RoamPeer {
         &self,
         cx: &agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
         cwd: &str,
+        mode: Option<&str>,
         notify_new: bool,
     ) -> Result<(), AcpError> {
         // The remote goose's session/new deserializer REQUIRES mcpServers
         // (a missing field is a hard protocol error, not a default) — the
         // shared builder sends it for every transport.
-        let params = crate::session::session_new_params("grouse", cwd, None, None, None);
+        let params = crate::session::session_new_params("grouse", cwd, None, None, mode);
         let reply = cx
             .send_request(UntypedMessage::new("session/new", params)?)
             .block_task()
@@ -2180,7 +2190,7 @@ mod tests {
         peer.apply_sessions(&list_response(&[("s1", "Title", "2026-01-01T00:00:00Z")]));
         peer.new_session("/home/user".to_string());
         match cmd_rx.try_recv() {
-            Ok(PeerCommand::NewSession { cwd }) => assert_eq!(cwd, "/home/user"),
+            Ok(PeerCommand::NewSession { cwd, .. }) => assert_eq!(cwd, "/home/user"),
             other => panic!("expected NewSession command, got {other:?}"),
         }
     }
@@ -2208,7 +2218,7 @@ mod tests {
             offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
         peer.new_session("/home/user".to_string());
         match cmd_rx.try_recv() {
-            Ok(PeerCommand::NewSession { cwd }) => assert_eq!(cwd, "/home/user"),
+            Ok(PeerCommand::NewSession { cwd, .. }) => assert_eq!(cwd, "/home/user"),
             other => panic!("expected NewSession queued while connecting, got {other:?}"),
         }
         peer.connection_ended(Ok(()));

@@ -204,6 +204,9 @@ public:
     /** Create a new chat on a roam peer in a caller-chosen dir; blank falls
      *  back to the config working dir. */
     Q_INVOKABLE void newRoamSessionIn(const QString &label, const QString &cwd);
+    /// A peer's new chat in a mode (`grouse.mode`: dev); empty = ordinary chat.
+    Q_INVOKABLE void newRoamSessionWithMode(const QString &label, const QString &cwd,
+                                           const QString &mode);
     Q_INVOKABLE void toggleRoamPeer(const QString &label);
     /** The device's iroh identity (base64 secret), generated + persisted. */
     Q_INVOKABLE QString roamIdentity();
@@ -271,6 +274,8 @@ public:
      *  reload; `refreshSession` is the quick one). */
     Q_INVOKABLE void reloadSessionFromStart();
     Q_INVOKABLE void newChat();
+    /// A new chat in a mode (`grouse.mode`: dev); empty = ordinary chat.
+    Q_INVOKABLE void newChatInMode(const QString &mode);
     /** Step off the landing page into the staging chat (provider/model already chosen there). */
     Q_INVOKABLE void beginChat();
     Q_INVOKABLE void renameSession(const QString &sessionId, const QString &title);

@@ -33,6 +33,7 @@ public:
         HeaderRole,       // true for group header rows
         CollapsedRole,    // header rows: is this group collapsed?
         CountRole,        // header rows: number of sessions in the group
+        DevRole,          // `grouse.mode` is dev: the "<>" marker in the drawer
     };
 
     explicit SessionListModel(QObject *parent = nullptr);

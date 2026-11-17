@@ -50,6 +50,10 @@ public:
         void (*grouse_connect)(void *h, const char *config_json, char **out_err);
         void (*grouse_disconnect)(void *h);
         void (*grouse_new_session)(void *h, const char *recipe_id, const char *project_id, char **out_err);
+        /// The same, plus a mode tag written at creation (`grouse.mode`: dev).
+        void (*grouse_new_session_with_mode)(void *h, const char *recipe_id,
+                                             const char *project_id, const char *mode,
+                                             char **out_err);
         void (*grouse_open_session)(void *h, const char *session_id);
         void (*grouse_refresh_session)(void *h, const char *session_id, int full);
         void (*grouse_list_sessions)(void *h);
@@ -131,6 +135,10 @@ public:
         void (*grouse_roam_open_session)(void *h, const char *label, const char *session_id);
         void (*grouse_roam_new_session)(void *h, const char *label);
         void (*grouse_roam_new_session_cwd)(void *h, const char *label, const char *cwd);
+        /// A peer's new chat in a mode (`grouse.mode`); the tag is written on THAT
+        /// peer's session/new, so a roam chat can be a dev chat like a local one.
+        void (*grouse_roam_new_session_with_mode)(void *h, const char *label,
+                                                  const char *cwd, const char *mode);
         char *(*grouse_identity_generate)(void);
         char *(*grouse_identity_public_key)(const char *secret, char **out_err);
         char *(*grouse_card_fingerprint)(const char *card, char **out_err);

@@ -545,6 +545,14 @@ void Manager::newRoamSession(const QString &label)
 
 void Manager::newRoamSessionIn(const QString &label, const QString &cwd)
 {
+    newRoamSessionWithMode(label, cwd, QString());
+}
+
+/// A roam peer's new chat in a mode. The tag is written by THAT peer's goose, so a
+/// roam chat carries a mode exactly like a local one.
+void Manager::newRoamSessionWithMode(const QString &label, const QString &cwd,
+                                     const QString &mode)
+{
     m_activePeerLabel = label;
     emit queuedChanged();
     m_landing = false;
@@ -571,8 +579,15 @@ void Manager::newRoamSessionIn(const QString &label, const QString &cwd)
         const QByteArray l = label.toUtf8();
         const QString t = cwd.trimmed();
         const QByteArray c = t.toUtf8();
-        m_bridge->api().grouse_roam_new_session_cwd(
-            m_bridge->handle(), l.constData(), t.isEmpty() ? nullptr : c.constData());
+        const QByteArray md = mode.toUtf8();
+        if (mode.isEmpty() || !m_bridge->api().grouse_roam_new_session_with_mode) {
+            m_bridge->api().grouse_roam_new_session_cwd(
+                m_bridge->handle(), l.constData(), t.isEmpty() ? nullptr : c.constData());
+        } else {
+            m_bridge->api().grouse_roam_new_session_with_mode(
+                m_bridge->handle(), l.constData(), t.isEmpty() ? nullptr : c.constData(),
+                md.constData());
+        }
     }
 }
 
@@ -780,6 +795,16 @@ void Manager::refreshSessionWith(int full)
 
 void Manager::newChat()
 {
+    newChatInMode(QString());
+}
+
+/// A new chat in a mode (`grouse.mode`: `dev`). Empty = an ordinary chat.
+///
+/// The mode rides `session/new` as a tag: the server stores it, filters on it and
+/// never returns it, so a mode can only be chosen when the chat is made. That is
+/// why creation — not a control in the chat — is where the choice lives.
+void Manager::newChatInMode(const QString &mode)
+{
     setMyDayVisible(false);   // a new conversation also takes the chat area back
     resetReloadProgress();
     m_activePeerLabel.clear();
@@ -819,10 +844,19 @@ void Manager::newChat()
     if (m_bridge && m_bridge->isAvailable()) {
         const QByteArray rid = recipeId.toUtf8();
         const QByteArray pid = projectId.toUtf8();
-        m_bridge->api().grouse_new_session(m_bridge->handle(),
-                                           recipeId.isEmpty() ? nullptr : rid.constData(),
-                                           projectId.isEmpty() ? nullptr : pid.constData(),
-                                           &err);
+        const QByteArray md = mode.toUtf8();
+        if (mode.isEmpty() || !m_bridge->api().grouse_new_session_with_mode) {
+            m_bridge->api().grouse_new_session(m_bridge->handle(),
+                                               recipeId.isEmpty() ? nullptr : rid.constData(),
+                                               projectId.isEmpty() ? nullptr : pid.constData(),
+                                               &err);
+        } else {
+            m_bridge->api().grouse_new_session_with_mode(
+                m_bridge->handle(),
+                recipeId.isEmpty() ? nullptr : rid.constData(),
+                projectId.isEmpty() ? nullptr : pid.constData(),
+                md.constData(), &err);
+        }
         if (err) {
             setStatus(QStringLiteral("new session failed: ") + QString::fromUtf8(err));
             m_bridge->api().grouse_string_free(err);
