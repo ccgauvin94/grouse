@@ -270,6 +270,10 @@ public:
     Q_INVOKABLE void compactConversation();
     /// Turn plan mode on/off for the open chat (system-prompt extra; see grouse#35).
     Q_INVOKABLE void setPlanMode(bool on);
+    /// The newest agent message's text — what the plan popup shows.
+    Q_INVOKABLE QString lastAgentText() const;
+    /// Leave plan mode and start executing; `compact` folds the exploration away first.
+    Q_INVOKABLE void approvePlan(bool compact);
     /** Serialize a session and write it to `filePath` (JSON). */
     Q_INVOKABLE void exportSessionTo(const QString &sessionId, const QString &filePath);
     Q_INVOKABLE void respondPermission(const QString &toolCallId, const QString &optionId);
@@ -633,6 +637,7 @@ signals:
     void toolGroupsChanged();
     void activityChanged();
     void planModeChanged();
+    void flushAfterCompaction();
     void contextReportChanged();
     void globalExtensionsChanged();
     void currentSessionChanged();
@@ -832,6 +837,8 @@ private:
     /// Session ids the user has put into plan mode in THIS process. A mirror, not the
     /// source of truth: goose keeps the real flag (a prompt extra) with no read path.
     QSet<QString> m_planSessions;
+    /// A go-ahead waiting for an in-flight compaction to finish (plan approval).
+    QString m_afterCompaction;
     QVariantList m_projects;
     /// Roam session id -> the title the peer's session/list carries. The peer
     /// list is the ONLY place a roam session's human title arrives (there is no

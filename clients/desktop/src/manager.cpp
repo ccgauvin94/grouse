@@ -230,6 +230,53 @@ QString Manager::wsUrl() const
              host().trimmed(), port().trimmed());
 }
 
+QString Manager::lastAgentText() const
+{
+    if (!m_messageModel)
+        return {};
+    for (int i = m_messageModel->rowCount() - 1; i >= 0; --i) {
+        const QVariantMap row = m_messageModel->row(i);
+        if (row.value("role").toString() != QLatin1String("agent"))
+            continue;
+        const QString text = row.value("text").toString();
+        if (!text.trimmed().isEmpty())
+            return text;
+    }
+    return {};
+}
+
+/// Approve the plan: leave plan mode and start executing.
+///
+/// `compact` first folds the conversation down, because a planning session spends a lot
+/// of window exploring and the executing turn does not need that detail. Compaction is
+/// itself a turn, so the go-ahead is PARKED until it finishes rather than sent into it.
+void Manager::approvePlan(bool compact)
+{
+    const QString proceed =
+        tr("Plan approved — go ahead and implement it, following the plan as written.");
+    setPlanMode(false);
+    if (!compact) {
+        sendPrompt(proceed);
+        return;
+    }
+    if (!m_bridge || !m_bridge->isAvailable()
+        || !m_bridge->api().grouse_ready(m_bridge->handle()))
+        return;
+    m_afterCompaction = proceed;
+    compactConversation();
+}
+
+/// A parked go-ahead: sent once compaction has actually finished.
+void Manager::flushAfterCompaction()
+{
+    if (m_compacting || m_afterCompaction.isEmpty())
+        return;
+    const QString text = m_afterCompaction;
+    m_afterCompaction.clear();
+    if (!text.isEmpty())
+        sendPrompt(text);
+}
+
 bool Manager::devChat() const
 {
     if (m_currentSessionId.isEmpty())
@@ -437,6 +484,7 @@ void Manager::disconnect()
     m_activeRunIds.clear();
     emit promptingChanged();
     m_compacting = false;
+    flushAfterCompaction();
     emit compactingChanged();
     m_landing = true;
     emit landingChanged();
@@ -1048,6 +1096,7 @@ void Manager::releaseTurnForLostWire(const QString &lostSessionId)
     }
     if (m_compacting) {
         m_compacting = false;
+    flushAfterCompaction();
         emit compactingChanged();
     }
     setActiveRunId(QString());
@@ -1142,6 +1191,7 @@ void Manager::restoreTurnState(const QString &sessionId)
     m_prompting = busy;
     m_promptingSessionId = busy ? sessionId : QString();
     m_compacting = false;
+    flushAfterCompaction();
     setActiveRunId(busy ? m_activeRunIds.value(sessionId) : QString());
     emit promptingChanged();
     emit compactingChanged();
@@ -3703,6 +3753,7 @@ void Manager::coreOnRunEnded(const QString &sessionId, const QString &stopReason
     m_prompting = false;
     m_promptingSessionId.clear();
     m_compacting = false;
+    flushAfterCompaction();
     m_compactionStatus.clear();
     setActiveRunId(QString());
     emit promptingChanged();
@@ -4017,6 +4068,7 @@ void Manager::onCompactionStatus(const QString &message)
         m_compactionStatus = message;
     } else if (done) {
         m_compacting = false;
+    flushAfterCompaction();
         m_compactionStatus.clear();
     }
     emit compactingChanged();

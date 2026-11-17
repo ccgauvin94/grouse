@@ -2870,6 +2870,12 @@ Kirigami.Page {
         }
     }
 
+    /// "Edit" on the plan popup comes back here: plan mode is still on, so all this has
+    /// to do is put the cursor where the next planning message is typed.
+    function focusComposer() {
+        chatInput.forceActiveFocus()
+    }
+
     function send() {
         const t = chatInput.text
         const files = page.pendingFiles
