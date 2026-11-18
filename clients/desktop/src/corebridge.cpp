@@ -144,8 +144,6 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_unstable_session_info);
     RESOLVE(grouse_unstable_session_project);
     RESOLVE(grouse_unstable_list_tools);
-    RESOLVE(grouse_plan_ready);
-    RESOLVE(grouse_unstable_set_plan_mode);
     RESOLVE(grouse_unstable_session_extensions_list);
     RESOLVE(grouse_unstable_session_extensions_add);
     RESOLVE(grouse_unstable_session_extensions_remove);

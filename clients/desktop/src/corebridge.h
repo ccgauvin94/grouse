@@ -149,11 +149,6 @@ public:
         void (*grouse_unstable_session_info)(void *h, const char *id);
         void (*grouse_unstable_session_project)(void *h, const char *id, const char *project_id);
         void (*grouse_unstable_list_tools)(void *h, const char *session_id);
-        /// Pure function: does this reply signal a finished plan (`[plan-ready]`)?
-        /// No handle — both clients must agree, so the check lives in the core.
-        int (*grouse_plan_ready)(const char *text);
-        /// Plan mode as a system-prompt extra (temporary shape: no state to read back).
-        void (*grouse_unstable_set_plan_mode)(void *h, const char *session_id, int on);
         void (*grouse_unstable_session_extensions_list)(void *h, const char *sid);
         void (*grouse_unstable_session_extensions_add)(void *h, const char *sid, const char *extension);
         void (*grouse_unstable_session_extensions_remove)(void *h, const char *sid, const char *name);

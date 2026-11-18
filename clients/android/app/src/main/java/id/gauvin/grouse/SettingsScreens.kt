@@ -529,6 +529,11 @@ internal fun ModelPill(
     knownModels: Set<String>,
     onPick: (String, String) -> Unit,
     onOpenSheet: () -> Unit,
+    // The caller supplies the layout modifier so the pill can be the item that gives
+    // way when the composer row runs out of width. Without it the row's LAST child —
+    // the send button — is what gets clipped, which is what a chip in this row used to
+    // do to it (measured 2026-11-17: the send circle sat half off the screen).
+    modifier: Modifier = Modifier,
 ) {
     fun labelFor(v: String) = if (v == "current") "Provider default"
         else opt?.choices?.firstOrNull { it.value == v }?.label ?: v
@@ -539,7 +544,7 @@ internal fun ModelPill(
     Surface(
         shape = RoundedCornerShape(20.dp),
         color = MaterialTheme.colorScheme.surface,
-        modifier = Modifier.clickable(enabled = opt != null) { onOpenSheet() },
+        modifier = modifier.clickable(enabled = opt != null) { onOpenSheet() },
     ) {
         Row(
             Modifier.padding(horizontal = 12.dp, vertical = 7.dp),

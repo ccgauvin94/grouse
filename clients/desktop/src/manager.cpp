@@ -256,61 +256,6 @@ QString Manager::wsUrl() const
              host().trimmed(), port().trimmed());
 }
 
-bool Manager::planReady() const
-{
-    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_plan_ready)
-        return false;
-    const QByteArray text = lastAgentText().toUtf8();
-    return m_bridge->api().grouse_plan_ready(text.constData()) != 0;
-}
-
-QString Manager::lastAgentText() const
-{
-    if (!m_messageModel)
-        return {};
-    for (int i = m_messageModel->rowCount() - 1; i >= 0; --i) {
-        const QVariantMap row = m_messageModel->row(i);
-        if (row.value("role").toString() != QLatin1String("agent"))
-            continue;
-        const QString text = row.value("text").toString();
-        if (!text.trimmed().isEmpty())
-            return text;
-    }
-    return {};
-}
-
-/// Approve the plan: leave plan mode and start executing.
-///
-/// `compact` first folds the conversation down, because a planning session spends a lot
-/// of window exploring and the executing turn does not need that detail. Compaction is
-/// itself a turn, so the go-ahead is PARKED until it finishes rather than sent into it.
-void Manager::approvePlan(bool compact)
-{
-    const QString proceed =
-        tr("Plan approved — go ahead and implement it, following the plan as written.");
-    setPlanMode(false);
-    if (!compact) {
-        sendPrompt(proceed);
-        return;
-    }
-    if (!m_bridge || !m_bridge->isAvailable()
-        || !m_bridge->api().grouse_ready(m_bridge->handle()))
-        return;
-    m_afterCompaction = proceed;
-    compactConversation();
-}
-
-/// A parked go-ahead: sent once compaction has actually finished.
-void Manager::flushAfterCompaction()
-{
-    if (m_compacting || m_afterCompaction.isEmpty())
-        return;
-    const QString text = m_afterCompaction;
-    m_afterCompaction.clear();
-    if (!text.isEmpty())
-        sendPrompt(text);
-}
-
 bool Manager::devChat() const
 {
     if (m_currentSessionId.isEmpty())
@@ -321,33 +266,6 @@ bool Manager::devChat() const
             return row.value("mode").toString() == QLatin1String("dev");
     }
     return false;
-}
-
-bool Manager::planMode() const
-{
-    return !m_currentSessionId.isEmpty() && m_planSessions.contains(m_currentSessionId);
-}
-
-/// Plan mode, the TEMPORARY shape: a system-prompt extra on the session.
-///
-/// The model's side is server-side and shared by every client (the extra is persisted and
-/// merged into each inference); the CLIENT's side is a local mirror, because goose has no
-/// getter for extras. The transcript is the cross-device record — see grouse#35.
-void Manager::setPlanMode(bool on)
-{
-    if (m_currentSessionId.isEmpty())
-        return;
-    if (on)
-        m_planSessions.insert(m_currentSessionId);
-    else
-        m_planSessions.remove(m_currentSessionId);
-    emit planModeChanged();
-    if (!m_bridge || !m_bridge->isAvailable()
-        || !m_bridge->api().grouse_unstable_set_plan_mode)
-        return;
-    const QByteArray sid = m_currentSessionId.toUtf8();
-    m_bridge->api().grouse_unstable_set_plan_mode(m_bridge->handle(), sid.constData(),
-                                                  on ? 1 : 0);
 }
 
 QString Manager::currentSessionTitle() const
@@ -518,7 +436,6 @@ void Manager::disconnect()
     m_activeRunIds.clear();
     emit promptingChanged();
     m_compacting = false;
-    flushAfterCompaction();
     emit compactingChanged();
     m_landing = true;
     emit landingChanged();
@@ -1132,7 +1049,6 @@ void Manager::releaseTurnForLostWire(const QString &lostSessionId)
     }
     if (m_compacting) {
         m_compacting = false;
-    flushAfterCompaction();
         emit compactingChanged();
     }
     setActiveRunId(QString());
@@ -1227,7 +1143,6 @@ void Manager::restoreTurnState(const QString &sessionId)
     m_prompting = busy;
     m_promptingSessionId = busy ? sessionId : QString();
     m_compacting = false;
-    flushAfterCompaction();
     setActiveRunId(busy ? m_activeRunIds.value(sessionId) : QString());
     emit promptingChanged();
     emit compactingChanged();
@@ -1257,25 +1172,6 @@ void Manager::flushQueue()
 }
 
 namespace {
-/// Drop the plan sentinel from displayed agent text.
-///
-/// `[plan-ready]` is a handshake between the agent and the client (see the core's
-/// `PLAN_READY_MARKER`), so it belongs in the signal and not in the transcript. Only the
-/// LAST matching line goes: a reply that quotes the marker mid-text keeps it.
-QString stripPlanSentinel(const QString &text)
-{
-    static const QString marker = QStringLiteral("[plan-ready]");
-    QStringList lines = text.split(QLatin1Char('\n'));
-    for (int i = lines.size() - 1; i >= 0; --i) {
-        if (lines.at(i).trimmed().compare(marker, Qt::CaseInsensitive) == 0) {
-            lines.removeAt(i);
-            break;
-        }
-    }
-    while (!lines.isEmpty() && lines.last().trimmed().isEmpty())
-        lines.removeLast();
-    return lines.join(QLatin1Char('\n'));
-}
 
 /// A prompt's image reaches the row as a `data:` URI: the core hands the client the
 /// PIXELS, not a path, so the row can show what was sent without the file still being
@@ -2516,9 +2412,6 @@ void Manager::coreOnSessions(const QString &json)
     onSessions(sessions);
 }
 
-
-
-
 void Manager::coreOnConfig(const QString &json)
 {
     QVariantList config;
@@ -3650,7 +3543,7 @@ QVariantMap Manager::rowFromItem(const QJsonObject &item)
                                                             : QStringLiteral("agent");
     // The plan sentinel is a SIGNAL, not content: it tells the client a plan is ready to
     // approve, and showing it would read as debris in the reply.
-    const QString shown = role == QLatin1String("agent") ? stripPlanSentinel(text) : text;
+    const QString shown = text;
     QVariantMap row{{"id", id}, {"role", role}, {"text", shown}, {"output", output},
                     {"html", QString()}, {"seq", seq}};
     if (role == QLatin1String("thought"))
@@ -3829,7 +3722,6 @@ void Manager::coreOnRunEnded(const QString &sessionId, const QString &stopReason
     m_prompting = false;
     m_promptingSessionId.clear();
     m_compacting = false;
-    flushAfterCompaction();
     m_compactionStatus.clear();
     setActiveRunId(QString());
     emit promptingChanged();
@@ -4144,7 +4036,6 @@ void Manager::onCompactionStatus(const QString &message)
         m_compactionStatus = message;
     } else if (done) {
         m_compacting = false;
-    flushAfterCompaction();
         m_compactionStatus.clear();
     }
     emit compactingChanged();

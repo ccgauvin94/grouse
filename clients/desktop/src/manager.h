@@ -121,7 +121,6 @@ class Manager : public QObject
     Q_PROPERTY(bool devChat READ devChat NOTIFY currentSessionChanged)
     /// Plan mode for the open chat. Temporary shape: the model's flag is server-side,
     /// ours is a local mirror (no getter exists), so this can be stale after a switch.
-    Q_PROPERTY(bool planMode READ planMode NOTIFY planModeChanged)
     Q_PROPERTY(int contextUsed READ contextUsed NOTIFY contextChanged)
     Q_PROPERTY(int contextSize READ contextSize NOTIFY contextChanged)
     Q_PROPERTY(QVariant availableCommands READ availableCommands NOTIFY commandsChanged)
@@ -282,15 +281,6 @@ public:
     Q_INVOKABLE void cancelTurn();
     /** Compact the conversation history (goose /compact command). */
     Q_INVOKABLE void compactConversation();
-    /// Turn plan mode on/off for the open chat (system-prompt extra; see grouse#35).
-    Q_INVOKABLE void setPlanMode(bool on);
-    /// The newest agent message's text — what the plan popup shows.
-    Q_INVOKABLE QString lastAgentText() const;
-    /// True when the newest agent reply ends with the plan sentinel — the popup's trigger,
-    /// so a clarifying question in plan mode does not open it.
-    Q_INVOKABLE bool planReady() const;
-    /// Leave plan mode and start executing; `compact` folds the exploration away first.
-    Q_INVOKABLE void approvePlan(bool compact);
     /** Serialize a session and write it to `filePath` (JSON). */
     Q_INVOKABLE void exportSessionTo(const QString &sessionId, const QString &filePath);
     Q_INVOKABLE void respondPermission(const QString &toolCallId, const QString &optionId);
@@ -449,7 +439,6 @@ public:
     bool compacting() const { return m_compacting; }
     QString compactionStatus() const { return m_compactionStatus; }
     bool devChat() const;
-    bool planMode() const;
     QString m_advisorReport;
     QString m_advisorSession;
     int contextUsed() const { return m_contextUsed; }
@@ -639,9 +628,6 @@ public:
     void coreOnProviders(const QString &json);
     void coreOnSessionProbe(const QString &sid, const QString &u, qint64 n);
     void coreOnToolResult(const QString &text, int isError);
-    /** "Approve and compact" in the plan popup: the go-ahead waits for the
-     *  compaction to clear, then sends (see approvePlan). */
-    void flushAfterCompaction();
     void coreOnError(const QString &method, const QString &message);
 
 signals:
@@ -659,7 +645,6 @@ signals:
     void toolsChanged();
     void toolGroupsChanged();
     void activityChanged();
-    void planModeChanged();
     /// A review arrived (or was cleared): the card re-reads both properties.
     void advisorReportChanged();
     void contextReportChanged();
@@ -858,11 +843,6 @@ private:
     QHash<QString, QString> m_activeRunIds;
 
     QVariantList m_sessions;
-    /// Session ids the user has put into plan mode in THIS process. A mirror, not the
-    /// source of truth: goose keeps the real flag (a prompt extra) with no read path.
-    QSet<QString> m_planSessions;
-    /// A go-ahead waiting for an in-flight compaction to finish (plan approval).
-    QString m_afterCompaction;
     QVariantList m_projects;
     /// Roam session id -> the title the peer's session/list carries. The peer
     /// list is the ONLY place a roam session's human title arrives (there is no

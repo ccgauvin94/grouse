@@ -207,14 +207,14 @@ pub const PROJECT_TAG_KEY: &str = "grouse.project";
 /// nothing to update a mode WITH. Flipping a mode in place waits on upstream.
 pub const MODE_TAG_KEY: &str = "grouse.mode";
 
-/// The one non-default mode: a chat that opens the dev-only surface (plan mode today,
-/// the advisor and the changes panel next). Named because several call sites compare
+/// The one non-default mode: a chat that opens the dev-only surface (the advisor today,
+/// a changes panel next). Named because several call sites compare
 /// against it — the advisor's turn-end trigger among them — and a string literal per
 /// site is how a typo becomes "the feature silently never runs".
 pub const DEV_MODE: &str = "dev";
 
 /// The modes this client knows: `chat` (the default, and what an absent tag means)
-/// or `dev`. Plan is NOT a mode — it is a behaviour inside dev.
+/// or `dev`.
 ///
 /// Closed on purpose: the only way to learn a session's mode is to ask which
 /// sessions carry each value (one filtered `session/list` per value), so an open

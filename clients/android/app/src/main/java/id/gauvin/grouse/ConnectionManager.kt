@@ -791,86 +791,6 @@ class ConnectionManager private constructor(context: Context) {
     val compacting = mutableStateOf(false)
     val compactionStatus = mutableStateOf("")
 
-    // ---- plan mode (a dev-session behaviour, not a mode of its own) -------------
-    /**
-     * Sessions with plan mode ON, keyed by session id.
-     *
-     * The SERVER side is a system-prompt EXTRA (`_goose/unstable/session/system-prompt/set`,
-     * key `plan`, mode `append`), which goose persists and merges into every inference — so
-     * the model keeps planning after a restart, and on every device. This map is only the
-     * CLIENT's mirror: goose exposes no getter for extras, so nothing can read the flag back
-     * (grouse#35 tracks the deterministic fix, which needs tag mutation upstream). The
-     * transcript is the cross-device record; the desktop keeps the same mirror.
-     */
-    val planSessions = androidx.compose.runtime.mutableStateMapOf<String, Boolean>()
-
-    /** Plan mode for the chat on screen. False when no chat is open. */
-    val planMode: Boolean get() = currentSession.value?.let { planSessions[it] == true } ?: false
-
-    /** The chat on screen is a dev session — the mode tag the drawer's `</>` marks. */
-    val devChat: Boolean
-        get() = currentSession.value?.let { id ->
-            sessions.value.firstOrNull { it.sessionId == id }?.isDev == true
-        } ?: false
-
-    /** Turn plan mode on/off for the chat on screen: the prompt extra on the server, and
-     *  this client's mirror. Dismissing the plan popup must NOT come through here — a
-     *  dismissal is "not yet", and plan mode stays on. */
-    fun setPlanMode(on: Boolean) {
-        val sid = currentSession.value ?: return
-        if (on) planSessions[sid] = true else planSessions.remove(sid)
-        unstable.setPlanMode(sid, on)
-    }
-
-    /** The model says its plan is complete (`[plan-ready]` on its own line). The core
-     *  strips the sentinel from the transcript; this reads the same rule, so the popup
-     *  opens when the MODEL is done rather than on every plan-mode turn. */
-    fun planReady(text: String): Boolean = unstable.planReady(text)
-
-    /** The last thing the model said — what the plan popup shows. The `[plan-ready]`
-     *  sentinel is stripped: it is a handshake between the agent and this client, not
-     *  something to show a person. */
-    fun lastAgentText(): String =
-        stripPlanSentinel(messages.lastOrNull { it.role == "assistant" }?.text.orEmpty())
-
-    /** A go-ahead parked behind the compaction that "Approve and compact" started. The
-     *  compaction is itself a turn, so this flushes on ITS completion, not before. */
-    @Volatile private var pendingPlanProceed: String? = null
-
-    /** What "Approve" sends. Short on purpose: the plan is in the transcript above it. */
-    private val planProceed = "Go ahead — implement the plan."
-
-    /**
-     * Answer the plan popup. `compact` is "Approve and compact": reclaim context first,
-     * then send, because a plan followed by its implementation is exactly when the context
-     * is longest. Cancel/Edit never reach here: they leave plan mode ON so the user can
-     * keep iterating, and only an approval turns it off.
-     */
-    fun approvePlan(compact: Boolean) {
-        setPlanMode(false)
-        if (!compact) {
-            send(planProceed)
-            return
-        }
-        pendingPlanProceed = planProceed
-        compact()
-    }
-
-    /**
-     * The finished plan waiting for an answer: session id to the plan text, or null.
-     *
-     * Set by the TURN-END hook, not by the UI: the model ends a plan turn with
-     * `[plan-ready]` on its own line, and a plan turn that ends with a question must not
-     * open the popup. Deciding here means the answer survives the screen being
-     * recomposed, and a background plan turn cannot pop a popup over another chat.
-     */
-    val pendingPlan = mutableStateOf<Pair<String, String>?>(null)
-
-    /** Answer the plan popup. Both answers turn plan mode off; `approvePlan` owns the
-     *  send. Kept together so a client cannot disarm one without the other. */
-    fun dismissPlan() {
-        pendingPlan.value = null
-    }
     /**
      * The row CURRENTLY receiving text chunks — the only bubble that may render as plain
      * text while it grows (re-parsing Markdown on every token is O(n²)).
@@ -882,6 +802,12 @@ class ConnectionManager private constructor(context: Context) {
      * the moment you hit send (measured 2026-11-08). Only the core's own chunks say which
      * bubble is live.
      */
+    /** The chat on screen is a dev session — the mode tag the drawer's `</>` marks. */
+    val devChat: Boolean
+        get() = currentSession.value?.let { id ->
+            sessions.value.firstOrNull { it.sessionId == id }?.isDev == true
+        } ?: false
+
     val streamingRowId = mutableStateOf<Long?>(null)
     val commands = mutableStateOf<List<String>>(emptyList())
     val permissions = mutableStateListOf<AcpEvent.Permission>()   // pending approvals, oldest first
@@ -3379,28 +3305,6 @@ class ConnectionManager private constructor(context: Context) {
             // on the Stop-hook push for this turn so a later turn from another client in the
             // same (possibly shared) session doesn't spuriously match the stale flag.
             store.pendingPushSessionId = null
-            // "Approve and compact" parked its go-ahead behind the compaction, which just
-            // ended. Send it now, from here, so a compaction that fails or is rejected does
-            // not silently swallow the approval.
-            pendingPlanProceed?.let { text ->
-                pendingPlanProceed = null
-                send(text)
-            }
-            // The plan handshake is not content: drop it from the bubble now the turn is
-            // over. It cannot happen at AppendText time — a chunk may split the token in
-            // half, and stripping then would eat real text.
-            val lastReply = messages.indexOfLast { it.role == "assistant" }
-            if (lastReply >= 0 && messages[lastReply].text.contains(PLAN_READY_SENTINEL, true)) {
-                messages[lastReply] =
-                    messages[lastReply].copy(text = stripPlanSentinel(messages[lastReply].text))
-            }
-            // A plan-mode turn that ended with the model's own `[plan-ready]` line is a
-            // finished plan: ask. The question form ("shall I proceed with step 2?") does
-            // not carry it, so an iteration turn leaves the chat alone.
-            if (planSessions[sessionId] == true) {
-                val plan = lastAgentText()
-                if (plan.isNotBlank() && unstable.planReady(plan)) pendingPlan.value = sessionId to plan
-            }
         }
         // Drain ONE prompt queued in THIS chat. The queue is per chat, and the
         // core routes by session id, so a background chat's next turn can start
@@ -4270,18 +4174,5 @@ class ConnectionManager private constructor(context: Context) {
     }
 }
 
-/** The model's plan handshake: `[plan-ready]` on a line of its own (the core's
- *  `PLAN_READY_MARKER`). It is a signal between the agent and this client, so it is
- *  removed from anything a person reads. Matched as a WHOLE line, the same rule the
- *  core uses for `plan_ready`, so the sentence "I will write [plan-ready] at the end"
- *  is not mistaken for the signal — and is not stripped either. */
-internal fun stripPlanSentinel(text: String): String {
-    if (!text.contains(PLAN_READY_SENTINEL, ignoreCase = true)) return text
-    return text.lineSequence()
-        .filterNot { it.trim().equals(PLAN_READY_SENTINEL, ignoreCase = true) }
-        .joinToString("\n")
-        .trimEnd()
-}
 
-internal const val PLAN_READY_SENTINEL = "[plan-ready]"
 

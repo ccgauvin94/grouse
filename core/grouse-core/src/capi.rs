@@ -1442,25 +1442,6 @@ pub extern "C" fn grouse_unstable_session_project(h: *mut c_void, id: *const c_c
     catch_unwind(AssertUnwindSafe(|| handle(h).unstable.session_project(id, project_id))).ok();
 }
 
-/// Plan mode on/off for a session: a system-prompt extra (see
-/// `GrouseUnstable::set_plan_mode`). Temporary shape — no state marker to read back.
-#[no_mangle]
-pub extern "C" fn grouse_unstable_set_plan_mode(h: *mut c_void, session_id: *const c_char, on: i32) {
-    let Some(session_id) = (unsafe { c_param(session_id) }).map(str::to_owned) else { return };
-    catch_unwind(AssertUnwindSafe(|| {
-        handle(h).unstable.set_plan_mode(session_id, on != 0)
-    }))
-    .ok();
-}
-
-/// Whether an agent reply signals a finished plan (`[plan-ready]` on its own line).
-/// Pure function, no handle: both clients must agree on the signal.
-#[no_mangle]
-pub extern "C" fn grouse_plan_ready(text: *const c_char) -> i32 {
-    let Some(text) = (unsafe { c_param(text) }) else { return 0 };
-    i32::from(crate::unstable::plan_ready(text))
-}
-
 #[no_mangle]
 pub extern "C" fn grouse_unstable_list_tools(h: *mut c_void, session_id: *const c_char) {
     let Some(session_id) = (unsafe { c_param(session_id) }).map(str::to_owned) else { return };

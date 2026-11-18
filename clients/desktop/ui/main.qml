@@ -905,18 +905,6 @@ Controls.ApplicationWindow {
 
     Connections {
         target: Mgr
-        // The trigger is the end of a turn in a plan-mode chat: no new server event is
-        // needed, and it is the moment the plan exists.
-        function onPromptingChanged() {
-            // The MODEL says when a plan is ready (`[plan-ready]`); a plan-mode turn that
-            // ends with a question must not open this.
-            if (!Mgr.prompting && Mgr.planMode && Mgr.online && Mgr.planReady()
-                    && Mgr.currentSessionId.length > 0 && !planDialog.opened) {
-                const text = Mgr.lastAgentText()
-                if (text.length > 0)
-                    planDialog.openWith(text)
-            }
-        }
         function onPermissionRequested() {
             permissionDialog.pendingToolCallId = Mgr.permissionToolCallId()
             permissionDialog.appTitle = Mgr.permissionTitle()
@@ -1368,13 +1356,6 @@ Controls.ApplicationWindow {
 
     PermissionDialog {
         id: permissionDialog
-    }
-
-    // A plan-mode turn just ended: ask what to do with the plan. Cancel leaves the mode
-    // on, so closing the popup can never silently disarm it.
-    PlanDialog {
-        id: planDialog
-        onEditRequested: chatPage.focusComposer()
     }
 
     FormDialog {
