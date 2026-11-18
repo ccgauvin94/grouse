@@ -19,36 +19,6 @@ use serde_json::{json, Value};
 use crate::spine::{self, PendingRequest, RpcConn};
 use crate::GrouseUnstableListener;
 
-/// What plan mode tells the model. ONE string, in the core, so the two clients
-/// cannot drift into giving the agent different instructions for the same flag.
-///
-/// Instructed, not enforced: nothing here can stop a tool call. Enforcement would be
-/// per-session tool switches (a re-prefill per switch) or a `PreToolUse` hook (which
-/// is project-scoped and cannot see this flag at all).
-pub const PLAN_MODE_INSTRUCTIONS: &str = "PLAN MODE. Investigate before touching anything: \
-read, search, and run read-only commands freely. Do NOT create, edit, delete or move \
-files, install packages, change git state, or run anything that mutates the system. \
-While you are still gathering context or you need something from the user, answer \
-normally and do NOT signal readiness. When — and only when — you have a complete plan \
-the user can approve, write it as a short numbered list (the files you will touch, the \
-change to each, the risks, how it will be verified) and end your reply with a final line \
-containing only [plan-ready]. Nothing may follow that line.";
-
-/// The line that says "a complete plan is above, waiting for approval".
-///
-/// The popup must not open after every plan-mode turn — a clarifying question is not a
-/// plan. So readiness is something the MODEL states, not something the client guesses
-/// from the shape of the reply: one sentinel line, looked for by exact match, and the
-/// instruction above tells it not to write that line until the plan is complete.
-pub const PLAN_READY_MARKER: &str = "[plan-ready]";
-
-/// Whether a reply signals a finished plan. Case-insensitive, whole-line, so prose that
-/// happens to mention the marker is not mistaken for the signal.
-pub fn plan_ready(text: &str) -> bool {
-    text.lines()
-        .any(|line| line.trim().eq_ignore_ascii_case(PLAN_READY_MARKER))
-}
-
 /// The unstable `_goose/unstable/...` shim (CONTRACT §5), retiring with `grouse-unstable`.
 ///
 /// Constructed independently of [`crate::Core`]; the live connection is resolved per call
@@ -184,46 +154,6 @@ impl GrouseUnstable {
             Ok(report) => self.listener.on_context_report(session_id, report.to_string()),
             Err(error) => eprintln!("grouse-core: context report for {session_id} failed: {error}"),
         }
-    }
-
-    /// Move a session between projects (`None` un-files — an explicit JSON null, never
-    /// an omitted key); re-lists projects so the sidebar reflects the change.
-    /// Plan mode, the TEMPORARY shape: a system-prompt extra on the session.
-    ///
-    /// `_goose/unstable/session/system-prompt/set` (mode `append`, key `plan`) is
-    /// upstream's method and upstream classifies it **keep** (#11451 — Berd uses it
-    /// for persona handoff), and it is the only lever that is mutable at runtime,
-    /// model-visible, re-sent on every inference and persisted on the session. That
-    /// is why plan mode can exist at all before session metadata can be mutated.
-    ///
-    /// What it does NOT do is give the client a state marker it can read back:
-    /// there is no getter, so each client mirrors the flag locally and the
-    /// transcript is the cross-device record. `off` sends empty text, which clears
-    /// the key (there is no Clear mode).
-    pub fn set_plan_mode(&self, session_id: String, on: bool) {
-        let Some(conn) = self.route(&session_id) else {
-            return;
-        };
-        self.call(
-            &*conn,
-            "_goose/unstable/session/system-prompt/set",
-            json!({
-                "sessionId": session_id,
-                "mode": "append",
-                "key": "plan",
-                "text": if on { PLAN_MODE_INSTRUCTIONS } else { "" },
-            }),
-        );
-    }
-
-    /// Does this reply signal a finished plan (see [`PLAN_READY_MARKER`])?
-    ///
-    /// A pure predicate, on this object because plan mode's whole surface lives here: the
-    /// client has the reply text and nothing else can answer it, and both clients must
-    /// answer it the SAME way or one of them pops a plan popup after a clarifying
-    /// question. The answer is the sentinel, not the shape of the reply.
-    pub fn plan_ready(&self, text: String) -> bool {
-        plan_ready(&text)
     }
 
     pub fn session_project(&self, session_id: String, project_id: Option<String>) {
@@ -1539,47 +1469,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn readiness_is_a_whole_line_signal_not_a_guess() {
-        assert!(plan_ready("1. do a thing\n2. verify it\n[plan-ready]"));
-        assert!(plan_ready("  [PLAN-READY]  "));
-        // Prose that mentions it is not the signal — the whole line has to be the marker.
-        assert!(!plan_ready("then I will write [plan-ready] at the end"));
-        assert!(!plan_ready("a clarifying question?"));
-        assert_eq!(PLAN_READY_MARKER, "[plan-ready]");
-    }
-
-    #[test]
-    fn plan_mode_is_a_prompt_extra_that_clears_with_empty_text() {
-        let _guard = TEST_LOCK.lock();
-        let stub = StubConn::new();
-        stub.script(vec![Ok(Value::Null), Ok(Value::Null)]);
-        let (g, _rec) = harness(stub.clone());
-
-        g.set_plan_mode("s1".to_string(), true);
-        g.set_plan_mode("s1".to_string(), false);
-
-        // On: append the instruction under the plan key. Off: the SAME key with empty
-        // text, which is how goose clears an extra (there is no Clear mode).
-        assert_calls(
-            &stub,
-            &[
-                (
-                    "_goose/unstable/session/system-prompt/set",
-                    json!({"sessionId": "s1", "mode": "append", "key": "plan",
-                           "text": PLAN_MODE_INSTRUCTIONS}),
-                ),
-                (
-                    "_goose/unstable/session/system-prompt/set",
-                    json!({"sessionId": "s1", "mode": "append", "key": "plan", "text": ""}),
-                ),
-            ],
-        );
-    }
-
-    /// The donut's breakdown is the SERVER's attribution of the next request, so
-    /// the shim's whole job is to ask the chat's own connection and hand the reply
-    /// over verbatim — including its oddities (a segment per extension, previews).
     #[test]
     fn context_report_emits_the_servers_attribution_verbatim() {
         let _guard = TEST_LOCK.lock();

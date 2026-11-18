@@ -161,5 +161,4 @@ excluded = 14
 | `ui.chat-scroll-pinned` | yes: ChatScreen.kt#var follow by remember | yes: ui/ChatPage.qml#function pinPass |
 | `ui.tools-sheet-catalog` | yes: ConnectionManager.kt#fun onExtensionCatalog | yes: src/manager.cpp#void Manager::coreOnExtensionCatalog |
 | `ui.dev-mode` | yes: Drawer.kt#ic_dev_mode+ConnectionManager.kt#fun newRoamSession | yes: ui/main.qml#newChatInMode+ui/main.qml#dev-mode-symbolic |
-| `ui.plan-mode` | yes: ChatScreen.kt#fun PlanSheet+ConnectionManager.kt#fun approvePlan | yes: ui/main.qml#planDialog.openWith+ui/PlanDialog.qml#signal editRequested |
 | `ui.advisor` | yes: ChatScreen.kt#fun AdvisorCard+SettingsScreens.kt#Review each dev turn | yes: ui/ChatPage.qml#advisorCard+ui/SettingsDialog.qml#advisorBox |

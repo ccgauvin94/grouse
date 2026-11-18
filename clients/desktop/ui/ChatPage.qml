@@ -726,16 +726,6 @@ Kirigami.Page {
                         font.weight: Font.DemiBold
                     }
                     Controls.Label {
-                        // The one place the state is stated in words: a checkable button in
-                        // the composer can be scrolled past, and "why is it planning?" is the
-                        // question this line answers.
-                        visible: Mgr.planMode
-                        text: qsTr("Plan mode — investigating, no edits until you approve")
-                        color: Kirigami.Theme.highlightColor
-                        font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.86))
-                        renderType: Text.NativeRendering
-                    }
-                    Controls.Label {
                         text: Mgr.status
                         color: Kirigami.Theme.disabledTextColor
                         font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.86))
@@ -2801,27 +2791,6 @@ Kirigami.Page {
                     }
                     Item { Layout.fillWidth: true }
 
-                    // Plan mode is a DEV control: it changes what the agent is allowed to
-                    // do, and only dev chats carry modes at all. The model's flag lives on
-                    // the session (a system-prompt extra); this button mirrors it, because
-                    // goose exposes no getter — the transcript is the cross-device record.
-                    Controls.Button {
-                        id: planToggle
-                        visible: Mgr.devChat
-                        checkable: true
-                        text: qsTr("Plan")
-                        icon.name: "document-edit"
-                        Layout.alignment: Qt.AlignVCenter
-                        onClicked: Mgr.setPlanMode(checked)
-                        ToolTip.visible: hovered
-                        ToolTip.text: qsTr("Investigate first and propose a plan; no edits until approved")
-                        Connections {
-                            target: Mgr
-                            function onPlanModeChanged() { planToggle.checked = Mgr.planMode }
-                            function onCurrentSessionChanged() { planToggle.checked = Mgr.planMode }
-                        }
-                    }
-
                     // Compaction reports HERE rather than over the transcript: it is a fact
                     // about the window the donut beside it measures, and the row it used to
                     // own was chrome above the conversation.
@@ -2953,12 +2922,6 @@ Kirigami.Page {
             }
             MouseArea { anchors.fill: parent; onClicked: imageViewer.close() }
         }
-    }
-
-    /// "Edit" on the plan popup comes back here: plan mode is still on, so all this has
-    /// to do is put the cursor where the next planning message is typed.
-    function focusComposer() {
-        chatInput.forceActiveFocus()
     }
 
     function send() {

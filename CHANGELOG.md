@@ -5,6 +5,29 @@ All notable changes to Grouse are recorded here. The format is based on
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Removed — plan mode
+
+- **Plan mode is gone from both clients and the core.** It was a toggle, a popup, a
+  `[plan-ready]` sentinel and a system-prompt extra — and it could not be trusted. goose has
+  no read path for a prompt extra, so each client mirrored the flag locally: turn it off on
+  the phone and the desktop still believed it was on; a fresh device showed off while the
+  server kept appending the plan instruction. The model itself said it best — asked whether
+  it was still planning, it answered that nothing in its context told it a mode, which is
+  exactly the problem. It also leaked: replies began explaining the `[plan-ready]` handshake
+  to the reader.
+- Writing "plan it first, don't edit anything until I say" is a sentence, not a mode, and it
+  needs none of that machinery. The advisor (above) covers the durable half — a review after
+  the fact — without any session state to drift.
+- **The composer row is fixed with it.** The Plan chip in the phone's input row had pushed
+  the SEND button half off the screen (the row had no way to shrink: every child was
+  fixed-width and the last one got clipped). The model pill now takes the slack and
+  ellipsises when there is none, so a control added to that row can no longer hide Send.
+- Kept: the dev mode itself — the `grouse.mode` tag, the `</>` marker, the chat/dev choice at
+  creation, the Dev settings section and the advisor. grouse#5 survives without plan mode:
+  the dev tag still cannot be mutated, so `session/meta/update` is still wanted.
+
+grouse 0.2.112 (versionCode 216).
+
 ### Added — an advisor on every dev turn
 
 - **A second opinion after the turn, on both clients.** Settings → Dev has a new switch
