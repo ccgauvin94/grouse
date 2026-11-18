@@ -1,0 +1,57 @@
+# macOS spike — the checks that can run without a Mac.
+#
+# The SwiftUI client is not started; clients/macos/spike/ is the binding proof. Its Swift
+# can only be COMPILED on macOS, and this account has no macOS runners (a private repo
+# cannot use them for free — a `runs-on: macos-14` job is cancelled before it starts, as
+# the first version of this workflow was). So the Mac-side build stays a hand-run step and
+# this job covers the invariants that need no Mac:
+#
+#   1. the Swift bindings still GENERATE from the core's current public surface, and
+#   2. every CoreListener event still has a no-op default, so a conformance in the app
+#      keeps compiling when the core grows a callback.
+#
+# (2) is the one that matters: without it, a new listener event breaks an app that only
+# exists on a Mac, and nothing in this repo would notice.
+name: macOS bindings
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'clients/macos/**'
+      - 'core/**'
+      - '.github/workflows/macos.yml'
+  pull_request:
+    paths:
+      - 'clients/macos/**'
+      - 'core/**'
+      - '.github/workflows/macos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bindings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+
+      - name: uniffi-bindgen-swift
+        run: |
+          # Same CLI family as the committed Kotlin bindings (uniffi 0.32.x): a different
+          # generator version rewrites the Swift differently for no benefit.
+          cargo install uniffi --features cli --locked
+
+      # DEBUG on purpose: the release profile sets strip = true, which removes the uniffi
+      # metadata sections the generator reads. Same reason build.sh does it for the Mac.
+      - name: Build the host core (debug, unstripped)
+        run: cargo build --manifest-path core/Cargo.toml -p grouse-core
+
+      - name: Bindings generate, and every listener event has a default
+        run: python3 clients/macos/spike/check-bindings.py core/target/debug/libgrouse_core.so
