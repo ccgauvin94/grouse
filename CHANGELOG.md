@@ -5,6 +5,28 @@ All notable changes to Grouse are recorded here. The format is based on
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added — the advisor's model is an operator env var
+
+- **`GROUSE_ADVISOR_MODEL`** (and, when you need it, **`GROUSE_ADVISOR_PROVIDER`**) set in the
+  GOOSE SERVER's environment chooses the model the advisor reviews with. Unset, nothing
+  changes: the review runs on whatever provider and model a new session gets by default.
+- **Set once, both clients agree.** The core reads the value from the server itself
+  (`_goose/unstable/config/read`), which consults the server process environment before its
+  `config.yaml` — so there is nothing in either app to configure and nothing to keep in
+  sync. That is the whole reason it is an env var rather than a picker: a per-app setting is
+  a per-app drift, and the phone cannot be handed an environment.
+- **Provider first, then model.** The pin is applied to the hidden session the review runs
+  on, in that order, because a model name is resolved against the session's current
+  provider's catalog — pinning the model first can be refused or resolve to the wrong thing.
+  A single-provider box only needs the model.
+- **A refused pin is loud**, unlike a refused review: an env var naming a model the provider
+  does not serve would otherwise make the advisor silently stop working, and the cool-off
+  would then hide even the retries. The core prints `advisor model pin refused (…)` with the
+  server's own error.
+- config.yaml works too, with the key spelled `GROUSE_ADVISOR_MODEL` — the file lookup is
+  verbatim while the environment lookup is case-insensitive, so the uppercase spelling is the
+  one that works in both places.
+
 ### Removed — plan mode
 
 - **Plan mode is gone from both clients and the core.** It was a toggle, a popup, a

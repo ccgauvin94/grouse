@@ -1179,8 +1179,6 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_list_tools(
     ): Int
-    external fun uniffi_grouse_core_checksum_method_grouseunstable_plan_ready(
-    ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_providers_list(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_recipes_delete(
@@ -1220,8 +1218,6 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_grouse_core_checksum_method_grouseunstable_session_project(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_set_extension_enabled(
-    ): Int
-    external fun uniffi_grouse_core_checksum_method_grouseunstable_set_plan_mode(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_sources_create(
     ): Int
@@ -1524,8 +1520,6 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_list_tools(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_grouse_core_fn_method_grouseunstable_plan_ready(`ptr`: Long,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Byte
     external fun uniffi_grouse_core_fn_method_grouseunstable_providers_list(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_recipes_delete(`ptr`: Long,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1565,8 +1559,6 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_method_grouseunstable_session_project(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`projectId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_set_extension_enabled(`ptr`: Long,`configKey`: RustBuffer.ByValue,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_grouse_core_fn_method_grouseunstable_set_plan_mode(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`on`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_sources_create(`ptr`: Long,`sourceType`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`description`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1939,9 +1931,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_list_tools() and 0xFFFF) != 33901) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_plan_ready() and 0xFFFF) != 51272) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_providers_list() and 0xFFFF) != 51277) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2000,9 +1989,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_set_extension_enabled() and 0xFFFF) != 32807) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_set_plan_mode() and 0xFFFF) != 4949) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_sources_create() and 0xFFFF) != 63216) {
@@ -5091,16 +5077,6 @@ public interface GrouseUnstableInterface {
     fun `listTools`(`sessionId`: kotlin.String)
     
     /**
-     * Does this reply signal a finished plan (see [`PLAN_READY_MARKER`])?
-     *
-     * A pure predicate, on this object because plan mode's whole surface lives here: the
-     * client has the reply text and nothing else can answer it, and both clients must
-     * answer it the SAME way or one of them pops a plan popup after a clarifying
-     * question. The answer is the sentinel, not the shape of the reply.
-     */
-    fun `planReady`(`text`: kotlin.String): kotlin.Boolean
-    
-    /**
      * The server's provider inventory; surfaces as `on_providers(json)`.
      *
      * This is the authority on which providers exist, which are usable, and what
@@ -5219,24 +5195,6 @@ public interface GrouseUnstableInterface {
      * new enabled state.
      */
     fun `setExtensionEnabled`(`configKey`: kotlin.String, `enabled`: kotlin.Boolean)
-    
-    /**
-     * Move a session between projects (`None` un-files — an explicit JSON null, never
-     * an omitted key); re-lists projects so the sidebar reflects the change.
-     * Plan mode, the TEMPORARY shape: a system-prompt extra on the session.
-     *
-     * `_goose/unstable/session/system-prompt/set` (mode `append`, key `plan`) is
-     * upstream's method and upstream classifies it **keep** (#11451 — Berd uses it
-     * for persona handoff), and it is the only lever that is mutable at runtime,
-     * model-visible, re-sent on every inference and persisted on the session. That
-     * is why plan mode can exist at all before session metadata can be mutated.
-     *
-     * What it does NOT do is give the client a state marker it can read back:
-     * there is no getter, so each client mirrors the flag locally and the
-     * transcript is the cross-device record. `off` sends empty text, which clears
-     * the key (there is no Clear mode).
-     */
-    fun `setPlanMode`(`sessionId`: kotlin.String, `on`: kotlin.Boolean)
     
     /**
      * Create a project or skill (`target.scope: "global"`); re-lists the touched family.
@@ -5595,28 +5553,6 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
 
     
     /**
-     * Does this reply signal a finished plan (see [`PLAN_READY_MARKER`])?
-     *
-     * A pure predicate, on this object because plan mode's whole surface lives here: the
-     * client has the reply text and nothing else can answer it, and both clients must
-     * answer it the SAME way or one of them pops a plan popup after a clarifying
-     * question. The answer is the sentinel, not the shape of the reply.
-     */override fun `planReady`(`text`: kotlin.String): kotlin.Boolean {
-            return FfiConverterBoolean.lift(
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_grouse_core_fn_method_grouseunstable_plan_ready(
-        it,
-        
-        FfiConverterString.lower(`text`),_status)
-}
-    }
-    )
-    }
-    
-
-    
-    /**
      * The server's provider inventory; surfaces as `on_providers(json)`.
      *
      * This is the authority on which providers exist, which are usable, and what
@@ -5958,36 +5894,6 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
         
         FfiConverterString.lower(`configKey`),
         FfiConverterBoolean.lower(`enabled`),_status)
-}
-    }
-    
-    
-
-    
-    /**
-     * Move a session between projects (`None` un-files — an explicit JSON null, never
-     * an omitted key); re-lists projects so the sidebar reflects the change.
-     * Plan mode, the TEMPORARY shape: a system-prompt extra on the session.
-     *
-     * `_goose/unstable/session/system-prompt/set` (mode `append`, key `plan`) is
-     * upstream's method and upstream classifies it **keep** (#11451 — Berd uses it
-     * for persona handoff), and it is the only lever that is mutable at runtime,
-     * model-visible, re-sent on every inference and persisted on the session. That
-     * is why plan mode can exist at all before session metadata can be mutated.
-     *
-     * What it does NOT do is give the client a state marker it can read back:
-     * there is no getter, so each client mirrors the flag locally and the
-     * transcript is the cross-device record. `off` sends empty text, which clears
-     * the key (there is no Clear mode).
-     */override fun `setPlanMode`(`sessionId`: kotlin.String, `on`: kotlin.Boolean)
-        = 
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_grouse_core_fn_method_grouseunstable_set_plan_mode(
-        it,
-        
-        FfiConverterString.lower(`sessionId`),
-        FfiConverterBoolean.lower(`on`),_status)
 }
     }
     

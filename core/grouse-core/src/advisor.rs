@@ -110,6 +110,32 @@ pub(crate) fn prompt(ask: &str, calls: &[ToolCall]) -> String {
     s
 }
 
+/// The `session/set_config_option` calls that pin a model on a session, in the order
+/// this server requires: **provider first, then model**.
+///
+/// Load-bearing: `set_config_option` resolves a model name against the session's CURRENT
+/// provider's catalog, so a model from another provider sent first is refused (or worse,
+/// silently resolves to the wrong thing) and the model pick then applies to a catalog that
+/// did not contain it. Either half may be absent — a site that keeps everything on one
+/// provider only needs the model.
+pub(crate) fn model_pin_params(
+    wire: &str,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Vec<serde_json::Value> {
+    let call = |id: &str, value: &str| {
+        serde_json::json!({ "sessionId": wire, "configId": id, "value": value })
+    };
+    let mut out = Vec::new();
+    if let Some(provider) = provider.map(str::trim).filter(|p| !p.is_empty()) {
+        out.push(call("provider", provider));
+    }
+    if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        out.push(call("model", model));
+    }
+    out
+}
+
 /// Whether the model found nothing worth saying. Matched instead of shown, so the
 /// UI can stay silent rather than print a card that says "nothing".
 pub(crate) fn nothing_material(reply: &str) -> bool {
@@ -199,5 +225,23 @@ mod tests {
         assert!(nothing_material("  Nothing Material.  "));
         assert!(!nothing_material("Nothing material, except the unwrap on line 4."));
         assert!(!nothing_material(""));
+    }
+
+    #[test]
+    fn the_model_pin_applies_provider_before_model() {
+        let calls = model_pin_params("w1", Some("gauvin-id"), Some("deepseek-v4.1-flash"));
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["configId"], "provider");
+        assert_eq!(calls[0]["value"], "gauvin-id");
+        assert_eq!(calls[1]["configId"], "model");
+        assert_eq!(calls[1]["sessionId"], "w1");
+    }
+
+    #[test]
+    fn either_half_may_be_absent_and_blank_is_absent() {
+        assert_eq!(model_pin_params("w1", None, None).len(), 0);
+        assert_eq!(model_pin_params("w1", Some("  "), Some("m")).len(), 1);
+        let only_provider = model_pin_params("w1", Some("p"), None);
+        assert_eq!(only_provider[0]["configId"], "provider");
     }
 }
