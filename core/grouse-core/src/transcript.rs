@@ -2114,6 +2114,36 @@ impl TranscriptStore {
         ))
     }
 
+    /// Every tool call of the given runs, in call order.
+    ///
+    /// `run_framing` is deliberately thin — a chip label needs titles and nothing
+    /// else — while a REVIEW needs the arguments and the result, so this walks the
+    /// calls themselves. Ids are the run anchors `turn_runs` collects, but any call
+    /// id would answer with its own run's calls, so duplicates are dropped rather
+    /// than trusted not to happen.
+    pub fn run_calls(&self, run_ids: &[String]) -> Vec<ToolCall> {
+        let st = self.state.lock();
+        let mut out: Vec<ToolCall> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for id in run_ids {
+            let Some(&idx) = st.tool_by_id.get(id) else {
+                continue;
+            };
+            let calls: Vec<ToolCall> = match st.bubbles.get(idx) {
+                Some(Bubble::Tool(row, _)) => vec![row.to_call()],
+                Some(Bubble::ToolGroup(rows, _)) => rows.iter().map(ToolRow::to_call).collect(),
+                _ => Vec::new(),
+            };
+            for call in calls {
+                if seen.insert(call.id.clone()) {
+                    out.push(call);
+                }
+            }
+        }
+        out.sort_by_key(|call| call.seq);
+        out
+    }
+
     /// Replace a run's label with the model's rewrite, emitting the `Upsert` the
     /// client needs. The absorbed thinking is untouched: it is still what the
     /// expanded run shows.
@@ -2825,6 +2855,8 @@ mod tests {
     }
 
     impl CoreListener for TestListener {
+    fn on_advisor_report(&self, _: String, _: String) {}
+
     fn on_sensitivity(&self, _data: String) {}
     fn on_thread_timeline(&self, _label: String, _rows: Vec<crate::TimelineRow>) {}
     fn on_file(&self, _: crate::attachments::FileEvent) {}

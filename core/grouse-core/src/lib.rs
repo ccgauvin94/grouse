@@ -33,6 +33,7 @@ use crate::transcript::TranscriptStore;
 
 uniffi::setup_scaffolding!();
 
+mod advisor;
 mod attachments;
 
 // The file-ingest types are part of the PUBLIC surface — they are fields of
@@ -689,6 +690,15 @@ pub trait CoreListener: Send + Sync {
     /// fine); the
     /// parity ledger demands a disposition per client (`listener.on_file`).
     fn on_file(&self, event: crate::attachments::FileEvent);
+
+    /// The dev advisor's review of the turn that just ended, on `session_id`.
+    ///
+    /// A review is advisory text written by a SECOND model call on a hidden session
+    /// (see `advisor.rs`) and is never part of the transcript: it describes the work,
+    /// so it must not be sent back to the model as history. Clients show it beside the
+    /// turn and drop it. Empty text is never emitted — that is the "nothing material"
+    /// answer, which stays silent.
+    fn on_advisor_report(&self, session_id: String, text: String);
 }
 
 /// Unstable events (CONTRACT §5). Retiring with `grouse-unstable`.
@@ -906,6 +916,14 @@ struct CoreState {
     /// (issue #13). On by default; costs one short inference per turn, spent on
     /// a hidden session so it never appears in a chat.
     run_summaries: bool,
+    /// Review every dev-session turn on a hidden session (the Dev settings switch).
+    /// GLOBAL, not per session: the point is "my dev chats get a second opinion", and
+    /// a per-chat flag would be one more thing to remember to set.
+    advisor: bool,
+    /// Each session's MODE (`chat` / `dev`), from what this client created and from
+    /// every list it has seen. The advisor's trigger needs it at turn end, which is
+    /// long after the list that taught us.
+    session_modes: std::collections::HashMap<String, String>,
     /// Sessions whose `session/load` replay is in progress. Replayed thought
     /// chunks are framing for the following tool run, not rows of their own.
     /// Shared by every transport, so the rule is one rule.
@@ -1166,6 +1184,8 @@ impl Core {
                 cache: Arc::new(CacheStore::new(cache_dir)),
                 state: Mutex::new(CoreState {
                     run_summaries: true,
+                    advisor: false,
+                    session_modes: std::collections::HashMap::new(),
                     ..Default::default()
                 }),
                 conn: Mutex::new(None),
@@ -1433,7 +1453,17 @@ impl Core {
                         .live_new_session_async(rid.clone(), pid.clone(), md.clone())
                         .await
                     {
-                        Ok(_session_id) => {
+                        Ok(session_id) => {
+                            // Recorded here because a brand-new chat is missing from
+                            // `session/list` until its first message lands, and the
+                            // advisor asks about a turn, not a listing.
+                            if let Some(mode) = md.as_deref() {
+                                crate::session::DispatchHost::session_mode(
+                                    &this,
+                                    &crate::session::display_id(None, &session_id),
+                                    mode,
+                                );
+                            }
                             this.save_cache();
                             this.probe_stamp();
                             // Live reuse doesn't go through the handshake's
@@ -2521,6 +2551,17 @@ impl Core {
     /// Whether the model rewrites run labels (issue #13).
     pub fn run_summaries(&self) -> bool {
         self.inner.state.lock().run_summaries
+    }
+
+    /// Review every DEV-session turn on a hidden session, from now on. Global by
+    /// design: this is "my dev chats get a second opinion", not a per-chat flag to
+    /// remember. Off by default — each review is a real model call.
+    pub fn set_advisor(&self, on: bool) {
+        self.inner.state.lock().advisor = on;
+    }
+
+    pub fn advisor(&self) -> bool {
+        self.inner.state.lock().advisor
     }
 }
 
@@ -4004,11 +4045,141 @@ impl Core {
                 Err(error) => format!("reply {key} ERR {error}"),
             });
             core.on_turn_ended(&key, result);
-            // The turn is over: rewrite its tool runs' labels (issue #13),
-            // after the reply and on a hidden session on the SAME connection,
-            // so it costs the user no latency.
+            // The turn is over: review it if this is a dev chat and the advisor is
+            // on. BEFORE the summariser, which CONSUMES the turn's run ids.
+            core.spawn_advisor_review(summary_owner.clone(), summary_key.clone());
+            // Then rewrite its tool runs' labels (issue #13), after the reply and
+            // on a hidden session on the SAME connection, so it costs the user no
+            // latency.
             core.spawn_run_summaries(summary_owner, summary_key);
         });
+    }
+
+    /// Review the turn that just ended, if this is a dev chat and the advisor is on.
+    ///
+    /// GLOBAL switch, DEV chats only: the whole point is that a coding session gets a
+    /// second opinion without per-chat bookkeeping. Cheap to decline — two state reads —
+    /// because this runs after every turn of every chat.
+    fn spawn_advisor_review(
+        &self,
+        owner: Arc<dyn crate::session::ChatEndpoint>,
+        key: String,
+    ) {
+        let (enabled, is_dev, run_ids) = {
+            let state = self.inner.state.lock();
+            (
+                state.advisor,
+                state
+                    .session_modes
+                    .get(&key)
+                    .is_some_and(|mode| mode == crate::session::DEV_MODE),
+                // A CLONE: the summariser consumes this list a moment later.
+                state.turn_runs.get(&key).cloned().unwrap_or_default(),
+            )
+        };
+        if !enabled || !is_dev || run_ids.is_empty() {
+            return;
+        }
+        let core = self.clone();
+        crate::roam::runtime().spawn(async move {
+            core.review_turn(owner, key, run_ids).await;
+        });
+    }
+
+    /// The review itself: one ordinary model call on the hidden session, then
+    /// truncate it back to empty so it cannot accumulate a conversation.
+    ///
+    /// Failure is SILENT by design. A review is a courtesy; a broken one must never
+    /// surface as an error in a chat that did nothing wrong, and the cool-off in
+    /// `hidden_failed` keeps it from costing a session per turn.
+    async fn review_turn(
+        &self,
+        owner: Arc<dyn crate::session::ChatEndpoint>,
+        key: String,
+        run_ids: Vec<String>,
+    ) {
+        let slot = owner.label().unwrap_or_default();
+        // One review per endpoint at a time: the reply is collected by position, so
+        // two concurrent prompts on the same hidden session would cross.
+        {
+            let mut state = self.inner.state.lock();
+            if !state.summarizer_busy.insert(slot.clone()) {
+                return;
+            }
+        }
+        self.review_turn_serial(owner, key, run_ids, slot.clone()).await;
+        self.inner.state.lock().summarizer_busy.remove(&slot);
+    }
+
+    async fn review_turn_serial(
+        &self,
+        owner: Arc<dyn crate::session::ChatEndpoint>,
+        key: String,
+        run_ids: Vec<String>,
+        slot: String,
+    ) {
+        let store = self.store_for(&key);
+        let calls = store.run_calls(&run_ids);
+        if calls.is_empty() {
+            self.inner.state.lock().summarizer_busy.remove(&slot);
+            return;
+        }
+        // What the user asked, because "unfinished work" is measured against it.
+        let ask = store
+            .transcript()
+            .into_iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(|message| message.content)
+            .unwrap_or_default();
+        let purpose = format!("advisor:{slot}");
+        let Some((hidden, wire)) = self.hidden_session(&owner, &key, &slot, &purpose).await
+        else {
+            return;
+        };
+        self.inner
+            .state
+            .lock()
+            .summarizer_ids
+            .insert(hidden.clone());
+        let params = crate::session::prompt_params(
+            &Prompt {
+                blocks: vec![PromptBlock::Text {
+                    text: crate::advisor::prompt(&ask, &calls),
+                }],
+            },
+            &wire,
+        );
+        let sent = crate::session::request(owner.as_ref(), "session/prompt", params)
+            .await
+            .is_ok();
+        let text = crate::session::DispatchHost::take_summarizer_reply(self, &hidden);
+        let truncated = crate::session::request(
+            owner.as_ref(),
+            "_goose/unstable/session/conversation/truncate",
+            json!({ "sessionId": &wire, "truncateFrom": 0 }),
+        )
+        .await
+        .is_ok();
+        {
+            let mut state = self.inner.state.lock();
+            state.summarizer_ids.remove(&hidden);
+            if !sent || !truncated {
+                state.summarizer_sessions.remove(&slot);
+                state.summarizer_replies.remove(&hidden);
+            }
+        }
+        if !sent || !truncated {
+            self.hidden_failed(&purpose);
+            return;
+        }
+        let text = text.trim().to_string();
+        if text.is_empty() || crate::advisor::nothing_material(&text) {
+            return;
+        }
+        self.inner
+            .listener
+            .on_advisor_report(key, text);
     }
 
     /// Ask the model for a one-line label per tool run of the turn that just
@@ -4116,6 +4287,74 @@ impl Core {
         self.rewrite_run_labels(owner, key, runs).await;
     }
 
+    /// The hidden session a side-channel model call runs on, minted on first use.
+    ///
+    /// `_meta.hidden` keeps it out of every session list, and it lives on the CHAT'S
+    /// OWN connection so the call cannot cross transports. `slot` is the per-endpoint
+    /// key it is filed under (one hidden session per connection), `purpose` the
+    /// cool-off label. `None` means "do not try now": the path failed recently, so a
+    /// session minted here would be another agent for nothing.
+    ///
+    /// The caller must register the returned display id in `summarizer_ids` before
+    /// prompting — that is what routes its chunks away from every client store.
+    async fn hidden_session(
+        &self,
+        owner: &Arc<dyn crate::session::ChatEndpoint>,
+        key: &str,
+        slot: &str,
+        purpose: &str,
+    ) -> Option<(String, String)> {
+        if let Some(pair) = self
+            .inner
+            .state
+            .lock()
+            .summarizer_sessions
+            .get(slot)
+            .cloned()
+        {
+            return Some(pair);
+        }
+        if !self.hidden_ready(purpose) {
+            return None;
+        }
+        let cwd = owner
+            .session_cwd(key)
+            .filter(|cwd| !cwd.is_empty())
+            .unwrap_or_else(|| {
+                if owner.label().is_none() {
+                    self.resolve_cwd(key)
+                } else {
+                    String::new()
+                }
+            });
+        let params = json!({
+            "cwd": cwd,
+            "mcpServers": [],
+            "_meta": { "hidden": true },
+        });
+        let Ok(reply) = crate::session::request(owner.as_ref(), "session/new", params).await
+        else {
+            self.hidden_failed(purpose);
+            return None;
+        };
+        let Some(wire) = reply
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            self.hidden_failed(purpose);
+            return None;
+        };
+        let hidden = crate::session::display_id(owner.label().as_deref(), &wire);
+        self.inner
+            .state
+            .lock()
+            .summarizer_sessions
+            .insert(slot.to_string(), (hidden.clone(), wire.clone()));
+        self.hidden_created(purpose);
+        Some((hidden, wire))
+    }
+
     /// One hidden session on the CHAT'S OWN connection (main or peer). Its
     /// `session/update` chunks are intercepted centrally by `session::dispatch`
     /// via the summarizer ids, so they never touch a client store.
@@ -4145,58 +4384,10 @@ impl Core {
         runs: Vec<(String, String, Vec<String>)>,
         slot: String,
     ) {
-        let existing = self
-            .inner
-            .state
-            .lock()
-            .summarizer_sessions
-            .get(&slot)
-            .cloned();
         let purpose = format!("labels:{slot}");
-        let (hidden, wire) = if let Some(pair) = existing {
-            pair
-        } else {
-            if !self.hidden_ready(&purpose) {
-                return; // a session minted now would be another agent for nothing
-            }
-            let cwd = owner
-                .session_cwd(&key)
-                .filter(|cwd| !cwd.is_empty())
-                .unwrap_or_else(|| {
-                    if owner.label().is_none() {
-                        self.resolve_cwd(&key)
-                    } else {
-                        String::new()
-                    }
-                });
-            // `_meta.hidden` keeps it out of every session list.
-            let params = json!({
-                "cwd": cwd,
-                "mcpServers": [],
-                "_meta": { "hidden": true },
-            });
-            let Ok(reply) =
-                crate::session::request(owner.as_ref(), "session/new", params).await
-            else {
-                self.hidden_failed(&purpose);
-                return;
-            };
-            let Some(wire) = reply
-                .get("sessionId")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-            else {
-                self.hidden_failed(&purpose);
-                return;
-            };
-            let hidden = crate::session::display_id(owner.label().as_deref(), &wire);
-            self.inner
-                .state
-                .lock()
-                .summarizer_sessions
-                .insert(slot.clone(), (hidden.clone(), wire.clone()));
-            self.hidden_created(&purpose);
-            (hidden, wire)
+        let Some((hidden, wire)) = self.hidden_session(&owner, &key, &slot, &purpose).await
+        else {
+            return;
         };
         self.inner
             .state
@@ -4588,6 +4779,15 @@ impl Core {
             // client should not have to re-derive the default in three places.
             if session.mode.is_none() {
                 session.mode = Some(crate::session::DEFAULT_MODE.to_string());
+            }
+            // Remembered, not just reported: the advisor's trigger is the END OF A
+            // TURN, which is long after the list that taught us the mode.
+            if let Some(mode) = &session.mode {
+                self.inner
+                    .state
+                    .lock()
+                    .session_modes
+                    .insert(session.id.clone(), mode.clone());
             }
             session.has_new = self.inner.hub.has_new(&session.id);
         }
@@ -5318,6 +5518,17 @@ impl crate::session::DispatchHost for Core {
             .cloned()
             .unwrap_or_default()
     }
+    fn session_mode(&self, key: &str, mode: &str) {
+        if mode.is_empty() {
+            return;
+        }
+        self.inner
+            .state
+            .lock()
+            .session_modes
+            .insert(key.to_string(), mode.to_string());
+    }
+
     fn session_stamp(&self, key: &str, updated_at: &str) {
         if !updated_at.is_empty() {
             self.inner
@@ -5493,6 +5704,10 @@ mod tests {
     }
 
     impl CoreListener for Events {
+        fn on_advisor_report(&self, session_id: String, text: String) {
+            self.push(format!("advisor {session_id} {text}"));
+        }
+
     fn on_sensitivity(&self, _data: String) {}
     fn on_thread_timeline(&self, _label: String, _rows: Vec<crate::TimelineRow>) {}
         fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
@@ -5547,6 +5762,10 @@ mod tests {
     struct ArcListener(Arc<dyn CoreListener>);
 
     impl CoreListener for ArcListener {
+        fn on_advisor_report(&self, session_id: String, text: String) {
+            self.0.on_advisor_report(session_id, text);
+        }
+
     fn on_sensitivity(&self, _data: String) {}
     fn on_thread_timeline(&self, _label: String, _rows: Vec<crate::TimelineRow>) {}
         fn on_file(&self, event: crate::attachments::FileEvent) {

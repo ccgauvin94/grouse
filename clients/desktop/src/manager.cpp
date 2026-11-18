@@ -132,6 +132,7 @@ bool Manager::notificationsEnabled() const { return m_store.value("notify_events
 bool Manager::configuredProvidersOnly() const { return m_store.value("configured_providers_only", true).toBool(); }
 bool Manager::runSummaries() const { return m_store.value("run_summaries", true).toBool(); }
 bool Manager::rescaleImages() const { return m_store.value("image_rescale", true).toBool(); }
+bool Manager::advisor() const { return m_store.value("advisor", false).toBool(); }
 bool Manager::debugTools() const { return m_store.value("debug_tools", false).toBool(); }
 QString Manager::workingDir() const { return m_store.value("cwd", "").toString(); }
 bool Manager::roamEnabled() const { return m_store.value("roam_enabled", false).toBool(); }
@@ -206,6 +207,31 @@ QString Manager::turnDiag(const QString &sessionId) const
     const QByteArray sid = sessionId.toUtf8();
     return m_bridge->takeString(
         m_bridge->api().grouse_turn_diag(m_bridge->handle(), sid.constData()));
+}
+
+void Manager::setAdvisor(bool v)
+{
+    if (advisor() == v)
+        return;
+    m_store.setValue("advisor", v);
+    emit settingsChanged();
+    syncAdvisorToCore();
+}
+
+void Manager::dismissAdvisorReport()
+{
+    if (m_advisorReport.isEmpty() && m_advisorSession.isEmpty())
+        return;
+    m_advisorReport.clear();
+    m_advisorSession.clear();
+    emit advisorReportChanged();
+}
+
+void Manager::syncAdvisorToCore()
+{
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_set_advisor)
+        return;
+    m_bridge->api().grouse_set_advisor(m_bridge->handle(), advisor() ? 1 : 0);
 }
 
 void Manager::syncRunSummariesToCore()
@@ -973,6 +999,8 @@ void Manager::sendPrompt(const QString &text, const QVariantList &images)
         return;
     m_landing = false;
     emit landingChanged();
+    // A review is about the turn that is over: starting the next one retires it.
+    dismissAdvisorReport();
 
     const QString expectJson = m_currentSessionId.isEmpty()
         ? QString() : QStringLiteral("{\"session_id\":\"%1\"}").arg(m_currentSessionId);
@@ -2401,6 +2429,7 @@ void Manager::coreOnStatus(const QString &json)
             restoreRoamPeers();
         }
         syncRunSummariesToCore();
+        syncAdvisorToCore();
         syncRescaleToCore();
         flushQueue();
         refreshSessions();
@@ -2509,6 +2538,19 @@ void Manager::coreOnConfig(const QString &json)
         config << m;
     }
     onConfig(config);
+}
+
+void Manager::coreOnAdvisorReport(const QString &sid, const QString &text)
+{
+    // A review is about the TURN, not the chat: it is shown beside that turn and
+    // dropped when the reader moves on (a new turn, another chat, a dismissal).
+    // Keeping it in the transcript would send it back to the model as history the
+    // next time the chat is prompted — the advisor would end up talking to itself.
+    if (text.trimmed().isEmpty())
+        return;
+    m_advisorSession = sid;
+    m_advisorReport = text;
+    emit advisorReportChanged();
 }
 
 void Manager::coreOnPermission(const QString &json)

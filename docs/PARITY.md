@@ -149,6 +149,7 @@ excluded = 14
 | `listener.on_file` | yes: ConnectionManager.kt#override fun onFile | yes: src/corebridge.cpp#cb_on_file |
 | `listener.on_thread_timeline` | yes: ConnectionManager.kt#override fun onThreadTimeline | excluded: no desktop timeline surface yet — the C ABI slot and trampoline are in, the corebridge wiring is not |
 | `listener.on_sensitivity` | yes: ConnectionManager.kt#override fun onSensitivity | excluded: no desktop sensitivity surface yet — the knob is per-board and the desktop has no My Day strip to put it on |
+| `listener.on_advisor_report` | yes: ConnectionManager.kt#override fun onAdvisorReport | yes: src/corebridge.cpp#cb_on_advisor_report |
 | `ui.chat-file-card` | yes: ChatScreen.kt#fun SharedFileRow | yes: ui/FileCard.qml#objectName: "cardName" |
 | `ui.fileInlineImage` | yes: Files.kt#fun isInlineImage | yes: ui/ImageCard.qml#objectName: "cardImage" |
 | `ui.chat-attachment-card` | yes: Files.kt#AttachmentCard | yes: ui/AttachmentCard.qml#objectName: "cardName" |
@@ -161,3 +162,4 @@ excluded = 14
 | `ui.tools-sheet-catalog` | yes: ConnectionManager.kt#fun onExtensionCatalog | yes: src/manager.cpp#void Manager::coreOnExtensionCatalog |
 | `ui.dev-mode` | yes: Drawer.kt#ic_dev_mode+ConnectionManager.kt#fun newRoamSession | yes: ui/main.qml#newChatInMode+ui/main.qml#dev-mode-symbolic |
 | `ui.plan-mode` | yes: ChatScreen.kt#fun PlanSheet+ConnectionManager.kt#fun approvePlan | yes: ui/main.qml#planDialog.openWith+ui/PlanDialog.qml#signal editRequested |
+| `ui.advisor` | yes: ChatScreen.kt#fun AdvisorCard+SettingsScreens.kt#Review each dev turn | yes: ui/ChatPage.qml#advisorCard+ui/SettingsDialog.qml#advisorBox |

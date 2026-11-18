@@ -64,6 +64,7 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Checklist
+import androidx.compose.material.icons.filled.FactCheck
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Folder
@@ -1247,6 +1248,20 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                     }
                 }
 
+                // The dev advisor's review of the turn that just ended (Settings → Dev).
+                // A card above the composer, not a bubble: a review is ABOUT the turn, so
+                // putting it in the transcript would replay it into the conversation and
+                // send it back to the model as history next turn — the advisor would end
+                // up reviewing itself.
+                cm.advisorReport.value?.let { (reviewSession, review) ->
+                    if (reviewSession == cm.currentSession.value) {
+                        AdvisorCard(
+                            text = review,
+                            onDismiss = cm::dismissAdvisorReport,
+                        )
+                    }
+                }
+
                 // Composer modelled on Claude's: ONE rounded, outlined container holding the text
                 // field and the action row together, rather than a pill field with buttons floating
                 // underneath it. The container is the affordance -- everything inside belongs to the
@@ -1696,6 +1711,46 @@ fun PermissionSheet(req: AcpEvent.Permission, onChoose: (String?) -> Unit) {
                         modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) { Text(prettyOption(opt.label)) }
                 }
             }
+        }
+    }
+}
+
+/** The advisor's review of the turn that just ended.
+ *
+ *  Not a chat bubble on purpose: the review is about the turn, and a bubble would be
+ *  replayed into the conversation and re-sent to the model as history — so it lives
+ *  outside `messages` entirely and disappears when the next turn starts.
+ */
+@Composable
+fun AdvisorCard(text: String, onDismiss: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+    ) {
+        Column(Modifier.padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.FactCheck, contentDescription = null,
+                    modifier = Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(6.dp))
+                Text("Advisor", style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.weight(1f))
+                IconButton(onClick = onDismiss, modifier = Modifier.size(26.dp)) {
+                    Icon(Icons.Filled.Close, contentDescription = "dismiss review",
+                        modifier = Modifier.size(16.dp))
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            // Scrollable and capped: six long bullets must not push the composer off
+            // the screen, and the text is selectable so it can be copied.
+            Text(
+                text,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier
+                    .heightIn(max = 200.dp)
+                    .verticalScroll(rememberScrollState()),
+            )
         }
     }
 }

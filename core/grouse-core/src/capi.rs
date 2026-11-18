@@ -259,6 +259,10 @@ pub struct GrouseCoreListener {
     /// The surfacing-sensitivity readout, as the server's JSON. Appended at the END;
     /// ABI 15.
     pub on_sensitivity: Option<extern "C" fn(*mut c_void, *const c_char)>,
+    /// The dev advisor's review of the turn that just ended: `(session_id, text)`.
+    /// Appended at the END; ABI 16.
+    pub on_advisor_report:
+        Option<extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
 }
 
 /// Bridges the core's typed listener traits to the installed C table. The raw
@@ -557,6 +561,9 @@ impl CoreListener for CoreCallbackForwarder {
                 &session_id,
             )
         };
+    }
+    fn on_advisor_report(&self, session_id: String, text: String) {
+        unsafe { cb_str2(table_fn!(self, on_advisor_report), self.user_data, &session_id, &text) };
     }
     fn on_file(&self, event: crate::attachments::FileEvent) {
         let p = c_json(&event);
@@ -1158,6 +1165,19 @@ pub extern "C" fn grouse_set_run_summaries(h: *mut c_void, on: i32) {
 #[no_mangle]
 pub extern "C" fn grouse_run_summaries(h: *mut c_void) -> i32 {
     catch_unwind(AssertUnwindSafe(|| handle(h).core.run_summaries() as i32)).unwrap_or(0)
+}
+
+/// Review every dev-session turn on a hidden session (the Dev settings switch).
+#[no_mangle]
+pub extern "C" fn grouse_set_advisor(h: *mut c_void, on: i32) {
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.set_advisor(on != 0))).ok();
+}
+
+/// Whether dev-session turns are reviewed (the switch's state, for a picker that
+/// re-reads it on open).
+#[no_mangle]
+pub extern "C" fn grouse_advisor(h: *mut c_void) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.advisor() as i32)).unwrap_or(0)
 }
 
 /// NULL when no session is active (the caller treats it as "none").

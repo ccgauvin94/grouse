@@ -195,6 +195,10 @@ public:
         /// answer rides `on_context_report` as raw JSON (ABI 13). Deliberately SILENT on a
         /// server older than goose 1.58 — that is a missing capability, not a fault.
         void (*grouse_unstable_context_report)(void *h, const char *session_id);
+        /// Review every dev-session turn on a hidden session (the Dev settings switch).
+        void (*grouse_set_advisor)(void *h, int on);
+        /// Whether dev-session turns are reviewed.
+        int (*grouse_advisor)(void *h);
     };
 
     /// Process-scoped singleton. First call performs the dlopen + symbol
@@ -319,5 +323,7 @@ struct GrouseCoreListener {
     void (*on_thread_timeline)(void *, const char *, const char *);
     // The surfacing-sensitivity readout, as the server's JSON. Appended last; ABI 15.
     void (*on_sensitivity)(void *, const char *);
+    // The dev advisor's review of a turn: (session_id, text). Appended last; ABI 16.
+    void (*on_advisor_report)(void *, const char *, const char *);
 };
 }

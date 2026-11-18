@@ -15,6 +15,8 @@ use std::sync::Arc;
 struct L(Arc<std::sync::Mutex<Vec<String>>>);
 
 impl CoreListener for L {
+    fn on_advisor_report(&self, _: String, _: String) {}
+
     fn on_sensitivity(&self, _data: String) {}
     fn on_thread_timeline(&self, _label: String, _rows: Vec<grouse_core::TimelineRow>) {}
     fn on_file(&self, event: grouse_core::FileEvent) {

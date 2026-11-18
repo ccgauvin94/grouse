@@ -1256,6 +1256,11 @@ impl RoamPeer {
             // arrive, so publish them without emitting a touch event.
             for summary in &sessions {
                 self.host.session_stamp(&summary.id, &summary.updated_at);
+                // The mode too: a peer chat's turn ends like any other, and the
+                // advisor decides whether to review it from this.
+                if let Some(mode) = &summary.mode {
+                    self.host.session_mode(&summary.id, mode);
+                }
             }
             inner.sessions = sessions;
             inner.session_cwds = cwds;
@@ -1661,6 +1666,8 @@ mod tests {
     }
 
     impl CoreListener for RecordingListener {
+    fn on_advisor_report(&self, _: String, _: String) {}
+
     fn on_sensitivity(&self, _data: String) {}
     fn on_thread_timeline(&self, _label: String, _rows: Vec<crate::TimelineRow>) {}
     fn on_file(&self, _: crate::attachments::FileEvent) {}

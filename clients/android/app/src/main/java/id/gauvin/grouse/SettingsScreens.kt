@@ -392,9 +392,17 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
             // changes panel next) are per-chat toggles that will want defaults. Empty on
             // purpose — the section exists so those land here rather than in the chat.
             SettingsSection("Dev") {
-                SettingCaption("Dev sessions are chats created with the dev mode. Nothing to " +
-                    "configure here yet: plan mode is a per-chat toggle in the composer, and " +
-                    "dev-only settings will live in this section.")
+                // GLOBAL, not per chat: "my dev chats get a second opinion" is how you
+                // work, not a property of one conversation. Off until asked for, because
+                // each review costs one extra inference per turn.
+                var advisorOn by remember { mutableStateOf(cm.store.advisor) }
+                SettingsSwitchRow("Review each dev turn with an advisor", advisorOn) { on ->
+                    advisorOn = on; cm.setAdvisor(on)
+                }
+                SettingCaption("After every turn in a dev chat, a second model call reviews " +
+                    "what the turn changed and posts a short note above the composer. The " +
+                    "review is about the turn, not part of it — it never joins the " +
+                    "conversation. Plan mode is a per-chat toggle in the composer.")
             }
 
             Spacer(Modifier.height(24.dp))
