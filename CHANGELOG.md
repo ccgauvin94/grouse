@@ -5,6 +5,34 @@ All notable changes to Grouse are recorded here. The format is based on
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added — an advisor on every dev turn
+
+- **A second opinion after the turn, on both clients.** Settings → Dev has a new switch
+  ("Review each dev turn with an advisor"). When it is on, every turn in a dev chat is
+  reviewed afterwards by a second model call and a short note appears above the composer —
+  defects first, then missed cases, then risks, then work the turn left unfinished. If the
+  work looks right the model answers "nothing material" and NOTHING is shown, so a quiet
+  turn stays quiet.
+- **The review is not part of the conversation.** It is deliberately outside the transcript:
+  shown beside the turn, dropped when the next turn starts or the chat changes, and never
+  sent back to the model. A review replayed as history would have the advisor reviewing
+  itself, and it would grow the context of every later turn.
+- **GLOBAL, not per chat.** "My dev chats get a second opinion" is how you work, not a
+  property of one conversation — one switch, both clients. Off by default: each review is a
+  real inference.
+- **It runs on a hidden session**, the same path the tool-run summarizer uses: `_meta.hidden`
+  so it never appears in a session list, one ordinary model call, then
+  `session/conversation/truncate` back to empty so it cannot accumulate a conversation. It is
+  a prompt and a model call, not a delegate, a recipe or a goose change.
+- **What it sees** is the turn as it happened: the request, then each tool call with its
+  arguments and (clipped) result — the edits, the shell commands, the test runs. Caps keep a
+  single huge `write` from turning the request into a copy of the file.
+- **Its failures are silent.** A review is a courtesy; a broken one must never surface as an
+  error in a chat that did nothing wrong, and a cool-off keeps a failing path from costing a
+  hidden session per turn.
+
+grouse 0.2.111 (versionCode 215).
+
 ### Added — dev mode on the phone, and plan mode with it
 
 - **A dev chat is created, not converted.** The drawer's "New chat" row is a choice now

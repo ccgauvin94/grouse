@@ -61,6 +61,14 @@ class Manager : public QObject
     /** Rewrite each tool run's label with a short model-written line (issue #13).
      *  Costs one small inference per turn, on a hidden session. */
     Q_PROPERTY(bool runSummaries READ runSummaries WRITE setRunSummaries NOTIFY settingsChanged)
+    /// Review every dev-session turn on a hidden session (Settings → Dev). Off by
+    /// default: each review is a real model call.
+    Q_PROPERTY(bool advisor READ advisor WRITE setAdvisor NOTIFY settingsChanged)
+    /// The dev advisor's review of the turn in `advisorSession`, or empty. A REVIEW
+    /// is not transcript: it is a second opinion about the turn, shown beside it and
+    /// dropped when the chat moves on — so it never becomes history the model sees.
+    Q_PROPERTY(QString advisorReport READ advisorReport NOTIFY advisorReportChanged)
+    Q_PROPERTY(QString advisorSession READ advisorSession NOTIFY advisorReportChanged)
     // Outbound image rescale (CONTRACT §8.1). Default ON; persisted in QSettings
     // and pushed into the core on Ready + on toggle.
     Q_PROPERTY(bool rescaleImages READ rescaleImages WRITE setRescaleImages NOTIFY settingsChanged)
@@ -144,6 +152,11 @@ public:
     bool configuredProvidersOnly() const;
     QStringList configuredProviders() const { return m_configuredProviders; }
     bool runSummaries() const;
+    bool advisor() const;
+    void setAdvisor(bool v);
+    QString advisorReport() const { return m_advisorReport; }
+    QString advisorSession() const { return m_advisorSession; }
+    Q_INVOKABLE void dismissAdvisorReport();
     bool rescaleImages() const;
     bool debugTools() const;
     QString workingDir() const;
@@ -164,6 +177,7 @@ public:
     /** Push the stored run-summary preference into the core (it defaults ON, so
      *  an OFF setting has to reach it explicitly). */
     void syncRunSummariesToCore();
+    void syncAdvisorToCore();
     /** The ACP endpoint URL the configured host/port/key map to ("wss://host:port/acp"). */
     QString wsUrl() const;
     QString status() const { return m_status; }
@@ -436,6 +450,8 @@ public:
     QString compactionStatus() const { return m_compactionStatus; }
     bool devChat() const;
     bool planMode() const;
+    QString m_advisorReport;
+    QString m_advisorSession;
     int contextUsed() const { return m_contextUsed; }
     int contextSize() const { return m_contextSize; }
     QVariant availableCommands() const { return m_availableCommands; }
@@ -617,6 +633,7 @@ public:
     /// chat) — the rows the sheet can offer beyond the chat's own lease.
     void coreOnExtensionCatalog(const QString &sid, const QString &json);
     void coreOnContextReport(const QString &sid, const QString &json);
+    void coreOnAdvisorReport(const QString &sid, const QString &text);
     void coreOnConfigValue(const QString &key, const QString &value);
     void coreOnSupportedModels(const QString &provider, const QString &json);
     void coreOnProviders(const QString &json);
@@ -643,6 +660,8 @@ signals:
     void toolGroupsChanged();
     void activityChanged();
     void planModeChanged();
+    /// A review arrived (or was cleared): the card re-reads both properties.
+    void advisorReportChanged();
     void contextReportChanged();
     void globalExtensionsChanged();
     void currentSessionChanged();

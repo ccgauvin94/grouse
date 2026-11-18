@@ -402,6 +402,13 @@ class ConnectionManager private constructor(context: Context) {
         // A file the SERVER shared, downloading into this device's cache. The
         // transcript only ever carried the reference (see ItemKind.FILE), so this
         // is the only place the bytes arrive.
+        override fun onAdvisorReport(sessionId: String, text: String) {
+            // About the TURN, not the chat: shown beside it and dropped when the reader
+            // moves on. Never added to `messages` — a review replayed into the
+            // transcript would be sent back to the model as history next turn.
+            if (sessionId != currentSession.value) return
+            main.post { advisorReport.value = sessionId to text }
+        }
         override fun onFile(event: uniffi.grouse_core.FileEvent) {
             main.post {
                 val path = when (event) {
@@ -1191,6 +1198,18 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Toggle the model-written run labels (issue #13): store it and push it to the core. */
     fun setRunSummaries(v: Boolean) { store.runSummaries = v; core.setRunSummaries(v) }
+
+    /** Review every dev-session turn on a hidden session (Settings → Dev). Global by
+     *  design, and off until asked for: each review costs one inference. */
+    fun setAdvisor(v: Boolean) { store.advisor = v; core.setAdvisor(v) }
+
+    /** The review waiting to be read: (session id, text), or null. Cleared when the
+     *  next turn starts or the reader dismisses it — it is not transcript. */
+    val advisorReport = mutableStateOf<Pair<String, String>?>(null)
+
+    fun dismissAdvisorReport() {
+        if (advisorReport.value != null) advisorReport.value = null
+    }
     /** Outbound image rescale (CONTRACT §8.1). Core policy, app toggle. */
     fun setRescaleImages(v: Boolean) { store.rescaleImages = v; core.setImageRescale(v) }
 
@@ -2248,6 +2267,8 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     fun send(text: String, images: List<ImageBlock> = emptyList(), files: List<FileBlock> = emptyList()) {
+        // A review is about the turn that is over: starting the next one retires it.
+        dismissAdvisorReport()
         // The core echoes the prompt into the transcript itself: the wire carries
         // no user_message_chunk for our own send, so the core keeps its own copy
         // (otherwise the question is never recorded, and a reopen that trusts the
@@ -3941,6 +3962,7 @@ class ConnectionManager private constructor(context: Context) {
         // The core defaults the model-written run labels ON and keeps the flag for the
         // process; push the stored preference so an OFF setting survives a restart.
         core.setRunSummaries(store.runSummaries)
+        core.setAdvisor(store.advisor)
         core.setImageRescale(store.rescaleImages)
         // Resuming means content is on its way — show "Loading…" from the tap,
         // not from whenever the core's first event happens to land. onCoreTranscript

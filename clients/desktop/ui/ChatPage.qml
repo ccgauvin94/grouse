@@ -2542,6 +2542,91 @@ Kirigami.Page {
             }
         }
 
+        // The dev advisor's review of the turn that just ended (Settings → Dev).
+        //
+        // A band above the composer, NOT a transcript row: a review is about the turn,
+        // and putting it in the transcript would replay it into the conversation and
+        // send it back to the model as history next time — the advisor would end up
+        // reviewing itself. So it lives here, disappears when the next turn starts, and
+        // is never persisted: reopen the chat and it is gone, which is correct, because
+        // the turn it describes is old news by then.
+        Rectangle {
+            id: advisorCard
+            Layout.fillWidth: true
+            readonly property bool showing: Mgr.advisorReport.length > 0
+                                          && Mgr.advisorSession === Mgr.currentSessionId
+            visible: showing
+            implicitHeight: showing ? advisorCol.implicitHeight + Kirigami.Units.smallSpacing * 2 : 0
+            color: Kirigami.Theme.alternateBackgroundColor
+
+            // A left accent, not a border: the card's top edge is shared with the
+            // transcript and a full border reads as yet another divider.
+            Rectangle {
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                width: 3
+                color: Kirigami.Theme.highlightColor
+            }
+
+            ColumnLayout {
+                id: advisorCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Kirigami.Units.largeSpacing
+                anchors.rightMargin: Kirigami.Units.smallSpacing
+                anchors.topMargin: Kirigami.Units.smallSpacing
+                spacing: Kirigami.Units.smallSpacing
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Kirigami.Units.smallSpacing
+                    Kirigami.Icon {
+                        source: "document-edit-verify"
+                        color: Kirigami.Theme.highlightColor
+                        implicitWidth: Kirigami.Units.iconSizes.small
+                        implicitHeight: Kirigami.Units.iconSizes.small
+                    }
+                    Controls.Label {
+                        text: qsTr("Advisor")
+                        font.bold: true
+                        font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.9))
+                        renderType: Text.NativeRendering
+                        Layout.fillWidth: true
+                    }
+                    Controls.ToolButton {
+                        icon.name: "window-close"
+                        display: Controls.AbstractButton.IconOnly
+                        implicitWidth: Kirigami.Units.iconSizes.small
+                        implicitHeight: Kirigami.Units.iconSizes.small
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Dismiss this review")
+                        onClicked: Mgr.dismissAdvisorReport()
+                    }
+                }
+                // Selectable and scrollable: a review is prose meant to be acted on, so
+                // it has to be copyable, and it must not stretch the composer downwards
+                // when the model writes six long bullets.
+                Controls.ScrollView {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Math.min(advisorText.implicitHeight,
+                                                     Kirigami.Units.gridUnit * 9)
+                    clip: true
+                    Controls.TextArea {
+                        id: advisorText
+                        text: Mgr.advisorReport
+                        textFormat: Text.MarkdownText
+                        readOnly: true
+                        selectByMouse: true
+                        wrapMode: TextEdit.Wrap
+                        background: null
+                        font.pixelSize: Math.max(11, Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.9))
+                    }
+                }
+            }
+        }
+
         // input bar. Buttons and the text entry share one height so the bar
         // reads as a single control row instead of a tall box flanked by
         // short buttons. The provider/model strip sits under the input line.

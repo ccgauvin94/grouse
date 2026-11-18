@@ -207,17 +207,24 @@ pub const PROJECT_TAG_KEY: &str = "grouse.project";
 /// nothing to update a mode WITH. Flipping a mode in place waits on upstream.
 pub const MODE_TAG_KEY: &str = "grouse.mode";
 
+/// The one non-default mode: a chat that opens the dev-only surface (plan mode today,
+/// the advisor and the changes panel next). Named because several call sites compare
+/// against it — the advisor's turn-end trigger among them — and a string literal per
+/// site is how a typo becomes "the feature silently never runs".
+pub const DEV_MODE: &str = "dev";
+
 /// The modes this client knows: `chat` (the default, and what an absent tag means)
 /// or `dev`. Plan is NOT a mode — it is a behaviour inside dev.
 ///
 /// Closed on purpose: the only way to learn a session's mode is to ask which
 /// sessions carry each value (one filtered `session/list` per value), so an open
 /// vocabulary would cost a walk per word.
-pub const MODE_VALUES: &[&str] = &["chat", "dev"];
+pub const MODE_VALUES: &[&str] = &[DEFAULT_MODE, DEV_MODE];
 
 /// An untagged session is a normal chat. The read path only walks the modes that
 /// are NOT the default, because "absent" already says chat.
 pub const DEFAULT_MODE: &str = "chat";
+
 
 /// `session/new`. `_meta.client` present ⇒ goose's `SessionType::User`, so the
 /// desktop/CLI can see these chats. `recipeId` starts a recipe session;
@@ -1407,6 +1414,8 @@ mod tests {
     }
 
     impl CoreListener for Recorder {
+    fn on_advisor_report(&self, _: String, _: String) {}
+
     fn on_sensitivity(&self, _data: String) {}
     fn on_thread_timeline(&self, _label: String, _rows: Vec<crate::TimelineRow>) {}
     fn on_file(&self, _: crate::attachments::FileEvent) {}
@@ -2079,6 +2088,13 @@ pub(crate) trait DispatchHost: Send + Sync {
     /// that ended in error), so a plan may not treat it as current or use it as
     /// a merge base. The peer used to pass a hard-coded `false` here.
     fn is_incomplete(&self, key: &str) -> bool;
+    /// The mode a session was listed or created with (`chat` / `dev`).
+    ///
+    /// A tag is write-only, so a mode is learned either at creation or from the
+    /// per-value walk, and both are long before the turn it decides: the advisor runs
+    /// at TURN END, so the core has to remember what the list taught it. Default:
+    /// ignore, which is what a transport with nothing to say should do.
+    fn session_mode(&self, _key: &str, _mode: &str) {}
     /// A plain tool call landed in `run_id` — the end-of-turn summarizer's
     /// worklist for `key`, oldest first.
     fn tool_run(&self, key: &str, run_id: &str);
@@ -2692,6 +2708,8 @@ pub(crate) struct NullListener;
 
 impl crate::CoreListener for NullListener {
     fn on_file(&self, _: crate::attachments::FileEvent) {}
+    fn on_advisor_report(&self, _session_id: String, _text: String) {}
+
     fn on_sensitivity(&self, _: String) {}
     fn on_status(&self, _: crate::ConnectionStatus) {}
     fn on_sessions(&self, _: Vec<crate::SessionSummary>) {}
@@ -2767,6 +2785,13 @@ impl crate::CoreListener for SessionGate {
     fn on_speak(&self, text: String) {
         if self.shown() {
             self.inner.on_speak(text);
+        }
+    }
+    fn on_advisor_report(&self, session_id: String, text: String) {
+        // Chat-scoped paint: a review belongs beside the turn it reviews, so a
+        // background chat's report is dropped rather than shown over another.
+        if self.shown() {
+            self.inner.on_advisor_report(session_id, text);
         }
     }
     fn on_config(&self, options: Vec<crate::ConfigOption>) {

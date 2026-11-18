@@ -177,12 +177,14 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_unstable_respond_recipe_params);
     RESOLVE(grouse_unstable_respond_elicitation);
     RESOLVE(grouse_unstable_context_report);
+    RESOLVE(grouse_set_advisor);
+    RESOLVE(grouse_advisor);
 #undef RESOLVE
 
     // The listener table's layout and the symbol signatures are the contract.
     // An older core (or a stale GROUSE_CORE) is refused before any callback can
     // be invoked with the wrong arity.
-    static constexpr unsigned kExpectedAbiVersion = 15;
+    static constexpr unsigned kExpectedAbiVersion = 16;
     if (!a.grouse_abi_version) {
         qWarning() << "CoreBridge: core library predates the ABI version symbol; refusing it";
         return false;
@@ -361,6 +363,10 @@ static void cb_on_extension_catalog(void *u, const char *a, const char *b) {
     const QString sa = copyStr(a); const QString sb = copyStr(b);
     marshal(u, nullptr, [=](Manager *m) { m->coreOnExtensionCatalog(sa, sb); });
 }
+static void cb_on_advisor_report(void *u, const char *a, const char *b) {
+    const QString sa = copyStr(a); const QString sb = copyStr(b);
+    marshal(u, nullptr, [=](Manager *m) { m->coreOnAdvisorReport(sa, sb); });
+}
 static void cb_on_context_report(void *u, const char *a, const char *b) {
     const QString sa = copyStr(a); const QString sb = copyStr(b);
     marshal(u, nullptr, [=](Manager *m) { m->coreOnContextReport(sa, sb); });
@@ -445,6 +451,7 @@ void CoreBridge::installListener()
         // out-of-bounds read the version gate exists to prevent.
         nullptr,   // on_thread_timeline (ABI 14)
         nullptr,   // on_sensitivity (ABI 15)
+        cb_on_advisor_report,   // ABI 16
     };
     m_listener = &table;
 

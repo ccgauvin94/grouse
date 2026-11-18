@@ -232,6 +232,13 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("run_summaries", true)
         set(v) = cfg.edit().putBoolean("run_summaries", v).apply()
 
+    /** Whether every DEV-session turn is reviewed by a second model call (the advisor).
+     *  GLOBAL, not per chat: "my dev chats get a second opinion" is how you work, not a
+     *  property of one conversation. Off by default — each review is a real inference. */
+    var advisor: Boolean
+        get() = cfg.getBoolean("advisor", false)
+        set(v) = cfg.edit().putBoolean("advisor", v).apply()
+
     /** Whether attached images are downscaled to a generous long edge (1600 px)
      *  before they ride a prompt. A phone camera photo otherwise re-sends
      *  megabytes of base64 with every turn of history. On by default; the
