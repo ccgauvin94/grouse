@@ -60,6 +60,25 @@ Flags: `--no-send` stops before prompting. Env: `GROUSE_TLS=0` for a plain-ws de
   `Sources/GrouseCore/ListenerDefaults.swift` supplies no-op defaults via a protocol
   extension — one file, and a conformance then implements only what it uses.
 
+## What CI checks (and what it cannot)
+
+The Swift builds **only on a Mac**: this account has no macOS runners — a `runs-on:
+macos-14` job is cancelled before it starts ("The configuration 'macos-14-arm64-us-default'
+is not supported"; macOS minutes are not free for a private repo). So the first version of
+`.github/workflows/macos.yml` was replaced with a job that runs on Ubuntu and guards the
+two invariants that need no Darwin:
+
+1. **The bindings still generate.** `check-bindings.py` runs `uniffi-bindgen-swift` against
+   a debug host build, so a core change that breaks Swift generation is caught here and not
+   on the Mac.
+2. **`ListenerDefaults.swift` keeps up.** It compares the generated `CoreListener`
+   protocol's requirements against the defaults and fails with the exact signature to paste
+   — which is what stops a new core event from silently breaking a conformance that only
+   compiles on someone's laptop.
+
+Run it yourself: `python3 clients/macos/spike/check-bindings.py <path-to-libgrouse_core.so>`
+(a debug build — see the strip note above).
+
 ## If the spike passes: the app, in phases
 
 Estimates for one person; the repo's own rules make the middle phases bigger than they look.
