@@ -801,6 +801,24 @@ const HIDDEN_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(3
 
 const MAX_SUMMARIZED_STEPS: usize = 40;
 
+/// The config keys the dev advisor's model comes from — the OPERATOR's choice, not a
+/// client preference.
+///
+/// Read from the goose server itself (`_goose/unstable/config/read`), which consults the
+/// server PROCESS ENVIRONMENT before its config.yaml (verified live: `HOME` answers
+/// `/state`). So one `GROUSE_ADVISOR_MODEL=…` on the goose host is what both clients use,
+/// with nothing to set in either app and nothing to keep in sync — which is the whole
+/// reason it is an env var and not a picker.
+///
+/// Uppercase on purpose: the env lookup uppercases the key anyway, and the config.yaml
+/// fallback matches the key VERBATIM, so an uppercase key is the spelling that works in
+/// both places (goose's own keys are uppercase for the same reason).
+pub const ADVISOR_MODEL_KEY: &str = "GROUSE_ADVISOR_MODEL";
+/// Same, for the provider. Optional: a box with one provider only needs the model, and a
+/// model pinned without its provider is resolved against whatever provider the hidden
+/// session already has — which is why setting both is the reliable shape.
+pub const ADVISOR_PROVIDER_KEY: &str = "GROUSE_ADVISOR_PROVIDER";
+
 /// How many trailing messages ONE backfill page asks the wire for. Pages are
 /// bounded so a scroll-back never waits on a whole transcript, and so a slow
 /// link still delivers something.
@@ -4287,6 +4305,58 @@ impl Core {
         self.rewrite_run_labels(owner, key, runs).await;
     }
 
+    /// Pin the operator's advisor model on a freshly minted hidden session, if the
+    /// server advertises one (see [`ADVISOR_MODEL_KEY`]).
+    ///
+    /// Best effort, and LOUD on refusal — unlike the review itself. A review that fails
+    /// is nobody's problem, but an env var that names a model the provider does not serve
+    /// would otherwise make the advisor silently never work again (the cool-off then
+    /// stops even the retries that would have shown it).
+    async fn pin_advisor_model(
+        &self,
+        owner: &Arc<dyn crate::session::ChatEndpoint>,
+        wire: &str,
+    ) {
+        let provider = self.read_config(owner, ADVISOR_PROVIDER_KEY).await;
+        let model = self.read_config(owner, ADVISOR_MODEL_KEY).await;
+        for params in crate::advisor::model_pin_params(wire, provider.as_deref(), model.as_deref())
+        {
+            if let Err(error) =
+                crate::session::request(owner.as_ref(), "session/set_config_option", params.clone())
+                    .await
+            {
+                eprintln!(
+                    "grouse-core: advisor model pin refused ({}) — {}",
+                    params.get("configId").and_then(Value::as_str).unwrap_or("?"),
+                    error
+                );
+            }
+        }
+    }
+
+    /// A non-secret config value from the SERVER (`_goose/unstable/config/read`), which
+    /// checks the server process environment before its config.yaml. `None` when the key
+    /// is absent — which is the normal case, not an error.
+    async fn read_config(
+        &self,
+        owner: &Arc<dyn crate::session::ChatEndpoint>,
+        key: &str,
+    ) -> Option<String> {
+        let reply = crate::session::request(
+            owner.as_ref(),
+            "_goose/unstable/config/read",
+            json!({ "key": key }),
+        )
+        .await
+        .ok()?;
+        reply
+            .get("value")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
     /// The hidden session a side-channel model call runs on, minted on first use.
     ///
     /// `_meta.hidden` keeps it out of every session list, and it lives on the CHAT'S
@@ -4352,6 +4422,11 @@ impl Core {
             .summarizer_sessions
             .insert(slot.to_string(), (hidden.clone(), wire.clone()));
         self.hidden_created(purpose);
+        // Only the advisor honours the operator's model: the summarizer's labels are a
+        // few words and should not change because someone picked a reviewer.
+        if purpose.starts_with("advisor") {
+            self.pin_advisor_model(owner, &wire).await;
+        }
         Some((hidden, wire))
     }
 
