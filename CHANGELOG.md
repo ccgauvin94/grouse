@@ -6,6 +6,22 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed — the long-press chat menu is a sheet, not a dialog full of buttons
+
+- **One row per action, with an icon.** The sheet carries the chat's name (and which endpoint
+  it lives on), then Rename / Move to project / Export / Archive / Delete as tappable rows
+  with 12dp of vertical padding — where the dialog stacked six 48dp platform buttons inside
+  its own 24dp margins, so a four-action menu took most of the screen to say four short words.
+- **The ellipses are gone.** "Rename…", "Archive…", "Delete…" promised a second dialog on the
+  same row that already opens one; the row is the promise.
+- **Delete sits apart, below a rule**, in the error colour — a thumb reaching for Archive one
+  row up should not be able to land on it. There is no Cancel row: a sheet dismisses with a
+  swipe or a tap outside, which is the gesture the rest of the app already uses.
+- The sub-dialogs (rename, archive, delete) are unchanged: they are confirmations, and a
+  confirmation is the right thing for a dialog to be.
+
+grouse 0.2.116 (versionCode 220).
+
 ### Changed — the Activity slide-out is withdrawn, and the app bar gets out of the way
 
 - **Activity is a bottom sheet again**, opened from the composer's "+" sheet and from the

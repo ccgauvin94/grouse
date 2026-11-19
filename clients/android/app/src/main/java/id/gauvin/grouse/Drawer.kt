@@ -46,6 +46,11 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Unarchive
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.painterResource
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -494,37 +499,7 @@ fun DrawerNoMatches(query: String, onClear: () -> Unit) {
 internal fun SessionActionsDialog(cm: ConnectionManager, s: SessionInfo, onDone: () -> Unit) {
     var mode by remember(s.sessionId) { mutableStateOf("menu") }
     when (mode) {
-        "menu" -> AlertDialog(
-            onDismissRequest = onDone,
-            title = { Text(s.title.ifBlank { "Untitled chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-            text = {
-                val peer = ConnectionManager.roamPeer(s.sessionId)
-                Column {
-                    if (peer != null) Text("Lives on $peer",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline)
-                    TextButton(onClick = { mode = "rename" }) { Text(stringResource(R.string.rename_chat_menu)) }
-                    // Projects and export are LOCAL concepts — the fork's federation routes
-                    // rename/archive/delete to the owning peer (since roam-4), but a remote
-                    // session can't be filed into this server's projects or exported here.
-                    if (peer == null) {
-                        TextButton(onClick = { mode = "move" }) { Text(stringResource(R.string.move_to_project_menu)) }
-                        TextButton(onClick = { cm.exportSession(s.sessionId); onDone() }) { Text(stringResource(R.string.export_chat)) }
-                    }
-                    if (s.archived) {
-                        TextButton(onClick = { cm.unarchiveSession(s.sessionId); onDone() }) {
-                            Text(stringResource(R.string.unarchive_chat))
-                        }
-                    }
-                    TextButton(onClick = { mode = "archive" }) { Text(stringResource(R.string.archive_chat_menu)) }
-                    TextButton(onClick = { mode = "delete" }) {
-                        Text(stringResource(R.string.delete_chat_menu), color = MaterialTheme.colorScheme.error)
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = onDone) { Text(stringResource(R.string.cancel)) } },
-        )
+        "menu" -> SessionActionsSheet(cm, s, onDone) { mode = it }
         "rename" -> {
             var newName by remember(s.sessionId) { mutableStateOf(s.title) }
             AlertDialog(
@@ -584,6 +559,87 @@ internal fun SessionActionsDialog(cm: ConnectionManager, s: SessionInfo, onDone:
         )
     }
 }
+/** The long-press menu itself: a bottom sheet of one-tap rows.
+ *
+ *  It used to be an AlertDialog whose body was a Column of TextButtons: a title, then six
+ *  48dp platform buttons inside the dialog's own 24dp margins, with "Rename…", "Archive…",
+ *  "Delete…" ellipses promising a second dialog that the row already opens. A sheet is the
+ *  phone's own idiom for a context menu, sits under the thumb, and gives every action an icon
+ *  so the destructive one reads as destructive before it is pressed. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SessionActionsSheet(
+    cm: ConnectionManager,
+    s: SessionInfo,
+    onDone: () -> Unit,
+    onPick: (String) -> Unit,
+) {
+    val peer = ConnectionManager.roamPeer(s.sessionId)
+    ModalBottomSheet(onDismissRequest = onDone) {
+        Column(Modifier.padding(bottom = 12.dp)) {
+            Column(Modifier.padding(start = 20.dp, end = 20.dp)) {
+                Text(
+                    s.title.ifBlank { "Untitled chat" },
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (peer != null) Text(
+                    "Lives on $peer",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            // Projects and export are LOCAL concepts — the fork's federation routes
+            // rename/archive/delete to the owning peer (since roam-4), but a remote session
+            // can't be filed into this server's projects or exported here.
+            SheetAction(Icons.Filled.Edit, stringResource(R.string.rename_chat_menu)) { onPick("rename") }
+            if (peer == null) {
+                SheetAction(Icons.Filled.Folder, stringResource(R.string.move_to_project_menu)) { onPick("move") }
+                SheetAction(Icons.Filled.Share, stringResource(R.string.export_chat)) {
+                    cm.exportSession(s.sessionId)
+                    onDone()
+                }
+            }
+            if (s.archived) SheetAction(Icons.Filled.Unarchive, stringResource(R.string.unarchive_chat)) {
+                cm.unarchiveSession(s.sessionId)
+                onDone()
+            }
+            SheetAction(Icons.Filled.Archive, stringResource(R.string.archive_chat_menu)) { onPick("archive") }
+            // A rule, not just red text: the destructive row sits apart so a thumb aiming at
+            // Archive one row up cannot land on Delete.
+            HorizontalDivider(Modifier.padding(horizontal = 20.dp, vertical = 6.dp))
+            SheetAction(Icons.Filled.Delete, stringResource(R.string.delete_chat_menu), danger = true) {
+                onPick("delete")
+            }
+        }
+    }
+}
+
+/** One row of the sheet: icon, label, the whole row as the target. 12dp vertical padding is
+ *  a comfortable target without the platform button's built-in margins. */
+@Composable
+private fun SheetAction(
+    icon: ImageVector,
+    label: String,
+    danger: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val tint = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+    Row(
+        Modifier.fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(14.dp))
+        Text(label, style = MaterialTheme.typography.bodyLarge, color = tint)
+    }
+}
+
 
 /** Create a project on the server, then open its first chat. No ACP directory-listing or mkdir
  *  method exists, so ConnectionManager.createProject runs a throwaway fast-model session that
