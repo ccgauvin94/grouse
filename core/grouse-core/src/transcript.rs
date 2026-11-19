@@ -736,6 +736,30 @@ impl State {
         }
         self.merge_overlap
     }
+
+    /// The merge anchor `anchor_merge` could not find: a prompt THIS client sent.
+    ///
+    /// goose sends no `user_message_chunk` for a prompt a client wrote, so the
+    /// cache holds that row under the local id the core gave it (`@n`), never
+    /// under the server's message id. And goose's replay tail is turn-aligned,
+    /// so the FIRST replayed row is very often exactly that prompt. The id then
+    /// matches nothing, `anchor_merge` reports a gap, and the caller answers a
+    /// gap with a FULL replay — minutes on a long conversation, and a transcript
+    /// left cut off if that replay is interrupted (the "it shows an older turn"
+    /// report). The adopted row is the anchor: the replay re-supplies this
+    /// prompt and everything after it, so the cached suffix behind it goes and
+    /// the prefix stays.
+    fn anchor_adopted(&mut self, idx: usize) {
+        self.bubbles.truncate(idx + 1);
+        self.emitted_from = self.emitted_from.min(self.bubbles.len());
+        self.tool_by_id.clear();
+        index_bubbles(&mut self.tool_by_id, &self.bubbles);
+        self.stream_idx = None;
+        self.stream_role.clear();
+        self.stream_msg_id.clear();
+        self.merge_anchored = true;
+        self.merge_overlap = true;
+    }
 }
 
 /// Monotonic milliseconds since the process's first call — a clock that cannot
@@ -1117,6 +1141,14 @@ impl TranscriptStore {
                         match at {
                             Some(idx) if echo_text == replayed => {
                                 st.pending_echo.pop_front();
+                                // The server finally named this prompt, and the cache
+                                // has no id to anchor on: adopt the row AND use it as
+                                // the merge anchor (see `State::anchor_adopted`), or
+                                // every open whose replay starts at this prompt takes
+                                // the gap path — a whole-session replay.
+                                if st.merging && !st.merge_overlap {
+                                    st.anchor_adopted(idx);
+                                }
                                 if let Bubble::Text { id, created: c, .. } = &mut st.bubbles[idx] {
                                     *id = mid.to_string();
                                     if *c == 0 {
@@ -4053,9 +4085,12 @@ mod tests {
         //    the row carries only the core's `@n` key.
         // 2. A reopen's tail re-delivers it with the server's own id. The merged
         //    cache has no id on that row, so the merge can only fall back to
-        //    TEXT — and its anchor misses, which is the gap that forces a full
-        //    reload (`end_merge` true): correct, expensive, and what kept the
-        //    prompts from duplicating only because the caller then repaints.
+        //    TEXT — and the adopted row IS the anchor: the suffix behind it goes
+        //    and the prefix stays. (Before 2026-11-19 this reported a gap and the
+        //    caller answered with a whole-session replay, because goose's tail is
+        //    turn-aligned and therefore very often starts at exactly this prompt.
+        //    That is the open that shows a loading bar and can come back with an
+        //    older turn when the rebuild does not finish.)
         // 3. Now the row HAS the server id, so the next reopen anchors by
         //    identity: the tail folds in place instead of reloading.
         let (l, _evts) = listener();
@@ -4067,14 +4102,14 @@ mod tests {
         store.run_ended("end_turn");
         let first_paint = store.rich_transcript();
 
-        // Reopen #1: no server id on the prompt, so the tail cannot anchor.
+        // Reopen #1: no server id on the prompt, so identity cannot anchor it.
         let one = TranscriptStore::new(listener().0);
         one.set_session("roam:Phaethon:s1");
         one.replace_rich_for_merge(first_paint);
         one.append_chunk("user", "huh. I can use the remote", Some("m_u1"), false);
         assert!(
-            one.end_merge(),
-            "a tail whose first row the paint cannot name is a gap: full reload"
+            !one.end_merge(),
+            "the adopted prompt is the anchor: this is a merge, not a gap"
         );
         // The adopted row now carries the id, and the cache keeps it.
         let prompts = |s: &TranscriptStore| -> Vec<(String, String)> {
@@ -4087,6 +4122,11 @@ mod tests {
         assert_eq!(
             prompts(&one),
             vec![("huh. I can use the remote".to_string(), "m_u1".to_string())]
+        );
+        assert_eq!(
+            one.rich_transcript().len(),
+            1,
+            "the stale suffix behind the adopted prompt goes: the replay re-supplies it"
         );
 
         // Reopen #2: the cache carries the id, so the tail anchors ON the prompt

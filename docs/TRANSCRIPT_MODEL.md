@@ -346,15 +346,40 @@ time, and left the newest messages below the fold. A failed load releases the
 hold *without* painting, so the provisional cache paint stays on screen (see
 `open_session`'s contract in `core/CONTRACT.md` §3.2).
 
+**A reopen never leaves less on screen than it found.** The one load that can come
+back with fewer rows is the merge gap's rebuild (it clears the store and replays the
+whole session). That rebuild is capped (`REBUILD_TIMEOUT_SECS`) and a roam link can
+drop mid-stream, so it can fail *after* the clear: the transcript then ended in the
+middle of the conversation — the newest turn gone, an older one at the bottom — with
+nothing reported. The rows the client was reading are now kept and put back if it
+fails, and the session is marked incomplete, so no cache save can stamp a transcript
+with a hole in it as current.
+
+**A suppressed load reports no progress.** A fresh-cache open discards the rows the
+server replays (they are already on screen), and it used to announce `0 of N` first —
+so every cached open flashed the client's loading bar for a replay that never painted
+a row.
+
 **A replay REPLACES the rows already held, it never appends onto them.** goose
 re-assigns `tool_call_id`s from `call_0` on every replay, so a replayed row's id
 does not reliably match the live row it restates; appending duplicates every
 replayed row and collides tool ids. A cache paint is provisional (dropped
 wholesale by the first replayed row), and the reconnect path arms that same drop —
-the store holds the LIVE transcript across a drop, not a merge base. (The `merge`
-mode still exists for a painted stale cache, but against this server the anchor
-is the first replayed row, so it is a full rebuild in practice. A PAGE is the
-opposite and is safe to splice: it is strictly older than everything held.)
+the store holds the LIVE transcript across a drop, not a merge base. A PAGE is the
+opposite and is safe to splice: it is strictly older than everything held.
+
+**A merge anchors on identity, or on an adopted prompt.** A stale-but-settled
+cache keeps its prefix and replaces its tail, and the anchor is the first replayed
+row the cache can name. That used to be identity only — which, against this
+server, meant almost never: goose's `replayTail` is turn-aligned, so the first
+replayed row is a USER prompt, and goose sends no `user_message_chunk` for a
+prompt a client wrote. The cache holds that row under the core's own `@n` key, so
+the anchor id matched nothing, every open reported a gap, and the caller answered
+it with a whole-session replay (the reload that re-downloads the chat). The
+text-adoption path — a replayed prompt matched to the echo it already has — is now
+the anchor too: the adopted row stays, the cached suffix behind it goes (the
+replay re-supplies it), and `merge_overlap` is recorded. A gap is still reported
+when the tail really does start past the cache, and it still owes a full rebuild.
 
 ## Types (sketch)
 

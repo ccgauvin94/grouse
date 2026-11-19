@@ -1858,6 +1858,12 @@ mod tests {
         fn is_incomplete(&self, _key: &str) -> bool {
             false
         }
+        fn mark_incomplete(&self, key: &str) {
+            self.recorder
+                .events
+                .lock()
+                .push(format!("mark_incomplete {key}"));
+        }
         fn replay_tick(&self, key: &str, message_id: &str) {
             self.recorder
                 .events

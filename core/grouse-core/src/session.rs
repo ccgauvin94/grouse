@@ -1146,6 +1146,187 @@ mod tests {
         );
     }
 
+    /// A painted cache, a tail that cannot anchor, and a rebuild that fails.
+    ///
+    /// The gap path clears the store before rebuilding it from the whole session. That
+    /// rebuild is capped (`REBUILD_TIMEOUT_SECS`) and a roam link can drop mid-stream, so
+    /// it can fail — and the store has already been cleared by then. The release then
+    /// painted whatever prefix had arrived, so the chat came back showing an OLDER turn
+    /// with nothing reported. It must keep the transcript the client was looking at, and
+    /// mark the session incomplete so the hole cannot survive as a "fresh" cache.
+    #[test]
+    fn a_failed_gap_rebuild_keeps_the_painted_transcript() {
+        use futures::future::BoxFuture;
+
+        struct Host {
+            store: Arc<crate::transcript::TranscriptStore>,
+            incomplete: StdMutex<Vec<String>>,
+            events: StdMutex<Vec<String>>,
+        }
+        impl DispatchHost for Host {
+            fn display_id(&self, wire: &str) -> String {
+                wire.to_string()
+            }
+            fn store(&self, _key: &str) -> Arc<crate::transcript::TranscriptStore> {
+                self.store.clone()
+            }
+            fn touched(&self, _k: String, _t: String, _u: String) {}
+            fn active_run(&self, _k: String, _r: String) {}
+            fn turn_lost(&self, _k: &str) {}
+            fn config(&self, _k: &str, _o: Vec<ConfigOption>) {}
+            fn usage(&self, _k: &str, _u: i64, _s: i64, _c: f64, _cur: String) {}
+            fn commands(&self, _k: &str, _n: Vec<String>) {}
+            fn permission(&self, _k: &str, _r: PermissionRequest) {}
+            fn begin_replay(&self, key: &str, suppress: bool) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("begin {key} suppress={suppress}"));
+            }
+            fn end_replay(&self, key: &str) {
+                self.events.lock().unwrap().push(format!("end {key}"));
+            }
+            fn replaying(&self, _k: &str) -> bool {
+                false
+            }
+            fn replay_tick(&self, _k: &str, _m: &str) {}
+            fn paging(&self, _k: &str) -> bool {
+                false
+            }
+            fn replay_backlog(&self, _k: &str, _s: usize, _t: usize) {}
+            fn accepts_chat(&self, _k: &str) -> bool {
+                true
+            }
+            fn background(&self, _k: &str) {}
+            fn endpoint_ready(&self, _l: Option<&str>) {}
+            fn cache_session(&self, _k: &str) {}
+            fn session_stamp(&self, _k: &str, _u: &str) {}
+            fn listed_stamp(&self, _k: &str) -> String {
+                String::new()
+            }
+            fn is_incomplete(&self, _k: &str) -> bool {
+                false
+            }
+            fn mark_incomplete(&self, key: &str) {
+                self.incomplete.lock().unwrap().push(key.to_string());
+            }
+            fn tool_run(&self, _k: &str, _r: &str) {}
+            fn step_closed(&self, _k: &str) {}
+            fn stamp_probe(&self, _k: &str, _p: bool) {}
+            fn is_summarizer(&self, _k: &str) -> bool {
+                false
+            }
+            fn summarizer_chunk(&self, _k: &str, _t: &str) -> bool {
+                false
+            }
+            fn take_summarizer_reply(&self, _k: &str) -> String {
+                String::new()
+            }
+        }
+
+        /// The server: a bounded tail that streams one row the paint cannot name (so
+        /// the merge finds no anchor), and a whole-session rebuild that dies.
+        struct Server(Arc<crate::transcript::TranscriptStore>);
+        impl ChatEndpoint for Server {
+            fn request(
+                &self,
+                method: &str,
+                params: Value,
+            ) -> BoxFuture<'static, Result<Value, AcpError>> {
+                assert_eq!(method, "session/load", "only a load is expected here");
+                let full = params
+                    .pointer("/_meta/replayTail")
+                    .and_then(Value::as_u64)
+                    .is_none();
+                if full {
+                    return Box::pin(async {
+                        Err(AcpError::internal_error().data("link died mid-rebuild"))
+                    });
+                }
+                self.0
+                    .append_chunk("agent", "a row the paint cannot name", Some("z9"), false);
+                Box::pin(async { Ok(json!({ "ok": true })) })
+            }
+            fn notify(&self, _m: &str, _p: Value) -> Result<(), AcpError> {
+                Ok(())
+            }
+            fn wire_id(&self, display: &str) -> String {
+                display.to_string()
+            }
+            fn accepts_prompt(&self) -> bool {
+                true
+            }
+            fn label(&self) -> Option<String> {
+                None
+            }
+        }
+
+        // What the cache would have painted: an older turn this client had seen.
+        let seed = crate::transcript::TranscriptStore::new(Box::new(NullListener));
+        seed.set_session("roam:Phaethon:s1");
+        seed.append_chunk("user", "an older question", Some("m1"), false);
+        seed.append_chunk("agent", "an older answer", Some("m2"), false);
+        let painted = seed.rich_transcript();
+
+        let store = Arc::new(crate::transcript::TranscriptStore::new(Box::new(NullListener)));
+        store.set_session("roam:Phaethon:s1");
+        let host = Host {
+            store: store.clone(),
+            incomplete: StdMutex::new(Vec::new()),
+            events: StdMutex::new(Vec::new()),
+        };
+        let plan = PaintPlan {
+            suppress: false,
+            merge: true,
+            tail: REPLAY_TAIL,
+            items: Some(painted.clone()),
+            complete: true,
+        };
+        let server = Server(store.clone());
+        crate::roam::runtime()
+            .block_on(load_with_plan(
+                &server,
+                &host,
+                &store,
+                "roam:Phaethon:s1",
+                "/work",
+                &plan,
+            ))
+            .expect("the open itself succeeded; only the rebuild failed");
+
+        let kept = store.rich_transcript();
+        // Compare identity and content, not `seq`: that is a position stamp the store
+        // assigns itself, and the point here is WHICH rows survived.
+        let shape = |items: &[crate::Item]| -> Vec<(String, crate::ItemKind, String)> {
+            items
+                .iter()
+                .map(|i| (i.id.clone(), i.kind, i.text.clone()))
+                .collect()
+        };
+        assert_eq!(
+            shape(&kept),
+            shape(&painted),
+            "the rows the client was reading are what survives — not a prefix of the rebuild"
+        );
+        assert_eq!(
+            host.incomplete.lock().unwrap().as_slice(),
+            ["roam:Phaethon:s1"],
+            "a transcript with a hole in it must never read back as current"
+        );
+        // The bar belongs to the whole load: it must not finish before the rebuild it caused.
+        let events = host.events.lock().unwrap().clone();
+        assert_eq!(
+            events.iter().filter(|e| e.starts_with("begin")).count(),
+            1,
+            "{events:?}"
+        );
+        assert_eq!(
+            events.last().map(String::as_str),
+            Some("end roam:Phaethon:s1"),
+            "the replay ends only after the rebuild: {events:?}"
+        );
+    }
+
     #[test]
     fn an_assistant_project_session_is_not_a_chat_but_keeps_its_cwd() {
         // One chat per thread label is filed under the `assistant` project so the
@@ -1980,6 +2161,11 @@ async fn replay_held(
     let tail = if asked == 0 { None } else { Some(asked) };
     host.begin_replay(key, suppress);
     store.hold_emissions(true);
+    // What the client is looking at while this replay runs. Kept only for a MERGE,
+    // because only a merge can end in a gap — and the gap path has to clear the
+    // store to rebuild it (see below), so this is the only copy of the rows the
+    // screen is showing.
+    let painted = if merge { Some(store.rich_transcript()) } else { None };
     let mut guard = ReplayGuard { host, store, key, ends: true, holds: true };
     let reply = load_request(endpoint, key, cwd, tail).await;
     let reply = match reply {
@@ -1989,16 +2175,26 @@ async fn replay_held(
         // and tells the host the replay is over, so the session can be reloaded again.
         Err(error) => return Err(error),
     };
-    guard.ends = false;
-    host.end_replay(key);
     let mut reply = reply;
     // Merge gap: the tail started past the cached prefix, so extending the
-    // cache would leave a hole. Clear and load the whole transcript now.
+    // cache would leave a hole. Clear and load the whole transcript now — but a
+    // rebuild is allowed to FAIL (it is capped at `REBUILD_TIMEOUT_SECS`, and a
+    // roam link can drop mid-stream), and by then the store has been cleared. Left
+    // unrepaired, the release below then painted whatever prefix of the rebuild had
+    // arrived: the transcript ended in the middle of the conversation — the newest
+    // turn gone, an older one at the bottom — with nothing reported. So the paint
+    // is put back, and the session is marked incomplete so no cache save can call
+    // this transcript current.
     if store.end_merge() {
         store.clear();
-        if let Ok(full_reply) = load_request(endpoint, key, cwd, None).await {
-            // This reply describes what is on screen now, backlog included.
-            reply = full_reply;
+        match load_request(endpoint, key, cwd, None).await {
+            Ok(full_reply) => reply = full_reply,
+            Err(_) => {
+                if let Some(painted) = painted {
+                    store.replace_rich(painted, false);
+                }
+                host.mark_incomplete(key);
+            }
         }
     }
     // Tell the host how much history the server still holds BEFORE the paint is
@@ -2010,6 +2206,11 @@ async fn replay_held(
     // The replay is in: paint the newest window (or the empty transcript) once.
     store.release_held_replay();
     guard.holds = false;
+    // The progress bar belongs to the WHOLE load: a merge that had to rebuild is
+    // still loading, and ending it here (as this did) let the bar finish while the
+    // rebuild was still running — then the screen changed after "loading" was over.
+    guard.ends = false;
+    host.end_replay(key);
     Ok(reply)
 }
 
@@ -2088,6 +2289,13 @@ pub(crate) trait DispatchHost: Send + Sync {
     /// that ended in error), so a plan may not treat it as current or use it as
     /// a merge base. The peer used to pass a hard-coded `false` here.
     fn is_incomplete(&self, key: &str) -> bool;
+    /// Record that `key`'s transcript is known to be MISSING rows the server holds,
+    /// even though no turn is in flight. A merge gap is the case: the bounded tail
+    /// started past the cache, the rebuild that was owed did not complete, and the
+    /// rows on screen are the paint the client already had. Without this the next
+    /// paint plan compares a cache stamp that says "current" against a transcript
+    /// with a hole in it, and the hole survives every later open.
+    fn mark_incomplete(&self, key: &str);
     /// The mode a session was listed or created with (`chat` / `dev`).
     ///
     /// A tag is write-only, so a mode is learned either at creation or from the
@@ -2263,6 +2471,11 @@ impl DispatchHost for PrefixHost {
     }
     fn is_incomplete(&self, key: &str) -> bool {
         self.host().is_some_and(|host| host.is_incomplete(key))
+    }
+    fn mark_incomplete(&self, key: &str) {
+        if let Some(host) = self.host() {
+            host.mark_incomplete(key);
+        }
     }
     fn tool_run(&self, key: &str, run_id: &str) {
         if let Some(host) = self.host() {

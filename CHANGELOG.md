@@ -6,6 +6,30 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — a roam reopen that came back showing an older turn
+
+- **A stale-cache open merges in place instead of re-downloading the chat.** A merge keeps
+  the cached prefix and replaces the tail, anchored on the first replayed row the cache can
+  name — and that used to be identity only. goose's replay tail is turn-aligned, so the first
+  replayed row is very often a USER prompt, and goose sends no user chunk for a prompt a
+  client wrote: the cache holds that row under the core's own `@n` key, never the server's
+  message id. The anchor matched nothing, the merge reported a gap, and a gap is answered
+  with a whole-session replay — the loading bar on an open whose transcript was already on
+  screen. The prompt-adoption path (a replayed prompt matched to the echo it already has) is
+  now an anchor too.
+- **A reopen can no longer come back with LESS than it found.** The gap's rebuild clears the
+  store before replaying the whole session, and that rebuild is capped at two minutes and can
+  die with a roam link mid-stream. When it did, the release painted whatever prefix had
+  arrived: the newest turn gone, an older one at the bottom, and nothing reported. The rows
+  the client was reading are now kept and restored, and the session is marked incomplete, so
+  a transcript with a hole in it can never be saved as a current cache.
+- **The loading bar belongs to the whole load.** It ended before a merge's rebuild had even
+  started, so the screen changed after "loading" was over. And a suppressed load — a fresh
+  cache, whose replayed rows are thrown away — no longer announces `0 of N` at all, which is
+  what made a fully cached open flash the bar for a replay that never painted a row.
+
+grouse 0.2.117 (versionCode 221).
+
 ### Changed — the long-press chat menu is a sheet, not a dialog full of buttons
 
 - **One row per action, with an icon.** The sheet carries the chat's name (and which endpoint

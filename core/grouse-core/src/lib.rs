@@ -5498,28 +5498,34 @@ impl crate::session::DispatchHost for Core {
             }
             state.message_counts.get(key).copied().unwrap_or(0)
         };
-        // Emitted for every replay (not only a forced one): a client that shows
-        // an open's progress gets a 0 of N to start from, and one that ignores
-        // it loses nothing.
-        self.inner
-            .listener
-            .on_replay_progress(key.to_string(), 0, total, false);
+        // A SUPPRESSED load replays its rows only to throw them away: the cache it was
+        // planned from is already current. There is no progress to report, and emitting
+        // "0 of N" made every cached open flash the client's loading bar for a replay
+        // that never painted a row — the bar that appeared even though the transcript
+        // was already on screen.
+        if !suppress {
+            self.inner
+                .listener
+                .on_replay_progress(key.to_string(), 0, total, false);
+        }
     }
     fn end_replay(&self, key: &str) {
-        let (loaded, total) = {
+        let (loaded, total, suppressed) = {
             let mut state = self.inner.state.lock();
             state.replaying.remove(key);
-            state.suppressing.remove(key);
+            let suppressed = state.suppressing.remove(key);
             let loaded = state
                 .replay_seen
                 .remove(key)
                 .map(|seen| seen.len() as i64)
                 .unwrap_or(0);
-            (loaded, state.message_counts.get(key).copied().unwrap_or(0))
+            (loaded, state.message_counts.get(key).copied().unwrap_or(0), suppressed)
         };
-        self.inner
-            .listener
-            .on_replay_progress(key.to_string(), loaded, total, true);
+        if !suppressed {
+            self.inner
+                .listener
+                .on_replay_progress(key.to_string(), loaded, total, true);
+        }
     }
     fn replay_tick(&self, key: &str, message_id: &str) {
         let (loaded, total, emit) = {
@@ -5583,6 +5589,11 @@ impl crate::session::DispatchHost for Core {
     }
     fn is_incomplete(&self, key: &str) -> bool {
         self.inner.state.lock().incomplete.contains(key)
+    }
+    fn mark_incomplete(&self, key: &str) {
+        // A transcript with a hole in it, with no turn to explain it: the next plan
+        // must not read it as current, and a save must not stamp it fresh.
+        self.inner.state.lock().incomplete.insert(key.to_string());
     }
     fn listed_stamp(&self, key: &str) -> String {
         self.inner
