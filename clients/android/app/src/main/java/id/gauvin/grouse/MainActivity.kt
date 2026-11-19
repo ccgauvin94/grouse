@@ -236,9 +236,11 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
         drawerState = drawerState,
         // No drawer on the onboarding screen, and not once it's mid-swipe-away from "connect"
         // either -- gate strictly on being past onboarding. Also off while the chat's pinned
-        // dock is open: a vertical scroll in its nested WebView leaks horizontal drag to this
-        // drawer, which would otherwise fling the menu open over the dock.
-        gesturesEnabled = cm.configured && route != "connect" && !cm.pinnedDockOpen.value,
+        // dock or its Activity pane is open: both own the right edge, and a vertical scroll in
+        // the dock's nested WebView leaks horizontal drag to this drawer, which would otherwise
+        // fling the menu open over them.
+        gesturesEnabled = cm.configured && route != "connect" &&
+            !cm.pinnedDockOpen.value && !cm.activityDockOpen.value,
         drawerContent = {
             ModalDrawerSheet {
                 // Re-fetch the session list whenever the menu opens — it IS the chats list now,

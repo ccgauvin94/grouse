@@ -5,6 +5,38 @@ All notable changes to Grouse are recorded here. The format is based on
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+### Changed — Activity is a pane on the chat's right edge, and the app bar is quieter
+
+- **Activity is no longer behind the composer's "+" sheet.** It is a right-edge tab on the
+  chat (an icon plus a live count) that slides out as a pane, the same shape as the
+  pinned-app dock — so a delegate can be watched while the turn keeps writing, which a sheet
+  that dismisses on the first scroll could not do. The tab is there whenever the chat HAS
+  lanes, not only while one is live: the old header pill appeared with the work and vanished
+  with it, which is why the surface was only findable in the + menu. It stacks above a pinned
+  app's tab when both exist, shows the running count in amber, and falls back to the total
+  when nothing is running. Back closes it; the + sheet still lists it, so a chat with no lanes
+  yet can still see that the surface exists.
+- **The blurb is gone.** The old sheet opened with two paragraphs explaining what a lane is,
+  above an empty state that explained it again. The pane is a title and the lanes; a chat with
+  nothing to show says so in one line.
+- **The context donut finally has room off the roam endpoint's name.** The gap had been added
+  BEFORE the ring, where it did nothing: the weight spacer pushes the cluster right, so extra
+  width there only moved the ring's left edge and never opened space on its right. It is after
+  the ring now (12dp), and the ring sits in a 24dp tap target instead of being a 14dp one.
+
+### Fixed — the context breakdown after a compaction
+
+- **The breakdown no longer shows the pre-compaction window.** The donut dropped to the new
+  usage (it reads the provider's own `usage_update`) while the panel underneath went on saying
+  "429k / 1.0M": the breakdown is a measurement of the next request, cached so that reopening
+  it is instant, and a compaction rewrites the conversation that measurement described.
+  Compaction completion now drops the cached report and, when the panel is showing,
+  re-measures — the numbers on screen are the ones that are lying, and a spinner is honest.
+  Both completion paths count (the server's "Compaction complete" line, and a run ending while
+  a compaction was armed), and whichever sees it first is the one that spends the tokenization.
+
+grouse 0.2.114 (versionCode 218).
 ### Added — the advisor's model is an operator env var
 
 - **`GROUSE_ADVISOR_MODEL`** (and, when you need it, **`GROUSE_ADVISOR_PROVIDER`**) set in the

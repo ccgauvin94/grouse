@@ -9,6 +9,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Base64
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -58,6 +59,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.ArrowDropDown
@@ -549,9 +551,8 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
         PermissionSheet(req, onChoose = { cm.answerPermission(req, it) })
     }
 
-    if (showActivity) {
-        ActivitySheet(cm, onDismiss = { showActivity = false })
-    }
+    // Activity renders in the Scaffold body (ActivityDock): it is a right-edge pane, not a
+    // sheet, so it can stay open beside a running turn.
 
     if (showComposer) {
         ComposerSheet(cm,
@@ -632,8 +633,24 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
     LaunchedEffect(pinCount) { if (pinCount == 0) showPinned = false }
     // Tell the shell a full-surface overlay is up so it suspends the main drawer's swipe
     // gesture — a scroll in the dock's WebView otherwise flings the left menu open over it.
-    LaunchedEffect(showPinned) { cm.pinnedDockOpen.value = showPinned }
-    DisposableEffect(Unit) { onDispose { cm.pinnedDockOpen.value = false } }
+    LaunchedEffect(showPinned) {
+        cm.pinnedDockOpen.value = showPinned
+        // One right-edge pane at a time: they occupy the same edge and the same scrim, so a
+        // second one opening over the first just loses the first.
+        if (showPinned) showActivity = false
+    }
+    // Activity is the other right-edge pane (see ActivityDock): same gesture suspension, same
+    // one-at-a-time rule.
+    LaunchedEffect(showActivity) {
+        cm.activityDockOpen.value = showActivity
+        if (showActivity) showPinned = false
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            cm.pinnedDockOpen.value = false
+            cm.activityDockOpen.value = false
+        }
+    }
 
     Scaffold(topBar = {
         Column {
@@ -690,59 +707,38 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        // The right-hand status cluster: work in flight, then the context
-                        // donut. Both sit at the far right of the TITLE row (they are
-                        // readouts, not part of the chat name) — the activity pill used to
-                        // live in the action slot, where the roam chip cut it off and it
-                        // read as part of the host name.
-                        val lanes = cm.activity.value
-                        val running = lanes.count { it.running }
+                        // The chat's own readout — the context donut — sits at the far right
+                        // of the TITLE row, which is the last thing before the action slot.
+                        // Activity used to sit here too as a pill; it is the chat's right-edge
+                        // tab now (see ActivityDock), so this row carries one number and the
+                        // header stops competing with itself for width.
                         val u = cm.usage.value
                         val hasRing = u != null && u.size > 0 && !cm.compacting.value
-                        if (lanes.isNotEmpty() || hasRing) {
+                        if (hasRing) {
                             Spacer(Modifier.weight(1f))
-                            // A WORD, not an icon: a wrench means tools, and this is
-                            // agents/background work. The pill stays for the life of the
-                            // chat's activity — "2 running" while a turn works, "3 agents"
-                            // afterwards — because an affordance that vanishes the moment
-                            // nothing is live is one you cannot find when you want it. A
-                            // chat that never had a delegate shows no pill at all: there is
-                            // nothing in the sheet to open (the + sheet still lists it).
-                            // LIVE work only, so the badge returns to nothing when it ends.
-                            // It used to say "3 agents" for the life of the chat and, after a
-                            // cancel, kept saying it for work that no longer existed
-                            // (2026-11-13). The sheet itself is still reachable from the
-                            // composer's "+" sheet, so a finished run is not lost.
-                            if (running > 0) {
-                                Surface(
-                                    shape = RoundedCornerShape(50),
-                                    color = MaterialTheme.colorScheme.secondaryContainer,
-                                    modifier = Modifier.clickable { showActivity = true },
-                                ) {
-                                    Text(
-                                        "$running running",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                    )
-                                }
-                            }
-                            // Breathing room off the action slot: the roam chip is wider and
-                            // its leading edge sits closer than an icon button's, so the ring
-                            // read as part of the host name rather than as the chat's own
-                            // status. It gets more room there (and more again when the pill
-                            // sits between the title and it).
-                            if (hasRing) {
-                                Spacer(Modifier.width(if (roamPeer != null) 18.dp else 8.dp))
+                            // A 24dp target around a 14dp ring: the tap is the only way into
+                            // the breakdown, and a 14dp tap area is a miss waiting to happen
+                            // on a phone held one-handed.
+                            Box(
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .clickable {
+                                        showContextDetail = !showContextDetail
+                                        if (showContextDetail) cm.requestContextReport()
+                                    },
+                                contentAlignment = Alignment.Center,
+                            ) {
                                 ContextRing(
                                     pct = (u.used * 100 / u.size).coerceIn(0, 100),
                                     modifier = Modifier.size(14.dp),
-                                    onClick = {
-                                        showContextDetail = !showContextDetail
-                                        if (showContextDetail) cm.requestContextReport()
-                                    }
                                 )
                             }
+                            // The gap that keeps the ring from reading as part of the roam
+                            // endpoint's name. It has to be AFTER the ring: the weight spacer
+                            // above it pushes the cluster right but cannot open space on the
+                            // right-hand side, so a spacer put there (the old 18dp) moved
+                            // nothing and the ring stayed flush against the chip.
+                            Spacer(Modifier.width(12.dp))
                         }
                     }
                 }
@@ -1418,6 +1414,9 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                 }
             }
             PinnedDock(cm, session, pins, pinCount, showPinned) { showPinned = it }
+            // After the pinned dock so it lands on top when both tabs are on the edge; the
+            // two never open together (see the effects above).
+            ActivityDock(cm, showActivity, hasPinned = pinCount > 0) { showActivity = it }
         }
     }
 }
@@ -1814,135 +1813,220 @@ fun ElicitationSheet(
  *  ACP, so this is the only place the phone can show what a delegate is doing while it
  *  runs — the transcript shows the delegate as one chip that barely changes.
  *
- *  A sheet rather than a pane: the phone has no room for a second column, so this is
- *  the "in addition to the tools menu" half of the desktop's docked panel. */
-@OptIn(ExperimentalMaterial3Api::class)
+ *  The lane list itself, with no chrome: the pane and the empty state both draw it, so
+ *  the rows cannot drift between the two. */
 @Composable
-fun ActivitySheet(cm: ConnectionManager, onDismiss: () -> Unit) {
+private fun ActivityLaneList(cm: ConnectionManager, modifier: Modifier = Modifier) {
     val lanes = cm.activity.value
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
-            Text("Activity", style = MaterialTheme.typography.titleLarge)
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "Background work in this chat: sub-agents, and delegates still running. " +
-                    "Finished runs stay; a run the turn's Stop killed reads \"cancelled\".",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline,
-            )
-            Spacer(Modifier.height(12.dp))
-            if (lanes.isEmpty()) {
-                Text(
-                    "No background work in this chat. A delegate (a sub-agent run) appears " +
-                        "here while it works, and stays once it has finished — ordinary tool " +
-                        "calls never do: they are the turn's own steps, shown in the transcript.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline,
-                )
+    if (lanes.isEmpty()) {
+        Text(
+            stringResource(R.string.activity_empty),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.outline,
+            modifier = modifier.padding(top = 8.dp),
+        )
+        return
+    }
+    LazyColumn(modifier.fillMaxWidth()) {
+        // NEWEST FIRST: lanes come in transcript order, so the live one used to be
+        // at the BOTTOM of a list of every delegate this chat ever ran — the top of
+        // the pane was always ancient finished work.
+        items(lanes.asReversed(), key = { it.id }) { lane ->
+            // `outcome` is the core's answer, NOT the tool call's status. A delegate's
+            // call returns its ack ("Delegated to subagent X") a second after it is
+            // issued, so `status` reads "completed" for the whole time the subagent
+            // works, and this pane said "done" the instant it was fired (reported
+            // 2026-11-13). `cancelled` is set when the turn that delegated it was
+            // stopped, which kills its subagents with it.
+            val running = lane.running
+            val badge = when (lane.outcome) {
+                "running" -> "running"
+                "cancelled" -> "cancelled"
+                "failed" -> "failed"
+                "unfinished" -> "unfinished"
+                else -> "done"
             }
-            LazyColumn(Modifier.fillMaxWidth()) {
-                // NEWEST FIRST: lanes come in transcript order, so the live one used to be
-                // at the BOTTOM of a list of every delegate this chat ever ran — the top of
-                // the sheet was always ancient finished work.
-                items(lanes.asReversed(), key = { it.id }) { lane ->
-                    // `outcome` is the core's answer, NOT the tool call's status. A delegate's
-                    // call returns its ack ("Delegated to subagent X") a second after it is
-                    // issued, so `status` reads "completed" for the whole time the subagent
-                    // works, and this sheet said "done" the instant it was fired (reported
-                    // 2026-11-13). `cancelled` is set when the turn that delegated it was
-                    // stopped, which kills its subagents with it.
-                    val running = lane.running
-                    val badge = when (lane.outcome) {
-                        "running" -> "running"
-                        "cancelled" -> "cancelled"
-                        "failed" -> "failed"
-                        "unfinished" -> "unfinished"
-                        else -> "done"
+            val tint = when (lane.outcome) {
+                "running" -> MaterialTheme.statusColors.connecting
+                "failed" -> MaterialTheme.colorScheme.error
+                "cancelled" -> MaterialTheme.colorScheme.onSurfaceVariant
+                else -> MaterialTheme.statusColors.online
+            }
+            Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        if (lane.subagent) Icons.Filled.Build else Icons.Filled.Refresh,
+                        contentDescription = null,
+                        tint = tint,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        lane.title.ifBlank { "tool call" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = if (lane.subagent) FontWeight.SemiBold else FontWeight.Normal,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(badge, style = MaterialTheme.typography.labelSmall, color = tint)
+                }
+                if (lane.detail.isNotBlank()) {
+                    Text(
+                        lane.detail,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(start = 24.dp, top = 2.dp),
+                    )
+                }
+                // What it is doing NOW. The child's own tool calls arrive on the
+                // delegate row while it works, so this is real progress rather than
+                // a spinner: the last step IS its current one.
+                if (running) {
+                    val now = lane.steps.lastOrNull()
+                    Text(
+                        if (now != null)
+                            "now · ${now.name.replace('_', ' ')} · ${now.detail}"
+                        else "working…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.statusColors.connecting,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(start = 24.dp, top = 2.dp),
+                    )
+                }
+                // The sub-agent's own tool calls — what it ACTUALLY did, which
+                // neither the delegate's chip nor its summary says.
+                lane.steps.takeLast(6).forEach { step ->
+                    Row(Modifier.padding(start = 24.dp, top = 2.dp)) {
+                        Text(
+                            step.name,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.outline,
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            step.detail,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
-                    val tint = when (lane.outcome) {
-                        "running" -> MaterialTheme.statusColors.connecting
-                        "failed" -> MaterialTheme.colorScheme.error
-                        "cancelled" -> MaterialTheme.colorScheme.onSurfaceVariant
-                        else -> MaterialTheme.statusColors.online
-                    }
-                    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                if (lane.subagent) Icons.Filled.Build else Icons.Filled.Refresh,
-                                contentDescription = null,
-                                tint = tint,
-                                modifier = Modifier.size(16.dp),
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                lane.title.ifBlank { "tool call" },
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = if (lane.subagent) FontWeight.SemiBold else FontWeight.Normal,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(badge, style = MaterialTheme.typography.labelSmall, color = tint)
-                        }
-                        if (lane.detail.isNotBlank()) {
-                            Text(
-                                lane.detail,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.outline,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(start = 24.dp, top = 2.dp),
-                            )
-                        }
-                        // What it is doing NOW. The child's own tool calls arrive on the
-                        // delegate row while it works, so this is real progress rather than
-                        // a spinner: the last step IS its current one.
-                        if (running) {
-                            val now = lane.steps.lastOrNull()
-                            Text(
-                                if (now != null)
-                                    "now · ${now.name.replace('_', ' ')} · ${now.detail}"
-                                else "working…",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.statusColors.connecting,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(start = 24.dp, top = 2.dp),
-                            )
-                        }
-                        // The sub-agent's own tool calls — what it ACTUALLY did, which
-                        // neither the delegate's chip nor its summary says.
-                        lane.steps.takeLast(6).forEach { step ->
-                            Row(Modifier.padding(start = 24.dp, top = 2.dp)) {
-                                Text(
-                                    step.name,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontFamily = FontFamily.Monospace,
-                                    color = MaterialTheme.colorScheme.outline,
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    step.detail,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.outline,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
-                        if (running && lane.steps.size > 6) {
-                            Text(
-                                "… ${lane.steps.size - 6} earlier steps",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.outline,
-                                modifier = Modifier.padding(start = 24.dp, top = 2.dp),
-                            )
-                        }
-                    }
-                    HorizontalDivider()
+                }
+                if (running && lane.steps.size > 6) {
+                    Text(
+                        "… ${lane.steps.size - 6} earlier steps",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.padding(start = 24.dp, top = 2.dp),
+                    )
                 }
             }
+            HorizontalDivider()
+        }
+    }
+}
+
+/** The Activity pane's body: a 34dp header strip and the lane list. Tight edges on
+ *  purpose — the lanes are the point, and the pane is a readout you leave open beside
+ *  a running turn rather than a dialog you read once. */
+@Composable
+private fun ActivityPane(cm: ConnectionManager, onClose: () -> Unit) {
+    BackHandler(enabled = true) { onClose() }
+    Column(Modifier.fillMaxSize().padding(bottom = 8.dp)) {
+        Row(
+            Modifier.fillMaxWidth().height(34.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                stringResource(R.string.activity),
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f).padding(start = 12.dp),
+            )
+            IconButton(onClick = onClose, modifier = Modifier.size(34.dp)) {
+                Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.close),
+                    modifier = Modifier.size(18.dp))
+            }
+        }
+        ActivityLaneList(cm, Modifier.weight(1f).padding(horizontal = 16.dp))
+    }
+}
+
+/** The chat's right-edge Activity tab, and the pane it opens.
+ *
+ *  Activity used to be a bottom sheet reachable only from the composer's "+" sheet, with
+ *  a header pill that appeared ONLY while something was running — so a finished delegate
+ *  was behind two taps in a menu, which is where "too buried" came from.
+ *
+ *  A slide-out rather than a sheet, for the same reason the pinned-app dock is one: the
+ *  lanes are progress you watch WHILE the turn keeps writing, and a sheet that covers the
+ *  transcript (and dismisses on the first scroll) cannot do that. The tab is always there
+ *  when the chat HAS lanes, so the affordance no longer comes and goes with live work.
+ *  Screen-edge swipe is deliberately not the gesture: on gesture-nav Android the right
+ *  edge IS the system Back gesture. */
+@Composable
+private fun BoxScope.ActivityDock(
+    cm: ConnectionManager,
+    open: Boolean,
+    hasPinned: Boolean,
+    onOpenChange: (Boolean) -> Unit,
+) {
+    val lanes = cm.activity.value
+    val running = lanes.count { it.running }
+    // No lanes, no tab: there is nothing to open, and a permanent empty tab is furniture.
+    // The "+" sheet still lists Activity, which is where an empty chat finds it.
+    if (lanes.isNotEmpty() && !open) {
+        Surface(
+            color = MaterialTheme.colorScheme.secondaryContainer,
+            shape = RoundedCornerShape(topStart = 14.dp, bottomStart = 14.dp),
+            tonalElevation = 3.dp,
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                // Stack above the pinned-app tab rather than under it: both live on the
+                // same edge, and two tabs at the same point is one tab. 70dp clears the
+                // pinned tab's own height plus a gap.
+                .offset(y = if (hasPinned) (-70).dp else 0.dp)
+                .clickable { onOpenChange(true) },
+        ) {
+            Column(
+                Modifier.padding(horizontal = 7.dp, vertical = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Icon(Icons.Filled.AccountTree, contentDescription = stringResource(R.string.activity),
+                    modifier = Modifier.size(18.dp))
+                // The live count is the point of the tab: "2" says a delegate is working
+                // without opening anything. Once the work finishes it falls back to the
+                // total, because the lanes are still there to read.
+                Text(
+                    if (running > 0) "$running" else "${lanes.size}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (running > 0) MaterialTheme.statusColors.connecting
+                            else MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+            }
+        }
+    }
+    AnimatedVisibility(visible = open, enter = fadeIn(), exit = fadeOut()) {
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f))
+            .clickable { onOpenChange(false) })
+    }
+    AnimatedVisibility(
+        visible = open,
+        enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
+        exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut(),
+        modifier = Modifier.align(Alignment.CenterEnd),
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 4.dp,
+            modifier = Modifier.fillMaxHeight().fillMaxWidth(0.94f).widthIn(max = 520.dp),
+        ) {
+            ActivityPane(cm) { onOpenChange(false) }
         }
     }
 }
@@ -2026,9 +2110,10 @@ private fun ComposerSheet(
     onPhotos: () -> Unit,
     onFiles: () -> Unit,
     onDismiss: () -> Unit,
-    /// Open the chat's Activity list (sub-agents + running work). Always offered, because
-    /// the header badge only appears while something is running — so without this the
-    /// surface would be undiscoverable in exactly the chat you want to inspect afterwards.
+    /// Open the chat's Activity pane (sub-agents + running work). Kept here as well as on
+    /// the chat's right-edge tab because the tab only exists once the chat HAS lanes — an
+    /// empty chat still gets a way to see that the surface exists (and what "no background
+    /// work" means) without hunting for it.
     onActivity: () -> Unit,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {

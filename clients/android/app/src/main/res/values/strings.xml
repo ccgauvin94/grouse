@@ -37,6 +37,8 @@
     <string name="schedule_managed_on_server">Schedule is managed on the server.</string>
     <string name="compacting">Compacting…</string>
     <string name="compact">Compact</string>
+    <string name="activity">Activity</string>
+    <string name="activity_empty">No background work in this chat.</string>
     <string name="context_breakdown">What fills the window</string>
     <string name="context_measuring">measuring…</string>
     <string name="context_measuring_long">Measuring this context. A long chat takes a moment.</string>

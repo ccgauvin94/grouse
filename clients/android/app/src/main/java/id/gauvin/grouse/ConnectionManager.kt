@@ -633,6 +633,25 @@ class ConnectionManager private constructor(context: Context) {
         io { runCatching { unstable.contextReport(id) } }
     }
 
+    /** A compaction rewrote the conversation, so every context reading of it is now wrong.
+     *
+     *  `reportCache` exists so re-opening the panel is instant — which is exactly why the
+     *  panel went on saying "429k" under a donut that had dropped to "7k": the donut reads the
+     *  provider's own `usage_update` (which does refresh after a compact) while the breakdown
+     *  was a cached measurement of the transcript that no longer exists. So drop the cached
+     *  copy, and if the panel is showing this chat re-measure it: the numbers on screen are
+     *  the ones lying, and a silent stale panel is worse than a spinner.
+     */
+    private fun forgetContextReport(sessionId: String?) {
+        val id = sessionId ?: return
+        reportCache.remove(id)
+        if (contextReportSession.value == id && contextReport.value != null &&
+            !contextReportLoading.value) {
+            contextReport.value = null
+            requestContextReport(force = true)
+        }
+    }
+
     fun runScheduleNow(id: String) { io { unstable.schedulesRunNow(id) } }
 
     fun deleteSchedule(id: String) { io { unstable.schedulesDelete(id) } }
@@ -1236,6 +1255,10 @@ class ConnectionManager private constructor(context: Context) {
      *  swipe gesture on it: scrolling the dock's nested WebView leaks its horizontal component
      *  to the drawer, which otherwise flings the left menu open over the dock. */
     val pinnedDockOpen = mutableStateOf(false)
+
+    /** True while the chat's Activity pane is open. Same gesture suspension as
+     *  [pinnedDockOpen], and the two are mutually exclusive — they own the same edge. */
+    val activityDockOpen = mutableStateOf(false)
 
     /** Config option ids this client exposes — shared with Screens.kt so the same single
      *  list drives both the Settings picker and the saved-option restore. */
@@ -3290,8 +3313,15 @@ class ConnectionManager private constructor(context: Context) {
         activeRunIds.remove(sessionId)
         val shown = sessionId == currentSession.value
         if (shown) {
+            val wasCompacting = compacting.value
             compacting.value = false
             compactionStatus.value = ""
+            // A compaction that never announced its completion (a reworded goose, or a run
+            // stopped mid-compact) still rewrote the transcript: recognise it by the fact that
+            // we were compacting when the turn ended. The status hook above clears
+            // `compacting`, so whichever path sees it first is the one that spends the
+            // re-measure; the other sees `false` and does nothing.
+            if (wasCompacting) forgetContextReport(sessionId)
             // The turn is over: a filler still waiting has nothing left to cover.
             main.removeCallbacks(thinkingFiller)
             turnInFlight = false
@@ -3725,8 +3755,15 @@ class ConnectionManager private constructor(context: Context) {
             compacting.value = true
             compactionStatus.value = message
         } else if (done) {
+            val wasCompacting = compacting.value
             compacting.value = false
             compactionStatus.value = ""
+            // The transcript was rewritten under the panel: its cached measurement describes
+            // the conversation that no longer exists (the donut refreshes itself from
+            // usage_update; the breakdown does not, and kept showing the pre-compaction
+            // numbers). Guarded on `wasCompacting` so an unrelated "… failed" line cannot
+            // spend a tokenization.
+            if (wasCompacting) forgetContextReport(core.activeSessionId())
         }
     }
 
