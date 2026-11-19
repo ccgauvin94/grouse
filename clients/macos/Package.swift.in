@@ -3,18 +3,23 @@
 // TEMPLATED — build.sh writes Package.swift from this file, substituting @LIBDIR@ with the
 // absolute path to build/lib (the universal libgrouse_core.a). SwiftPM has no way to say
 // "the library next to me", and an unsafeFlags path is the only way to point the linker at
-// a local static archive. Committing a generated absolute path would be worse.
+// a local static archive.
 //
-// The three targets mirror what uniffi's Swift output expects:
+// ONE package, two executables:
+//   Grouse      the SwiftUI app (what this directory is for)
+//   grouse-spike  the CLI that proves the binding boundary — kept because it is also the
+//                 CI smoke test, and it is the fastest way to tell "the core is broken"
+//                 from "the UI is broken".
+//
+// The targets below mirror what uniffi's Swift output expects:
 //   GrouseCoreFFI  the C headers (grouse_coreFFI.h / grouse_roam_coreFFI.h) + a plain
 //                  module map, so the generated Swift's `canImport(grouse_coreFFI)` works.
-//   GrouseCore     the generated Swift binding plus ListenerDefaults.swift.
-//   grouse-spike   the CLI.
+//   GrouseCore     the generated Swift bindings plus ListenerDefaults.swift.
 import PackageDescription
 
 let package = Package(
-    name: "grouse-spike",
-    platforms: [.macOS(.v13)],
+    name: "Grouse",
+    platforms: [.macOS(.v14)],
     targets: [
         .target(
             name: "GrouseCoreFFI",
@@ -38,6 +43,11 @@ let package = Package(
             name: "grouse-spike",
             dependencies: ["GrouseCore"],
             path: "Sources/grouse-spike"
+        ),
+        .executableTarget(
+            name: "Grouse",
+            dependencies: ["GrouseCore"],
+            path: "Sources/Grouse"
         ),
     ]
 )

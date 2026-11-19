@@ -1,8 +1,8 @@
 # macOS — the SwiftUI client (not started)
 
 The plan for macOS is the same shape as Android: a thin native UI over the one Rust core,
-consuming the **uniffi Swift bindings**. `clients/macos/spike/` is the de-risking step; there
-is no app yet.
+consuming the **uniffi Swift bindings**. `clients/macos/` holds the spike **and** the
+first slice of the app.
 
 Read `AGENTS.md` at the repo root for the architecture and `docs/PARITY.md` for the ledger a
 new client joins.
@@ -24,14 +24,20 @@ purpose: no settings, no storage, no AppKit. If it runs, the phases below hold.
 On the Mac (it cannot be built on the Linux host — no Apple SDK, no `lipo`, no `swift`):
 
 ```sh
-cd clients/macos/spike
-./build.sh                       # Rust ×3, lipo, bindgen, SwiftPM, swift build
+cd clients/macos
+./build.sh --host-only      # this machine's arch; drop the flag for a universal build
+open build/Grouse.app       # first launch asks for host / port / secret key / cwd
+```
 
+The CLI that ships in the same package is the fast way to tell "the core is broken" from
+"the UI is broken":
+
+```sh
 GROUSE_HOST=goose.gauvin.id GROUSE_PORT=443 GROUSE_KEY=<secret> \
   ./.build/debug/grouse-spike
 ```
 
-What it does, and what each step proves:
+What the spike's steps prove:
 
 | step | proves |
 |---|---|
@@ -79,6 +85,46 @@ two invariants that need no Darwin:
 Run it yourself: `python3 clients/macos/spike/check-bindings.py <path-to-libgrouse_core.so>`
 (a debug build — see the strip note above).
 
+## What the first slice of the app does
+
+`Sources/Grouse/` is phase 1, part one — the parts that touch the core, before the polish
+that makes it pleasant:
+
+- **connect** over TLS with `X-Secret-Key`; settings in `UserDefaults`, cache in
+  `~/Library/Application Support/grouse`
+- **sidebar** of sessions with the `</>` dev marker, and **new chat / new dev chat** (⌘N,
+  ⌘⇧N) — a mode is written at creation because it cannot be changed afterwards
+- **transcript** built from the core's item ops, keyed by the core's row ids, plain while
+  streaming and rendered once the turn ends
+- **composer** with ⌘↩ to send, **Stop** in the toolbar
+- **tool approval** driven by the server's own options (the four answers the KDE dialog
+  lost for months), plus **thinking** and **tool** rows that expand
+- **advisor** card above the composer, driven by the global Dev switch
+- a status line with the wire state, the context count and replay progress
+
+Deliberately NOT yet: Markdown as real block views, images and attachments, roam peers,
+provider/model pickers, recipes/schedules/skills/extensions, My Day, threads, MCP Apps,
+notifications, speech, and the two scroll/windowing refinements. Each is a known, sized
+piece rather than a surprise.
+
+## Layout
+
+One SwiftPM package, two executables:
+
+```
+clients/macos/
+  build.sh                 Rust (host or universal) → bindgen → SwiftPM → Grouse.app
+  check-bindings.py        the CI guard (bindings generate; every listener has a default)
+  Package.swift.in         templated by build.sh with the local lib path
+  Sources/Grouse/          the app: SwiftUI shell, CoreBridge, ChatModel, views
+  Sources/grouse-spike/    the CLI smoke test, and the check that the core links
+  Sources/GrouseCore/      generated bindings (gitignored) + ListenerDefaults.swift
+  Sources/GrouseCoreFFI/   generated C headers + our module map (gitignored)
+```
+
+One package on purpose: the bindings are generated once and `ListenerDefaults.swift` exists
+once. Two would have meant two copies of both, and the drift that follows.
+
 ## If the spike passes: the app, in phases
 
 Estimates for one person; the repo's own rules make the middle phases bigger than they look.
@@ -86,7 +132,7 @@ Estimates for one person; the repo's own rules make the middle phases bigger tha
 | phase | work | rough |
 |---|---|---|
 | 0 | the spike (above) | 2–3 d |
-| 1 | app shell, sidebar (sessions/projects/roam), mode choice at creation, chat surface, composer, attachments/images, provider+model picker | 1.5–2 wk |
+| 1 | app shell, sidebar (sessions/projects/roam), mode choice at creation, chat surface, composer, attachments/images, provider+model picker — **part one is in the tree** | 1.5–2 wk |
 | 2 | the three behaviours that are RULES, not code: incremental transcript updates (never republish the list), newest-60 windowing with `load_older` anchoring, and scroll pinning (pin from layout, decide on *settle*, stop when content height stops changing). SwiftUI gives none of it for free | 1 wk |
 | 3 | Settings + Dev, context panel, permission/elicitation dialogs, advisor card, recipes, schedules, skills, extensions, My Day, threads | 2–3 wk |
 | 4 | MCP Apps: `WKWebView` plus a loopback host (the port of `appbridge.cpp`), or the browser-handoff path only | 3–5 d |

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guards the two macOS-spike invariants that CAN be checked without a Mac.
+"""Guards the two macOS invariants that CAN be checked without a Mac.
 
 This host is Linux, and the account has no macOS CI runners (a private repo cannot use
 them for free — the job is cancelled before it starts). So the Swift itself is compiled on
@@ -17,7 +17,7 @@ the Mac by hand, and this script covers what does not need one:
    that only runs on a Mac — with no CI anywhere to blame. This is that CI.
 
 Usage (from anywhere in the repo):
-    clients/macos/spike/check-bindings.py <path-to-libgrouse_core.dylib|.so>
+    clients/macos/check-bindings.py <path-to-libgrouse_core.dylib|.so>
 
 Exit 0 clean; 1 on a broken invariant. Prints what it found either way.
 """
@@ -28,9 +28,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-SPIKE = Path(__file__).resolve().parent
-REPO = SPIKE.parents[2]
-DEFAULTS = SPIKE / "Sources" / "GrouseCore" / "ListenerDefaults.swift"
+PKG = Path(__file__).resolve().parent
+REPO = PKG.parents[1]
+DEFAULTS = PKG / "Sources" / "GrouseCore" / "ListenerDefaults.swift"
 
 
 def generate(library: Path, out: Path) -> Path:

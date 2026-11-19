@@ -28,12 +28,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SPIKE_DIR="$PWD"
+PKG_DIR="$PWD"
 REPO_ROOT="$(cd ../.. && pwd)"
 CORE_DIR="$REPO_ROOT/core"
-LIB_DIR="$SPIKE_DIR/build/lib"
-GEN_SWIFT="$SPIKE_DIR/Sources/GrouseCore/Generated"
-GEN_INCLUDE="$SPIKE_DIR/Sources/GrouseCoreFFI/include"
+LIB_DIR="$PKG_DIR/build/lib"
+GEN_SWIFT="$PKG_DIR/Sources/GrouseCore/Generated"
+GEN_INCLUDE="$PKG_DIR/Sources/GrouseCoreFFI/include"
 CMD=(run)
 HOST_ONLY=0
 
@@ -130,7 +130,39 @@ sed "s|@LIBDIR@|$LIB_DIR|g" Package.swift.in > Package.swift
 echo "== swift build =="
 swift build 2>&1 | tail -20
 
+# ---- the app bundle --------------------------------------------------------------
+# SwiftPM produces a bare executable. A .app is just a directory with a plist, which is all
+# that is needed to get a Dock icon, a menu bar and a window that behaves — no Xcode project
+# to keep in sync, which is the point: nothing here is generated that only Xcode can read.
+APP="$PKG_DIR/build/Grouse.app"
+echo "== assembling $APP =="
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "$PKG_DIR/.build/debug/Grouse" "$APP/Contents/MacOS/Grouse"
+cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>Grouse</string>
+    <key>CFBundleDisplayName</key><string>Grouse</string>
+    <key>CFBundleIdentifier</key><string>id.gauvin.grouse.macos</string>
+    <key>CFBundleExecutable</key><string>Grouse</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSHumanReadableCopyright</key><string>AGPL-3.0-or-later</string>
+</dict>
+</plist>
+PLIST
+# Ad-hoc signature: enough to launch a locally built bundle. A distributable build needs a
+# Developer ID identity + notarisation (phase 6 in README.md), which is a different job.
+codesign --force --sign - "$APP" >/dev/null 2>&1 || echo "note: ad-hoc codesign skipped"
+
 echo
-echo "Built. Run it:"
-echo "  GROUSE_HOST=goose.gauvin.id GROUSE_PORT=443 GROUSE_KEY=… ./.build/debug/grouse-spike"
-echo "(env vars: GROUSE_HOST, GROUSE_PORT, GROUSE_KEY, GROUSE_TLS=1|0, GROUSE_CWD, GROUSE_CACHE)"
+echo "Built."
+echo "  app:  open $APP                       (connection settings are in the app)"
+echo "  cli:  GROUSE_HOST=… GROUSE_KEY=… $PKG_DIR/.build/debug/grouse-spike"
+echo "        env: GROUSE_HOST, GROUSE_PORT, GROUSE_KEY, GROUSE_TLS=1|0, GROUSE_CWD, GROUSE_CACHE"
