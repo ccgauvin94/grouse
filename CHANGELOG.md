@@ -6,6 +6,23 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed — the Activity slide-out is withdrawn, and the app bar gets out of the way
+
+- **Activity is a bottom sheet again**, opened from the composer's "+" sheet and from the
+  header count while work is live. 0.2.114 gave it a permanent tab on the chat's right edge,
+  which answered "too buried" by putting a new control where there is no settled home for one —
+  where the button belongs is still an open question, so the surface goes back to where it was
+  rather than shipping a guess. The blurb stays gone and the empty state is one line either
+  way.
+- **The context donut sits halfway back towards the roam endpoint chip.** 0.2.114 opened the
+  gap on the correct side but overdid it; it is 6dp now instead of 12dp.
+- **The app bar no longer appends " · working…" to the chat's name.** The title is the one
+  piece of text that says where you are, and it was being rewritten in exactly the moment you
+  are most likely to be reading it. The composer's thinking line already reports the turn, and
+  the running count still appears beside the donut.
+
+grouse 0.2.115 (versionCode 219).
+
 ### Changed — Activity is a pane on the chat's right edge, and the app bar is quieter
 
 - **Activity is no longer behind the composer's "+" sheet.** It is a right-edge tab on the

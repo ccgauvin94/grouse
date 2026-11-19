@@ -1256,10 +1256,6 @@ class ConnectionManager private constructor(context: Context) {
      *  to the drawer, which otherwise flings the left menu open over the dock. */
     val pinnedDockOpen = mutableStateOf(false)
 
-    /** True while the chat's Activity pane is open. Same gesture suspension as
-     *  [pinnedDockOpen], and the two are mutually exclusive — they own the same edge. */
-    val activityDockOpen = mutableStateOf(false)
-
     /** Config option ids this client exposes — shared with Screens.kt so the same single
      *  list drives both the Settings picker and the saved-option restore. */
     private val optionIds = CONFIG_IDS
