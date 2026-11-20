@@ -6,6 +6,41 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed — a reopen lands on what is new, and the cache costs one parse
+
+- **A chat reopened with something new in it now opens at the NEWEST message.** Every
+  reopen used to restore a remembered reading position (distance from the end), so a
+  thread that had received a note while it was closed — the briefing writing into an
+  area — opened above that note. The page now keeps the session's last-activity stamp
+  from when you left and compares it against the server's current one: unchanged means
+  restore, changed means land at the end. A thread chat is never in `session/list`
+  (it lives in the assistant project, which the core filters out), so it has no stamp
+  to compare and always lands at the newest row — which is what a thread wants.
+- **A chat whose rows arrive AFTER the switch no longer opens at the top.** The
+  scroll-to-end loop gave up on an empty transcript — it "settled" at height 0 and
+  cleared the one flag that asks for the bottom — so the cache read and the replayed
+  window then landed with nothing left asking for the end. The flag now stays armed
+  until there are rows to be at the end of, and an empty list no longer starts the
+  loop at all (it was 40 layout passes on nothing).
+- **The transcript cache is parsed once, straight into its types.** `load_transcript`
+  built a `serde_json::Value` tree and then deep-cloned every item out of it to
+  deserialize, so a conversation was copied twice before a single row was painted —
+  and this runs on the UI thread on every chat switch. The write side borrowed the
+  slice instead of building a `Value` first. A file the typed parse rejects still
+  falls back to the old lenient read (skipping an unparseable row rather than
+  discarding the conversation).
+- **One timing line per chat switch**, so "the client hangs on a switch" stops being a
+  guess: `grouse: open <id> painted in Nms (R rows, sync Mms)` splits the synchronous
+  cost (cache read + parse, and any core probe) from the wait for a painted window.
+
+### Fixed — the composer's Send button no longer squashes
+
+- Preferred width is not a floor in a Qt layout, so a narrow chat pane shrank the
+  buttons and clipped their labels ("Se"). The mode pill, attach and Send/Stop now pin
+  `Layout.minimumWidth` to their own implicit width, and the entry field's floor drops
+  to three grid units — the field is the only item that can shrink. MyDay's assistant
+  row gets the same pin.
+
 ### Changed — the chat's own menu, and background work gets the mark it deserves
 
 - **A "…" in the top-right corner, where the other app keeps its overflow.** It opens the

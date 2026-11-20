@@ -196,6 +196,15 @@ public:
     QVariant globalExtensions() const;
     QString currentSessionTitle() const;
     QString currentSessionId() const { return m_currentSessionId; }
+    /** The session's "last activity" stamp as the server last reported it (the
+     *  row's lastMessageAt, falling back to updatedAt). Empty when the session is
+     *  not in the list at all — a thread chat, which session/list never returns.
+     *
+     *  The chat page uses it to tell a REOPEN with something new in it (land at
+     *  the end) from a reopen of a chat you left scrolled up (restore that
+     *  position). Without it, every reopen restored a stale reading position and
+     *  hid whatever had arrived since. */
+    Q_INVOKABLE QString sessionStamp(const QString &sessionId) const;
     bool landingPage() const { return m_landing; }
 
     Q_INVOKABLE void connectToServer();
@@ -936,6 +945,12 @@ private:
     bool m_roamRestored = false;   // persisted roam peers re-armed only once (at Ready)
     /// cwd of the freshly-opened chat, remembered so auto-connect can resume it.
     QString m_lastCwd;
+    /// When the last `openSession` started. Reported once per open, together with
+    /// the first painted window, so "the client hangs on a chat switch" can be
+    /// split into client prep vs. load-without-a-paint instead of guessed at.
+    QElapsedTimer m_openClock;
+    QString m_openFor;
+    qint64 m_openEarlier = 0;
     /// Coalesces messagesChanged while chunks stream (see requestMessagesUpdate).
     QTimer *m_updateTimer = nullptr;
     /// Fires when the tail has stopped receiving chunks; renders it without

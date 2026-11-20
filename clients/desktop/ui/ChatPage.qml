@@ -404,6 +404,11 @@ Kirigami.Page {
     // the same reading position is a different absolute offset on every open.
     // First open of a chat in this app session starts at the bottom instead.
     property var scrollMem: ({})
+    // The session's last-activity stamp as it was when we LEFT it (sessionId -> stamp).
+    // A reopen compares it against the server's current one: something arrived while we
+    // were away, so land on the newest message instead of restoring an old reading
+    // position that predates it. Reopening a chat with nothing new still restores.
+    property var seenStamp: ({})
     property string scrollSession: ""
     property bool pendingRestore: false
     property bool pendingFirstScroll: false
@@ -551,9 +556,14 @@ Kirigami.Page {
     }
 
     function handleSessionSwitch() {
-        // Remember where the outgoing chat was scrolled before the model swaps.
-        if (scrollSession.length > 0 && list.contentHeight > 0)
-            scrollMem[scrollSession] = list.contentHeight - list.height - list.contentY
+        // Remember where the outgoing chat was scrolled before the model swaps — and
+        // what it looked like, so the return can tell "still where I left it" from
+        // "something arrived while I was gone".
+        if (scrollSession.length > 0) {
+            if (list.contentHeight > 0)
+                scrollMem[scrollSession] = list.contentHeight - list.height - list.contentY
+            seenStamp[scrollSession] = Mgr.sessionStamp(scrollSession)
+        }
         scrollSession = Mgr.currentSessionId
         // Rebuild the provider/model pickers for the chat being opened. They were only
         // ever rebuilt on a config/providers event, so after a switch they kept showing
@@ -565,7 +575,14 @@ Kirigami.Page {
         scrollApplyAttempts = 0
         if (scrollSession.length === 0)
             return
-        if (scrollSession in scrollMem) {
+        // "" means the server never lists this chat — a thread chat lives in the
+        // assistant project, which session/list filters out — so there is nothing to
+        // compare and the newest message is the only honest landing spot. That is also
+        // what makes threads land on the note that was just written to them.
+        const now = Mgr.sessionStamp(scrollSession)
+        const before = seenStamp[scrollSession]
+        const changed = now === "" || before === undefined || now !== before
+        if (!changed && (scrollSession in scrollMem)) {
             pendingRestore = true
             pinnedToEnd = false
         } else {
@@ -612,6 +629,13 @@ Kirigami.Page {
             return      // the running chain re-reads the layout on its next pass
         if (!page.pinnedToEnd || list.height <= 0)
             return
+        // Nothing painted yet (the cache read and the replayed window land after the
+        // switch). Spinning here burns 40 layout passes on an empty list and then
+        // CLEARS the flag, which is exactly how a chat opened at the top: the rows
+        // arrived with nothing left asking to be at the bottom of them. Stay armed;
+        // onCountChanged and onContentHeightChanged call back in.
+        if (Mgr.messageModel.count === 0)
+            return
         page.pinning = true
         page.pinHeight = -1
         page.pinPass(0)
@@ -637,7 +661,10 @@ Kirigami.Page {
             if (settled) {
                 page.pinning = false
                 page.pinHeight = -1
-                page.pendingFirstScroll = false
+                // An empty transcript "settles" instantly. Only a real one has
+                // finished the job (see the guard in pinToEnd).
+                if (Mgr.messageModel.count > 0)
+                    page.pendingFirstScroll = false
                 return
             }
             page.pinPass(attempt + 1)
@@ -669,6 +696,10 @@ Kirigami.Page {
             if (page.pendingFirstScroll) {
                 page.pinToEnd()
             } else if (page.pendingRestore) {
+                // Same rule for a restore: with nothing painted there is no height to
+                // measure from, and clearing the flag here parked the view at the top.
+                if (Mgr.messageModel.count === 0)
+                    return
                 page.pendingRestore = false
                 // Stored as the DISTANCE FROM THE END, not as contentY: the core fills the
                 // history in pages, so the same reading position is a different absolute

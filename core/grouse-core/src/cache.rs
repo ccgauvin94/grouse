@@ -61,6 +61,30 @@ use crate::{Item, SessionSummary};
 /// it with ids.
 pub const TRANSCRIPT_CACHE_VERSION: u64 = 8;
 
+/// The on-disk transcript file, as its own types: save and load each cost ONE
+/// pass, with no intermediate `Value` tree to walk or copy.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedTranscript {
+    v: u64,
+    #[serde(rename = "updatedAt", default)]
+    updated_at: String,
+    #[serde(default)]
+    complete: bool,
+    #[serde(default)]
+    items: Vec<Item>,
+}
+
+/// The write side, borrowing: serializing `&[Item]` directly is what keeps the
+/// save from copying every string a second time.
+#[derive(serde::Serialize)]
+struct CachedTranscriptRef<'a> {
+    v: u64,
+    #[serde(rename = "updatedAt")]
+    updated_at: &'a str,
+    complete: bool,
+    items: &'a [Item],
+}
+
 /// The tool catalog cache, mirroring the desktop's tool-cache JSON.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -154,23 +178,27 @@ impl CacheStore {
         if session_id.is_empty() || items.is_empty() {
             return true;
         }
-        let Ok(arr) = serde_json::to_value(items) else {
+        // Borrowed view, serialized straight: `to_value(items)` built a whole
+        // `Value` tree and then threw it away, which is a second copy of every
+        // string in the conversation.
+        //
+        // Does this file reach the session's ORIGIN? A tail-first open caches
+        // the recent rows and fetches the rest in the background
+        // (docs/TRANSCRIPT_MODEL.md, "Windows"), so "settled" and "stale" are
+        // no longer enough to describe it: a fresh, settled, PARTIAL cache must
+        // still page the server for its history, and a complete one must not.
+        // Absent (every cache written before this) reads as false, which costs
+        // one page once and then self-heals.
+        let file = CachedTranscriptRef {
+            v: TRANSCRIPT_CACHE_VERSION,
+            updated_at,
+            complete,
+            items,
+        };
+        let Ok(bytes) = serde_json::to_vec(&file) else {
             return false;
         };
-        let root = serde_json::json!({
-            "v": TRANSCRIPT_CACHE_VERSION,
-            "updatedAt": updated_at,
-            "items": arr,
-            // Does this file reach the session's ORIGIN? A tail-first open
-            // caches the recent rows and fetches the rest in the background
-            // (docs/TRANSCRIPT_MODEL.md, "Windows"), so "settled" and "stale"
-            // are no longer enough to describe it: a fresh, settled, PARTIAL
-            // cache must still page the server for its history, and a complete
-            // one must not. Absent (every cache written before this) reads as
-            // false, which costs one page once and then self-heals.
-            "complete": complete,
-        });
-        write_json(&self.transcript_path(session_id), &root)
+        atomic_write(&self.transcript_path(session_id), &bytes).is_ok()
     }
 
     /// Load a session transcript as the rich item list. Returns `(items,
@@ -181,10 +209,34 @@ impl CacheStore {
     /// reaches the session's origin (see [`Self::save_transcript`]).
     pub fn load_transcript(&self, session_id: &str) -> Option<(Vec<Item>, String, bool)> {
         let bytes = fs::read(self.transcript_path(session_id)).ok()?;
-        let root: Value = serde_json::from_slice(&bytes).ok()?;
-        // A pre-rich cache is lossy (see TRANSCRIPT_CACHE_VERSION) and its own
-        // stamp can make it look fresh, so treat it as absent: the caller then
-        // replays and rewrites it. One-time; the format is stamped from here on.
+        // ONE parse, straight into the types. The old shape parsed to `Value` and
+        // then deep-cloned every item out of the tree to deserialize it, so a
+        // conversation was copied twice before a single row was painted — and this
+        // runs on the UI thread on EVERY chat switch (plan_cache_paint).
+        if let Ok(file) = serde_json::from_slice::<CachedTranscript>(&bytes) {
+            if file.v == TRANSCRIPT_CACHE_VERSION {
+                return if file.items.is_empty() {
+                    None
+                } else {
+                    Some((file.items, file.updated_at, file.complete))
+                };
+            }
+            // Right shape, wrong version: a pre-rich cache is lossy and its own
+            // stamp can make it look fresh, so treat it as absent (the caller then
+            // replays and rewrites it). One-time; the format is stamped from here on.
+            return None;
+        }
+        // Something in the file did not match the types. Fall back to the lenient
+        // read, which SKIPS an item it cannot parse instead of throwing away the
+        // whole conversation — a half-broken cache is still a better paint than an
+        // empty chat, and the replay repairs it.
+        Self::load_transcript_lenient(&bytes)
+    }
+
+    /// The pre-2026-11-20 read: `Value` tree, per-item parse, bad rows skipped.
+    /// Kept as the fallback for a file the typed parse rejects.
+    fn load_transcript_lenient(bytes: &[u8]) -> Option<(Vec<Item>, String, bool)> {
+        let root: Value = serde_json::from_slice(bytes).ok()?;
         if root.get("v").and_then(Value::as_u64) != Some(TRANSCRIPT_CACHE_VERSION) {
             return None;
         }

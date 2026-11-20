@@ -33,6 +33,7 @@
 #include <QSaveFile>
 #include <QSet>
 #include <QStandardPaths>
+#include <QElapsedTimer>
 #include <QTimer>
 #include <QUrl>
 
@@ -758,10 +759,30 @@ void Manager::openSession(const QString &sessionId)
     setStatus(QStringLiteral("loading…"));
     m_lastCwd = workingDir();
     if (m_bridge && m_bridge->isAvailable()) {
+        m_openClock.start();
+        m_openFor = sessionId;
         const QByteArray sid = sessionId.toUtf8();
         m_bridge->api().grouse_open_session(m_bridge->handle(), sid.constData());
+        const qint64 opened = m_openClock.elapsed();
         m_bridge->api().grouse_load_cached_transcript(m_bridge->handle(), sid.constData());
+        // One line per switch, because two very different costs hide behind "the
+        // UI hangs": the SYNCHRONOUS part here (cache read + parse, and any core
+        // probe) and the wait until the first painted window. The second number is
+        // reported from coreOnItem's Window branch.
+        m_openEarlier = opened;
     }
+}
+
+QString Manager::sessionStamp(const QString &sessionId) const
+{
+    for (const auto &v : m_sessions) {
+        const QVariantMap row = v.toMap();
+        if (row.value("sessionId").toString() != sessionId)
+            continue;
+        const QString stamp = row.value("lastMessageAt").toString();
+        return stamp.isEmpty() ? row.value("updatedAt").toString() : stamp;
+    }
+    return {};
 }
 
 void Manager::refreshSession()
@@ -3656,6 +3677,17 @@ void Manager::coreOnItem(const QString &json)
             || m_status == QStringLiteral("reloading…")
             || m_status == QStringLiteral("reloading from the start…"))
             setStatus(QStringLiteral("ready"));
+        // The first window after an open is the moment the chat is PAINTED. One line
+        // per switch: the synchronous cost (cache parse + any core probe) against the
+        // wait for a paint, which is the split that decides where a "hang" lives.
+        if (!m_openFor.isEmpty() && m_openFor == m_currentSessionId) {
+            qInfo().noquote() << QStringLiteral("grouse: open %1 painted in %2ms (%3 rows, sync %4ms)")
+                                     .arg(m_openFor)
+                                     .arg(m_openClock.elapsed())
+                                     .arg(m_messageModel->rowCount())
+                                     .arg(m_openEarlier);
+            m_openFor.clear();
+        }
         refreshActivity();   // the chat is painted: its lanes are what the panel shows
         return;
     }
