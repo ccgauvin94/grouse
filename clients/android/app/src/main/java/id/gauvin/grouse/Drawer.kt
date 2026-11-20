@@ -490,16 +490,30 @@ fun DrawerNoMatches(query: String, onClear: () -> Unit) {
     }
 }
 
-/** Long-press actions for one session: Rename / Move to project / Archive / Delete.
+/** Actions for one session: Rename / Move to project / Archive / Delete, and (from the chat's
+ *  app-bar menu) the background-task list at the head.
  *  Archive hides (history stays server-side, restorable via unarchive); Delete is goose's real
  *  session/delete (≥1.44 -- the old "-32601 no delete" note is obsolete) and is permanent.
  *  Move is the sanctioned working_dir rewrite -- also the repair for chats stranded by a
- *  renamed project directory. */
+ *  renamed project directory.
+ *
+ *  [onActivity] adds the "Background tasks" row and is what the chat's "…" menu passes; a
+ *  long-press in the drawer leaves it null, because there is no chat on screen to report on.
+ *  [sessionActions] = false is the Assistant thread: notify and the scheduler find it by id
+ *  and by the exact title "Assistant", so renaming, archiving or deleting it from a menu would
+ *  break the scheduled runs. */
 @Composable
-internal fun SessionActionsDialog(cm: ConnectionManager, s: SessionInfo, onDone: () -> Unit) {
+internal fun SessionActionsDialog(
+    cm: ConnectionManager,
+    s: SessionInfo,
+    // onDone stays LAST so the drawer's call sites keep their trailing lambda.
+    onActivity: (() -> Unit)? = null,
+    sessionActions: Boolean = true,
+    onDone: () -> Unit,
+) {
     var mode by remember(s.sessionId) { mutableStateOf("menu") }
     when (mode) {
-        "menu" -> SessionActionsSheet(cm, s, onDone) { mode = it }
+        "menu" -> SessionActionsSheet(cm, s, onDone, onActivity, sessionActions) { mode = it }
         "rename" -> {
             var newName by remember(s.sessionId) { mutableStateOf(s.title) }
             AlertDialog(
@@ -572,6 +586,8 @@ private fun SessionActionsSheet(
     cm: ConnectionManager,
     s: SessionInfo,
     onDone: () -> Unit,
+    onActivity: (() -> Unit)?,
+    sessionActions: Boolean,
     onPick: (String) -> Unit,
 ) {
     val peer = ConnectionManager.roamPeer(s.sessionId)
@@ -592,27 +608,37 @@ private fun SessionActionsSheet(
                 )
             }
             Spacer(Modifier.height(6.dp))
-            // Projects and export are LOCAL concepts — the fork's federation routes
-            // rename/archive/delete to the owning peer (since roam-4), but a remote session
-            // can't be filed into this server's projects or exported here.
-            SheetAction(Icons.Filled.Edit, stringResource(R.string.rename_chat_menu)) { onPick("rename") }
-            if (peer == null) {
-                SheetAction(Icons.Filled.Folder, stringResource(R.string.move_to_project_menu)) { onPick("move") }
-                SheetAction(Icons.Filled.Share, stringResource(R.string.export_chat)) {
-                    cm.exportSession(s.sessionId)
+            // Background tasks first, above a rule: it is a readout of this chat, not an edit
+            // of it, and the mark is the one the header shows while work is live.
+            if (onActivity != null) {
+                SheetRow(label = stringResource(R.string.background_tasks), onClick = onActivity) {
+                    BackgroundTasksGlyph(Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurface)
+                }
+                if (sessionActions) HorizontalDivider(Modifier.padding(horizontal = 20.dp, vertical = 6.dp))
+            }
+            if (sessionActions) {
+                // Projects and export are LOCAL concepts — the fork's federation routes
+                // rename/archive/delete to the owning peer (since roam-4), but a remote session
+                // can't be filed into this server's projects or exported here.
+                SheetAction(Icons.Filled.Edit, stringResource(R.string.rename_chat_menu)) { onPick("rename") }
+                if (peer == null) {
+                    SheetAction(Icons.Filled.Folder, stringResource(R.string.move_to_project_menu)) { onPick("move") }
+                    SheetAction(Icons.Filled.Share, stringResource(R.string.export_chat)) {
+                        cm.exportSession(s.sessionId)
+                        onDone()
+                    }
+                }
+                if (s.archived) SheetAction(Icons.Filled.Unarchive, stringResource(R.string.unarchive_chat)) {
+                    cm.unarchiveSession(s.sessionId)
                     onDone()
                 }
-            }
-            if (s.archived) SheetAction(Icons.Filled.Unarchive, stringResource(R.string.unarchive_chat)) {
-                cm.unarchiveSession(s.sessionId)
-                onDone()
-            }
-            SheetAction(Icons.Filled.Archive, stringResource(R.string.archive_chat_menu)) { onPick("archive") }
-            // A rule, not just red text: the destructive row sits apart so a thumb aiming at
-            // Archive one row up cannot land on Delete.
-            HorizontalDivider(Modifier.padding(horizontal = 20.dp, vertical = 6.dp))
-            SheetAction(Icons.Filled.Delete, stringResource(R.string.delete_chat_menu), danger = true) {
-                onPick("delete")
+                SheetAction(Icons.Filled.Archive, stringResource(R.string.archive_chat_menu)) { onPick("archive") }
+                // A rule, not just red text: the destructive row sits apart so a thumb aiming at
+                // Archive one row up cannot land on Delete.
+                HorizontalDivider(Modifier.padding(horizontal = 20.dp, vertical = 6.dp))
+                SheetAction(Icons.Filled.Delete, stringResource(R.string.delete_chat_menu), danger = true) {
+                    onPick("delete")
+                }
             }
         }
     }
@@ -627,6 +653,25 @@ private fun SheetAction(
     danger: Boolean = false,
     onClick: () -> Unit,
 ) {
+    SheetRow(label = label, danger = danger, onClick = onClick) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.size(18.dp),
+        )
+    }
+}
+
+/** A sheet row whose leading mark the caller supplies, so a drawn glyph (the background-tasks
+ *  diamond) and a Material icon land at the same optical size and the same 14dp gutter. */
+@Composable
+private fun SheetRow(
+    label: String,
+    danger: Boolean = false,
+    onClick: () -> Unit,
+    leading: @Composable () -> Unit,
+) {
     val tint = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
     Row(
         Modifier.fillMaxWidth()
@@ -634,7 +679,7 @@ private fun SheetAction(
             .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+        leading()
         Spacer(Modifier.width(14.dp))
         Text(label, style = MaterialTheme.typography.bodyLarge, color = tint)
     }

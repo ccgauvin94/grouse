@@ -6,6 +6,32 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed — the chat's own menu, and background work gets the mark it deserves
+
+- **A "…" in the top-right corner, where the other app keeps its overflow.** It opens the
+  chat's sheet: Background tasks at the head, then the session actions (Rename / Move to
+  project / Export / Archive / Delete) that until now were reachable only by long-pressing
+  this chat's row in the drawer. The drawer keeps its long-press; this is the same sheet,
+  pointed at the chat you are actually reading.
+- **Background tasks has a mark of its own: a diamond outline with a solid core.** Drawn
+  rather than borrowed from Material, because it has to be the same mark everywhere it
+  appears — the app-bar glyph, the menu row, and the composer's "+" tile now all use it, and
+  the feature is named "Background tasks" in all three. It replaces the "3 running" pill,
+  which said the same thing in words and stayed for the life of a chat.
+- **The glyph sits left of the context donut and only while work is live.** Tapping it opens
+  the same sheet. When nothing is running it is not there, so the header has one fewer thing
+  to read in the ordinary case.
+- **A roam chat names its endpoint UNDER the chat's name**, the way the other app puts
+  "Remote Control" there, instead of as an AssistChip on the far right. The chip competed
+  with the donut for the one line and reported the wire's state a second time right beside
+  the connection dot; the subtitle keeps its colour (grey when connected, amber while
+  retrying, red when down) and still opens the endpoint's page.
+- The Assistant thread's "…" menu carries Background tasks only — notify and the scheduler
+  find that session by id and by the exact title "Assistant", so rename/archive/delete are
+  deliberately absent there.
+
+grouse 0.2.118 (versionCode 222).
+
 ### Fixed — a roam reopen that came back showing an older turn
 
 - **A stale-cache open merges in place instead of re-downloading the chat.** A merge keeps

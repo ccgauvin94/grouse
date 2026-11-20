@@ -29,7 +29,9 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.geometry.Offset
@@ -71,6 +73,7 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Send
@@ -278,6 +281,69 @@ private fun LevelBar(level: Float) {
     }
 }
 
+/** The background-tasks mark: a diamond outline with a solid core.
+ *
+ *  Drawn rather than borrowed because it is not a Material symbol — the point is to match the
+ *  mark the other assistant app uses for live work, and the header glyph and the menu row have
+ *  to be recognisably the same thing. One stroke weight, no fill on the outline: at 17dp a
+ *  second weight turns into a smudge. */
+@Composable
+fun BackgroundTasksGlyph(modifier: Modifier = Modifier, tint: Color = Color.Unspecified) {
+    val color = if (tint == Color.Unspecified) MaterialTheme.colorScheme.onSurfaceVariant else tint
+    Canvas(modifier) {
+        val cx = size.width / 2f
+        val cy = size.height / 2f
+        val stroke = (size.minDimension * 0.09f).coerceAtLeast(1.4f)
+        val r = size.minDimension / 2f - stroke / 2f
+        fun diamond(radius: Float) = Path().apply {
+            moveTo(cx, cy - radius)
+            lineTo(cx + radius, cy)
+            lineTo(cx, cy + radius)
+            lineTo(cx - radius, cy)
+            close()
+        }
+        drawPath(diamond(r), color, style = Stroke(width = stroke, join = StrokeJoin.Round))
+        drawPath(diamond(r * 0.33f), color)
+    }
+}
+
+/** The endpoint a remote chat lives on, as a subtitle under the chat's name. Colour only
+ *  when there is something wrong: a green line every time would say nothing, and the
+ *  connection dot already reports the healthy case. */
+@Composable
+private fun RoamSubtitle(peer: String, status: String?, onClick: () -> Unit) {
+    val state = roamLinkState(status)
+    val color = when (state) {
+        LinkState.Connected -> MaterialTheme.colorScheme.onSurfaceVariant
+        LinkState.Retrying -> MaterialTheme.statusColors.connecting
+        LinkState.Down -> MaterialTheme.statusColors.offline
+    }
+    // A colour alone cannot say "cannot connect": while this chat's peer is down, name the
+    // phase beside it ("laptop · no reply", "laptop · reconnect 3").
+    val label = if (state == LinkState.Connected) peer
+        else "$peer · " + (ConnectionManager.roamStatusDetail(status)
+            ?: ConnectionManager.roamStatusShort(status)).take(30)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            // Lines up under the title text, past the connection dot.
+            .padding(start = 18.dp, top = 1.dp)
+            .clip(RoundedCornerShape(50))
+            .clickable(onClick = onClick)
+            .padding(end = 10.dp, top = 1.dp, bottom = 1.dp),
+    ) {
+        LinkDot(state, dotSize = 6.dp, touchSize = 10.dp)
+        Spacer(Modifier.width(5.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = color,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Unit) {
@@ -294,6 +360,10 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
     var showTurnLog by remember { mutableStateOf(false) }
     // The chat's work lanes (sub-agents + running calls), opened from the header badge.
     var showActivity by remember { mutableStateOf(false) }
+    // The chat's "…" menu (background tasks + the session actions the drawer's long-press
+    // used to own). A sheet with the chat's own name as its header, so the menu says which
+    // chat it is about even when the drawer behind it is showing a different one.
+    var showChatMenu by remember { mutableStateOf(false) }
     // Debug diagnostics (Settings → Experimental, default OFF): the turn log and the
     // live turn-state readout both expose internal state rather than conversation.
     val debugTools = cm.store.debugTools
@@ -553,6 +623,24 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
         ActivitySheet(cm, onDismiss = { showActivity = false })
     }
 
+    // The "…" menu. session/list only returns chats that have messages, so a brand-new
+    // chat is not in cm.sessions yet — build a row from the id rather than come up empty.
+    if (showChatMenu) {
+        val sid = cm.currentSession.value
+        val info = cm.sessions.value.firstOrNull { it.sessionId == sid }
+            ?: sid?.let {
+                SessionInfo(it, cm.currentChatTitle ?: ctx.getString(R.string.new_chat), "", 0, "")
+            }
+        if (info != null) SessionActionsDialog(
+            cm, info,
+            onDone = { showChatMenu = false },
+            onActivity = { showChatMenu = false; showActivity = true },
+            // The Assistant thread is not a chat you rename or archive away: notify and the
+            // scheduler find it by id and by the exact title "Assistant".
+            sessionActions = !cm.onAssistant,
+        )
+    }
+
     if (showComposer) {
         ComposerSheet(cm,
             // Every tile closes the sheet first (ComposerSheet does it): each
@@ -641,8 +729,8 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
             title = {
                 Column {
                     Row(verticalAlignment = Alignment.CenterVertically,
-                        // fillMaxWidth lets the weight spacer push the donut to the
-                        // far right of the title row.
+                        // fillMaxWidth: the title carries the weight, so the cluster sits at
+                        // the far right and the name ellipsizes into whatever is left.
                         modifier = Modifier.fillMaxWidth()
                             // Long-press the title for the core's turn log: the one
                             // place the client can show WHY a chat thinks it is busy.
@@ -667,12 +755,11 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                             },
                         )
                         Spacer(Modifier.width(2.dp))
-                        // Single line + ellipsis: this Row shares the app bar with up to 3 action
-                        // icons, so on a compact width the default (titleLarge, unbounded) title text
-                        // used to wrap to a second line and visually collide with/get clipped by the
-                        // icons (e.g. "Assistant · working…" broke across two lines mid-word). A
-                        // tighter style plus a hard single-line cap keeps it readable and self-eliding
-                        // instead of visually breaking.
+                        // Single line + ellipsis: this Row shares the app bar with the
+                        // status cluster, so on a compact width the default (titleLarge,
+                        // unbounded) title used to wrap to a second line and collide with
+                        // the icons. A tighter style plus a hard single-line cap keeps it
+                        // readable and self-eliding instead of visually breaking.
                         //
                         // The TITLE is the chat's NAME, full stop. It used to be replaced by
                         // "Reconnecting…" / "Connecting…" / "Offline · tap to reconnect" and
@@ -685,35 +772,36 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                             style = MaterialTheme.typography.titleMedium,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                            // weight, not a spacer: unweighted children are measured first,
+                            // so the cluster never gets squeezed — a long name ellipsizes
+                            // instead of pushing the donut off the bar.
+                            modifier = Modifier.weight(1f),
                         )
-                        // The right-hand status cluster: live work, then the context donut.
-                        // Both are readouts about this chat, not part of its name.
-                        val lanes = cm.activity.value
-                        val running = lanes.count { it.running }
-                        val u = cm.usage.value
-                        val hasRing = u != null && u.size > 0 && !cm.compacting.value
-                        if (running > 0 || hasRing) {
-                            Spacer(Modifier.weight(1f))
-                            // LIVE work only. It used to read "3 agents" for the life of the
-                            // chat and, after a cancel, kept saying it for work that no longer
-                            // existed (2026-11-13) — the sheet, which also holds the finished
-                            // runs, is reachable from the composer's "+" sheet.
-                            if (running > 0) {
-                                Surface(
-                                    shape = RoundedCornerShape(50),
-                                    color = MaterialTheme.colorScheme.secondaryContainer,
-                                    modifier = Modifier.clickable { showActivity = true },
-                                ) {
-                                    Text(
-                                        "$running running",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                    )
-                                }
+                        // The right-hand cluster: live work, then the context donut. Both are
+                        // readouts about this chat, not part of its name.
+                        val running = cm.activity.value.count { it.running }
+                        // LIVE work only. It used to read "3 agents" for the life of the chat
+                        // and, after a cancel, kept saying it for work that no longer existed
+                        // (2026-11-13). It is the background-tasks mark now — drawn the way the
+                        // other app draws it, so the header and the menu row are one symbol —
+                        // and it is on screen only while something is actually running.
+                        if (running > 0) {
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .clickable { showActivity = true },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                BackgroundTasksGlyph(
+                                    modifier = Modifier.size(17.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
-                            if (hasRing) {
-                                Spacer(Modifier.width(8.dp))
+                        }
+                        cm.usage.value?.let { u ->
+                            if (u.size > 0 && !cm.compacting.value) {
+                                if (running > 0) Spacer(Modifier.width(4.dp))
                                 // A 24dp target around a 14dp ring: the tap is the only way
                                 // into the breakdown, and 14dp is a miss waiting to happen on
                                 // a phone held one-handed.
@@ -731,15 +819,24 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                                         modifier = Modifier.size(14.dp),
                                     )
                                 }
-                                // The gap that keeps the ring from reading as part of the roam
-                                // endpoint's name. It has to be AFTER the ring: the weight
-                                // spacer above pushes the cluster right but cannot open space
-                                // on its right-hand side, so the old spacer placed before the
-                                // ring was a no-op. 6dp is half the distance that turned out to
-                                // be one step too far.
+                                // The gap that keeps the ring from reading as part of the
+                                // "…" button beside it. It has to be AFTER the ring: a
+                                // spacer before it would be inside the title's weight.
                                 Spacer(Modifier.width(6.dp))
                             }
                         }
+                    }
+                    // A remote chat names its endpoint UNDER its name, the way the other app
+                    // puts "Remote Control" there. It used to be an AssistChip in `actions`,
+                    // where it fought the donut for the one line and reported the wire's state
+                    // a second time right beside the connection dot. Tapping it opens the
+                    // endpoint page — reconnect / disconnect / remove live there.
+                    if (roamPeer != null) {
+                        RoamSubtitle(
+                            peer = roamPeer,
+                            status = cm.roamStatus[roamPeer],
+                            onClick = { nav.navigate("roam_endpoint/" + Uri.encode(roamPeer)) },
+                        )
                     }
                 }
             },
@@ -763,40 +860,14 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                             modifier = Modifier.size(9.dp).align(Alignment.TopEnd)) {}
                     }
                 }
-                // Tools and model/mode now live in the + sheet and model pill — nothing
-                // in the top bar for them. The roam chip stays as the "this chat is
-                // remote" marker, and it reports that endpoint the same way the dot
-                // reports the main wire: colour for state, tap for the endpoint's page
-                // (which is where its reconnect/disconnect/remove actions live).
-                if (roamPeer != null) {
-                    val chipStatus = cm.roamStatus[roamPeer]
-                    val chipState = roamLinkState(chipStatus)
-                    AssistChip(
-                        onClick = { nav.navigate("roam_endpoint/" + Uri.encode(roamPeer)) },
-                        label = {
-                            Text(
-                                // A colour alone cannot say "cannot connect": while
-                                // this chat's peer is down, name the phase beside it
-                                // ("laptop · no reply", "laptop · reconnect 3").
-                                if (chipState == LinkState.Connected) roamPeer
-                                else "$roamPeer · " + (ConnectionManager.roamStatusDetail(chipStatus)
-                                    ?: ConnectionManager.roamStatusShort(chipStatus)).take(30),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                // Tint only when there is something wrong: a green chip every
-                                // time would say nothing, red/amber says "this endpoint" at a
-                                // glance without the user reading the dot.
-                                color = when (chipState) {
-                                    LinkState.Connected -> MaterialTheme.colorScheme.onSurfaceVariant
-                                    LinkState.Retrying -> MaterialTheme.statusColors.connecting
-                                    LinkState.Down -> MaterialTheme.statusColors.offline
-                                },
-                            )
-                        },
-                        leadingIcon = {
-                            LinkDot(chipState, dotSize = 9.dp, touchSize = 16.dp)
-                        },
-                        modifier = Modifier.padding(end = 4.dp),
+                // The chat's own "…", where the other app keeps its overflow: background
+                // tasks at the head, then the session actions that used to be reachable
+                // only by long-pressing this chat's row in the drawer. The roam chip that
+                // used to sit here is a subtitle under the chat's name now.
+                IconButton(onClick = { showChatMenu = true }) {
+                    Icon(
+                        Icons.Filled.MoreVert,
+                        contentDescription = stringResource(R.string.chat_menu),
                     )
                 }
             }
@@ -1941,7 +2012,7 @@ private fun ActivityLaneList(cm: ConnectionManager, modifier: Modifier = Modifie
 fun ActivitySheet(cm: ConnectionManager, onDismiss: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
-            Text(stringResource(R.string.activity), style = MaterialTheme.typography.titleLarge)
+            Text(stringResource(R.string.background_tasks), style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(8.dp))
             ActivityLaneList(cm)
         }
@@ -2091,20 +2162,25 @@ private fun ComposerSheet(
                     cm.refreshSessionSheet()
                 }
             }
-            // Activity sits with Tools because they answer the same question — what is
-            // this chat doing, and what may it use. The count is the live lanes.
+            // Background tasks sits with Tools because they answer the same question — what is
+            // this chat doing, and what may it use. Same mark, same name as the app-bar "…"
+            // menu and the header glyph: one feature, one symbol, wherever it is entered.
             val laneCount = cm.activity.value.count { it.running }
             OutlinedButton(
                 onClick = { onDismiss(); onActivity() },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(16.dp))
+                BackgroundTasksGlyph(
+                    Modifier.size(17.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
                 Spacer(Modifier.width(8.dp))
                 Text(
                     when {
-                        laneCount > 0 -> "Activity — $laneCount running"
-                        cm.activity.value.isNotEmpty() -> "Activity — ${cm.activity.value.size} recent"
-                        else -> "Activity"
+                        laneCount > 0 -> stringResource(R.string.background_tasks) + " — $laneCount running"
+                        cm.activity.value.isNotEmpty() ->
+                            stringResource(R.string.background_tasks) + " — ${cm.activity.value.size} recent"
+                        else -> stringResource(R.string.background_tasks)
                     },
                 )
             }
