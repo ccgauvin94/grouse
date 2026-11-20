@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QHash>
+#include <QElapsedTimer>
 #include <functional>
 #include <QSet>
 #include <QJsonObject>
