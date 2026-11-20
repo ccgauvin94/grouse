@@ -2643,7 +2643,12 @@ Kirigami.Page {
                     Controls.Button {
                         id: modePill
                         visible: Mgr.online
+                        // preferredWidth is NOT a floor in a layout: when the row runs out of
+                        // space every shrinkable item gives, and a Button gives by clipping its
+                        // own label. Pinning the minimum to the implicit size is what makes the
+                        // TEXT FIELD the thing that gives instead (see chatInput below).
                         Layout.preferredWidth: implicitWidth
+                        Layout.minimumWidth: implicitWidth
                         Layout.alignment: Qt.AlignVCenter
                         icon.name: "tools-wizard"
                         text: page.modePrettyName(page.currentMode())
@@ -2678,6 +2683,7 @@ Kirigami.Page {
                         // Boxed (bordered) but snug: the 4px side paddings match the
                         // mode pill's, so the drawn box is ~24px on a 16px glyph.
                         Layout.preferredWidth: implicitWidth
+                        Layout.minimumWidth: implicitWidth
                         Layout.alignment: Qt.AlignVCenter
                         icon.name: "mail-attachment"
                         display: Controls.AbstractButton.IconOnly
@@ -2693,7 +2699,12 @@ Kirigami.Page {
                     id: chatInput
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    Layout.minimumWidth: 120
+                    // The field is the only item in this row that may shrink: the buttons pin
+                    // their minimum to their own label, so the deficit lands here. 120 was a
+                    // floor wide enough that the row could NOT absorb it — at a narrow chat
+                    // pane the row overflowed instead and the Send button was drawn off the
+                    // edge ("Se"), which reads as a broken button rather than a tight window.
+                    Layout.minimumWidth: Kirigami.Units.gridUnit * 3
                     placeholderText: Mgr.prompting
                                      ? qsTr("Queue a message…")
                                      : qsTr("Message Goose…")
@@ -2724,7 +2735,11 @@ Kirigami.Page {
 
                 Controls.Button {
                     id: sendButton
-                    Layout.preferredWidth: Kirigami.Units.gridUnit * 3
+                    // "Stop" is wider than "Send", so the floor is the implicit width of
+                    // whatever it is currently saying — never the gridUnit multiple, which is
+                    // only the comfortable size.
+                    Layout.preferredWidth: Math.max(Kirigami.Units.gridUnit * 3, implicitWidth)
+                    Layout.minimumWidth: implicitWidth
                     Layout.alignment: Qt.AlignVCenter
                     text: Mgr.prompting ? qsTr("Stop") : qsTr("Send")
                     onClicked: Mgr.prompting ? Mgr.cancelTurn() : page.send()

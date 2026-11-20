@@ -236,6 +236,10 @@ Kirigami.Page {
                 }
                 Controls.Button {
                     text: qsTr("Send")
+                    // Same rule as the chat composer: a preferred width is not a floor, so a
+                    // narrow pane would shrink this button and clip the word. Pin it to its own
+                    // label and let the field give instead.
+                    Layout.minimumWidth: implicitWidth
                     enabled: draftField.text.trim().length > 0
                     onClicked: page.sendAssistant(draftField)
                 }
