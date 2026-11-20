@@ -6,6 +6,21 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed — opening a chat no longer blocks the UI thread
+
+- **A chat switch, and `New chat`, now run the core's blocking work on a worker.**
+  Opening a chat reads and parses its cached transcript, and for a thread chat (which
+  `session/list` never returns) it also asks the server for the session's cwd;
+  creating one is a handshake. All of that ran on the UI thread, so the window froze
+  from the click until the new chat appeared. It now runs on one background thread, in
+  click order — one thread, not a pool, because the last paint is the one that must
+  stay. The window still answers the click immediately: the model clears and the
+  status line changes before the task is queued, and every event the core emits is
+  marshalled back onto the main thread exactly as before. This is the shape the
+  Android client has always used (`ConnectionManager.io {}`).
+- The per-switch timing line now reports both halves:
+  `grouse: open <id> painted in Nms (R rows; worker Mms: open X, cache Y)`.
+
 ### Changed — a reopen lands on what is new, and the cache costs one parse
 
 - **A chat reopened with something new in it now opens at the NEWEST message.** Every

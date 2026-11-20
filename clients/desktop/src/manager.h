@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QHash>
+#include <functional>
 #include <QSet>
 #include <QJsonObject>
 #include <QSettings>
@@ -14,6 +15,7 @@ class RoamListModel;
 class SessionListModel;
 class MessageListModel;
 class QTimer;
+class QThreadPool;
 
 /**
  * Process-scoped owner of the chat state, exposed to QML as a context property
@@ -141,6 +143,7 @@ public:
     static void setInlineAppsSupported(bool on);
     static bool inlineAppsSupported();
     explicit Manager(QObject *parent = nullptr);
+    ~Manager() override;
 
     QString host() const;
     QString port() const;
@@ -951,6 +954,14 @@ private:
     QElapsedTimer m_openClock;
     QString m_openFor;
     qint64 m_openEarlier = 0;
+    qint64 m_openOpenCall = 0;
+    /// The one thread the core's BLOCKING intents run on (open a chat, create one).
+    /// A cache read and a session/load on the UI thread is what froze the window on
+    /// every switch; the core is built to be called off-main (Android always has),
+    /// and CoreBridge marshals every event it emits back onto the main thread.
+    QThreadPool *m_io = nullptr;
+    /// Run `work` on the core worker (in click order — the pool is single-threaded).
+    void runOnCore(std::function<void()> work);
     /// Coalesces messagesChanged while chunks stream (see requestMessagesUpdate).
     QTimer *m_updateTimer = nullptr;
     /// Fires when the tail has stopped receiving chunks; renders it without

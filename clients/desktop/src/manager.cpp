@@ -14,6 +14,7 @@
 #include <cmath>
 
 #include <QDateTime>
+#include <QDebug>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QDesktopServices>
@@ -34,6 +35,9 @@
 #include <QSet>
 #include <QStandardPaths>
 #include <QElapsedTimer>
+#include <QMetaObject>
+#include <QRunnable>
+#include <QThreadPool>
 #include <QTimer>
 #include <QUrl>
 
@@ -59,6 +63,13 @@ Manager::Manager(QObject *parent)
     m_sessionsModel = new SessionListModel(this);
     m_messageModel = new MessageListModel(this);
     m_roamModel = new RoamListModel(this);
+
+    // ONE worker thread for the core's blocking intents (open a chat, create one).
+    // One, not a pool: two opens must run in CLICK ORDER, because the last paint is
+    // the one that stays — a slower earlier open landing after a later one would
+    // leave the wrong chat's transcript on screen.
+    m_io = new QThreadPool(this);
+    m_io->setMaxThreadCount(1);
 
     // The sidebar's collapsed groups are the user's own state, not a per-launch
     // default: restore what was last chosen and persist every toggle. Without
@@ -116,6 +127,46 @@ Manager::Manager(QObject *parent)
     m_bridge = bridge;
     bridge->setTarget(this);
     bridge->installListener();
+}
+
+Manager::~Manager()
+{
+    // A task still inside the core must finish before the bridge (and the core
+    // library) can go away: it holds the handle and calls through the ABI table.
+    // Bounded: a task parked in an RPC must not hang the quit. After this the
+    // queued work is dropped, and any task still running finishes against a handle
+    // that is still alive until the bridge goes (it outlives this object).
+    if (m_io) {
+        m_io->waitForDone(5000);
+        m_io->clear();
+    }
+}
+
+namespace {
+/// A plain QRunnable, not `QThreadPool::start(callable)` (Qt 6.7+ only): the flatpak
+/// SDK and the dev distrobox do not have to agree on a version for this to build.
+class CoreTask : public QRunnable
+{
+public:
+    explicit CoreTask(std::function<void()> fn) : m_fn(std::move(fn)) { setAutoDelete(true); }
+    void run() override
+    {
+        if (m_fn)
+            m_fn();
+    }
+
+private:
+    std::function<void()> m_fn;
+};
+} // namespace
+
+void Manager::runOnCore(std::function<void()> work)
+{
+    if (!m_io) {
+        work();
+        return;
+    }
+    m_io->start(new CoreTask(std::move(work)));
 }
 
 void Manager::requestMessagesUpdate()
@@ -758,19 +809,32 @@ void Manager::openSession(const QString &sessionId)
     emit messagesChanged();
     setStatus(QStringLiteral("loading…"));
     m_lastCwd = workingDir();
-    if (m_bridge && m_bridge->isAvailable()) {
-        m_openClock.start();
-        m_openFor = sessionId;
-        const QByteArray sid = sessionId.toUtf8();
-        m_bridge->api().grouse_open_session(m_bridge->handle(), sid.constData());
-        const qint64 opened = m_openClock.elapsed();
-        m_bridge->api().grouse_load_cached_transcript(m_bridge->handle(), sid.constData());
-        // One line per switch, because two very different costs hide behind "the
-        // UI hangs": the SYNCHRONOUS part here (cache read + parse, and any core
-        // probe) and the wait until the first painted window. The second number is
-        // reported from coreOnItem's Window branch.
-        m_openEarlier = opened;
-    }
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    m_openClock.start();
+    m_openFor = sessionId;
+    // OFF THE UI THREAD. Everything here can block: reading and parsing the cached
+    // transcript, and — for a session `session/list` has never returned, i.e. a
+    // thread chat — a `session/info` round trip just to learn its cwd. Both ran on
+    // the main thread, which is why a chat switch froze the window before the new
+    // chat appeared. The core is built for this (Android has always called it from
+    // a background executor) and CoreBridge marshals every event it emits back onto
+    // the main thread, so nothing below touches UI state off-main.
+    const CoreBridge::AimsApi api = m_bridge->api();
+    void *h = m_bridge->handle();
+    const QByteArray sid = sessionId.toUtf8();
+    runOnCore([this, api, h, sid] {
+        QElapsedTimer clock;
+        clock.start();
+        api.grouse_open_session(h, sid.constData());
+        const qint64 openMs = clock.elapsed();
+        api.grouse_load_cached_transcript(h, sid.constData());
+        const qint64 cacheMs = clock.elapsed() - openMs;
+        QMetaObject::invokeMethod(this, [this, openMs, cacheMs] {
+            m_openOpenCall = openMs;
+            m_openEarlier = openMs + cacheMs;
+        }, Qt::QueuedConnection);
+    });
 }
 
 QString Manager::sessionStamp(const QString &sessionId) const
@@ -892,7 +956,6 @@ void Manager::newChatInMode(const QString &mode)
     // thread chat, into a prefill it does not belong to).
     emit draftRequested(QString());
     setStatus(QStringLiteral("connecting…"));
-    char *err = nullptr;
     // The recipe id and project id ride session/new directly. `grouse_new_session`
     // already took a recipe id; passing it here (rather than letting
     // serverConfigJson consume it) is what actually starts a recipe run.
@@ -900,27 +963,38 @@ void Manager::newChatInMode(const QString &mode)
     m_pendingRecipeId.clear();
     const QString projectId = m_pendingProjectFiling;
     m_pendingProjectFiling.clear();
-    if (m_bridge && m_bridge->isAvailable()) {
-        const QByteArray rid = recipeId.toUtf8();
-        const QByteArray pid = projectId.toUtf8();
-        const QByteArray md = mode.toUtf8();
-        if (mode.isEmpty() || !m_bridge->api().grouse_new_session_with_mode) {
-            m_bridge->api().grouse_new_session(m_bridge->handle(),
-                                               recipeId.isEmpty() ? nullptr : rid.constData(),
-                                               projectId.isEmpty() ? nullptr : pid.constData(),
-                                               &err);
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    // Also off the UI thread: `session/new` is a handshake, and it blocked the
+    // window for its duration ("New chat" sat on the old screen until the server
+    // answered). The window has already moved to the new chat here — the id arrives
+    // through the usual events.
+    const CoreBridge::AimsApi api = m_bridge->api();
+    void *h = m_bridge->handle();
+    const QByteArray rid = recipeId.toUtf8();
+    const QByteArray pid = projectId.toUtf8();
+    const QByteArray md = mode.toUtf8();
+    const bool plain = mode.isEmpty() || !api.grouse_new_session_with_mode;
+    const bool hasRecipe = !recipeId.isEmpty();
+    const bool hasProject = !projectId.isEmpty();
+    runOnCore([this, api, h, rid, pid, md, plain, hasRecipe, hasProject] {
+        char *err = nullptr;
+        if (plain) {
+            api.grouse_new_session(h, hasRecipe ? rid.constData() : nullptr,
+                                   hasProject ? pid.constData() : nullptr, &err);
         } else {
-            m_bridge->api().grouse_new_session_with_mode(
-                m_bridge->handle(),
-                recipeId.isEmpty() ? nullptr : rid.constData(),
-                projectId.isEmpty() ? nullptr : pid.constData(),
-                md.constData(), &err);
+            api.grouse_new_session_with_mode(h, hasRecipe ? rid.constData() : nullptr,
+                                             hasProject ? pid.constData() : nullptr,
+                                             md.constData(), &err);
         }
-        if (err) {
-            setStatus(QStringLiteral("new session failed: ") + QString::fromUtf8(err));
-            m_bridge->api().grouse_string_free(err);
-        }
-    }
+        if (!err)
+            return;
+        const QString message = QString::fromUtf8(err);
+        api.grouse_string_free(err);
+        QMetaObject::invokeMethod(this, [this, message] {
+            setStatus(QStringLiteral("new session failed: ") + message);
+        }, Qt::QueuedConnection);
+    });
 }
 
 void Manager::beginChat()
@@ -3681,11 +3755,13 @@ void Manager::coreOnItem(const QString &json)
         // per switch: the synchronous cost (cache parse + any core probe) against the
         // wait for a paint, which is the split that decides where a "hang" lives.
         if (!m_openFor.isEmpty() && m_openFor == m_currentSessionId) {
-            qInfo().noquote() << QStringLiteral("grouse: open %1 painted in %2ms (%3 rows, sync %4ms)")
+            qInfo().noquote() << QStringLiteral("grouse: open %1 painted in %2ms (%3 rows; worker %4ms: open %5, cache %6)")
                                      .arg(m_openFor)
                                      .arg(m_openClock.elapsed())
                                      .arg(m_messageModel->rowCount())
-                                     .arg(m_openEarlier);
+                                     .arg(m_openEarlier)
+                                     .arg(m_openOpenCall)
+                                     .arg(m_openEarlier - m_openOpenCall);
             m_openFor.clear();
         }
         refreshActivity();   // the chat is painted: its lanes are what the panel shows

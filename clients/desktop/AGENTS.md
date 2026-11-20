@@ -43,6 +43,18 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
 - Connection lifecycle: `main.cpp` calls `manager.autoConnect()` at startup
   (resumes the last chat when settings exist); `Mgr.connectToServer()` otherwise.
   The core owns connect/open/new and reconnect (exponential backoff, core-side).
+- **The core's BLOCKING intents run on a worker, never on the UI thread.** Opening a
+  chat reads and parses its cached transcript, and — for a session `session/list` has
+  never returned (a thread chat) — makes a `session/info` round trip to learn its cwd;
+  `session/new` is a handshake. All of that used to run on the main thread, which is
+  why a chat switch froze the window before the new chat appeared. `Manager::runOnCore`
+  puts them on a **single** `QThreadPool` thread (one, not a pool: two opens must run
+  in click order, because the last paint is the one that stays). This is safe because
+  the core is built to be called off-main (Android has always called it from a
+  background executor) and `CoreBridge` marshals every event it emits onto the main
+  thread through a queued `invokeMethod` — no QObject is touched off-main. UI state
+  (the model clear, `currentSessionId`, the status line) still changes synchronously
+  before the task is queued, so the window answers the click immediately.
 - **Roam peers are PARALLEL connections, not replacements.** `connectRoam`
   dials a `goose serve --roam` peer through the core's bundled roam transport
   (no separate dlopen of `libgrouse_roam_core.so` — it is inside
