@@ -124,7 +124,12 @@ Rectangle {
             visible: text.length > 0
             opacity: 0.6
             elide: Text.ElideRight
-            Layout.maximumWidth: bar.width * 0.55
+            // Cap the badge at half the PANEL, never at `bar.width`: a Layout attached
+            // property bound to the item's own width is exactly the cycle Qt reports as
+            // "Detected recursive rearrange. Aborting after two iterations" — the layout
+            // sizes the row, the row sizes the cap, the cap sizes the row. The panel's
+            // width comes from the SplitView, so the loop stops there.
+            Layout.maximumWidth: panel.width * 0.5
             font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
         }
     }
