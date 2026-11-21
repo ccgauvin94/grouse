@@ -89,7 +89,15 @@ Manager::Manager(QObject *parent)
     // its Reset (a load that failed mid-stream), land what arrived.
     m_paintTimer = new QTimer(this);
     m_paintTimer->setSingleShot(true);
-    m_paintTimer->setInterval(3000);
+    // 3s is the safety valve for a paint that dies before its Window. The env override
+    // exists so the test that covers the valve can run in milliseconds instead of
+    // spending three seconds asleep (and turning into a flake on a loaded machine).
+    int flushMs = 3000;
+    bool flushOk = false;
+    const int flushEnv = qEnvironmentVariableIntValue("GROUSE_PAINT_FLUSH_MS", &flushOk);
+    if (flushOk && flushEnv > 0)
+        flushMs = flushEnv;
+    m_paintTimer->setInterval(flushMs);
     connect(m_paintTimer, &QTimer::timeout, this, &Manager::flushPaint);
 
     m_updateTimer = new QTimer(this);
