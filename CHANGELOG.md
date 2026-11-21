@@ -19,6 +19,12 @@ All notable changes to Grouse are recorded here. The format is based on
   implicit size derived from a child whose width derives from this card"); this card kept
   it. The natural width is now a fixed 340 like its siblings, which decides the size only
   when nothing else does — the app always supplies the bubble's width.
+- **Pinned by a case, not just by the suite not hanging.**
+  `test_the_natural_width_does_not_follow_the_width` creates a card with no width, gives
+  it one, lets a layout pass run and compares `implicitWidth` against what it was: 340 on
+  the fix, 524 on the old sizing. The wait matters — a ratchet only moves on a layout
+  pass, so the first version of the case read the stale value and passed on the broken
+  code.
 
 ### Fixed — the settings dialog sizes itself to the window again
 

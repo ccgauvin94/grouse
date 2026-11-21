@@ -56,6 +56,26 @@ TestCase {
         full.destroy()
     }
 
+    // The card's natural width is a CONSTANT, and not a function of its width.
+    // It used to be `body.implicitWidth + 24` while the body fills the card — the
+    // cycle FileCard's header records — so an un-sized card grew 24px on every
+    // layout pass and stalled the whole runner inside text layout instead of
+    // failing a case. Comparing the number here turns that regression into a
+    // failed assertion rather than a hung suite.
+    function test_the_natural_width_does_not_follow_the_width() {
+        const card = cardComp.createObject(tc, { name: "a-rather-long-attachment-name.pdf" })
+        const natural = card.implicitWidth
+        verify(natural > 0, "the card has no natural width")
+        compare(card.width, natural)          // given no width, it takes the natural one
+        card.width = 500
+        // A ratchet only moves on a LAYOUT PASS, so a synchronous compare cannot see
+        // it: with the old sizing this came back as 500 + 24 here, and reading it
+        // before the pass read the stale value and passed.
+        wait(80)
+        compare(card.implicitWidth, natural)  // setting a width must not move it
+        card.destroy()
+    }
+
     // The informative part of a filename is the end, and a card in a bubble is
     // narrow.
     function test_a_long_name_elides_its_middle_not_its_suffix() {
