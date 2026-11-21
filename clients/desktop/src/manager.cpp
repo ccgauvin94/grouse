@@ -532,15 +532,35 @@ void Manager::connectToServer()
     m_landing = false;
     emit landingChanged();
     m_lastCwd = workingDir();
-    char *err = nullptr;
+    // OFF THE UI THREAD. `grouse_connect` does not merely start a dial: the core's
+    // `connect()` BLOCKS on the handshake (`wait_ready`) and returns when the wire is
+    // Ready, so at startup this held the main thread for the length of a session/new
+    // round trip — measured 3.2s + 0.5s of stalls before any chat existed
+    // (2026-11-21). Same worker, same rule, as every other blocking intent.
+    const CoreBridge::AimsApi api = m_bridge->api();
+    void *h = m_bridge->handle();
     const QByteArray cfg = serverConfigJson().toUtf8();
-    m_bridge->api().grouse_connect(m_bridge->handle(), cfg.constData(), &err);
-    if (err) {
-        setStatus(QStringLiteral("connect failed: ") + QString::fromUtf8(err));
-        m_bridge->api().grouse_string_free(err);
-    } else {
-        setStatus(QStringLiteral("connecting…"));
-    }
+    setStatus(QStringLiteral("connecting…"));
+    runOnCore([this, api, h, cfg] {
+        QElapsedTimer clock;
+        clock.start();
+        char *err = nullptr;
+        api.grouse_connect(h, cfg.constData(), &err);
+        const qint64 ms = clock.elapsed();
+        QString message;
+        if (err) {
+            message = QString::fromUtf8(err);
+            api.grouse_string_free(err);
+        }
+        timingLog(QStringLiteral("connect %1ms%2")
+                      .arg(ms)
+                      .arg(message.isEmpty() ? QString() : QStringLiteral(" FAILED: ") + message));
+        if (!message.isEmpty()) {
+            QMetaObject::invokeMethod(this, [this, message] {
+                setStatus(QStringLiteral("connect failed: ") + message);
+            }, Qt::QueuedConnection);
+        }
+    });
 }
 
 void Manager::autoConnect()
@@ -3878,6 +3898,17 @@ void Manager::coreOnItem(const QString &json)
             m_itemHasOlder = hasOlder;
             emit itemWindowChanged();
         }
+        // A paint that lands long after the previous one is the background fill, not
+        // the open: the core keeps paging the older history in after the newest window
+        // is on screen. Naming it takes one line of log and settles whether the residual
+        // 2.5s stall belongs to the fill or to something else (2026-11-21).
+        if (m_paintGap.isValid() && m_paintGap.elapsed() > 1000) {
+            timingLog(QStringLiteral("late paint %1ms after the previous one (%2 rows, older=%3)")
+                          .arg(m_paintGap.elapsed())
+                          .arg(m_messageModel->rowCount())
+                          .arg(hasOlder ? QStringLiteral("yes") : QStringLiteral("no")));
+        }
+        m_paintGap.restart();
         // A Window is the core's "this session's window is painted" marker, and the
         // only event that reports a SUCCESSFUL open (a failure arrives as
         // on_session_open_failed). The status below is set locally when a chat opens,

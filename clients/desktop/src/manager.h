@@ -988,6 +988,9 @@ private:
     /// fixes; this is the difference. A 100ms tick that arrives late IS the stall.
     QTimer *m_stallTimer = nullptr;
     QElapsedTimer m_stallClock;
+    /// Time since the previous paint, so a window that arrives seconds later can be
+    /// named as the background history fill rather than guessed at.
+    QElapsedTimer m_paintGap;
     /// Coalesces messagesChanged while chunks stream (see requestMessagesUpdate).
     QTimer *m_updateTimer = nullptr;
     /// Fires when the tail has stopped receiving chunks; renders it without
