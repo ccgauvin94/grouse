@@ -6,6 +6,18 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed — the Android chat header only marks a wire that is in trouble
+
+- **The green dot beside the chat name is gone.** It was on screen saying "fine" on every
+  glance, next to a name the user was already reading, and the healthy state is now the
+  absence of a mark — the name sits alone in the middle of the bar.
+- **What is left is the case that needs saying**: a slowly blinking sync mark while the
+  adapter is retrying, and a steady cloud-off in the offline colour once the automatic
+  attempts ran out. Both still open the instance's settings, which is where the mark was
+  the only shortcut to.
+- **A roam chat draws no mark here at all**: its pill two lines below already carries that
+  endpoint's dot and state, so the header would have been reporting one wire twice.
+
 ### Changed — the Android chat name is centred in the header
 
 - **The name sits in the middle of the bar, with its endpoint pill centred under it**, which

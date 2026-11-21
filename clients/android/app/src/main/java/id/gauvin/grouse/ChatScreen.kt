@@ -759,7 +759,7 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                             .pointerInput(debugTools) {
                                 // Long-press is the debug gesture only; with the switch
                                 // off the title is just the title. Reconnecting is no
-                                // longer a tap HERE — see the dot.
+                                // longer a tap HERE — see the mark beside the name.
                                 if (debugTools) {
                                     detectTapGestures(onLongPress = { showTurnLog = true })
                                 }
@@ -782,19 +782,20 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                             Row(verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.Center,
                                 modifier = Modifier.fillMaxWidth()) {
-                                // The dot IS the connection UI: colour for state (green / slowly
-                                // blinking amber while a reconnect is being attempted / red once the
-                                // automatic attempts ran out), tap for the settings of the wire it
-                                // reports on. For a roam chat that is this endpoint's page, so the
-                                // chat-level and the endpoint-level story are the same gesture.
-                                LinkDot(
-                                    state = link,
-                                    onClick = {
-                                        if (roamPeer != null) nav.navigate("roam_endpoint/" + Uri.encode(roamPeer))
-                                        else nav.navigate("instance")
-                                    },
-                                )
-                                Spacer(Modifier.width(2.dp))
+                                // The connection mark, and ONLY when there is something wrong:
+                                // the green dot that used to sit here said "fine" on every
+                                // glance at a name the user was already reading, so a healthy
+                                // wire now draws nothing and the name sits alone. A roam chat
+                                // draws nothing here either — its pill two lines below already
+                                // carries that endpoint's dot — and the mark that does appear
+                                // is where the wire's settings live.
+                                if (roamPeer == null) {
+                                    LinkProblemIcon(
+                                        state = link,
+                                        onClick = { nav.navigate("instance") },
+                                    )
+                                    Spacer(Modifier.width(2.dp))
+                                }
                                 // Single line + ellipsis: this Row shares the app bar with the
                                 // status cluster, so on a compact width the default (titleLarge,
                                 // unbounded) title used to wrap to a second line and collide with

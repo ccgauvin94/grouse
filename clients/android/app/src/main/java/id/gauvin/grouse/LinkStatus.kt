@@ -12,22 +12,28 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import id.gauvin.grouse.ui.theme.statusColors
 
-/** What the connection dot says about the wire carrying the chat on screen.
+/** What a connection indicator says about the wire carrying the chat on screen.
  *
  *  Three states, because a colour carries three — and because the words that used to say
  *  this (`Offline · tap to reconnect`) REPLACED the chat title, so a dropped socket cost
- *  the user the name of the conversation they were in. The dot says it instead, and the
- *  title never moves. */
+ *  the user the name of the conversation they were in. An indicator says it instead, and
+ *  the title never moves. Two of them read this: the roam pill's dot under the name, and
+ *  the mark the chat header draws only when this is NOT `Connected`. */
 enum class LinkState { Connected, Retrying, Down }
 
 /** The main connection's dot state.
@@ -77,6 +83,51 @@ fun linkFailureIsTerminal(message: String): Boolean {
         "401", "403", "unauthorized", "forbidden", "invalid secret", "secret key",
         "certificate", "x509", "unknown issuer", "self-signed", "tls handshake",
     ).any { m.contains(it) }
+}
+
+/** The chat header's connection mark: NOTHING while the wire is up, a mark when it is not.
+ *
+ *  The green dot that sat beside the chat name was on screen saying "fine" on every glance,
+ *  forever, next to a name the user was already looking at — so it is gone, and the healthy
+ *  state is now the absence of a mark. What is left is the case that needs saying: a wire
+ *  that is retrying (a slowly blinking sync mark) or one whose attempts ran out (a steady
+ *  cloud-off in the offline colour). Both stay tappable, because that mark is where the
+ *  wire's settings live.
+ *
+ *  A roam chat gets no mark here: its pill already carries the endpoint's dot and state,
+ *  two lines below, and two indicators for one wire is how the header got crowded. */
+@Composable
+fun LinkProblemIcon(state: LinkState, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    if (state == LinkState.Connected) return
+    val color = if (state == LinkState.Retrying) MaterialTheme.statusColors.connecting
+                else MaterialTheme.statusColors.offline
+    // Same slow blink as the dot it replaces: "something is being tried" should be visible
+    // out of the corner of the eye. Down is steady — a red mark that kept blinking would
+    // read as still working.
+    val alpha = if (state == LinkState.Retrying) {
+        val transition = rememberInfiniteTransition(label = "linkMark")
+        val a by transition.animateFloat(
+            initialValue = 1f,
+            targetValue = 0.3f,
+            animationSpec = infiniteRepeatable(tween(durationMillis = 900), RepeatMode.Reverse),
+            label = "linkMarkAlpha",
+        )
+        a
+    } else 1f
+    Box(
+        modifier = modifier
+            .size(24.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            if (state == LinkState.Retrying) Icons.Filled.Sync else Icons.Filled.CloudOff,
+            contentDescription = if (state == LinkState.Retrying) "reconnecting" else "disconnected",
+            tint = color.copy(alpha = alpha),
+            modifier = Modifier.size(16.dp),
+        )
+    }
 }
 
 /** The connection dot: green when the wire is up, slowly blinking amber while a reconnect
