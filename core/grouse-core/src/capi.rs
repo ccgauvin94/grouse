@@ -46,7 +46,14 @@ use crate::{
 /// The desktop refuses a library whose value it does not expect — a mismatch is
 /// a callback called with the wrong arity (a garbage pointer), not a compile
 /// error, so it must be caught at load time.
-pub const GROUSE_ABI_VERSION: u32 = 15;
+///
+/// 16: `on_advisor_report` appended to the listener table, plus `grouse_advisor`
+/// and `grouse_set_advisor` (2026-11-17, `644376c9`). That commit bumped the
+/// desktop's expectation to 16 — correctly, since it changed the layout and added
+/// two symbols — but left this constant at 15, so a build from the repo refused
+/// its own core ("core library ABI 15, expected 16") and the app could not start.
+/// The constant is the one that was wrong.
+pub const GROUSE_ABI_VERSION: u32 = 16;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
