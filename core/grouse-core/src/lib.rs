@@ -1521,10 +1521,28 @@ impl Core {
         );
     }
 
+    /// Open a chat, on EITHER wire.
+    ///
+    /// A roam chat is addressed by its `roam:<label>:<id>` id — the same prefix
+    /// [`Self::peer_for_session`] resolves for `refresh_session` and the unstable
+    /// calls — so this is the one open intent: the core decides the owner from the
+    /// id, and a client never has to know whether the chat it is showing lives here
+    /// or on a peer.
+    ///
+    /// It did not, and the cost was a second entry point with its own copy of the
+    /// open logic: the desktop's `openRoamSession` drifted — it was the one open path
+    /// that stayed synchronous on the UI thread and never reported a paint
+    /// (2026-11-20). Two intents that mean the same thing will always drift; one
+    /// intent cannot.
+    ///
     /// `session/load` with the session's real cwd (resolved: cache → probe →
-    /// session/list, never guessed); a fresh cached transcript renders
-    /// instantly, otherwise the load replays it.
+    /// session/list, never guessed); a fresh cached transcript renders instantly,
+    /// otherwise the load replays it.
     pub fn open_session(&self, session_id: String) {
+        if let Some(label) = self.peer_for_session(&session_id).map(|p| p.label().to_string()) {
+            self.open_on_peer(&label, session_id);
+            return;
+        }
         self.open_session_inner(session_id, false);
     }
 
@@ -2020,6 +2038,22 @@ impl Core {
     /// Open a session on a roam peer; the peer becomes the chat owner until a
     /// Main session is opened. Its transcript is peer-owned (never cached).
     pub fn roam_open_session(&self, label: String, session_id: String) {
+        // A prefixed id already names its peer, so it goes through the same door as
+        // every other open. The label lookup below is for a caller that passes a RAW
+        // peer session id (no prefix) — the shape this intent was written for.
+        if self.peer_for_session(&session_id).is_some() {
+            self.open_session(session_id);
+            return;
+        }
+        self.open_on_peer(&label, session_id);
+    }
+
+    /// The one peer-open body, shared by [`Self::open_session`] and
+    /// [`Self::roam_open_session`].
+    ///
+    /// Takes the LABEL, not the peer: this impl block is `#[uniffi::export]`, and the
+    /// macro rejects a signature carrying `Arc<RoamPeer>`.
+    fn open_on_peer(&self, label: &str, session_id: String) {
         let peer = self
             .inner
             .peers
@@ -2028,7 +2062,7 @@ impl Core {
             .find(|peer| peer.label() == label)
             .cloned();
         let Some(peer) = peer else { return };
-        *self.inner.active_peer_label.write() = Some(label);
+        *self.inner.active_peer_label.write() = Some(label.to_string());
         // The store is the single display source; the peer paints into it.
         self.inner.hub.display(&session_id);
         // Peer sessions are not in the main session list; the working dir is

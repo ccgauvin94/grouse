@@ -55,6 +55,13 @@ transport. No protocol logic lives here anymore; a protocol fix is made in
   thread through a queued `invokeMethod` — no QObject is touched off-main. UI state
   (the model clear, `currentSessionId`, the status line) still changes synchronously
   before the task is queued, so the window answers the click immediately.
+- **One open intent, on either wire.** `grouse_open_session` resolves the owner from the
+  `roam:<label>:<id>` prefix, exactly as `refresh_session` and the unstable calls already did, so
+  a client never chooses between a local and a remote open. It used to: `open_session` in the core
+  was local-only and the desktop called a separate `grouse_roam_open_session`, which is how one
+  copy of the open path kept its own behaviour — it was still synchronous on the UI thread and
+  logged nothing long after the local one had moved (2026-11-20). The C symbol remains, and now
+  delegates.
 - **Roam peers are PARALLEL connections, not replacements.** `connectRoam`
   dials a `goose serve --roam` peer through the core's bundled roam transport
   (no separate dlopen of `libgrouse_roam_core.so` — it is inside
