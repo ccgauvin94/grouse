@@ -6,6 +6,17 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — the settings dialog sizes itself to the window again
+
+- **`Window.window` does not exist on a Dialog.** `SettingsDialog` is a `Controls.Dialog`
+  — a Popup, not an Item — so the attached property was always null, Qt warned
+  (`QML SettingsDialog: Window.window does only support types deriving from Item`) on
+  every launch, and the "80% of the window" cap silently fell through to the fixed
+  `Kirigami.Units.gridUnit * 40` fallback on every screen. The height is read off the
+  popup's parent item, which is the window's contentItem.
+- Worth noting for log hygiene: Qt prints that diagnostic **without the word
+  "warning"**, so a smoke check grepping for "warning|error" reports a clean log over it.
+
 ### Fixed — the fenced-code test speaks the paint protocol
 
 - **`tst_manager` expected a row to be visible the instant its `Upsert` arrived.** A

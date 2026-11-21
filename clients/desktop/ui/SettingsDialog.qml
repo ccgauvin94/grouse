@@ -74,8 +74,12 @@ Controls.Dialog {
     //
     // 80% of the window, not a fixed pixel height: the same dialog has to fit a 13"
     // laptop and a 4K monitor, and a fixed cap is wrong on one of them.
-    readonly property real maxFormHeight: Window.window
-        ? Window.window.height * 0.8
+    // A Dialog is a Popup, not an Item, so `Window.window` is not available here —
+    // Qt warns ("Window.window does only support types deriving from Item") and the
+    // cap fell through to the fixed fallback on every screen. The attached property
+    // belongs on the popup's parent item, which is the window's contentItem.
+    readonly property real maxFormHeight: parent && parent.Window.window
+        ? parent.Window.window.height * 0.8
         : Kirigami.Units.gridUnit * 40
 
     contentItem: ColumnLayout {
