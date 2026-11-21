@@ -16,6 +16,18 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QCryptographicHash>
+#include <QScopeGuard>
+
+// A main-thread phase that runs long enough to be felt. The stall detector reports
+// THAT the window froze; these say during what, which is the difference between
+// "the sidebar rebuilt" and "the transcript laid out". 20ms floor so a healthy
+// switch stays silent.
+#define GROUSE_PHASE(name) \
+    QElapsedTimer _phaseTimer; _phaseTimer.start(); \
+    const auto _phaseGuard = qScopeGuard([this, _phaseTimer]() { \
+        const qint64 _ms = _phaseTimer.elapsed(); \
+        if (_ms >= 20) timingLog(QStringLiteral(name " %1ms").arg(_ms)); \
+    })
 #include <QDir>
 #include <QDesktopServices>
 #include <QFile>
@@ -121,7 +133,10 @@ Manager::Manager(QObject *parent)
     m_updateTimer = new QTimer(this);
     m_updateTimer->setSingleShot(true);
     m_updateTimer->setInterval(50);
-    connect(m_updateTimer, &QTimer::timeout, this, [this] { emit messagesChanged(); });
+    connect(m_updateTimer, &QTimer::timeout, this, [this] {
+        GROUSE_PHASE("phase messagesChanged");
+        emit messagesChanged();
+    });
 
     // Longer than the repaint coalescer on purpose: this must not fire between two
     // chunks of the same reply, only once the stream has actually gone quiet.
@@ -2666,6 +2681,7 @@ QString projectKey(const QString &raw)
 
 void Manager::coreOnSessions(const QString &json)
 {
+    GROUSE_PHASE("phase sessions");
     QVariantList sessions;
     const QJsonArray arr = parseArr(json);
     for (const auto &el : arr) {
@@ -3054,6 +3070,7 @@ void Manager::coreOnContextReport(const QString &sid, const QString &json)
 
 void Manager::refreshActivity()
 {
+    GROUSE_PHASE("phase activity");
     if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_activity) {
         if (!m_activity.isEmpty()) {
             m_activity.clear();
@@ -4669,6 +4686,7 @@ void Manager::buildPeekQueue()
 
 void Manager::doPeekStep()
 {
+    GROUSE_PHASE("phase peek");
     if (m_peekQueue.isEmpty())
         return;
     // Never interfere with an active turn — INCLUDING one started elsewhere
