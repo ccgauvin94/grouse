@@ -307,9 +307,16 @@ fun BackgroundTasksGlyph(modifier: Modifier = Modifier, tint: Color = Color.Unsp
     }
 }
 
-/** The endpoint a remote chat lives on, as a subtitle under the chat's name. Colour only
- *  when there is something wrong: a green line every time would say nothing, and the
- *  connection dot already reports the healthy case. */
+/** The endpoint a remote chat lives on, as a pill under the chat's name — the same shape the
+ *  other assistant app gives "Remote Control", and the reason it is a pill rather than plain
+ *  grey text: a bare line reads as a second title, so it gets a chip background to say it is
+ *  a tap target about the chat rather than another part of its name.
+ *
+ *  It is CENTRED under the name (the whole title column, not the text's left edge): the pill
+ *  is a badge about the chat, and left-hanging it under a left-aligned name made it look like
+ *  a wrapped continuation of the title. Colour only when there is something wrong — a green
+ *  chip every time would say nothing, and the connection dot already reports the healthy case.
+ */
 @Composable
 private fun RoamSubtitle(peer: String, status: String?, onClick: () -> Unit) {
     val state = roamLinkState(status)
@@ -318,29 +325,41 @@ private fun RoamSubtitle(peer: String, status: String?, onClick: () -> Unit) {
         LinkState.Retrying -> MaterialTheme.statusColors.connecting
         LinkState.Down -> MaterialTheme.statusColors.offline
     }
+    // Healthy is the quiet surface tint; anything else tints the chip with its own state
+    // colour so the pill reads at a glance without having to read the words.
+    val chipBackground = when (state) {
+        LinkState.Connected -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+        else -> color.copy(alpha = 0.16f)
+    }
     // A colour alone cannot say "cannot connect": while this chat's peer is down, name the
     // phase beside it ("laptop · no reply", "laptop · reconnect 3").
     val label = if (state == LinkState.Connected) peer
         else "$peer · " + (ConnectionManager.roamStatusDetail(status)
             ?: ConnectionManager.roamStatusShort(status)).take(30)
     Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            // Lines up under the title text, past the connection dot.
-            .padding(start = 18.dp, top = 1.dp)
-            .clip(RoundedCornerShape(50))
-            .clickable(onClick = onClick)
-            .padding(end = 10.dp, top = 1.dp, bottom = 1.dp),
+        horizontalArrangement = Arrangement.Center,
+        modifier = Modifier.fillMaxWidth().padding(top = 1.dp),
     ) {
-        LinkDot(state, dotSize = 6.dp, touchSize = 10.dp)
-        Spacer(Modifier.width(5.dp))
-        Text(
-            label,
-            style = MaterialTheme.typography.labelSmall,
-            color = color,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(chipBackground)
+                .clickable(onClick = onClick)
+                // 2dp vertical keeps the pill ~20dp tall: small enough to sit under a
+                // titleMedium name without crowding it, and the whole row is the target.
+                .padding(start = 7.dp, end = 9.dp, top = 2.dp, bottom = 2.dp),
+        ) {
+            LinkDot(state, dotSize = 6.dp, touchSize = 9.dp)
+            Spacer(Modifier.width(4.dp))
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = color,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
@@ -729,8 +748,11 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
             title = {
                 Column {
                     Row(verticalAlignment = Alignment.CenterVertically,
-                        // fillMaxWidth: the title carries the weight, so the cluster sits at
-                        // the far right and the name ellipsizes into whatever is left.
+                        // fillMaxWidth, and the name COLUMN carries the weight, so the cluster
+                        // sits at the far right and the name ellipsizes into what is left.
+                        // CentreVertically is against the whole column — a remote chat's
+                        // two-line header puts the ring in the middle of both lines instead
+                        // of on the first one's baseline.
                         modifier = Modifier.fillMaxWidth()
                             // Long-press the title for the core's turn log: the one
                             // place the client can show WHY a chat thinks it is busy.
@@ -742,41 +764,62 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                                     detectTapGestures(onLongPress = { showTurnLog = true })
                                 }
                             }) {
-                        // The dot IS the connection UI: colour for state (green / slowly
-                        // blinking amber while a reconnect is being attempted / red once the
-                        // automatic attempts ran out), tap for the settings of the wire it
-                        // reports on. For a roam chat that is this endpoint's page, so the
-                        // chat-level and the endpoint-level story are the same gesture.
-                        LinkDot(
-                            state = link,
-                            onClick = {
-                                if (roamPeer != null) nav.navigate("roam_endpoint/" + Uri.encode(roamPeer))
-                                else nav.navigate("instance")
-                            },
-                        )
-                        Spacer(Modifier.width(2.dp))
-                        // Single line + ellipsis: this Row shares the app bar with the
-                        // status cluster, so on a compact width the default (titleLarge,
-                        // unbounded) title used to wrap to a second line and collide with
-                        // the icons. A tighter style plus a hard single-line cap keeps it
-                        // readable and self-eliding instead of visually breaking.
-                        //
-                        // The TITLE is the chat's NAME, full stop. It used to be replaced by
-                        // "Reconnecting…" / "Connecting…" / "Offline · tap to reconnect" and
-                        // then it carried " · working…" while a turn ran — both cost the user
-                        // the name of the chat they were in at exactly the moment they needed
-                        // to know where they were. Turn progress is the composer's thinking
-                        // line, which does not overwrite anything.
-                        Text(
-                            if (cm.onAssistant) "Assistant" else cm.currentChatTitle ?: "Grouse",
-                            style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            // weight, not a spacer: unweighted children are measured first,
-                            // so the cluster never gets squeezed — a long name ellipsizes
-                            // instead of pushing the donut off the bar.
-                            modifier = Modifier.weight(1f),
-                        )
+                        // The name and the endpoint pill are ONE block, and the header row's
+                        // weight lives HERE rather than on the name. Measured against the name
+                        // alone, everything to the right centred on the FIRST line and hung
+                        // high the moment a remote chat grew a second one — the ring sat on
+                        // the title's baseline instead of in the middle of the header.
+                        Column(Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                // The dot IS the connection UI: colour for state (green / slowly
+                                // blinking amber while a reconnect is being attempted / red once the
+                                // automatic attempts ran out), tap for the settings of the wire it
+                                // reports on. For a roam chat that is this endpoint's page, so the
+                                // chat-level and the endpoint-level story are the same gesture.
+                                LinkDot(
+                                    state = link,
+                                    onClick = {
+                                        if (roamPeer != null) nav.navigate("roam_endpoint/" + Uri.encode(roamPeer))
+                                        else nav.navigate("instance")
+                                    },
+                                )
+                                Spacer(Modifier.width(2.dp))
+                                // Single line + ellipsis: this Row shares the app bar with the
+                                // status cluster, so on a compact width the default (titleLarge,
+                                // unbounded) title used to wrap to a second line and collide with
+                                // the icons. A tighter style plus a hard single-line cap keeps it
+                                // readable and self-eliding instead of visually breaking.
+                                //
+                                // The TITLE is the chat's NAME, full stop. It used to be replaced by
+                                // "Reconnecting…" / "Connecting…" / "Offline · tap to reconnect" and
+                                // then it carried " · working…" while a turn ran — both cost the user
+                                // the name of the chat they were in at exactly the moment they needed
+                                // to know where they were. Turn progress is the composer's thinking
+                                // line, which does not overwrite anything.
+                                Text(
+                                    if (cm.onAssistant) "Assistant" else cm.currentChatTitle ?: "Grouse",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    maxLines = 1,
+                                    // No weight here any more: the COLUMN is what carries the header
+                                    // row's weight, so a long name still ellipsizes into the space
+                                    // the cluster leaves instead of pushing the donut off the bar.
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            // A remote chat names its endpoint UNDER its name, the way the other
+                            // app puts "Remote Control" there. It used to be an AssistChip in
+                            // `actions`, where it fought the donut for the one line and reported
+                            // the wire's state a second time right beside the connection dot.
+                            // Tapping it opens the endpoint page — reconnect / disconnect /
+                            // remove live there.
+                            if (roamPeer != null) {
+                                RoamSubtitle(
+                                    peer = roamPeer,
+                                    status = cm.roamStatus[roamPeer],
+                                    onClick = { nav.navigate("roam_endpoint/" + Uri.encode(roamPeer)) },
+                                )
+                            }
+                        }
                         // The right-hand cluster: live work, then the context donut. Both are
                         // readouts about this chat, not part of its name.
                         val running = cm.activity.value.count { it.running }
@@ -825,18 +868,6 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                                 Spacer(Modifier.width(6.dp))
                             }
                         }
-                    }
-                    // A remote chat names its endpoint UNDER its name, the way the other app
-                    // puts "Remote Control" there. It used to be an AssistChip in `actions`,
-                    // where it fought the donut for the one line and reported the wire's state
-                    // a second time right beside the connection dot. Tapping it opens the
-                    // endpoint page — reconnect / disconnect / remove live there.
-                    if (roamPeer != null) {
-                        RoamSubtitle(
-                            peer = roamPeer,
-                            status = cm.roamStatus[roamPeer],
-                            onClick = { nav.navigate("roam_endpoint/" + Uri.encode(roamPeer)) },
-                        )
                     }
                 }
             },

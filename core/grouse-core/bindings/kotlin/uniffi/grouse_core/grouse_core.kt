@@ -1073,6 +1073,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_new_session_with_mode(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_open_on_peer(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_open_session(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_open_session_inner(
@@ -1401,6 +1403,8 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_method_core_new_session(`ptr`: Long,`recipeId`: RustBuffer.ByValue,`projectId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_new_session_with_mode(`ptr`: Long,`recipeId`: RustBuffer.ByValue,`projectId`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_core_open_on_peer(`ptr`: Long,`label`: RustBuffer.ByValue,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_core_open_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1772,7 +1776,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_new_session_with_mode() and 0xFFFF) != 34744) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_open_session() and 0xFFFF) != 21069) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_open_on_peer() and 0xFFFF) != 12477) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_core_open_session() and 0xFFFF) != 61264) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_open_session_inner() and 0xFFFF) != 5683) {
@@ -2856,9 +2863,32 @@ public interface CoreInterface {
     fun `newSessionWithMode`(`recipeId`: kotlin.String?, `projectId`: kotlin.String?, `mode`: kotlin.String?)
     
     /**
+     * The one peer-open body, shared by [`Self::open_session`] and
+     * [`Self::roam_open_session`].
+     *
+     * Takes the LABEL, not the peer: this impl block is `#[uniffi::export]`, and the
+     * macro rejects a signature carrying `Arc<RoamPeer>`.
+     */
+    fun `openOnPeer`(`label`: kotlin.String, `sessionId`: kotlin.String)
+    
+    /**
+     * Open a chat, on EITHER wire.
+     *
+     * A roam chat is addressed by its `roam:<label>:<id>` id — the same prefix
+     * [`Self::peer_for_session`] resolves for `refresh_session` and the unstable
+     * calls — so this is the one open intent: the core decides the owner from the
+     * id, and a client never has to know whether the chat it is showing lives here
+     * or on a peer.
+     *
+     * It did not, and the cost was a second entry point with its own copy of the
+     * open logic: the desktop's `openRoamSession` drifted — it was the one open path
+     * that stayed synchronous on the UI thread and never reported a paint
+     * (2026-11-20). Two intents that mean the same thing will always drift; one
+     * intent cannot.
+     *
      * `session/load` with the session's real cwd (resolved: cache → probe →
-     * session/list, never guessed); a fresh cached transcript renders
-     * instantly, otherwise the load replays it.
+     * session/list, never guessed); a fresh cached transcript renders instantly,
+     * otherwise the load replays it.
      */
     fun `openSession`(`sessionId`: kotlin.String)
     
@@ -3683,9 +3713,44 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
+     * The one peer-open body, shared by [`Self::open_session`] and
+     * [`Self::roam_open_session`].
+     *
+     * Takes the LABEL, not the peer: this impl block is `#[uniffi::export]`, and the
+     * macro rejects a signature carrying `Arc<RoamPeer>`.
+     */override fun `openOnPeer`(`label`: kotlin.String, `sessionId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_open_on_peer(
+        it,
+        
+        FfiConverterString.lower(`label`),
+        FfiConverterString.lower(`sessionId`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Open a chat, on EITHER wire.
+     *
+     * A roam chat is addressed by its `roam:<label>:<id>` id — the same prefix
+     * [`Self::peer_for_session`] resolves for `refresh_session` and the unstable
+     * calls — so this is the one open intent: the core decides the owner from the
+     * id, and a client never has to know whether the chat it is showing lives here
+     * or on a peer.
+     *
+     * It did not, and the cost was a second entry point with its own copy of the
+     * open logic: the desktop's `openRoamSession` drifted — it was the one open path
+     * that stayed synchronous on the UI thread and never reported a paint
+     * (2026-11-20). Two intents that mean the same thing will always drift; one
+     * intent cannot.
+     *
      * `session/load` with the session's real cwd (resolved: cache → probe →
-     * session/list, never guessed); a fresh cached transcript renders
-     * instantly, otherwise the load replays it.
+     * session/list, never guessed); a fresh cached transcript renders instantly,
+     * otherwise the load replays it.
      */override fun `openSession`(`sessionId`: kotlin.String)
         = 
     callWithHandle {

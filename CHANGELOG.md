@@ -6,6 +6,26 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — the endpoint pill on Android is a pill, and the header's readouts are centred
+
+- **The roam chip lost its background somewhere between "give it a rounded shape" and
+  the shipped build**: `RoamSubtitle` clipped to `RoundedCornerShape(50)` and then painted
+  nothing, so the one element that is a tap target about the chat looked exactly like a
+  second line of its name. It carries a background again — the quiet `surfaceVariant` tint
+  when the peer is healthy, its own state colour at 16 % when it is reconnecting or down, so
+  a broken endpoint reads without reading the words.
+- **It is centred under the name instead of hanging off its left edge.** Left-aligned, a
+  20 dp pill under a left-aligned title read as a wrapped continuation of the title. The
+  chip now sits in the middle of the title column, which is where the other assistant app
+  puts its remote-control badge.
+- **The donut, the running-work glyph and their gaps are centred on the whole header, not
+  on the first line.** The cluster was a sibling of the NAME inside the title `Column`, so
+  `CenterVertically` had one line to work with and everything hung high the moment a roam
+  chat grew a subtitle underneath it. The name and the pill are now one weighted column and
+  the cluster is a sibling of THAT — measured against the two-line block.
+- The name's `Modifier.weight(1f)` moved to that column, so a long name still ellipsizes
+  into the space the cluster leaves instead of pushing the donut off the bar.
+
 ### Fixed — the attachment card no longer sizes itself from its own body
 
 - **A `width`/`implicitWidth` cycle made `tst_qml` stall once every couple of runs.**
