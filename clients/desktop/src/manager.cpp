@@ -71,6 +71,24 @@ Manager::Manager(QObject *parent)
     m_io = new QThreadPool(this);
     m_io->setMaxThreadCount(1);
 
+    // Stall detector. Every number we have so far says the OPEN is cheap (worker 0ms)
+    // while the transcript appears ~300-400ms later; what that cannot say is whether
+    // the window was frozen for that time or merely empty. This can: a 100ms timer
+    // that finds 250ms+ since its last tick is reporting the main thread being busy,
+    // and names the chat it was busy on.
+    m_stallTimer = new QTimer(this);
+    m_stallTimer->setInterval(100);
+    m_stallClock.start();
+    connect(m_stallTimer, &QTimer::timeout, this, [this] {
+        const qint64 gap = m_stallClock.restart();
+        if (gap > 250)
+            timingLog(QStringLiteral("main thread stalled %1ms (%2)")
+                          .arg(gap)
+                          .arg(m_currentSessionId.isEmpty() ? QStringLiteral("no chat")
+                                                            : m_currentSessionId));
+    });
+    m_stallTimer->start();
+
     // The sidebar's collapsed groups are the user's own state, not a per-launch
     // default: restore what was last chosen and persist every toggle. Without
     // this the tree resets to "everything expanded" on each start.

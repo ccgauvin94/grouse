@@ -980,6 +980,11 @@ private:
     static QString timingLogPath();
     /// Append one line to that file and mirror it to qInfo.
     static void timingLog(const QString &line);
+    /// A stalled main thread, logged with the session on screen. "It locks" and
+    /// "it is empty for a moment" look identical from the outside and want opposite
+    /// fixes; this is the difference. A 100ms tick that arrives late IS the stall.
+    QTimer *m_stallTimer = nullptr;
+    QElapsedTimer m_stallClock;
     /// Coalesces messagesChanged while chunks stream (see requestMessagesUpdate).
     QTimer *m_updateTimer = nullptr;
     /// Fires when the tail has stopped receiving chunks; renders it without
