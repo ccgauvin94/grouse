@@ -9,6 +9,7 @@
 #include <QSettings>
 #include <QVariant>
 #include <QVariantList>
+#include <QVariantMap>
 
 class CoreBridge;
 class AppBridgeServer;
@@ -963,6 +964,17 @@ private:
     QThreadPool *m_io = nullptr;
     /// Run `work` on the core worker (in click order — the pool is single-threaded).
     void runOnCore(std::function<void()> work);
+    // --- paint batching -----------------------------------------------------
+    /// A transcript paint is `Reset` + one `Upsert` per row + `Window`. Applying it
+    /// row by row blanked the chat and then rebuilt it in front of the user, which is
+    /// the visible jump on every reopen of a chat that merged a tail. The rows are
+    /// buffered between those two events and landed in ONE model reset, so the screen
+    /// goes cached rows → (loading) → settled rows, with nothing in between.
+    bool m_painting = false;
+    QList<QVariantMap> m_paintRows;
+    QTimer *m_paintTimer = nullptr;
+    /// Land the buffered paint (also the safety valve when a paint never ends).
+    void flushPaint();
     /// Coalesces messagesChanged while chunks stream (see requestMessagesUpdate).
     QTimer *m_updateTimer = nullptr;
     /// Fires when the tail has stopped receiving chunks; renders it without

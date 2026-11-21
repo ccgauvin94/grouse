@@ -85,6 +85,13 @@ Manager::Manager(QObject *parent)
     m_peekTimer->setSingleShot(true);
     connect(m_peekTimer, &QTimer::timeout, this, &Manager::doPeekStep);
 
+    // A paint that never ends must not swallow the transcript: if no Window follows
+    // its Reset (a load that failed mid-stream), land what arrived.
+    m_paintTimer = new QTimer(this);
+    m_paintTimer->setSingleShot(true);
+    m_paintTimer->setInterval(3000);
+    connect(m_paintTimer, &QTimer::timeout, this, &Manager::flushPaint);
+
     m_updateTimer = new QTimer(this);
     m_updateTimer->setSingleShot(true);
     m_updateTimer->setInterval(50);
@@ -167,6 +174,18 @@ void Manager::runOnCore(std::function<void()> work)
         return;
     }
     m_io->start(new CoreTask(std::move(work)));
+}
+
+void Manager::flushPaint()
+{
+    if (!m_painting)
+        return;
+    m_painting = false;
+    m_paintTimer->stop();
+    m_messageModel->replaceAll(m_paintRows);
+    m_paintRows.clear();
+    m_currentIndex = -1;
+    requestMessagesUpdate();
 }
 
 void Manager::requestMessagesUpdate()
@@ -3720,9 +3739,16 @@ void Manager::coreOnItem(const QString &json)
 {
     const QJsonObject root = parseObj(json);
     if (root.contains(QStringLiteral("Reset"))) {
+        // NOT `m_messageModel->clear()`: a paint is Reset + rows + Window, and the
+        // blank-then-rebuild was the jump. Buffer; flushPaint lands it in one reset.
+        // A second Reset (the merge's end-of-replay repaint) simply supersedes the
+        // buffer, which is right — the newer paint is the one that describes the
+        // store.
+        m_painting = true;
+        m_paintRows.clear();
+        m_paintTimer->start();
         m_olderPending.clear();
         m_loadingOlder = false;
-        m_messageModel->clear();
         m_currentIndex = -1;
         m_tailTimer->stop();
         m_tailRendered.clear();
@@ -3736,6 +3762,8 @@ void Manager::coreOnItem(const QString &json)
         return;
     }
     if (root.contains(QStringLiteral("Window"))) {
+        // End of a paint: land it as one model reset (see flushPaint).
+        flushPaint();
         const QJsonObject w = root.value(QStringLiteral("Window")).toObject();
         const QString oldest = w.value(QStringLiteral("oldest_id")).toString();
         const bool hasOlder = w.value(QStringLiteral("has_older")).toBool();
@@ -3784,6 +3812,10 @@ void Manager::coreOnItem(const QString &json)
         const QJsonObject item = root.value(QStringLiteral("Upsert")).toObject()
                                      .value(QStringLiteral("item")).toObject();
         const QVariantMap row = rowFromItem(item);
+        if (m_painting) {
+            m_paintRows << row;
+            return;
+        }
         if (m_loadingOlder) {
             m_olderPending << row;
             return;
@@ -3800,6 +3832,8 @@ void Manager::coreOnItem(const QString &json)
         return;
     }
     if (root.contains(QStringLiteral("AppendText"))) {
+        // A delta belongs to rows the paint has not landed yet: land it first.
+        flushPaint();
         const QJsonObject o = root.value(QStringLiteral("AppendText")).toObject();
         m_messageModel->appendText(o.value(QStringLiteral("id")).toString(),
                                    o.value(QStringLiteral("chunk")).toString());
@@ -3808,6 +3842,7 @@ void Manager::coreOnItem(const QString &json)
         return;
     }
     if (root.contains(QStringLiteral("AppendOutput"))) {
+        flushPaint();
         const QJsonObject o = root.value(QStringLiteral("AppendOutput")).toObject();
         m_messageModel->appendOutput(o.value(QStringLiteral("id")).toString(),
                                      o.value(QStringLiteral("chunk")).toString());
@@ -3816,6 +3851,7 @@ void Manager::coreOnItem(const QString &json)
         return;
     }
     if (root.contains(QStringLiteral("Remove"))) {
+        flushPaint();
         const QJsonObject o = root.value(QStringLiteral("Remove")).toObject();
         m_messageModel->removeById(o.value(QStringLiteral("id")).toString());
         requestMessagesUpdate();

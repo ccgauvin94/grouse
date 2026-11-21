@@ -23,6 +23,17 @@ All notable changes to Grouse are recorded here. The format is based on
   with no `peer:` anywhere. It fails on the previous code with exactly the reported
   symptom (`peer:Phaethon|peer:Phaethon|peer:Phaethon`).
 
+### Changed — a repaint lands in one piece, not blank-then-rebuild
+
+- **A transcript paint is applied atomically.** The core sends `Reset` + one row
+  per message + `Window`, and the client cleared the model on the `Reset` and then
+  appended row by row — so a reopen that merged a tail went blank, grew back, and
+  then jumped a third time when the merge's end-of-replay repaint landed. The rows
+  are now buffered between `Reset` and `Window` and swapped in with ONE model reset:
+  cached rows stay on screen, the delta arrives, and the reconciled window replaces
+  them in a single step. A 3s safety valve lands the buffer if a load dies mid-paint
+  and never sends its `Window`.
+
 ### Changed — opening a chat no longer blocks the UI thread
 
 - **A chat switch, and `New chat`, now run the core's blocking work on a worker.**

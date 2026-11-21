@@ -103,6 +103,23 @@ void MessageListModel::clear()
     emit countChanged();
 }
 
+void MessageListModel::replaceAll(const QList<QVariantMap> &rows)
+{
+    beginResetModel();
+    m_rows = rows;
+    m_uids.clear();
+    m_uids.reserve(rows.size());
+    for (int i = 0; i < rows.size(); ++i)
+        m_uids << m_nextUid++;
+    m_dirtyRows.clear();
+    m_expanded.clear();
+    m_deferTimer->stop();
+    m_rowById.clear();
+    reindex();
+    endResetModel();
+    emit countChanged();
+}
+
 void MessageListModel::append(const QVariantMap &message)
 {
     const int at = m_rows.size();

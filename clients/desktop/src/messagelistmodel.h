@@ -64,6 +64,13 @@ public:
     QVariantMap row(int index) const;
 
     void clear();
+    /// Replace every row in ONE model reset.
+    ///
+    /// A paint arrives as `Reset` + one `Upsert` per row (docs/TRANSCRIPT_MODEL.md),
+    /// and applying it row by row made the chat go blank and then rebuild in front of
+    /// the user — the "it loads something, then jumps" on every merge. The Manager
+    /// buffers a paint between those two events and lands it here in one go.
+    void replaceAll(const QList<QVariantMap> &rows);
     void append(const QVariantMap &message);
     /** Insert `messages` (oldest first) at the front, in one begin/endInsertRows. */
     void prepend(const QList<QVariantMap> &messages);
