@@ -302,7 +302,10 @@ void Manager::flushPaint()
         m_currentIndex = -1;
         return;
     }
-    m_messageModel->replaceAll(m_paintRows);
+    {
+        GROUSE_PHASE("phase replaceAll");
+        m_messageModel->replaceAll(m_paintRows);
+    }
     m_paintRows.clear();
     m_currentIndex = -1;
     requestMessagesUpdate();
@@ -3944,7 +3947,10 @@ void Manager::coreOnItem(const QString &json)
             // The core emits the older items oldest-first, then this Window: one
             // model insert for the whole batch keeps the viewport stable.
             const int n = m_olderPending.size();
-            m_messageModel->prepend(m_olderPending);
+            {
+                GROUSE_PHASE("phase prependOlder");
+                m_messageModel->prepend(m_olderPending);
+            }
             m_olderPending.clear();
             m_loadingOlder = false;
             emit olderRowsPrepended(n);
