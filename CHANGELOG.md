@@ -6,6 +6,20 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed — a local rebuild stops compressing a bundle it will not use
+
+- **`flatpak build-bundle` was two thirds of a rebuild.** Measured on this tree: the
+  stage that produces `grouse-desktop.flatpak` took 276s, of which **252s** was
+  single-threaded compression of the app into one file, 14s the ostree export, and
+  ~10s the ccache-warm sandbox build — and the next command decompressed that file
+  straight back to install it. `flatpak build-export` has already written the same
+  commit into `~/.cache/grouse-flatpak/repo`, which `flatpak install` reads directly.
+- **`GROUSE_NO_BUNDLE=1` stops after the export.** The default is unchanged, because
+  the file is what publishing hands out (`release.yml`). With the switch, a full
+  rebuild of this tree is 138s instead of 375s, and the flatpak stage is 41s instead
+  of 276s; installing from the local repo was verified end to end (commit installed,
+  ABI 16/16/16, packaged QML identical, app alive with a clean log).
+
 ### Fixed — the core reports the ABI version its listener table actually has
 
 - **The core said 15 while the desktop required 16.** `644376c` appended

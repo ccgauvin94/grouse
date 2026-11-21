@@ -87,6 +87,15 @@ echo "== Building $APP_ID =="
 # the app module's cached build so it always re-runs; the base/runtime layers stay
 # cached, so this costs ~1 min of cmake/ninja, not the SDK download.
 rm -rf "${STATE_DIR}/builder-cache/build/grouse-desktop-"*
+# A local install does not need the single-file bundle: flatpak-builder has
+# already written the ref into ${REPO_DIR}, which `flatpak install` takes
+# directly. Producing the file is 252s of single-threaded compression (measured:
+# 276s of a 375s rebuild) that the next command decompresses straight back.
+# Publishing still needs the file, so this is opt-in and the default is unchanged.
+FINISH="flatpak build-export --files=files '${REPO_DIR}' '${BUILD_DIR}'"
+if [ "${GROUSE_NO_BUNDLE:-0}" != "1" ]; then
+    FINISH="${FINISH} && flatpak build-bundle '${REPO_DIR}' '${BUNDLE}' '${APP_ID}'"
+fi
 # Run the builder INSIDE the kde-build container: the manifest now has
 # base: io.qt.qtwebengine.BaseApp, and flatpak's ostree checkout of that base
 # restores SELinux labels the host's unprivileged context cannot set
@@ -104,7 +113,11 @@ distrobox enter kde-build -- bash -lc \
         --repo='${REPO_DIR}' \
         '${BUILD_DIR}' \
         '${MANIFEST}' \
-     && flatpak build-export --files=files '${REPO_DIR}' '${BUILD_DIR}' \
-     && flatpak build-bundle '${REPO_DIR}' '${BUNDLE}' '${APP_ID}'"
+     && ${FINISH}"
 
-echo "Done: ${BUNDLE}"
+if [ "${GROUSE_NO_BUNDLE:-0}" = "1" ]; then
+    echo "Done: exported to ${REPO_DIR} (no bundle) — install with:"
+    echo "  flatpak --user install --reinstall grouse-local ${APP_ID}"
+else
+    echo "Done: ${BUNDLE}"
+fi
