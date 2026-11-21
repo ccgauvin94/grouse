@@ -6,6 +6,41 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — a chat with a reply in flight is never rebuilt from the server
+
+Four read-only investigations plus a re-read of the code; the full findings are in
+`docs/CACHE_OPEN_AUDIT.md`.
+
+- **The premise was wrong for exactly one state.** Every open reconciles toward "the
+  server's copy is a superset of ours" — but goose persists a message when it
+  *finishes*, so for the whole duration of a turn the server is missing the reply
+  being streamed. Opening (or reloading) a chat mid-reply therefore replayed a
+  snapshot without it, and the replay's supersede/`reset` deleted the rows the store
+  held *and* cleared the stream id, so the rest of the reply restarted mid-sentence.
+  That is the reported "it comes back and the reply is gone / starts a paragraph in".
+- **A fourth paint mode now says so**: `PaintPlan::bind_only`. A session with a turn
+  in flight paints nothing, keeps its store, and takes a load with
+  `_meta.replayTail: 1` whose replay is discarded — the wire is only asked to *bind*
+  the session. It is never put through `verified_ask`, because the downgrade that
+  exists there is a *merge*, which would anchor on the live rows and truncate them.
+  Wired into `open_session_inner`, `roam::load_session` (so peer reconnects and peer
+  refreshes inherit it) and `refresh_session(Full)`, which no longer deletes the
+  cache or clears the store of a chat whose turn is live.
+- **`incomplete` no longer sticks.** `finish_turn` returns before touching the flag
+  when the turn was already released — which is precisely what `turn_lost` does — so
+  a reply that arrived after a dropped turn left the chat permanently "provisional"
+  and every later open replayed the whole conversation. A clean end now settles it
+  either way, and a load that answers settles it while no turn is in flight, so the
+  cache can be stamped and stop re-replaying.
+- **The "different checkpoint every time" had its own cause**: `save_open_transcript`
+  ran at the top of every peer load, including while a previous replay still had rows
+  in flight, so it cached whatever prefix had arrived; the next plan then treated that
+  prefix as the chat and merged behind it. It now refuses to save a store that is
+  mid-replay.
+- Pinned by `a_bind_only_load_keeps_the_live_rows_and_asks_for_one_message` (a store
+  with a partial reply survives a load byte-identical, and the tail asked for is 1;
+  the test's wire asserts no `session/info` probe is made).
+
 ### Fixed — a long reply stops being scrolled out from under the reader
 
 - **The hold now engages when the reply outgrows the SCREEN, not when the reader drags.** The

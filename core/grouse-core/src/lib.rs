@@ -1571,11 +1571,23 @@ impl Core {
             if self.inner.state.lock().replaying.contains(&session_id) {
                 return;
             }
-            // TOTAL invalidation, not just "disbelieve the stamp": the cache
-            // FILE goes. Otherwise a wrong store could be merged into or
-            // re-saved from, which is the thing a reload exists to escape.
-            self.inner.cache.forget(&session_id);
-            self.inner.hub.display(&session_id).clear();
+            // A turn in flight is the ONE case a reload cannot improve on: goose
+            // persists a message when it finishes, so the server's copy cannot
+            // contain the reply being streamed, and clearing the store here would
+            // throw away the only copy of it. The live store is repainted as-is
+            // (open_session_inner / the peer's load_session take it from here).
+            let live_turn = self.inner.state.lock().in_flight.contains(&session_id);
+            if live_turn {
+                self.note(format!(
+                    "refresh {session_id}: turn in flight — keeping the live store, not rebuilding"
+                ));
+            } else {
+                // TOTAL invalidation, not just "disbelieve the stamp": the cache
+                // FILE goes. Otherwise a wrong store could be merged into or
+                // re-saved from, which is the thing a reload exists to escape.
+                self.inner.cache.forget(&session_id);
+                self.inner.hub.display(&session_id).clear();
+            }
         }
         // A peer owns its own wire and cache; the same intent must reach it
         // instead of clearing the display owner and loading on the main wire
@@ -1611,15 +1623,26 @@ impl Core {
         // The incomplete case is the one that used to corrupt: a mid-stream drop
         // left a truncated store, the bounded-tail merge anchored onto it, and
         // each reopen re-saved a different wrong subset.
-        let paint = self.plan_cache_paint(&session_id, force_replay);
-        let (suppress, merge) = (paint.suppress, paint.merge);
         let store = self.inner.hub.display(&session_id);
-        match paint.items {
-            Some(items) if suppress => store.replace_rich(items, false),
-            Some(items) if merge => store.replace_rich_for_merge(items),
-            Some(items) => store.replace_rich(items, true),
-            None => store.clear(),
+        // A session with a TURN IN FLIGHT is the one case where the server cannot
+        // be the truth: goose persists a message only when it finishes, so the
+        // replay cannot contain the reply being streamed — and the replay's own
+        // supersede/`reset` deletes the rows we already hold (2026-11-21: switch
+        // away mid-reply, come back, the reply is gone or restarts mid-sentence).
+        // So the live store is painted back to the newly displayed client and the
+        // wire is only asked to bind.
+        let live_turn = self.inner.state.lock().in_flight.contains(&session_id);
+        let paint = if live_turn {
+            self.note(format!(
+                "open {session_id}: turn in flight — painting the live store, binding only"
+            ));
+            store.repaint_window();
+            crate::session::PaintPlan::bind_only()
+        } else {
+            self.plan_cache_paint(&session_id, force_replay)
         };
+        let (suppress, merge) = (paint.suppress, paint.merge);
+        crate::session::apply_paint(&store, &paint);
         let config = self.inner.state.lock().last_config.clone();
         let Some(config) = config else {
             // No connection configuration has ever been installed in this
@@ -1643,7 +1666,7 @@ impl Core {
                 let c = cwd.clone();
                 crate::roam::runtime().spawn(async move {
                     if let Err(error) = conn
-                        .live_load_session_async(sid.clone(), c.clone(), suppress, merge)
+                        .live_load_session_async(sid.clone(), c.clone(), suppress, merge, paint.keep)
                         .await
                     {
                         // The live wire refused the load. Do NOT bind a
@@ -4669,6 +4692,14 @@ impl Core {
         let ignored = {
             let mut state = self.inner.state.lock();
             if !state.in_flight.remove(key) {
+                // A CLEAN end still means "this chat's transcript is settled". The
+                // turn can be released before its reply arrives (`turn_lost` marks
+                // the chat incomplete), and if only the release path could clear
+                // that flag it stayed set for the life of the process — every open
+                // then took the full provisional replay of the whole chat.
+                if clean {
+                    state.incomplete.remove(key);
+                }
                 // The turn was already released (or never registered): whatever
                 // ended it now cannot tell the client, which is exactly the state
                 // that leaves a chat saying "working". Recorded with the keys,
@@ -5198,6 +5229,10 @@ impl Core {
             let plan = crate::session::PaintPlan {
                 suppress: false,
                 merge: false,
+                // Never a kept store: a resync exists because the server changed
+                // this session and our rows are what must be rebuilt. The caller
+                // above already skips while a turn is in flight.
+                keep: false,
                 // A resync rebuilds because the SERVER changed this session, so
                 // it must see the whole thing: `0` = no tail, replay everything.
                 tail: 0,
@@ -5628,6 +5663,12 @@ impl crate::session::DispatchHost for Core {
         // A transcript with a hole in it, with no turn to explain it: the next plan
         // must not read it as current, and a save must not stamp it fresh.
         self.inner.state.lock().incomplete.insert(key.to_string());
+    }
+    fn turn_in_flight(&self, key: &str) -> bool {
+        self.inner.state.lock().in_flight.contains(key)
+    }
+    fn clear_incomplete(&self, key: &str) {
+        self.inner.state.lock().incomplete.remove(key);
     }
     fn listed_stamp(&self, key: &str) -> String {
         self.inner

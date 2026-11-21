@@ -434,9 +434,20 @@ items: [Item] }`. It is the source for
 turn is in flight — or after it ended in error because the wire dropped
 mid-stream — is written with an EMPTY `updatedAt`, so it can never compare equal
 to the server's stamp and suppress the replay that would complete it. A
-settled-but-stale cache merges a bounded tail; an incomplete one takes a full
-replay (its rows are painted provisionally and dropped wholesale). `cache v4`
-exists because a v3 file could carry a poisoned stamp over a truncated
+settled-but-stale cache merges a bounded tail; an incomplete one takes a
+provisional paint and a replay big enough to replace what it painted.
+
+**A session with a TURN IN FLIGHT is the exception, and it is absolute: nothing is
+painted and the wire is only asked to BIND** (`PaintPlan::bind_only`). The server
+persists a message when it *finishes*, so a replay can never contain the reply
+being streamed — and a replay that replaces the store deletes it, along with the
+stream id the rest of the reply is appending to. The store is the newest copy of
+a live session, so an open repaints it (`repaint_window`) and takes a bind-only
+load instead. `refresh_session(id, Full)` honours the same rule: it will not clear
+the store of a chat whose turn is live. This is why switching away mid-reply and
+back keeps the reply (2026-11-21).
+
+`cache v4` exists because a v3 file could carry a poisoned stamp over a truncated
 transcript. `refresh_session(id)` forces the full replay on demand (the clients'
 "reload chat" action).
 

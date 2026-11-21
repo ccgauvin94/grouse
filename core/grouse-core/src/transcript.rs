@@ -2385,8 +2385,9 @@ impl TranscriptStore {
 
     /// Reset the item client and re-paint the current window from the store.
     /// Used when the store was reconciled in place (a replay merge) rather than
-    /// wholesale replaced.
-    fn repaint_window(&self) {
+    /// wholesale replaced — and when a session is opened while a turn is being
+    /// written into it, where the store (not the server) is the newest copy.
+    pub(crate) fn repaint_window(&self) {
         let (session_id, window, oldest, has_older) = {
             let mut st = self.state.lock();
             st.emitted_from = st.bubbles.len().saturating_sub(CLIENT_WINDOW);

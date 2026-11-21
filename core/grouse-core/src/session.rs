@@ -1146,6 +1146,153 @@ mod tests {
         );
     }
 
+    /// A session with a TURN IN FLIGHT is opened: the store is the newest copy.
+    ///
+    /// goose persists a message when it finishes, so the server's replay cannot
+    /// contain the reply being streamed — and the replay's supersede/`reset`
+    /// deletes the rows the store holds. Measured 2026-11-21: switching away
+    /// mid-reply and back left the prompt with no reply, or a reply that started
+    /// a paragraph in. A bind-only plan (the one an in-flight open now uses) must
+    /// paint NOTHING, ask the wire for ONE message, and never probe the server:
+    /// a verification that downgraded it to a merge would anchor on the live rows
+    /// and truncate them.
+    #[test]
+    fn a_bind_only_load_keeps_the_live_rows_and_asks_for_one_message() {
+        use futures::future::BoxFuture;
+        use std::sync::Mutex as StdMutex;
+
+        struct Host {
+            store: Arc<crate::transcript::TranscriptStore>,
+        }
+        impl DispatchHost for Host {
+            fn display_id(&self, wire: &str) -> String {
+                wire.to_string()
+            }
+            fn store(&self, _k: &str) -> Arc<crate::transcript::TranscriptStore> {
+                self.store.clone()
+            }
+            fn touched(&self, _k: String, _t: String, _u: String) {}
+            fn active_run(&self, _k: String, _r: String) {}
+            fn turn_lost(&self, _k: &str) {}
+            fn config(&self, _k: &str, _o: Vec<ConfigOption>) {}
+            fn usage(&self, _k: &str, _u: i64, _s: i64, _c: f64, _cur: String) {}
+            fn commands(&self, _k: &str, _n: Vec<String>) {}
+            fn permission(&self, _k: &str, _r: PermissionRequest) {}
+            fn begin_replay(&self, _k: &str, _s: bool) {}
+            fn end_replay(&self, _k: &str) {}
+            fn replaying(&self, _k: &str) -> bool {
+                false
+            }
+            fn replay_tick(&self, _k: &str, _m: &str) {}
+            fn paging(&self, _k: &str) -> bool {
+                false
+            }
+            fn replay_backlog(&self, _k: &str, _s: usize, _t: usize) {}
+            fn accepts_chat(&self, _k: &str) -> bool {
+                true
+            }
+            fn background(&self, _k: &str) {}
+            fn endpoint_ready(&self, _l: Option<&str>) {}
+            fn cache_session(&self, _k: &str) {}
+            fn session_stamp(&self, _k: &str, _u: &str) {}
+            fn listed_stamp(&self, _k: &str) -> String {
+                String::new()
+            }
+            fn is_incomplete(&self, _k: &str) -> bool {
+                true // a turn is running, which is what put us on this path
+            }
+            fn turn_in_flight(&self, _k: &str) -> bool {
+                true
+            }
+            fn clear_incomplete(&self, _k: &str) {}
+            fn mark_incomplete(&self, _k: &str) {}
+            fn tool_run(&self, _k: &str, _r: &str) {}
+            fn step_closed(&self, _k: &str) {}
+            fn stamp_probe(&self, _k: &str, _p: bool) {}
+            fn is_summarizer(&self, _k: &str) -> bool {
+                false
+            }
+            fn summarizer_chunk(&self, _k: &str, _t: &str) -> bool {
+                false
+            }
+            fn take_summarizer_reply(&self, _k: &str) -> String {
+                String::new()
+            }
+        }
+
+        /// The wire: a `session/load` ONLY (a probe would fail this assert), which
+        /// replays the last turn as the server has persisted it — the prompt and
+        /// the finished part, with no in-flight reply. The `replayTail` it was
+        /// asked for is recorded so the test can see what a bind-only plan owes.
+        struct Server(StdMutex<Option<u64>>);
+        impl ChatEndpoint for Server {
+            fn request(
+                &self,
+                method: &str,
+                params: Value,
+            ) -> BoxFuture<'static, Result<Value, AcpError>> {
+                assert_eq!(method, "session/load", "a bind-only load must not probe");
+                *self.0.lock().unwrap() = params
+                    .pointer("/_meta/replayTail")
+                    .and_then(Value::as_u64);
+                Box::pin(async { Ok(json!({ "ok": true })) })
+            }
+            fn notify(&self, _m: &str, _p: Value) -> Result<(), AcpError> {
+                Ok(())
+            }
+            fn wire_id(&self, display: &str) -> String {
+                display.to_string()
+            }
+            fn accepts_prompt(&self) -> bool {
+                true
+            }
+            fn label(&self) -> Option<String> {
+                None
+            }
+        }
+
+        let store = Arc::new(crate::transcript::TranscriptStore::new(Box::new(NullListener)));
+        store.set_session("roam:Phaethon:s1");
+        store.append_chunk("user", "a question", Some("m1"), false);
+        store.append_chunk("agent", "the reply so far", Some("m2"), false);
+        let before = store.rich_transcript();
+        let host = Host {
+            store: store.clone(),
+        };
+        let server = Server(StdMutex::new(None));
+
+        crate::roam::runtime()
+            .block_on(load_with_plan(
+                &server,
+                &host,
+                &store,
+                "roam:Phaethon:s1",
+                "/work",
+                &PaintPlan::bind_only(),
+            ))
+            .expect("a bind-only load still has to answer");
+
+        assert_eq!(
+            Some(1),
+            *server.0.lock().unwrap(),
+            "a bind-only load asks the wire for ONE message, not the chat"
+        );
+        let after: Vec<(String, String)> = store
+            .rich_transcript()
+            .iter()
+            .map(|i| (i.id.clone(), i.text.clone()))
+            .collect();
+        let expected: Vec<(String, String)> = before
+            .iter()
+            .map(|i| (i.id.clone(), i.text.clone()))
+            .collect();
+        assert_eq!(
+            expected, after,
+            "the store is the newest copy of a session with a turn in flight — it must \
+             come back exactly as it was"
+        );
+    }
+
     /// A painted cache, a tail that cannot anchor, and a rebuild that fails.
     ///
     /// The gap path clears the store before rebuilding it from the whole session. That
@@ -1209,6 +1356,19 @@ mod tests {
             }
             fn mark_incomplete(&self, key: &str) {
                 self.incomplete.lock().unwrap().push(key.to_string());
+            }
+            fn turn_in_flight(&self, k: &str) -> bool {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e == &format!("in_flight {k}"))
+            }
+            fn clear_incomplete(&self, key: &str) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("settled {key}"));
             }
             fn tool_run(&self, _k: &str, _r: &str) {}
             fn step_closed(&self, _k: &str) {}
@@ -1278,6 +1438,7 @@ mod tests {
         let plan = PaintPlan {
             suppress: false,
             merge: true,
+            keep: false,
             tail: REPLAY_TAIL,
             items: Some(painted.clone()),
             complete: true,
@@ -1858,6 +2019,18 @@ impl ReplayAsk {
             tail: first_tail(suppress, merge),
         }
     }
+
+    /// The ask for a session whose STORE is already the newest copy: bind the
+    /// session on the wire with the smallest legal replay and discard it. One
+    /// message is enough to bind — the server widens it to the last turn, and a
+    /// suppression drops every row of it.
+    pub(crate) fn bind_only() -> Self {
+        Self {
+            suppress: true,
+            merge: false,
+            tail: 1,
+        }
+    }
 }
 
 /// Confirm a "the cache is current, throw the replay away" decision against the
@@ -1942,6 +2115,10 @@ pub(crate) struct PaintPlan {
     pub suppress: bool,
     /// The cache is settled but stale: paint and merge a bounded tail.
     pub merge: bool,
+    /// The STORE is already the newest copy of this session (a turn is being
+    /// written into it), so nothing is painted and the wire is only asked to
+    /// bind. See [`PaintPlan::bind_only`].
+    pub keep: bool,
     /// How much history this load asks the wire for (`0` = the whole session).
     /// A bounded tail is what makes an open recent-first instead of a wait for
     /// the entire transcript.
@@ -1975,6 +2152,7 @@ pub(crate) fn plan_paint(
             PaintPlan {
                 suppress: fresh,
                 merge,
+                keep: false,
                 tail: first_tail(fresh, merge),
                 items: Some(items),
                 complete,
@@ -1983,6 +2161,7 @@ pub(crate) fn plan_paint(
         None => PaintPlan {
             suppress: false,
             merge: false,
+            keep: false,
             // Nothing to paint: ask for a bounded tail, not the whole session.
             tail: OPEN_TAIL,
             items: None,
@@ -1991,8 +2170,38 @@ pub(crate) fn plan_paint(
     }
 }
 
+impl PaintPlan {
+    /// The plan for a session the core is ALREADY writing into.
+    ///
+    /// This is not a cache verdict — it is the one case where the server cannot
+    /// be the truth: goose persists a message only when it FINISHES, so a
+    /// `session/load` replay can never contain the reply currently being
+    /// streamed, and the replay's own supersede/`reset` deletes the rows we
+    /// already hold (and clears the stream id, so the rest of the reply opens a
+    /// new bubble mid-sentence). So: paint nothing, keep the store, and take a
+    /// bind-only load.
+    ///
+    /// Measured 2026-11-21: switching away mid-reply and back left a chat with
+    /// its prompt but no reply, or a reply that started a paragraph in.
+    pub(crate) fn bind_only() -> Self {
+        PaintPlan {
+            suppress: true,
+            merge: false,
+            keep: true,
+            tail: 1,
+            items: None,
+            complete: true,
+        }
+    }
+}
+
 /// Paint a plan into a store (the one implementation of the three modes).
 pub(crate) fn apply_paint(store: &crate::transcript::TranscriptStore, plan: &PaintPlan) {
+    // A kept store is authoritative: not painted, not cleared, and its cursor
+    // left alone — it is the only copy of the turn being streamed.
+    if plan.keep {
+        return;
+    }
     // The cache already knows whether it reaches the conversation's origin, so
     // the cursor is right from the first paint instead of waiting for the load
     // reply: a partial cache shows "there is more" and a complete one does not.
@@ -2027,17 +2236,24 @@ pub(crate) async fn load_with_plan(
     // A suppression is verified against the server before it is honoured: a
     // stale freshness baseline would otherwise discard the replay (see
     // [`verified_ask`]).
-    let ask = verified_ask(
-        endpoint,
-        host,
-        key,
-        ReplayAsk {
-            suppress: plan.suppress,
-            merge: plan.merge,
-            tail: plan.tail,
-        },
-    )
-    .await;
+    // A bind-only plan is NOT verified: verification exists to turn a wrong
+    // "the cache is current" into a merge, and a merge would anchor on the live
+    // rows this plan exists to protect — truncating the reply being streamed.
+    let ask = if plan.keep {
+        ReplayAsk::bind_only()
+    } else {
+        verified_ask(
+            endpoint,
+            host,
+            key,
+            ReplayAsk {
+                suppress: plan.suppress,
+                merge: plan.merge,
+                tail: plan.tail,
+            },
+        )
+        .await
+    };
     replay_held(endpoint, host, store, key, cwd, ask).await
 }
 
@@ -2203,6 +2419,17 @@ async fn replay_held(
     // history (a hard reload) sees "nothing older" for one frame and stops.
     // `note_backlog` also starts the background fill.
     host.replay_backlog(key, replay_skipped(&reply), asked);
+    // A load that ANSWERED settles the store against the server, so a chat left
+    // `incomplete` by a dropped turn is no longer owed a full replay on every
+    // open — its cache can be stamped settled from now on. Not while a turn is
+    // in flight: the store is then the authority, not this replay (see
+    // `PaintPlan::bind_only`). This is the second half of "it reloads the whole
+    // chat on every open": `incomplete` was set on send and only a clean
+    // `finish_turn` cleared it, so a turn whose reply was released by
+    // `turn_lost` left the flag set for the life of the process.
+    if !host.turn_in_flight(key) {
+        host.clear_incomplete(key);
+    }
     // The replay is in: paint the newest window (or the empty transcript) once.
     store.release_held_replay();
     guard.holds = false;
@@ -2289,6 +2516,14 @@ pub(crate) trait DispatchHost: Send + Sync {
     /// that ended in error), so a plan may not treat it as current or use it as
     /// a merge base. The peer used to pass a hard-coded `false` here.
     fn is_incomplete(&self, key: &str) -> bool;
+    /// Whether a TURN is live for `key` right now — the one state in which the
+    /// store is newer than the server (messages are persisted on completion, so
+    /// the reply being streamed is not in any replay). Distinct from
+    /// `is_incomplete`, which also covers a turn that ended badly.
+    fn turn_in_flight(&self, key: &str) -> bool;
+    /// Clear `key`'s incomplete flag: a load answered against the server, so the
+    /// store is settled up to that answer.
+    fn clear_incomplete(&self, key: &str);
     /// Record that `key`'s transcript is known to be MISSING rows the server holds,
     /// even though no turn is in flight. A merge gap is the case: the bounded tail
     /// started past the cache, the rebuild that was owed did not complete, and the
@@ -2475,6 +2710,14 @@ impl DispatchHost for PrefixHost {
     fn mark_incomplete(&self, key: &str) {
         if let Some(host) = self.host() {
             host.mark_incomplete(key);
+        }
+    }
+    fn turn_in_flight(&self, key: &str) -> bool {
+        self.host().map(|host| host.turn_in_flight(key)).unwrap_or(false)
+    }
+    fn clear_incomplete(&self, key: &str) {
+        if let Some(host) = self.host() {
+            host.clear_incomplete(key);
         }
     }
     fn tool_run(&self, key: &str, run_id: &str) {

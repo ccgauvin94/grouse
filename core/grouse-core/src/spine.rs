@@ -848,12 +848,17 @@ impl Conn {
     /// Live-wire `session/load` — same wire-reuse rationale as
     /// `live_new_session_async`. The blocking twin that used to sit here had no
     /// caller once session handling became async end to end.
+    /// `bind_only` is the session-with-a-live-turn load: bind it on the wire and
+    /// discard the replay, verified or not (a verification that downgraded this
+    /// to a merge would anchor on the live rows and truncate the reply being
+    /// streamed — see `session::PaintPlan::bind_only`).
     pub(crate) async fn live_load_session_async(
         &self,
         session_id: String,
         cwd: String,
         suppress_replay: bool,
         merge_replay: bool,
+        bind_only: bool,
     ) -> Result<(), AcpError> {
         // NOTE: the gate/session id is ALREADY this session (`prebind_session`,
         // called by the open before the cwd round trip), so a failure cannot be
@@ -868,17 +873,21 @@ impl Conn {
         // before the gates are set) so the replayed rows are kept rather than
         // dropped — see `session::verified_ask`.
         let endpoint: &dyn crate::session::ChatEndpoint = self;
-        let ask = crate::session::verified_ask(
-            endpoint,
-            self.inner.host.as_ref(),
-            &replay_key,
-            crate::session::ReplayAsk {
-                suppress: suppress_replay,
-                merge: merge_replay,
-                tail: crate::session::first_tail(suppress_replay, merge_replay),
-            },
-        )
-        .await;
+        let ask = if bind_only {
+            crate::session::ReplayAsk::bind_only()
+        } else {
+            crate::session::verified_ask(
+                endpoint,
+                self.inner.host.as_ref(),
+                &replay_key,
+                crate::session::ReplayAsk {
+                    suppress: suppress_replay,
+                    merge: merge_replay,
+                    tail: crate::session::first_tail(suppress_replay, merge_replay),
+                },
+            )
+            .await
+        };
         let (suppress_replay, merge_replay) = (ask.suppress, ask.merge);
         self.inner
             .suppress_replay

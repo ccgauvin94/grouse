@@ -758,10 +758,19 @@ impl RoamPeer {
         let Some(open) = self.inner.lock().open_session_id.clone() else {
             return;
         };
+        let key = self.cache_key(&open);
+        // A store that is MID-REPLAY is a partial ingest (emissions held, rows
+        // still arriving). Saving it here cached whatever prefix had landed, and
+        // the next open then painted that prefix and planned a merge from it —
+        // which is why repeated manual refreshes of one chat showed a different
+        // "checkpoint" each time.
+        if self.host.replaying(&key) {
+            return;
+        }
         // The core owns the freshness rule (a mid-turn store is written with an
         // empty stamp); duplicating it here would let a dropped peer turn look
         // current.
-        self.host.cache_session(&self.cache_key(&open));
+        self.host.cache_session(&key);
     }
 
     /// Send a raw JSON-RPC request over this peer's connection — the
@@ -1043,8 +1052,19 @@ impl RoamPeer {
             let list = self.inner.lock().sessions.clone();
             freshness_stamp(self.host.as_ref(), &list, &key)
         };
-        let incomplete = self.host.is_incomplete(&key);
-        let plan = crate::session::plan_paint(&self.cache, &key, &listed, force, incomplete);
+        // A TURN IN FLIGHT makes the peer's copy incomplete by construction: goose
+        // persists a message when it finishes, so no replay can contain the reply
+        // being streamed — and a replay that replaces the store deletes it (and
+        // clears the stream id, so the rest of the reply restarts mid-sentence).
+        // The store we are already writing into is the newest copy; paint it and
+        // bind only.
+        let live_turn = self.host.turn_in_flight(&key);
+        let plan = if live_turn {
+            crate::session::PaintPlan::bind_only()
+        } else {
+            let incomplete = self.host.is_incomplete(&key);
+            crate::session::plan_paint(&self.cache, &key, &listed, force, incomplete)
+        };
         {
             let mut inner = self.inner.lock();
             inner.open_session_id = Some(raw.clone());
@@ -1057,6 +1077,11 @@ impl RoamPeer {
             }
         }
         let store = self.hub.display(&key);
+        if live_turn {
+            // The client cleared its rows when it asked for this session, so the
+            // store has to be painted back to it — the load below paints nothing.
+            store.repaint_window();
+        }
         // Paint AND replay through the SHARED lifecycle (`session::load_with_plan`):
         // it claims the session's load slot for both halves, so a resync (spawned
         // onto the runtime, not the peer's command loop) can never append its rows
@@ -1857,6 +1882,19 @@ mod tests {
         }
         fn is_incomplete(&self, _key: &str) -> bool {
             false
+        }
+        fn turn_in_flight(&self, key: &str) -> bool {
+            self.recorder
+                .events
+                .lock()
+                .iter()
+                .any(|e| e == &format!("in_flight {key}"))
+        }
+        fn clear_incomplete(&self, key: &str) {
+            self.recorder
+                .events
+                .lock()
+                .push(format!("settled {key}"));
         }
         fn mark_incomplete(&self, key: &str) {
             self.recorder

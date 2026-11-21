@@ -174,7 +174,11 @@ keep them when extending the core.
   while a turn is in flight (or after it ended in error because the wire dropped
   mid-stream) is written with an empty `updatedAt`, so it can never suppress the
   replay that would complete it; a settled-but-stale cache merges a bounded tail,
-  an incomplete one repaints provisionally behind a BOUNDED tail.
+  an incomplete one repaints provisionally behind a tail big enough to replace
+  what it painted. A session with a **turn in flight** is the exception: nothing
+  is painted and the load is BIND-ONLY, because the server persists a message only
+  when it finishes, so a replay cannot contain the reply being streamed — and one
+  that replaces the store deletes it (2026-11-21).
   `refresh_session(id, mode)` is the clients' "reload chat" action: `Quick` lets
   freshness decide (so an unchanged chat reloads nothing, and a dropped turn —
   whose cache carries an empty stamp — still replays), `Full` deletes the cache
