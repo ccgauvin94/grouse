@@ -118,6 +118,10 @@ import kotlinx.serialization.json.contentOrNull
 fun MessageBubble(
     m: ChatMessage,
     streaming: Boolean = false,
+    // The text to draw for a STREAMING row instead of the message's own: the reader scrolled
+    // away from the bottom and the row is held still (ChatScreen.heldStream), because a row
+    // that grows is a row that drags a reading position with it. Null = draw the live text.
+    heldText: String? = null,
     usage: AcpEvent.MessageUsage? = null,
     pinned: Boolean = false,
     live: Boolean = false,
@@ -131,7 +135,7 @@ fun MessageBubble(
         "error" -> ErrorBubble(m.text)
         "chart" -> ChartView(m.text)
         "mcpapp" -> McpAppView(m, pinned, onPin, onUnpin)
-        else -> AssistantBubble(m.text, streaming, usage)
+        else -> AssistantBubble(heldText ?: m.text, streaming, usage)
     }
 }
 
@@ -403,6 +407,32 @@ try {
 </script></body></html>
 """.trimIndent()
 
+/** How much of a streaming reply is SETTLED: the offset just past its last blank line, or 0
+ *  when it has not finished a paragraph yet.
+ *
+ *  Markdown arrives in blocks, and a block is never finished until a blank line closes it —
+ *  so everything before that point can be parsed once and left alone, while the paragraph
+ *  being written stays plain text. Fenced code is the exception that matters: a blank line
+ *  inside an open fence is code, not a paragraph break, so the scan tracks the fences and
+ *  refuses to settle in the middle of one (which would re-parse the block on every following
+ *  token). Allocation-free on purpose — this runs for every token of a long reply.
+ */
+internal fun settledParagraphEnd(text: String): Int {
+    var inFence = false
+    var cut = 0
+    var pos = 0
+    while (pos < text.length) {
+        val nl = text.indexOf('\n', pos)
+        val end = if (nl < 0) text.length else nl
+        var q = pos
+        while (q < end && (text[q] == ' ' || text[q] == '\t')) q++
+        if (end - q >= 3 && text.startsWith("```", q)) inFence = !inFence
+        else if (!inFence && q == end && nl >= 0) cut = nl + 1
+        pos = if (nl < 0) text.length else nl + 1
+    }
+    return cut
+}
+
 @Composable
 internal fun Markdownish(text: String) {
     // Fenced blocks are split out before the library sees the text: 0.20.0's
@@ -416,8 +446,9 @@ internal fun Markdownish(text: String) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         for (seg in segments) {
             when (seg) {
-                // Plain text while a turn streams (the caller decides), so this split
-                // runs once per finalized message, not per token.
+                // The caller decides how much of a streaming reply reaches this: only
+                // its settled paragraphs, so this split runs once per paragraph (and once
+                // per finalized message) rather than once per token.
                 is Segment.Code -> HighlightedCodeBlock(seg.code, seg.tag)
                 is Segment.Text ->
                     RichText(modifier = Modifier.fillMaxWidth(), style = style) {
@@ -601,11 +632,23 @@ private fun AssistantBubble(text: String, streaming: Boolean = false, usage: Acp
                     .tapOnly { menu = true }
                     .padding(horizontal = 2.dp, vertical = 4.dp)
             ) {
-                // Long-press selects the text; a tap opens the menu above. Plain text while
-                // streaming — re-parsing the growing Markdown every token is O(n²). The bubble
-                // re-renders once with full Markdown when the turn finishes.
+                // Long-press selects the text; a tap opens the menu above.
+                //
+                // While streaming, Markdown is applied to PARAGRAPHS, not per token. The part
+                // of the reply up to its last blank line is settled, so it is parsed once and
+                // skipped from then on (Markdownish is keyed on its own text); the paragraph
+                // still being written stays plain, which makes a token cost one short layout
+                // instead of a re-parse of the whole reply. That is the middle ground between
+                // re-parsing everything per token (O(n²), and it made streaming stutter) and
+                // plain text until the turn ends (nothing formatted while you read it).
                 SelectionContainer {
-                    if (streaming) Text(text) else Markdownish(text)
+                    if (streaming) {
+                        val cut = settledParagraphEnd(text)
+                        Column {
+                            if (cut > 0) Markdownish(text.substring(0, cut))
+                            if (cut < text.length) Text(text.substring(cut))
+                        }
+                    } else Markdownish(text)
                 }
             }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {

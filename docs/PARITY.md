@@ -68,7 +68,7 @@ Anchors are `file#token`; `+` joins more than one (all must resolve). Roots:
 android root = clients/android/app/src/main/java/id/gauvin/grouse
 desktop root = clients/desktop
 
-excluded = 14
+excluded = 15
 
 | surface | android | desktop |
 |---|---|---|
@@ -159,6 +159,8 @@ excluded = 14
 | `ui.my-day-lazy-cache` | yes: ConnectionManager.kt#fun paintTasks | yes: src/manager.cpp#void Manager::paintCachedTasks |
 | `ui.my-day-thread-chat` | yes: ConnectionManager.kt#fun openThreadChat | yes: src/manager.cpp#grouse_open_thread |
 | `ui.chat-scroll-pinned` | yes: ChatScreen.kt#var follow by remember | yes: ui/ChatPage.qml#function pinToEnd |
+| `ui.chat-stream-hold` | yes: ChatScreen.kt#var heldStream | yes: ui/ChatPage.qml#function pinToEnd |
+| `ui.chat-stream-markdown` | yes: Bubbles.kt#fun settledParagraphEnd | excluded: the desktop streams the reply as plain text and re-parses rich text once at finalize (ui/ChatPage.qml) — its own answer to the same per-token cost |
 | `ui.tools-sheet-catalog` | yes: ConnectionManager.kt#fun onExtensionCatalog | yes: src/manager.cpp#void Manager::coreOnExtensionCatalog |
 | `ui.dev-mode` | yes: Drawer.kt#ic_dev_mode+ConnectionManager.kt#fun newRoamSession | yes: ui/main.qml#newChatInMode+ui/main.qml#dev-mode-symbolic |
 | `ui.advisor` | yes: ChatScreen.kt#fun AdvisorCard+SettingsScreens.kt#Review each dev turn | yes: ui/ChatPage.qml#advisorCard+ui/SettingsDialog.qml#advisorBox |

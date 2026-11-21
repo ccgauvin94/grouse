@@ -46,6 +46,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
@@ -538,6 +539,37 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
     // (below) rather than from the arrival of messages.
     var follow by remember(cm.currentSession.value) { mutableStateOf(true) }
 
+    // A row that GROWS is the one thing that can drag a reading position with it. The newest
+    // bubble is anchored at the bottom of this reversed list, so every token it gains pushes
+    // everything above it up the screen — including a reader who scrolled up to read a long
+    // reply from its start, who then creeps down the page while trying to read it.
+    //
+    // So while the reader is away from the bottom the streaming row stops re-rendering at the
+    // text it had when they left. Nothing is lost: the turn keeps arriving in the core, and
+    // the row catches up (and the list re-pins) the moment they settle back at the bottom. The
+    // held text lives HERE rather than in the bubble because the bubble is disposed when it
+    // scrolls out of view, and a re-created one would silently reanimate mid-read.
+    var heldStream by remember(cm.currentSession.value) {
+        mutableStateOf<Pair<Long, String>?>(null)
+    }
+    LaunchedEffect(cm.currentSession.value, follow, cm.streamingRowId.value) {
+        val id = cm.streamingRowId.value
+        heldStream = when {
+            // Back at the bottom: the row catches up and the follower re-pins.
+            follow -> null
+            // No reply in flight and nothing held: an idle chat needs no freeze, so scrolling
+            // back through an old conversation keeps rendering it in full.
+            id == null -> heldStream
+            // A row that was already captured stays as captured — re-reading it here would
+            // re-freeze at the newest token and defeat the point.
+            heldStream?.first == id -> heldStream
+            // Otherwise capture NOW, in the effect and not in composition: `messages` is the
+            // whole transcript, and subscribing the screen to it would recompose everything
+            // once per token.
+            else -> cm.messages.firstOrNull { it.id == id }?.let { it.id to it.text }
+        }
+    }
+
     // Scroll-back: ask the core for older items when the oldest end nears. With
     // reverseLayout the oldest is the LAST index; the batch is prepended to the
     // model (which is the far end of the reversed layout) and the LazyColumn keeps
@@ -593,6 +625,16 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
     LaunchedEffect(listState) {
         snapshotFlow { listState.isScrollInProgress }.collect { moving ->
             if (!moving) follow = atBottom
+        }
+    }
+    // …but a FINGER on the list stops following at once, settle or no settle. A drag can last
+    // a second, and a reply that gains a line during it makes the follower's own emission fire
+    // while `follow` is still true — snapping the reader back to the end they were leaving.
+    // Only user gestures are read here: the pins above scroll programmatically and emit no
+    // drag interaction, so they cannot unpin themselves through this.
+    LaunchedEffect(listState) {
+        listState.interactionSource.interactions.collect { i ->
+            if (i is DragInteraction.Start) follow = false
         }
     }
     // Opening a session, or swapping in a fresh transcript after a replay, starts at the newest
@@ -1157,14 +1199,26 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                                     } else {
                                         val pinned = item.m.role == "mcpapp" &&
                                             item.m.appKey.isNotEmpty() && item.m.appKey == pins
+                                        // Held still while the reader is scrolled away from the
+                                        // bottom — see heldStream above. Matched on the id so a
+                                        // NEW reply never inherits the old row's text.
+                                        val held = heldStream
+                                            ?.takeIf { it.first == item.m.id }?.second
                                         MessageBubble(
                                             item.m,
-                                            // Only the bubble the core is writing into renders as
-                                            // plain text; the previous reply keeps its Markdown
-                                            // while the next one is still starting (see
-                                            // ConnectionManager.streamingRowId).
-                                            streaming = item.m.role == "assistant" &&
-                                                item.m.id == cm.streamingRowId.value,
+                                            // Only the bubble the core is writing into renders
+                                            // progressively (settled paragraphs as Markdown, the
+                                            // tail as plain text); the previous reply keeps its
+                                            // finished Markdown while the next one starts (see
+                                            // ConnectionManager.streamingRowId). A HELD row keeps
+                                            // that progressive render too, including after its
+                                            // turn ends: switching it to finalized Markdown under
+                                            // a reader's eyes would reflow the text they are on by
+                                            // everything it grew while they were away.
+                                            streaming = held != null ||
+                                                (item.m.role == "assistant" &&
+                                                    item.m.id == cm.streamingRowId.value),
+                                            heldText = held,
                                             live = cm.busy.value,
                                             // Each message carries its own stats now, so an older reply
                                             // long-presses to ITS numbers rather than the latest turn's.
@@ -1198,13 +1252,23 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                                 }
                             }
                         }
-                        if (!atBottom) SmallFloatingActionButton(
-                            // follow = true first: the animation lands on the end as it is
-                            // measured NOW, and the follower finishes the trip if a row
-                            // measured after that moved it again.
-                            onClick = { follow = true; scope.launch { listState.animateScrollToItem(0) } },
-                            modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp)
-                        ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "scroll to bottom") }
+                        if (!atBottom) Box(Modifier.align(Alignment.BottomEnd).padding(10.dp)) {
+                            SmallFloatingActionButton(
+                                // follow = true first: the animation lands on the end as it is
+                                // measured NOW, and the follower finishes the trip if a row
+                                // measured after that moved it again.
+                                onClick = { follow = true; scope.launch { listState.animateScrollToItem(0) } },
+                            ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "scroll to bottom") }
+                            // A streaming row deliberately stops updating while the reader is
+                            // away from the bottom, so say that the turn is still arriving down
+                            // there — otherwise a bubble that stopped growing reads as one that
+                            // stalled.
+                            if (cm.busy.value) Surface(
+                                color = MaterialTheme.colorScheme.primary,
+                                shape = CircleShape,
+                                modifier = Modifier.size(9.dp).align(Alignment.TopEnd),
+                            ) {}
+                        }
                     }
                 }
 

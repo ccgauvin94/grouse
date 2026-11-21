@@ -6,6 +6,35 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed — a streaming reply no longer drags the reader with it
+
+- **Scrolling up to read a long reply from its start now holds still.** The newest bubble is
+  anchored at the bottom of the reversed transcript, so every token it gained pushed
+  everything above it up the screen — a reader on the first paragraph crept down the page at
+  the speed of the model. While the reader is away from the bottom the streaming row stops
+  re-rendering at the text it had when they left; nothing is lost, because the turn keeps
+  arriving in the core, and the row catches up — and the list re-pins — the moment they settle
+  back at the bottom. The held text lives on the screen rather than in the bubble, so scrolling
+  the bubble out of view and back does not silently reanimate it mid-read.
+- **A finger on the list stops following immediately**, not at the settle. A drag lasts about
+  a second, and a reply that gained a line during it made the follower's own emission fire
+  while `follow` was still true — snapping the reader back to the end they were leaving. The
+  drag is also what arms the hold, so the bubble freezes as the reader takes over.
+- **The jump-to-bottom button carries a dot while a turn is running**, so a bubble that
+  stopped growing reads as "more is arriving down there" rather than as a stall.
+
+### Changed — the Android bubble renders Markdown per paragraph while a reply streams
+
+- **The reply up to its last blank line is parsed as Markdown, once; the paragraph still being
+  written stays plain text.** That is the middle ground between the two things that were
+  wrong before: re-parsing the whole growing reply per token (O(n²), and it stuttered) and
+  plain text until the turn ended (nothing formatted while you read it). A block is not
+  finished until a blank line closes it, so this is also the largest safe unit — and the scan
+  refuses to settle inside an open fenced code block, which is the one place a blank line does
+  not mean "new paragraph".
+- Pinned by `StreamingMarkdownTest` (9 cases: single lines, no-break newlines, trailing blank
+  lines, indented fences, paired fences, and an opening fence that is still unclosed).
+
 ### Changed — the Android context ring sits against the "…" instead of a spacer away from it
 
 - **The 6 dp spacer between the ring and the overflow button is gone.** Both ends already
