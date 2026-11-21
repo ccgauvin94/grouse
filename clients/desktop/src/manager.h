@@ -955,8 +955,6 @@ private:
     /// split into client prep vs. load-without-a-paint instead of guessed at.
     QElapsedTimer m_openClock;
     QString m_openFor;
-    qint64 m_openEarlier = 0;
-    qint64 m_openOpenCall = 0;
     /// The one thread the core's BLOCKING intents run on (open a chat, create one).
     /// A cache read and a session/load on the UI thread is what froze the window on
     /// every switch; the core is built to be called off-main (Android always has),

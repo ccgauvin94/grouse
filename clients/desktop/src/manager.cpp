@@ -662,11 +662,26 @@ void Manager::openRoamSession(const QString &label, const QString &sessionId, co
     emit toolsChanged();
     setStatus(QStringLiteral("loading…"));
     m_lastCwd = cwd.isEmpty() ? workingDir() : cwd;
-    if (m_bridge && m_bridge->isAvailable()) {
-        const QByteArray l = label.toUtf8();
-        const QByteArray sid = sessionId.toUtf8();
-        m_bridge->api().grouse_roam_open_session(m_bridge->handle(), l.constData(), sid.constData());
-    }
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    // OFF THE UI THREAD, exactly like the local open: a peer open asks the peer, and
+    // the peer's cached transcript is read and parsed on this side. This path was
+    // missed when the local one moved (2026-11-20) — which is why a ROAM chat was the
+    // one that still froze the window, and the one that logged nothing.
+    m_openClock.start();
+    m_openFor = sessionId;
+    timingLog(QStringLiteral("roam open start %1 on %2").arg(sessionId, label));
+    const CoreBridge::AimsApi api = m_bridge->api();
+    void *h = m_bridge->handle();
+    const QByteArray l = label.toUtf8();
+    const QByteArray sid = sessionId.toUtf8();
+    runOnCore([api, h, l, sid] {
+        QElapsedTimer clock;
+        clock.start();
+        api.grouse_roam_open_session(h, l.constData(), sid.constData());
+        timingLog(QStringLiteral("roam open %1 worker %2ms")
+                      .arg(QString::fromUtf8(sid)).arg(clock.elapsed()));
+    });
 }
 
 void Manager::newRoamSession(const QString &label)
@@ -693,10 +708,13 @@ void Manager::newRoamSession(const QString &label)
     emit toolsChanged();
     emit messagesChanged();
     setStatus(QStringLiteral("connecting…"));
-    if (m_bridge && m_bridge->isAvailable()) {
-        const QByteArray l = label.toUtf8();
-        m_bridge->api().grouse_roam_new_session(m_bridge->handle(), l.constData());
-    }
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    // `session/new` on the peer is a handshake: same worker, same reason.
+    const CoreBridge::AimsApi api = m_bridge->api();
+    void *h = m_bridge->handle();
+    const QByteArray l = label.toUtf8();
+    runOnCore([api, h, l] { api.grouse_roam_new_session(h, l.constData()); });
 }
 
 void Manager::newRoamSessionIn(const QString &label, const QString &cwd)
@@ -731,20 +749,25 @@ void Manager::newRoamSessionWithMode(const QString &label, const QString &cwd,
     emit toolsChanged();
     emit messagesChanged();
     setStatus(QStringLiteral("connecting…"));
-    if (m_bridge && m_bridge->isAvailable()) {
-        const QByteArray l = label.toUtf8();
-        const QString t = cwd.trimmed();
-        const QByteArray c = t.toUtf8();
-        const QByteArray md = mode.toUtf8();
-        if (mode.isEmpty() || !m_bridge->api().grouse_roam_new_session_with_mode) {
-            m_bridge->api().grouse_roam_new_session_cwd(
-                m_bridge->handle(), l.constData(), t.isEmpty() ? nullptr : c.constData());
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    const CoreBridge::AimsApi api = m_bridge->api();
+    void *h = m_bridge->handle();
+    const QByteArray l = label.toUtf8();
+    const QString t = cwd.trimmed();
+    const bool hasCwd = !t.isEmpty();
+    const QByteArray c = t.toUtf8();
+    const QByteArray md = mode.toUtf8();
+    const bool plain = mode.isEmpty() || !api.grouse_roam_new_session_with_mode;
+    runOnCore([api, h, l, c, md, hasCwd, plain] {
+        if (plain) {
+            api.grouse_roam_new_session_cwd(h, l.constData(), hasCwd ? c.constData() : nullptr);
         } else {
-            m_bridge->api().grouse_roam_new_session_with_mode(
-                m_bridge->handle(), l.constData(), t.isEmpty() ? nullptr : c.constData(),
-                md.constData());
+            api.grouse_roam_new_session_with_mode(h, l.constData(),
+                                                  hasCwd ? c.constData() : nullptr,
+                                                  md.constData());
         }
-    }
+    });
 }
 
 void Manager::toggleRoamPeer(const QString &label)
@@ -899,17 +922,19 @@ void Manager::openSession(const QString &sessionId)
     const CoreBridge::AimsApi api = m_bridge->api();
     void *h = m_bridge->handle();
     const QByteArray sid = sessionId.toUtf8();
-    runOnCore([this, api, h, sid] {
+    runOnCore([api, h, sid] {
         QElapsedTimer clock;
         clock.start();
         api.grouse_open_session(h, sid.constData());
         const qint64 openMs = clock.elapsed();
         api.grouse_load_cached_transcript(h, sid.constData());
-        const qint64 cacheMs = clock.elapsed() - openMs;
-        QMetaObject::invokeMethod(this, [this, openMs, cacheMs] {
-            m_openOpenCall = openMs;
-            m_openEarlier = openMs + cacheMs;
-        }, Qt::QueuedConnection);
+        // Reported HERE, not handed to the Window: the core emits its paint DURING the
+        // call, so a value posted after it reaches the main thread too late and the
+        // paint line read zeros (measured: "worker 0ms: open 0, cache 0").
+        timingLog(QStringLiteral("open %1 worker %2ms (open %3, cache %4)")
+                      .arg(QString::fromUtf8(sid))
+                      .arg(clock.elapsed()).arg(openMs)
+                      .arg(clock.elapsed() - openMs));
     });
 }
 
@@ -3849,13 +3874,10 @@ void Manager::coreOnItem(const QString &json)
         // per switch: the synchronous cost (cache parse + any core probe) against the
         // wait for a paint, which is the split that decides where a "hang" lives.
         if (!m_openFor.isEmpty() && m_openFor == m_currentSessionId) {
-            timingLog(QStringLiteral("open %1 painted in %2ms (%3 rows; worker %4ms: open %5, cache %6)")
+            timingLog(QStringLiteral("open %1 painted in %2ms (%3 rows)")
                                      .arg(m_openFor)
                                      .arg(m_openClock.elapsed())
-                                     .arg(m_messageModel->rowCount())
-                                     .arg(m_openEarlier)
-                                     .arg(m_openOpenCall)
-                                     .arg(m_openEarlier - m_openOpenCall));
+                                     .arg(m_messageModel->rowCount()));
             m_openFor.clear();
         }
         refreshActivity();   // the chat is painted: its lanes are what the panel shows
