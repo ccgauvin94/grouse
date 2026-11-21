@@ -6,6 +6,22 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — a long reply stops being scrolled out from under the reader
+
+- **The hold now engages when the reply outgrows the SCREEN, not when the reader drags.** The
+  previous fix only fired once the reader scrolled away, which missed the case that was
+  actually being reported: four lines into a long answer the reader is at the bottom, has not
+  dragged anything, and the follower keeps pinning — so every token pushes the line they are
+  reading off the top. The crossing of one viewport is a latch now: the follower stops
+  following and the row is frozen at the text it has, so the reading position cannot move at
+  all while the rest of the reply arrives in the core.
+- **The jump-to-bottom button appears for a held reply even at the bottom** (it is the way
+  back to the arriving text), still carrying the busy dot, and tapping it resumes following
+  for the rest of that reply — the latch fires on the crossing, not on "is over one screen",
+  so it does not re-freeze the moment it has been dismissed.
+- A drag during a reply still freezes it exactly as before; the two triggers feed the same
+  hold, and either one releases on the jump button or by settling back at the newest row.
+
 ### Changed — a streaming reply no longer drags the reader with it
 
 - **Scrolling up to read a long reply from its start now holds still.** The newest bubble is

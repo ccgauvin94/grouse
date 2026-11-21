@@ -46,6 +46,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
@@ -364,6 +365,17 @@ private fun RoamSubtitle(peer: String, status: String?, onClick: () -> Unit) {
     }
 }
 
+/** One measurement of what the transcript's END is doing: how many rows there are, how tall
+ *  the viewport is, and — when a reply is streaming — that row's id and measured height.
+ *  A data class so [androidx.compose.runtime.snapshotFlow] conflates equal frames instead of
+ *  emitting for every unrelated layout pass. */
+private data class EndFrame(
+    val count: Int,
+    val viewport: Int,
+    val streamId: Long?,
+    val size: Int,
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Unit) {
@@ -538,17 +550,22 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
     // that had appeared since the last measurement. So the list is driven from its own LAYOUT
     // (below) rather than from the arrival of messages.
     var follow by remember(cm.currentSession.value) { mutableStateOf(true) }
+    // Follow decisions are keyed on a FINGER, not on scrolling: this code scrolls the list too
+    // (the pin, and the jump-to-bottom button), and a programmatic scroll that read as "the
+    // reader took over" would unpin itself and then never recover.
+    var fingerOnList by remember(cm.currentSession.value) { mutableStateOf(false) }
 
-    // A row that GROWS is the one thing that can drag a reading position with it. The newest
-    // bubble is anchored at the bottom of this reversed list, so every token it gains pushes
-    // everything above it up the screen — including a reader who scrolled up to read a long
-    // reply from its start, who then creeps down the page while trying to read it.
+    // The FREEZE: the text a live reply is held at, while the reader is not following it.
     //
-    // So while the reader is away from the bottom the streaming row stops re-rendering at the
-    // text it had when they left. Nothing is lost: the turn keeps arriving in the core, and
-    // the row catches up (and the list re-pins) the moment they settle back at the bottom. The
-    // held text lives HERE rather than in the bubble because the bubble is disposed when it
-    // scrolls out of view, and a re-created one would silently reanimate mid-read.
+    // A row that grows is the one thing that can drag a reading position with it. The newest
+    // bubble is anchored at the bottom of this reversed list, so every token it gains pushes
+    // everything above it up the screen — including a reader who scrolled up mid-reply, and a
+    // reader who is simply reading the first lines of a reply that has grown past the screen
+    // (which is why the follower stops following at that crossing rather than waiting for a
+    // drag). Nothing is lost: the turn keeps arriving in the core, and the row catches up —
+    // jumping to the newest text, with the list re-pinning — the moment the reader asks for
+    // it. The held text lives HERE rather than in the bubble because the bubble is disposed
+    // when it scrolls out of view, and a re-created one would silently reanimate mid-read.
     var heldStream by remember(cm.currentSession.value) {
         mutableStateOf<Pair<Long, String>?>(null)
     }
@@ -601,40 +618,66 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
         reallySend()
     }
 
-    // The follower: re-pin on every layout change while following. The values are the three
-    // things that move the end without any scroll — rows arriving/leaving, the newest row
-    // growing as it lays out, and the viewport resizing — so streaming text, a late image and
-    // an opening keyboard are all just another emission. Not keyed on `messages` content: that
-    // recomposed the whole screen per token (this used to read the last message's text length
-    // in the composable body).
+    // The follower: one effect owns everything that moves the end.
+    //
+    // While following, rows arriving/leaving, the newest row growing as it lays out and the
+    // viewport resizing all move the end without any scroll, so any of them re-pins. Not keyed
+    // on `messages` content: that recomposed the whole screen per token.
+    //
+    // …until the live reply outgrows the SCREEN. Four lines into a long answer, "pinned to the
+    // bottom" and "keeping the reader's line still" are opposites: every token pushes the text
+    // they are reading off the top, which is what "it's still scrolling the replies" was.
+    //
+    // So the crossing of one viewport is a latch: the follower stops following, and the hold in
+    // `heldStream` freezes the row at the text it has — the reader's line cannot move because
+    // the row stops growing, and the jump-to-bottom button appears (a held row counts as "not
+    // at the bottom") carrying the busy dot, which is how the rest of the reply is reachable.
+    // Tapping it follows again, and there is no re-latch until the next reply, because the
+    // latch fires on the CROSSING rather than on "is over one screen".
     LaunchedEffect(listState) {
+        var overScreen = false
         snapshotFlow {
             val info = listState.layoutInfo
-            Triple(
-                info.totalItemsCount,
-                info.visibleItemsInfo.firstOrNull { it.index == 0 }?.size ?: -1,
-                info.viewportSize.height,
-            )
-        }.collect {
+            val id = cm.streamingRowId.value
+            val row = if (id == null) null else info.visibleItemsInfo.firstOrNull { it.key == id }
+            EndFrame(info.totalItemsCount, info.viewportSize.height, id, row?.size ?: -1)
+        }.collect { f ->
+            if (f.streamId == null) {
+                overScreen = false
+                if (follow && !listState.isScrollInProgress) listState.scrollToItem(0)
+                return@collect
+            }
+            val nowOverScreen = f.viewport > 0 && f.size >= f.viewport
+            val crossed = nowOverScreen && !overScreen
+            overScreen = nowOverScreen
+            if (follow && crossed) {
+                follow = false   // freezes the row via heldStream, below
+                return@collect
+            }
             if (follow && !listState.isScrollInProgress) listState.scrollToItem(0)
         }
     }
-    // What decisions follow is the SETTLE, not the start: at the newest row means keep
-    // following, a drag that stopped anywhere above it means don't. Reading the start instead
-    // would let the pin above unpin itself — it scrolls too — and then nothing recovers.
+    // What decisions follow is the SETTLE of a finger's scroll, not the start: at the newest
+    // row means keep following, a drag that stopped anywhere above it means don't.
     LaunchedEffect(listState) {
         snapshotFlow { listState.isScrollInProgress }.collect { moving ->
-            if (!moving) follow = atBottom
+            if (!moving && fingerOnList) {
+                fingerOnList = false
+                follow = atBottom
+            }
         }
     }
-    // …but a FINGER on the list stops following at once, settle or no settle. A drag can last
-    // a second, and a reply that gains a line during it makes the follower's own emission fire
-    // while `follow` is still true — snapping the reader back to the end they were leaving.
-    // Only user gestures are read here: the pins above scroll programmatically and emit no
-    // drag interaction, so they cannot unpin themselves through this.
+    // A FINGER on the list stops following at once, settle or no settle. A drag lasts about a
+    // second, and a reply that gained a line during it made the follower's own emission fire
+    // while `follow` was still true — snapping the reader back to the end they were leaving.
+    // It is also what arms the text hold below (`heldStream`), so the bubble freezes as the
+    // reader takes over rather than racing them.
     LaunchedEffect(listState) {
         listState.interactionSource.interactions.collect { i ->
-            if (i is DragInteraction.Start) follow = false
+            if (i is DragInteraction.Start) {
+                fingerOnList = true
+                follow = false
+            }
         }
     }
     // Opening a session, or swapping in a fresh transcript after a replay, starts at the newest
@@ -1252,12 +1295,17 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                                 }
                             }
                         }
-                        if (!atBottom) Box(Modifier.align(Alignment.BottomEnd).padding(10.dp)) {
+                        if (!atBottom || heldStream != null) Box(Modifier.align(Alignment.BottomEnd).padding(10.dp)) {
                             SmallFloatingActionButton(
                                 // follow = true first: the animation lands on the end as it is
                                 // measured NOW, and the follower finishes the trip if a row
                                 // measured after that moved it again.
-                                onClick = { follow = true; scope.launch { listState.animateScrollToItem(0) } },
+                                // Asking for the newest line resumes following: this is the
+                                // reader choosing to watch the reply arrive again.
+                                onClick = {
+                                    follow = true
+                                    scope.launch { listState.animateScrollToItem(0) }
+                                },
                             ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "scroll to bottom") }
                             // A streaming row deliberately stops updating while the reader is
                             // away from the bottom, so say that the turn is still arriving down
