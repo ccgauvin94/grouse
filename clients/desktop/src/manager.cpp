@@ -3855,7 +3855,7 @@ void Manager::coreOnItem(const QString &json)
                                      .arg(m_messageModel->rowCount())
                                      .arg(m_openEarlier)
                                      .arg(m_openOpenCall)
-                                     .arg(m_openEarlier - m_openOpenCall);
+                                     .arg(m_openEarlier - m_openOpenCall));
             m_openFor.clear();
         }
         refreshActivity();   // the chat is painted: its lanes are what the panel shows
