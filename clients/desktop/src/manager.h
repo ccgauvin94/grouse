@@ -975,6 +975,13 @@ private:
     QTimer *m_paintTimer = nullptr;
     /// Land the buffered paint (also the safety valve when a paint never ends).
     void flushPaint();
+    // --- open/timing diagnostics -------------------------------------------
+    /// Where the open timings are appended, printed at startup. A file, not just
+    /// stderr: a flatpak launched from the desktop menu has no terminal, and a
+    /// timing that only exists in a log nobody can open measures nothing.
+    static QString timingLogPath();
+    /// Append one line to that file and mirror it to qInfo.
+    static void timingLog(const QString &line);
     /// Coalesces messagesChanged while chunks stream (see requestMessagesUpdate).
     QTimer *m_updateTimer = nullptr;
     /// Fires when the tail has stopped receiving chunks; renders it without

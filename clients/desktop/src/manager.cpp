@@ -142,6 +142,16 @@ Manager::Manager(QObject *parent)
     m_bridge = bridge;
     bridge->setTarget(this);
     bridge->installListener();
+    // The two things every later measurement depends on: WHICH build is running (a
+    // stale bundle is indistinguishable from a bug) and where its timings go.
+    if (m_bridge->isAvailable() && m_bridge->api().grouse_abi_version) {
+        qInfo("Grouse desktop: core ABI %u; open timings -> %s",
+              m_bridge->api().grouse_abi_version(),
+              qUtf8Printable(timingLogPath()));
+    } else {
+        qWarning("Grouse desktop: core library NOT loaded; open timings -> %s",
+                 qUtf8Printable(timingLogPath()));
+    }
 }
 
 Manager::~Manager()
@@ -182,6 +192,35 @@ void Manager::runOnCore(std::function<void()> work)
         return;
     }
     m_io->start(new CoreTask(std::move(work)));
+}
+
+QString Manager::timingLogPath()
+{
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (dir.isEmpty())
+        return {};
+    QDir().mkpath(dir);
+    return dir + QStringLiteral("/open-timings.log");
+}
+
+void Manager::timingLog(const QString &line)
+{
+    qInfo().noquote() << line;
+    const QString path = timingLogPath();
+    if (path.isEmpty())
+        return;
+    // Bounded, and rewritten rather than grown without limit: this file exists to be
+    // read after a slow click, not to be an archive.
+    QFile f(path);
+    if (f.exists() && f.size() > 256 * 1024) {
+        f.remove();
+    }
+    if (!f.open(QIODevice::Append | QIODevice::Text))
+        return;
+    f.write(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz")).toUtf8());
+    f.write(" ");
+    f.write(line.toUtf8());
+    f.write("\n");
 }
 
 void Manager::flushPaint()
@@ -807,6 +846,7 @@ void Manager::testConnection()
 
 void Manager::openSession(const QString &sessionId)
 {
+    const QString previous = m_currentSessionId;
     setMyDayVisible(false);   // opening a conversation takes the chat area back from My Day
     resetReloadProgress();    // a reload bar belongs to the chat that started it
     m_activePeerLabel.clear();
@@ -848,6 +888,7 @@ void Manager::openSession(const QString &sessionId)
         return;
     m_openClock.start();
     m_openFor = sessionId;
+    timingLog(QStringLiteral("open start %1 (was %2)").arg(sessionId, previous));
     // OFF THE UI THREAD. Everything here can block: reading and parsing the cached
     // transcript, and — for a session `session/list` has never returned, i.e. a
     // thread chat — a `session/info` round trip just to learn its cwd. Both ran on
@@ -1772,6 +1813,10 @@ void Manager::openThreadChat(const QString &label)
     // core bind the chat itself, which the ready handler refused precisely because it was
     // an id nobody had asked to display.
     const auto known = m_threadSessions.constFind(trimmed);
+    timingLog(QStringLiteral("thread click \"%1\" -> %2")
+                  .arg(trimmed,
+                       (known != m_threadSessions.constEnd() && !known.value().isEmpty())
+                           ? known.value() : QStringLiteral("(not in the mirror: asking the core)")));
     if (known != m_threadSessions.constEnd() && !known.value().isEmpty()) {
         openSession(known.value());
         return;
@@ -3804,7 +3849,7 @@ void Manager::coreOnItem(const QString &json)
         // per switch: the synchronous cost (cache parse + any core probe) against the
         // wait for a paint, which is the split that decides where a "hang" lives.
         if (!m_openFor.isEmpty() && m_openFor == m_currentSessionId) {
-            qInfo().noquote() << QStringLiteral("grouse: open %1 painted in %2ms (%3 rows; worker %4ms: open %5, cache %6)")
+            timingLog(QStringLiteral("open %1 painted in %2ms (%3 rows; worker %4ms: open %5, cache %6)")
                                      .arg(m_openFor)
                                      .arg(m_openClock.elapsed())
                                      .arg(m_messageModel->rowCount())
