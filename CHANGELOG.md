@@ -6,6 +6,17 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — the core reports the ABI version its listener table actually has
+
+- **The core said 15 while the desktop required 16.** `644376c` appended
+  `on_advisor_report` — the 47th listener slot — and bumped `kExpectedAbiVersion` to 16
+  on the desktop side, but left `GROUSE_ABI_VERSION` at 15 in `capi.rs`. Nothing fails
+  to compile: the desktop compares the two at load and refuses a library it does not
+  expect, so a bundle built from that tree simply would not start. The slot's own
+  comment already read "Appended at the END; ABI 16" — only the constant was missed.
+- Verified against the shipped artifact, not the source tree: the installed
+  `libgrouse_core.so` answers 16 through `grouse_abi_version()`.
+
 ### Fixed — visiting Roam no longer flattens the sidebar's projects
 
 - **Opening a roam chat made the WHOLE local session list render as one peer group.**
