@@ -6,6 +6,19 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed — the Android chat name is centred in the header
+
+- **The name sits in the middle of the bar, with its endpoint pill centred under it**, which
+  is the shape the other assistant app gives a chat header. Both lines were left-hanging off
+  the margin, so the header read as three stacked left edges (dot, name, chip) against a
+  cluster pushed away on the right.
+- **The centre is the title slot's, not the window's**: the background-work glyph and the
+  context ring are laid out inside that slot, so when the glyph is out the name lands a few
+  dp left of true centre. Drawing the name over the bar's own layout to fix that would cost
+  more than the offset is worth.
+- A long name still ellipsizes: the dot and the name centre as a group, and the name is
+  measured against what the readouts leave rather than growing into them.
+
 ### Fixed — the endpoint pill on Android is a pill, and the header's readouts are centred
 
 - **The roam chip lost its background somewhere between "give it a rounded shape" and

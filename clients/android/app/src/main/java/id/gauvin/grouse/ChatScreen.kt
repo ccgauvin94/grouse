@@ -769,8 +769,19 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                         // alone, everything to the right centred on the FIRST line and hung
                         // high the moment a remote chat grew a second one — the ring sat on
                         // the title's baseline instead of in the middle of the header.
-                        Column(Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                        //
+                        // Both lines are CENTRED in this column, which is what makes the bar
+                        // read like the other assistant app's: the name sits in the middle
+                        // with its pill under it rather than hanging off the left margin.
+                        // The centre is the column's, not the window's, so it is a few dp
+                        // left of true centre whenever the running glyph is also out — the
+                        // readouts on the right are part of this slot. Correcting that would
+                        // mean drawing the title outside the app bar's own layout, which
+                        // costs more than the few dp are worth.
+                        Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Row(verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center,
+                                modifier = Modifier.fillMaxWidth()) {
                                 // The dot IS the connection UI: colour for state (green / slowly
                                 // blinking amber while a reconnect is being attempted / red once the
                                 // automatic attempts ran out), tap for the settings of the wire it
