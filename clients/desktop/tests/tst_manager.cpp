@@ -188,6 +188,10 @@ void TstManager::fencedCodeBecomesBlocksNotHtml()
     mgr.coreOnItem(QStringLiteral(R"({"Reset":{"session_id":"s1"}})"));
     mgr.coreOnItem(QStringLiteral(
         R"({"Upsert":{"item":{"id":"a1","kind":"Agent","text":"intro\n\n```sh\nls -l\n```\n\noutro","detail":"","output":"","status":"","app_key":"","calls":[]}}})"));
+    // A paint is Reset + one Upsert per row + Window, and the Manager holds the rows
+    // in its buffer until the Window lands them as one model reset — that batching is
+    // what removed the blank-then-rebuild jump. Without this op there is no row yet.
+    mgr.coreOnItem(QStringLiteral(R"({"Window":{"ids":["a1"]}})"));
 
     const int row = m->indexForId(QStringLiteral("a1"));
     QVERIFY(row >= 0);

@@ -6,6 +6,19 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — the fenced-code test speaks the paint protocol
+
+- **`tst_manager` expected a row to be visible the instant its `Upsert` arrived.** A
+  paint is `Reset` + one row per message + `Window`, and the client now buffers the
+  rows until the `Window` lands them as one model reset — so the test read
+  `indexForId` mid-paint and failed on `row >= 0` (reproducible, on the tree that
+  introduced the batching). It now sends the `Window` every paint ends with.
+- **The batching is late, not lossy**, which is worth pinning down because the rows
+  it holds are the replay path: with the `Window` withheld entirely, the same case
+  still passes, the safety valve landing the buffer (measured: 3186ms at the 3s
+  default). The switch on the client is `if (m_painting)` — nothing outside an open
+  paint is deferred at all.
+
 ### Changed — a local rebuild stops compressing a bundle it will not use
 
 - **`flatpak build-bundle` was two thirds of a rebuild.** Measured on this tree: the
