@@ -210,6 +210,14 @@ public:
      *  position). Without it, every reopen restored a stale reading position and
      *  hid whatever had arrived since. */
     Q_INVOKABLE QString sessionStamp(const QString &sessionId) const;
+    /** Append one line of QML-side timing to the same file the open timings go to.
+     *
+     *  PUBLIC on purpose: a Q_INVOKABLE declared in the private section is registered
+     *  with QMC::AccessPrivate, and QML refuses to call it — the app then logs
+     *  `TypeError: Property 'timingMark' ... is not a function` on every switch while
+     *  looking perfectly fine from C++. The scroll/pin work lives in QML, and a stall
+     *  on the main thread is only attributable if that side can mark its own phases. */
+    Q_INVOKABLE void timingMark(const QString &text) { timingLog(text); }
     bool landingPage() const { return m_landing; }
 
     Q_INVOKABLE void connectToServer();
@@ -980,9 +988,6 @@ private:
     static QString timingLogPath();
     /// Append one line to that file and mirror it to qInfo.
     static void timingLog(const QString &line);
-    /// The same, callable from QML: the scroll/pin work lives there, and a stall on the
-    /// main thread is only attributable if the QML side can mark its own phases.
-    Q_INVOKABLE void timingMark(const QString &text) { timingLog(text); }
     /// A stalled main thread, logged with the session on screen. "It locks" and
     /// "it is empty for a moment" look identical from the outside and want opposite
     /// fixes; this is the difference. A 100ms tick that arrives late IS the stall.
