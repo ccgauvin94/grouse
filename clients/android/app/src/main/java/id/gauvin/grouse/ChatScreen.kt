@@ -874,10 +874,12 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                                         modifier = Modifier.size(14.dp),
                                     )
                                 }
-                                // The gap that keeps the ring from reading as part of the
-                                // "…" button beside it. It has to be AFTER the ring: a
-                                // spacer before it would be inside the title's weight.
-                                Spacer(Modifier.width(6.dp))
+                                // No spacer after the ring: the margin to the "…" beside it is
+                                // already built twice over — this Box is 24dp around a 14dp
+                                // ring, and the action button that follows carries its own
+                                // inset around its glyph. The 6dp that used to sit here read
+                                // as a hole in the bar, which is what "move the donut up
+                                // against the …" was pointing at.
                             }
                         }
                     }

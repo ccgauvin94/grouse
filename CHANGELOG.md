@@ -6,6 +6,13 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed — the Android context ring sits against the "…" instead of a spacer away from it
+
+- **The 6 dp spacer between the ring and the overflow button is gone.** Both ends already
+  carry margin of their own — the ring's tap target is 24 dp around a 14 dp circle, and the
+  action button insets its glyph — so the spacer read as a hole in the bar rather than as
+  breathing room.
+
 ### Changed — the Android chat header only marks a wire that is in trouble
 
 - **The green dot beside the chat name is gone.** It was on screen saying "fine" on every
