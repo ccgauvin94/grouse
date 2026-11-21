@@ -158,7 +158,7 @@ excluded = 14
 | `ui.context-breakdown` | yes: ChatScreen.kt#fun ContextBreakdown | yes: ui/ContextBreakdown.qml#function categoryLabel |
 | `ui.my-day-lazy-cache` | yes: ConnectionManager.kt#fun paintTasks | yes: src/manager.cpp#void Manager::paintCachedTasks |
 | `ui.my-day-thread-chat` | yes: ConnectionManager.kt#fun openThreadChat | yes: src/manager.cpp#grouse_open_thread |
-| `ui.chat-scroll-pinned` | yes: ChatScreen.kt#var follow by remember | yes: ui/ChatPage.qml#function pinPass |
+| `ui.chat-scroll-pinned` | yes: ChatScreen.kt#var follow by remember | yes: ui/ChatPage.qml#function pinToEnd |
 | `ui.tools-sheet-catalog` | yes: ConnectionManager.kt#fun onExtensionCatalog | yes: src/manager.cpp#void Manager::coreOnExtensionCatalog |
 | `ui.dev-mode` | yes: Drawer.kt#ic_dev_mode+ConnectionManager.kt#fun newRoamSession | yes: ui/main.qml#newChatInMode+ui/main.qml#dev-mode-symbolic |
 | `ui.advisor` | yes: ChatScreen.kt#fun AdvisorCard+SettingsScreens.kt#Review each dev turn | yes: ui/ChatPage.qml#advisorCard+ui/SettingsDialog.qml#advisorBox |
