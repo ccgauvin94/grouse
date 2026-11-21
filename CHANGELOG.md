@@ -6,6 +6,20 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — the attachment card no longer sizes itself from its own body
+
+- **A `width`/`implicitWidth` cycle made `tst_qml` stall once every couple of runs.**
+  `AttachmentCard` took `implicitWidth` from `body.implicitWidth + 24`, while `body` fills
+  the card and the column inside it is `card.width - 28` — so an item created without a
+  width read its own `implicitWidth` back as its width and grew 24px per layout pass,
+  re-eliding both labels each time. The loop ran through text layout, so the runner hung
+  instead of failing: **5 stalls in 10 runs** before, **0 in 20** after, with the suite's
+  own test file unchanged.
+- That is the cycle `FileCard`'s and `ImageCard`'s headers already warn about ("no
+  implicit size derived from a child whose width derives from this card"); this card kept
+  it. The natural width is now a fixed 340 like its siblings, which decides the size only
+  when nothing else does — the app always supplies the bubble's width.
+
 ### Fixed — the settings dialog sizes itself to the window again
 
 - **`Window.window` does not exist on a Dialog.** `SettingsDialog` is a `Controls.Dialog`

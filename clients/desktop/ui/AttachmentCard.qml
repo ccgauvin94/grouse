@@ -30,7 +30,15 @@ Rectangle {
     property color fillColor: Qt.rgba(0, 0, 0, 0.06)
     property color foreground: Kirigami.Theme.textColor
 
-    implicitWidth: body.implicitWidth + 24
+    // A FIXED natural width, and never one derived from `body`: the body Row fills
+    // this Rectangle while the column inside it takes `card.width - 28`, so
+    // `implicitWidth: body.implicitWidth + 24` is a binding cycle. QML breaks it by
+    // guessing, and the guess is what made tst_qml stall inside QTextEngine's itemize
+    // once every few runs — a different AttachmentCard case each time, because the
+    // item grows by 24 every layout pass and re-elides its labels as it goes. Same
+    // rule FileCard and ImageCard record in their headers; the app always supplies a
+    // width (the bubble's), so this only decides the size when nothing does.
+    implicitWidth: 340
     implicitHeight: body.implicitHeight + 14
     radius: 8
     color: fillColor
