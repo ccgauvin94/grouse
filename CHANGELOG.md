@@ -92,6 +92,19 @@ All notable changes to Grouse are recorded here. The format is based on
   with no `peer:` anywhere. It fails on the previous code with exactly the reported
   symptom (`peer:Phaethon|peer:Phaethon|peer:Phaethon`).
 
+### Fixed — a load no longer redraws a transcript that did not change
+
+- **A merge repaint is now skipped when the window is already what is on screen.** The core
+  ends a successful merge with a Reset + the whole window — deliberately, because a client
+  that appended the replayed tail still holds a stale suffix the anchor dropped store-side.
+  But when the replay re-supplies exactly the rows the client already has (a chat that has
+  not moved since it was opened), the Reset rebuilds every delegate and re-pins the view to
+  show the same thing. `flushPaint` now compares the incoming window with the model's rows
+  and, when they match, leaves the model — delegates, content height and scroll position —
+  untouched, logging `paint skipped: N rows, the window already matches`.
+- The comparison is on identity and size (id, text, output, status, title, tool calls), not
+  the whole row: `seq` is re-stamped by a wholesale paint and means nothing to the view.
+
 ### Fixed — the chat no longer freezes for a second after it opens
 
 - **The scroll-to-end loop was doing the freezing.** `pinToEnd` ran a bounded **forty-pass**

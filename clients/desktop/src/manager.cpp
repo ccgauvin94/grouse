@@ -241,12 +241,52 @@ void Manager::timingLog(const QString &line)
     f.write("\n");
 }
 
+namespace {
+/// Whether a paint would change what is already on screen.
+///
+/// The core ends a MERGE with a repaint on purpose — a client that appended the replayed
+/// tail keeps a stale suffix the anchor dropped store-side, so one Reset is how it
+/// reconciles. But when the replay re-supplies exactly the rows the client already has
+/// (the usual case for a chat that has not moved since it was last opened), the Reset
+/// rebuilds every delegate and re-pins the view to show the SAME transcript: the "it
+/// redraws while loading even when nothing changed" report (2026-11-21).
+///
+/// Compared on the fields that decide a row's identity and size, not the whole
+/// QVariantMap: `seq` is re-stamped by a wholesale paint and carries no visible meaning.
+bool samePaintedRows(const QList<QVariantMap> &a, const QList<QVariantMap> &b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (int i = 0; i < a.size(); ++i) {
+        const QVariantMap &x = a.at(i);
+        const QVariantMap &y = b.at(i);
+        if (x.value("id") != y.value("id")
+            || x.value("text") != y.value("text")
+            || x.value("output") != y.value("output")
+            || x.value("status") != y.value("status")
+            || x.value("title") != y.value("title")
+            || x.value("calls") != y.value("calls"))
+            return false;
+    }
+    return true;
+}
+} // namespace
+
 void Manager::flushPaint()
 {
     if (!m_painting)
         return;
     m_painting = false;
     m_paintTimer->stop();
+    // A paint that matches what the model already holds is not a paint. Skipping it keeps
+    // the delegates, the content height and the scroll position exactly where they are.
+    if (!m_paintRows.isEmpty() && samePaintedRows(m_messageModel->rows(), m_paintRows)) {
+        timingLog(QStringLiteral("paint skipped: %1 rows, the window already matches")
+                      .arg(m_paintRows.size()));
+        m_paintRows.clear();
+        m_currentIndex = -1;
+        return;
+    }
     m_messageModel->replaceAll(m_paintRows);
     m_paintRows.clear();
     m_currentIndex = -1;
