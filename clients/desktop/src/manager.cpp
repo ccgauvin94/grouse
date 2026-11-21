@@ -688,8 +688,16 @@ void Manager::toggleRoamPeer(const QString &label)
 
 void Manager::setActiveTab(const QString &tab)
 {
-    if (tab == QLatin1String("main") && !m_activePeerLabel.isEmpty())
-        m_activePeerLabel.clear();
+    if (tab != QLatin1String("main") || m_activePeerLabel.isEmpty())
+        return;
+    // A roam chat owns the ACTIVE SESSION, not the sidebar's grouping. Clearing the
+    // label is what stops later local lists from inheriting it (coreOnSessions no
+    // longer stamps them at all), and the re-list is what repairs rows already on
+    // screen: a list fetched while the peer was set stays grouped under it until the
+    // next refresh, which is exactly the "Projects vanished after visiting Roam"
+    // report. One round trip on the switch back, not on every tab click.
+    m_activePeerLabel.clear();
+    refreshSessions();
 }
 
 QString Manager::roamIdentity()
@@ -2501,7 +2509,12 @@ void Manager::coreOnSessions(const QString &json)
         // The core DERIVES this (`grouse.mode`: chat | dev): the server returns no tags
         // on a row, so the core asks which sessions match the value and stamps it.
         m["mode"] = o.value("mode").toString();
-        m["peer"] = m_activePeerLabel;
+        // NO `peer` stamp here. This is the LOCAL server's list; a peer's sessions
+        // arrive on coreOnRoamSessions, which owns that label. Stamping this list with
+        // m_activePeerLabel (the peer whose CHAT is open) meant that opening a roam
+        // chat and going back to Main rendered every local session as one
+        // `peer: <label>` group — no Projects band, one flat list, and nothing healed
+        // it until the next list refresh (reported 2026-11-20).
         sessions << m;
     }
     onSessions(sessions);

@@ -5,6 +5,7 @@
 #include "corebridge.h"
 #include "manager.h"
 #include "messagelistmodel.h"
+#include "sessionlistmodel.h"
 
 /**
  * Thin-client Manager tests.
@@ -35,6 +36,7 @@ private slots:
     void configuredProviderFilter();
     void configuredProvidersParse();
     void roamTitleComesFromThePeerList();
+    void localSessionsKeepTheirProjectsAfterARoamChat();
     void providerChoicesDisambiguateDuplicateLabels();
     void roamOpenClearsTheLoadingStatus();
     void runEndRendersTheLastStreamedBubble();
@@ -448,6 +450,36 @@ void TstManager::roamTitleComesFromThePeerList()
     // A main-wire session is unaffected: its id is already the title fallback.
     mgr.openSession(QStringLiteral("s1"));
     QCOMPARE(mgr.currentSessionTitle(), QStringLiteral("s1"));
+}
+
+void TstManager::localSessionsKeepTheirProjectsAfterARoamChat()
+{
+    Manager mgr;
+    // Regression, 2026-11-20: opening a roam chat set m_activePeerLabel, and
+    // coreOnSessions stamped EVERY local row with it. Going back to Main then showed
+    // the whole local list as one `peer: <label>` group — the Projects band gone, the
+    // chats flat — because a row's section is derived from that stamp. The label
+    // belongs to the peer's OWN list (coreOnRoamSessions), never to the local one.
+    mgr.openRoamSession(QStringLiteral("Phaethon"),
+                        QStringLiteral("roam:Phaethon:20260101_1"), QString());
+    QVERIFY(mgr.onRoamSession());   // the peer really is the active one
+
+    mgr.coreOnProjects(QStringLiteral(R"([{"id":"hacking","name":"Hacking"}])"));
+    mgr.coreOnSessions(QStringLiteral(
+        R"([{"id":"s1","title":"In a project","updated_at":"2026-11-20T10:00:00Z","project_id":"hacking"},)"
+        R"({"id":"s2","title":"Unfiled","updated_at":"2026-11-20T09:00:00Z"}])"));
+
+    auto *m = qobject_cast<SessionListModel *>(mgr.sessionsModel());
+    QVERIFY(m != nullptr);
+    QStringList sections;
+    for (int r = 0; r < m->rowCount(); ++r) {
+        sections << m->data(m->index(r, 0), SessionListModel::SectionRole).toString();
+    }
+    QVERIFY2(!sections.join('|').contains(QStringLiteral("peer:")),
+             qPrintable(sections.join('|')));
+    QVERIFY(sections.contains(QStringLiteral("projects")));
+    QVERIFY(sections.contains(QStringLiteral("proj:hacking")));
+    QVERIFY(sections.contains(QStringLiteral("chats")));
 }
 
 void TstManager::providerChoicesDisambiguateDuplicateLabels()

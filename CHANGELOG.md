@@ -6,6 +6,23 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — visiting Roam no longer flattens the sidebar's projects
+
+- **Opening a roam chat made the WHOLE local session list render as one peer group.**
+  `m_activePeerLabel` means "the peer whose CHAT is open", but `coreOnSessions` stamped
+  every row of the local `session/list` with it, and a row's sidebar section is derived
+  from that stamp — so after a roam chat every local session landed in
+  `peer: <label>`: the Projects band gone, the list flat, nothing under it grouped.
+  The peer label belongs to the peer's own list (`coreOnRoamSessions`), which is where
+  it is now set; the local list never carries one.
+- **Switching back to Main re-lists**, so rows already stamped by an older build (or by
+  a list fetched while the peer was open) are repaired on the click instead of waiting
+  for the next refresh. One round trip, and only when a peer chat was actually open.
+- Regression test: `tst_manager` opens a roam session, feeds a local list with one filed
+  and one unfiled chat, and asserts the sections are `projects` / `proj:<id>` / `chats`
+  with no `peer:` anywhere. It fails on the previous code with exactly the reported
+  symptom (`peer:Phaethon|peer:Phaethon|peer:Phaethon`).
+
 ### Changed — opening a chat no longer blocks the UI thread
 
 - **A chat switch, and `New chat`, now run the core's blocking work on a worker.**
