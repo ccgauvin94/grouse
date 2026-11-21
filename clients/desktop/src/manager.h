@@ -980,6 +980,9 @@ private:
     static QString timingLogPath();
     /// Append one line to that file and mirror it to qInfo.
     static void timingLog(const QString &line);
+    /// The same, callable from QML: the scroll/pin work lives there, and a stall on the
+    /// main thread is only attributable if the QML side can mark its own phases.
+    Q_INVOKABLE void timingMark(const QString &text) { timingLog(text); }
     /// A stalled main thread, logged with the session on screen. "It locks" and
     /// "it is empty for a moment" look identical from the outside and want opposite
     /// fixes; this is the difference. A 100ms tick that arrives late IS the stall.

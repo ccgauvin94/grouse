@@ -92,6 +92,20 @@ All notable changes to Grouse are recorded here. The format is based on
   with no `peer:` anywhere. It fails on the previous code with exactly the reported
   symptom (`peer:Phaethon|peer:Phaethon|peer:Phaethon`).
 
+### Fixed — the chat no longer freezes for a second after it opens
+
+- **The scroll-to-end loop was doing the freezing.** `pinToEnd` ran a bounded **forty-pass**
+  loop of `positionViewAtEnd()`, and that call forces a full layout of the whole window
+  — so a 60-row transcript was laid out several times back to back. Measured on a roam
+  open: five consecutive main-thread stalls of 0.4–1 s *after* the transcript had painted,
+  plus 1.9 s on the next open. It is now a single `positionViewAtEnd()`; convergence comes
+  from `onContentHeightChanged`, which already fires as lazily measured rows settle.
+- **A stall detector** logs any main-thread gap over 250 ms together with the chat on
+  screen (`main thread stalled Nms (<session>)`), because "it locks" and "it is briefly
+  empty" look identical from the outside and want opposite fixes.
+- **The QML side can mark its own phases** (`Mgr.timingMark`), so `switch -> <session>`
+  and `opened <session> at the end` land in the same file as the open timings.
+
 ### Changed — a repaint lands in one piece, not blank-then-rebuild
 
 - **A transcript paint is applied atomically.** The core sends `Reset` + one row

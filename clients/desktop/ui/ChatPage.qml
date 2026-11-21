@@ -579,6 +579,7 @@ Kirigami.Page {
         // assistant project, which session/list filters out — so there is nothing to
         // compare and the newest message is the only honest landing spot. That is also
         // what makes threads land on the note that was just written to them.
+        Mgr.timingMark("switch -> " + scrollSession)
         const now = Mgr.sessionStamp(scrollSession)
         const before = seenStamp[scrollSession]
         const changed = now === "" || before === undefined || now !== before
@@ -607,68 +608,29 @@ Kirigami.Page {
         Mgr.loadOlder(40)
     }
 
-    /// Re-pin the view to the newest message until a pass lands at the end with the content
-    /// height unchanged.
+    /// Put the view at the end, ONCE.
     ///
-    /// One positionViewAtEnd() is not enough, and "call it again until atYEnd" is not either.
-    /// Delegates are realized and measured lazily (recycled rows are only estimates until they
-    /// are shown), images decode after their row exists, and the waiting bubble appears on
-    /// send — so contentHeight keeps growing AFTER the jump. And atYEnd is ALSO true while the
-    /// transcript is still short, which is why the old loop cleared pendingFirstScroll
-    /// immediately and the chat then settled a few messages short of the bottom (the visible
-    /// symptom: a chat opening just above the end, and the jump button needing two presses —
-    /// the first spent the distance that had appeared since the last measurement).
-    /// Convergence therefore needs both halves: at the end AND the height has stopped moving.
+    /// Convergence comes from `onContentHeightChanged`, not from a loop: delegates are
+    /// measured lazily (images decode after their row exists, a tall bubble's height is
+    /// an estimate until it is realized), so the end keeps moving through the first
+    /// frames and every move calls this again. A few cheap corrections.
     ///
-    /// Bounded so a layout that never settles cannot spin, and pendingFirstScroll is always
-    /// cleared on the way out because it also gates scroll-back (maybeLoadOlder).
-    property bool pinning: false
-    property real pinHeight: -1
+    /// It used to be a bounded FORTY-PASS loop of `positionViewAtEnd()`, and that call
+    /// forces a full layout of the whole window. Measured on a roam open: five
+    /// consecutive main-thread stalls of 0.4-1s AFTER the transcript had painted
+    /// (2026-11-21) — the paint was never the problem, the pin was.
+    ///
+    /// `pendingFirstScroll` still exists: it gates scroll-back until the chat has
+    /// landed on its newest row, and it is cleared on the first pin that finds the view
+    /// at the end with rows on screen.
     function pinToEnd() {
-        if (page.pinning)
-            return      // the running chain re-reads the layout on its next pass
-        if (!page.pinnedToEnd || list.height <= 0)
+        if (!pinnedToEnd || list.height <= 0 || Mgr.messageModel.count === 0)
             return
-        // Nothing painted yet (the cache read and the replayed window land after the
-        // switch). Spinning here burns 40 layout passes on an empty list and then
-        // CLEARS the flag, which is exactly how a chat opened at the top: the rows
-        // arrived with nothing left asking to be at the bottom of them. Stay armed;
-        // onCountChanged and onContentHeightChanged call back in.
-        if (Mgr.messageModel.count === 0)
-            return
-        page.pinning = true
-        page.pinHeight = -1
-        page.pinPass(0)
-    }
-    function pinPass(attempt) {
-        if (!page.pinnedToEnd || attempt >= 40) {
-            page.pinning = false
-            page.pinHeight = -1
+        list.positionViewAtEnd()
+        if (list.atYEnd && page.pendingFirstScroll) {
             page.pendingFirstScroll = false
-            return
+            Mgr.timingMark("opened " + page.scrollSession + " at the end")
         }
-        Qt.callLater(function() {
-            if (!page.pinnedToEnd) {
-                page.pinning = false
-                page.pinHeight = -1
-                return
-            }
-            const before = list.contentHeight
-            list.positionViewAtEnd()
-            const h = list.contentHeight
-            const settled = list.atYEnd && h === before && h === page.pinHeight
-            page.pinHeight = h
-            if (settled) {
-                page.pinning = false
-                page.pinHeight = -1
-                // An empty transcript "settles" instantly. Only a real one has
-                // finished the job (see the guard in pinToEnd).
-                if (Mgr.messageModel.count > 0)
-                    page.pendingFirstScroll = false
-                return
-            }
-            page.pinPass(attempt + 1)
-        })
     }
 
     function applySessionScroll() {
