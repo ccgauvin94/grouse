@@ -61,6 +61,45 @@ jobs:
             clients/desktop/krunner-prebuild/grouserunner.so
             clients/desktop/grouse-core-prebuild/libgrouse_core.so
 
+  # The desktop's QTest/QtQuickTest suites need the Qt/KF6 DEVELOPMENT headers
+  # and a C++ compiler, which the flatpak-builder image does not carry (and the
+  # bundle itself is configured with -DBUILD_TESTING=OFF). The Fedora container
+  # already used for host components has them, so ctest runs there instead.
+  desktop-tests:
+    runs-on: ubuntu-latest
+    needs: host-components
+    container:
+      image: fedora:44
+    steps:
+      - uses: actions/checkout@v4
+
+      # The bridge smoke test only proves a real load when the .so is present;
+      # reuse the same core artifact the Flatpak bundle gets.
+      - uses: actions/download-artifact@v4
+        with:
+          name: host-components
+          path: clients/desktop
+
+      - name: Install Qt/KF6 dev packages
+        run: |
+          dnf install -y gcc-c++ cmake ninja-build \
+            qt6-qtbase-devel qt6-qtdeclarative-devel kf6-kirigami-devel \
+            kf6-kcoreaddons-devel extra-cmake-modules kf6-qqc2-desktop-style \
+            qt6-qtsvg
+
+      - name: Configure and build desktop with tests
+        run: |
+          cmake -S clients/desktop -B clients/desktop/build-tests \
+            -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_TESTING=ON -DBUILD_KRUNNER=OFF
+          cmake --build clients/desktop/build-tests -j"$(nproc)"
+
+      - name: Run ctest
+        run: ctest --test-dir clients/desktop/build-tests --output-on-failure
+        env:
+          QT_QPA_PLATFORM: offscreen
+          GROUSE_CORE: ${{ github.workspace }}/clients/desktop/grouse-core-prebuild/libgrouse_core.so
+
   flatpak:
     runs-on: ubuntu-latest
     needs: host-components

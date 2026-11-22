@@ -16,7 +16,13 @@ class ReplyReceiver : BroadcastReceiver() {
             Notifier.ACTION_REPLY -> {
                 val text = RemoteInput.getResultsFromIntent(intent)
                     ?.getCharSequence(Notifier.KEY_REPLY)?.toString()?.trim()
-                if (!text.isNullOrBlank()) ConnectionManager.get(context).sendWhenReady(text)
+                if (!text.isNullOrBlank()) {
+                    // The alert's chat travels in the PendingIntent: the current screen may
+                    // have changed since the notification was posted (or the app may have
+                    // been killed), so it is not the reply's destination.
+                    ConnectionManager.get(context)
+                        .sendWhenReady(text, intent.getStringExtra(Notifier.EXTRA_SESSION_ID))
+                }
                 if (id >= 0) context.getSystemService(NotificationManager::class.java).cancel(id)
             }
             Notifier.ACTION_MARK_READ ->

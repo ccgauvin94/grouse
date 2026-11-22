@@ -322,7 +322,57 @@ internal sealed class Segment {
     internal data class Code(val code: String, val tag: String) : Segment()
 }
 
-private val FENCE_OPEN = Regex("^(\\x60{3,}|~{3,})(\\w[\\w+#.-]*)?\\s*$")
+/** One parsed fence opener. The renderer and the streaming settle scan MUST agree on this,
+ *  or a blank line inside a `~~~` block is treated as a paragraph break on one side and
+ *  code on the other (the block re-parses on every token after it). */
+internal data class Fence(val marker: Char, val length: Int, val tag: String)
+
+/** The single fence grammar for both markdown consumers. Up to three leading spaces/tabs
+ *  are the marker's indentation (CommonMark's rule); deeper indentation is text. A close
+ *  is a run of the SAME marker at least as long, with only whitespace after it. */
+internal object MarkdownFences {
+    // Range overloads let the per-token settle scan inspect a line in-place: it runs for
+    // every token of a long reply, so it must not allocate a substring per line.
+    fun open(line: String, start: Int = 0, end: Int = line.length): Fence? {
+        var i = start
+        val indentEnd = minOf(end, start + 3)
+        while (i < indentEnd && (line[i] == ' ' || line[i] == '\t')) i++
+        if (i >= end || (line[i] != '`' && line[i] != '~')) return null
+        val marker = line[i]
+        var run = 0
+        while (i < end && line[i] == marker) { i++; run++ }
+        if (run < 3) return null
+        var tagStart = i
+        var tagEnd = i
+        if (i < end && isWord(line[i])) {
+            while (i < end && (isWord(line[i]) || line[i] == '+' || line[i] == '#' ||
+                    line[i] == '.' || line[i] == '-')) i++
+            tagEnd = i
+        } else tagStart = i
+        while (i < end && (line[i] == ' ' || line[i] == '\t')) i++
+        if (i != end) return null
+        return Fence(marker, run, if (tagEnd > tagStart) line.substring(tagStart, tagEnd) else "")
+    }
+
+    fun closes(line: String, fence: Fence, start: Int = 0, end: Int = line.length): Boolean {
+        var i = start
+        val indentEnd = minOf(end, start + 3)
+        while (i < indentEnd && (line[i] == ' ' || line[i] == '\t')) i++
+        var run = 0
+        while (i < end && line[i] == fence.marker) { i++; run++ }
+        if (run < fence.length) return false
+        while (i < end && line[i].isWhitespace()) i++
+        return i == end
+    }
+
+    private fun isWord(c: Char): Boolean =
+        c in 'a'..'z' || c in 'A'..'Z' || c in '0'..'9' || c == '_'
+}
+
+// Pure adapters for the JVM parser tests (and for callers that only need a yes/no).
+internal fun isFenceOpen(line: String): Boolean = MarkdownFences.open(line) != null
+internal fun isFenceClose(line: String, openLine: String): Boolean =
+    MarkdownFences.open(openLine)?.let { MarkdownFences.closes(line, it) } ?: false
 
 // Line-based fence splitter — not a full markdown parse on purpose: the library
 // keeps rendering everything outside the fences (images/tables/lists), and a fence
@@ -335,7 +385,7 @@ internal fun splitFencedCode(text: String): List<Segment> {
     val lines = text.split('\n')
     var i = 0
     while (i < lines.size) {
-        val open = FENCE_OPEN.matchEntire(lines[i])
+        val open = MarkdownFences.open(lines[i])
         if (open == null) {
             if (textBuf.isNotEmpty() || i > 0) textBuf.append('\n')
             textBuf.append(lines[i])
@@ -344,7 +394,7 @@ internal fun splitFencedCode(text: String): List<Segment> {
         }
         val codeBuf = StringBuilder()
         i++
-        while (i < lines.size && !isCloseFence(lines[i], open)) {
+        while (i < lines.size && !MarkdownFences.closes(lines[i], open)) {
             if (codeBuf.isNotEmpty()) codeBuf.append('\n')
             codeBuf.append(lines[i])
             i++
@@ -354,18 +404,10 @@ internal fun splitFencedCode(text: String): List<Segment> {
             out.add(Segment.Text(textBuf.toString().trim('\n')))
             textBuf.setLength(0)
         }
-        val tag = if (open.groupValues.size > 2) open.groupValues[2] else ""
-        out.add(Segment.Code(codeBuf.toString(), tag))
+        out.add(Segment.Code(codeBuf.toString(), open.tag))
     }
     if (textBuf.isNotEmpty()) out.add(Segment.Text(textBuf.toString().trim('\n')))
     return out
-}
-
-private fun isCloseFence(line: String, open: MatchResult): Boolean {
-    val marker = open.groupValues[1]
-    val head = line.trimStart()
-    return head.length >= marker.length && head.startsWith(marker) &&
-        head.all { it == marker[0] || it.isWhitespace() }
 }
 
 private const val MAX_BLOCK_HEIGHT = 400

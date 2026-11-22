@@ -1091,6 +1091,7 @@ mod tests {
         ConnectionStatus, CoreListener, PermissionRequest, ProjectSummary, SessionSummary,
         TranscriptOp,
     };
+    use futures::future::BoxFuture;
     use std::sync::Mutex as StdMutex;
 
     #[test]
@@ -1485,6 +1486,408 @@ mod tests {
             events.last().map(String::as_str),
             Some("end roam:Phaethon:s1"),
             "the replay ends only after the rebuild: {events:?}"
+        );
+    }
+
+    /// A recording host for the paint/verify regression tests. `listed` is the
+    /// stale baseline a fresh-cache plan is built from; `stamps` records the
+    /// baseline a verification had to correct.
+    struct TestHost {
+        store: Arc<crate::transcript::TranscriptStore>,
+        listed: StdMutex<String>,
+        stamps: StdMutex<Vec<String>>,
+        events: StdMutex<Vec<String>>,
+        incomplete: StdMutex<Vec<String>>,
+    }
+
+    impl TestHost {
+        fn new(store: Arc<crate::transcript::TranscriptStore>) -> Arc<Self> {
+            Arc::new(Self {
+                store,
+                listed: StdMutex::new("listed@t1".into()),
+                stamps: StdMutex::new(Vec::new()),
+                events: StdMutex::new(Vec::new()),
+                incomplete: StdMutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl DispatchHost for TestHost {
+        fn display_id(&self, wire: &str) -> String {
+            wire.to_string()
+        }
+        fn store(&self, _key: &str) -> Arc<crate::transcript::TranscriptStore> {
+            self.store.clone()
+        }
+        fn touched(&self, _key: String, _title: String, _updated: String) {}
+        fn active_run(&self, _key: String, _run: String) {}
+        fn turn_lost(&self, _key: &str) {}
+        fn config(&self, _key: &str, _options: Vec<ConfigOption>) {}
+        fn usage(&self, _key: &str, _u: i64, _s: i64, _c: f64, _cur: String) {}
+        fn commands(&self, _key: &str, _names: Vec<String>) {}
+        fn permission(&self, _key: &str, _request: PermissionRequest) {}
+        fn begin_replay(&self, key: &str, suppress: bool) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("begin {key} suppress={suppress}"));
+        }
+        fn end_replay(&self, key: &str) {
+            self.events.lock().unwrap().push(format!("end {key}"));
+        }
+        fn replaying(&self, _key: &str) -> bool {
+            false
+        }
+        fn replay_tick(&self, _key: &str, _id: &str) {}
+        fn paging(&self, _key: &str) -> bool {
+            false
+        }
+        fn replay_backlog(&self, _key: &str, _skipped: usize, _tail: usize) {}
+        fn accepts_chat(&self, _key: &str) -> bool {
+            true
+        }
+        fn background(&self, _key: &str) {}
+        fn endpoint_ready(&self, _label: Option<&str>) {}
+        fn cache_session(&self, _key: &str) {}
+        fn session_stamp(&self, _key: &str, updated: &str) {
+            self.stamps.lock().unwrap().push(updated.to_string());
+        }
+        fn listed_stamp(&self, _key: &str) -> String {
+            self.listed.lock().unwrap().clone()
+        }
+        fn is_incomplete(&self, _key: &str) -> bool {
+            false
+        }
+        fn turn_in_flight(&self, _key: &str) -> bool {
+            false
+        }
+        fn clear_incomplete(&self, _key: &str) {}
+        fn mark_incomplete(&self, key: &str) {
+            self.incomplete.lock().unwrap().push(key.to_string());
+        }
+        fn tool_run(&self, _key: &str, _run: &str) {}
+        fn step_closed(&self, _key: &str) {}
+        fn stamp_probe(&self, _key: &str, _persist: bool) {}
+        fn is_summarizer(&self, _key: &str) -> bool {
+            false
+        }
+        fn summarizer_chunk(&self, _key: &str, _text: &str) -> bool {
+            false
+        }
+        fn take_summarizer_reply(&self, _key: &str) -> String {
+            String::new()
+        }
+    }
+
+    /// The probe says another client moved the session; the bounded replay
+    /// repeats the painted tail (`m2`, `m3`) and adds its row (`m4`).
+    struct StaleServer {
+        store: Arc<crate::transcript::TranscriptStore>,
+        tails: StdMutex<Vec<Option<u64>>>,
+    }
+
+    impl ChatEndpoint for StaleServer {
+        fn request(
+            &self,
+            method: &str,
+            params: Value,
+        ) -> BoxFuture<'static, Result<Value, AcpError>> {
+            if method == "_goose/unstable/session/info" {
+                return Box::pin(async { Ok(json!({ "session": { "updatedAt": "listed@t2" } })) });
+            }
+            assert_eq!(method, "session/load");
+            self.tails.lock().unwrap().push(
+                params
+                    .pointer("/_meta/replayTail")
+                    .and_then(Value::as_u64),
+            );
+            let store = self.store.clone();
+            Box::pin(async move {
+                for (id, text) in [
+                    ("m2", "older answer"),
+                    ("m3", "newest from us"),
+                    ("m4", "written by another client"),
+                ] {
+                    store.append_chunk("agent", text, Some(id), false);
+                }
+                Ok(json!({ "ok": true }))
+            })
+        }
+        fn notify(&self, _method: &str, _params: Value) -> Result<(), AcpError> {
+            Ok(())
+        }
+        fn wire_id(&self, display: &str) -> String {
+            display.to_string()
+        }
+        fn accepts_prompt(&self) -> bool {
+            true
+        }
+        fn label(&self) -> Option<String> {
+            None
+        }
+    }
+
+    fn shape(items: &[crate::Item]) -> Vec<(String, crate::ItemKind, String)> {
+        items
+            .iter()
+            .map(|i| (i.id.clone(), i.kind, i.text.clone()))
+            .collect()
+    }
+
+    fn seed_painted(store: &crate::transcript::TranscriptStore) -> Vec<crate::Item> {
+        store.set_session("s1");
+        store.append_chunk("user", "older question", Some("m1"), false);
+        store.append_chunk("agent", "older answer", Some("m2"), false);
+        store.append_chunk("agent", "newest from us", Some("m3"), false);
+        store.rich_transcript()
+    }
+
+    #[test]
+    fn a_suppression_downgraded_by_verification_merges_the_paint() {
+        // Paint-then-verify used to call `replace_rich` (no merge gate), then
+        // downgrade to a merge: `end_merge()` returned false and the overlap
+        // was APPENDED — the newest turn appeared twice. Verify before painting
+        // so the rows are armed as a merge base from the start.
+        let store = Arc::new(crate::transcript::TranscriptStore::new(Box::new(NullListener)));
+        let painted = seed_painted(&store);
+        let host = TestHost::new(store.clone());
+        let server = StaleServer {
+            store: store.clone(),
+            tails: StdMutex::new(Vec::new()),
+        };
+        let plan = PaintPlan {
+            suppress: true, // the stale plan's verdict
+            merge: false,
+            keep: false,
+            tail: 1,
+            items: Some(painted.clone()),
+            complete: true,
+        };
+        crate::roam::runtime()
+            .block_on(load_with_plan(&server, host.as_ref(), &store, "s1", "/w", &plan))
+            .expect("the load answered");
+
+        assert_eq!(
+            server.tails.lock().unwrap().as_slice(),
+            [Some(REPLAY_TAIL as u64)],
+            "a downgraded suppression owes the overlap tail, not the 1-message bind"
+        );
+        assert_eq!(
+            host.stamps.lock().unwrap().as_slice(),
+            ["listed@t2"],
+            "the server's stamp must replace the stale baseline"
+        );
+        assert_eq!(
+            shape(&store.rich_transcript()),
+            vec![
+                ("m1".into(), crate::ItemKind::User, "older question".into()),
+                ("m2".into(), crate::ItemKind::Agent, "older answer".into()),
+                ("m3".into(), crate::ItemKind::Agent, "newest from us".into()),
+                (
+                    "m4".into(),
+                    crate::ItemKind::Agent,
+                    "written by another client".into()
+                ),
+            ],
+            "the overlap replaces the painted suffix; the other client's row is new"
+        );
+    }
+
+    #[test]
+    fn a_resume_verifies_before_discarding_the_replay() {
+        // The main wire paints in `open_session_inner` and probes in its
+        // handshake, i.e. AFTER the paint. The shared replay body has to re-arm
+        // those rows as a merge base when verification downgrades the ask.
+        let store = Arc::new(crate::transcript::TranscriptStore::new(Box::new(NullListener)));
+        let painted = seed_painted(&store);
+        let host = TestHost::new(store.clone());
+        let server = StaleServer {
+            store: store.clone(),
+            tails: StdMutex::new(Vec::new()),
+        };
+        let plan = PaintPlan {
+            suppress: true,
+            merge: false,
+            keep: false,
+            tail: 1,
+            items: Some(painted.clone()),
+            complete: true,
+        };
+        apply_paint(&store, &plan); // the caller's pre-verification paint
+        crate::roam::runtime()
+            .block_on(replay_session(&server, host.as_ref(), &store, "s1", "/w", true, false))
+            .expect("the load answered");
+
+        assert_eq!(server.tails.lock().unwrap().as_slice(), [Some(REPLAY_TAIL as u64)]);
+        assert_eq!(
+            shape(&store.rich_transcript()),
+            vec![
+                ("m1".into(), crate::ItemKind::User, "older question".into()),
+                ("m2".into(), crate::ItemKind::Agent, "older answer".into()),
+                ("m3".into(), crate::ItemKind::Agent, "newest from us".into()),
+                (
+                    "m4".into(),
+                    crate::ItemKind::Agent,
+                    "written by another client".into()
+                ),
+            ],
+            "the replay must fill in the other client's row without duplicating ours"
+        );
+    }
+
+    #[test]
+    fn a_failed_merge_load_disarms_the_merge_gate() {
+        use futures::future::BoxFuture;
+        struct FailingLoad;
+        impl ChatEndpoint for FailingLoad {
+            fn request(
+                &self,
+                method: &str,
+                _params: Value,
+            ) -> BoxFuture<'static, Result<Value, AcpError>> {
+                assert_eq!(method, "session/load");
+                Box::pin(async { Err(AcpError::internal_error().data("link died")) })
+            }
+            fn notify(&self, _m: &str, _p: Value) -> Result<(), AcpError> {
+                Ok(())
+            }
+            fn wire_id(&self, display: &str) -> String {
+                display.to_string()
+            }
+            fn accepts_prompt(&self) -> bool {
+                true
+            }
+            fn label(&self) -> Option<String> {
+                None
+            }
+        }
+
+        let store = Arc::new(crate::transcript::TranscriptStore::new(Box::new(NullListener)));
+        let painted = seed_painted(&store);
+        let host = TestHost::new(store.clone());
+        let plan = PaintPlan {
+            suppress: false,
+            merge: true,
+            keep: false,
+            tail: REPLAY_TAIL,
+            items: Some(painted.clone()),
+            complete: true,
+        };
+        assert!(crate::roam::runtime()
+            .block_on(load_with_plan(
+                &FailingLoad,
+                host.as_ref(),
+                &store,
+                "s1",
+                "/w",
+                &plan
+            ))
+            .is_err());
+        assert!(
+            !store.end_merge(),
+            "the guard must disarm merge on the error exit; an armed gate would \
+             truncate a later load at this abandoned anchor"
+        );
+        assert_eq!(
+            host.events.lock().unwrap().as_slice(),
+            ["begin s1 suppress=false", "end s1"],
+            "a failed load still ends its replay"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_gap_rebuild_restores_the_painted_rows() {
+        use futures::future::BoxFuture;
+        struct CancelledRebuild {
+            store: Arc<crate::transcript::TranscriptStore>,
+            full_started: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl ChatEndpoint for CancelledRebuild {
+            fn request(
+                &self,
+                method: &str,
+                params: Value,
+            ) -> BoxFuture<'static, Result<Value, AcpError>> {
+                assert_eq!(method, "session/load");
+                if params.pointer("/_meta/replayTail").is_none() {
+                    // The whole-session rebuild: park here so the test can
+                    // cancel with the store already cleared.
+                    self.full_started
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    return Box::pin(futures::future::pending());
+                }
+                let store = self.store.clone();
+                Box::pin(async move {
+                    // An id the paint cannot name ⇒ a merge gap ⇒ full rebuild.
+                    store.append_chunk("agent", "unmatched", Some("z9"), false);
+                    Ok(json!({ "ok": true }))
+                })
+            }
+            fn notify(&self, _m: &str, _p: Value) -> Result<(), AcpError> {
+                Ok(())
+            }
+            fn wire_id(&self, display: &str) -> String {
+                display.to_string()
+            }
+            fn accepts_prompt(&self) -> bool {
+                true
+            }
+            fn label(&self) -> Option<String> {
+                None
+            }
+        }
+
+        let store = Arc::new(crate::transcript::TranscriptStore::new(Box::new(NullListener)));
+        let painted = seed_painted(&store);
+        let host = TestHost::new(store.clone());
+        let full_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen_started = full_started.clone();
+        let server = CancelledRebuild {
+            store: store.clone(),
+            full_started: full_started.clone(),
+        };
+        let task_store = store.clone();
+        let task_host = host.clone();
+        let task_painted = painted.clone();
+        crate::roam::runtime().block_on(async move {
+            let task = crate::roam::runtime().spawn(async move {
+                let plan = PaintPlan {
+                    suppress: false,
+                    merge: true,
+                    keep: false,
+                    tail: REPLAY_TAIL,
+                    items: Some(task_painted),
+                    complete: true,
+                };
+                load_with_plan(&server, task_host.as_ref(), &task_store, "s1", "/w", &plan).await
+            });
+            for _ in 0..200 {
+                if seen_started.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(
+                seen_started.load(std::sync::atomic::Ordering::SeqCst),
+                "the rebuild must have started before the cancellation"
+            );
+            task.abort();
+            let _ = task.await;
+        });
+
+        assert_eq!(
+            shape(&store.rich_transcript()),
+            shape(&painted),
+            "a dropped rebuild must not leave the chat empty or half-loaded"
+        );
+        assert_eq!(
+            host.incomplete.lock().unwrap().as_slice(),
+            ["s1"],
+            "the restored paint has a hole, so it cannot read back as current"
+        );
+        assert!(
+            host.events.lock().unwrap().iter().any(|e| e == "end s1"),
+            "the replay bar must end even for a cancelled load"
         );
     }
 
@@ -2196,7 +2599,19 @@ impl PaintPlan {
 }
 
 /// Paint a plan into a store (the one implementation of the three modes).
+///
+/// `suppress`/`merge` are passed separately because they may be the VERIFIED
+/// decision rather than the plan's original verdict (see [`load_with_plan`]).
 pub(crate) fn apply_paint(store: &crate::transcript::TranscriptStore, plan: &PaintPlan) {
+    apply_paint_decision(store, plan, plan.suppress, plan.merge);
+}
+
+fn apply_paint_decision(
+    store: &crate::transcript::TranscriptStore,
+    plan: &PaintPlan,
+    suppress: bool,
+    merge: bool,
+) {
     // A kept store is authoritative: not painted, not cleared, and its cursor
     // left alone — it is the only copy of the turn being streamed.
     if plan.keep {
@@ -2208,8 +2623,8 @@ pub(crate) fn apply_paint(store: &crate::transcript::TranscriptStore, plan: &Pai
     // The reply corrects it either way.
     store.set_server_more(!plan.complete);
     match &plan.items {
-        Some(items) if plan.suppress => store.replace_rich(items.clone(), false),
-        Some(items) if plan.merge => store.replace_rich_for_merge(items.clone()),
+        Some(items) if suppress => store.replace_rich(items.clone(), false),
+        Some(items) if merge => store.replace_rich_for_merge(items.clone()),
         Some(items) => store.replace_rich(items.clone(), true),
         None => store.clear(),
     }
@@ -2232,10 +2647,11 @@ pub(crate) async fn load_with_plan(
     plan: &PaintPlan,
 ) -> Result<Value, AcpError> {
     let _load = store.begin_load().await;
-    apply_paint(store, plan);
     // A suppression is verified against the server before it is honoured: a
     // stale freshness baseline would otherwise discard the replay (see
-    // [`verified_ask`]).
+    // [`verified_ask`]). VERIFY BEFORE PAINTING — a downgrade has to arm the
+    // painted rows as a merge base, which `replace_rich` cannot do after the
+    // fact (the replay tail would append a second copy of the newest turn).
     // A bind-only plan is NOT verified: verification exists to turn a wrong
     // "the cache is current" into a merge, and a merge would anchor on the live
     // rows this plan exists to protect — truncating the reply being streamed.
@@ -2254,6 +2670,7 @@ pub(crate) async fn load_with_plan(
         )
         .await
     };
+    apply_paint_decision(store, plan, ask.suppress, ask.merge);
     replay_held(endpoint, host, store, key, cwd, ask).await
 }
 
@@ -2289,15 +2706,19 @@ pub(crate) async fn replay_session(
     merge: bool,
 ) -> Result<Value, AcpError> {
     let _load = store.begin_load().await;
-    replay_held(
-        endpoint,
-        host,
-        store,
-        key,
-        cwd,
-        ReplayAsk::for_mode(suppress, merge),
-    )
-    .await
+    let mut ask = ReplayAsk::for_mode(suppress, merge);
+    // Cold resume used to take the plan's "fresh cache" word for it and drop the
+    // replay, so messages another client wrote while the app was closed were
+    // silently missing. Use the SAME verification as every other load. The one
+    // exception is a live turn: the main wire's bind-only path passes
+    // `suppress=true` with no merge, and the store — not the server — is the
+    // newest copy there. Probing it could downgrade a bind to a merge and
+    // truncate the reply being streamed, which is exactly what bind-only exists
+    // to prevent (`PaintPlan::bind_only`).
+    if !(ask.suppress && host.turn_in_flight(key)) {
+        ask = verified_ask(endpoint, host, key, ask).await;
+    }
+    replay_held(endpoint, host, store, key, cwd, ask).await
 }
 
 /// [`replay_session`]'s body, for callers already holding the load slot.
@@ -2324,10 +2745,32 @@ struct ReplayGuard<'a> {
     ends: bool,
     /// The store's emissions are still held.
     holds: bool,
+    /// A merge gate we armed and have not yet closed with `end_merge()`.
+    merge: bool,
+    /// The rows on screen before a merge gap forced a clear. The guard owns
+    /// them so a CANCELLED rebuild (a dropped future, a dead roam link) puts
+    /// them back too — not just an `Err` arm that may never run.
+    painted: Option<Vec<crate::Item>>,
+    /// True from the `clear()` for a gap rebuild until that rebuild answers.
+    rebuilding: bool,
 }
 
 impl Drop for ReplayGuard<'_> {
     fn drop(&mut self) {
+        if self.rebuilding {
+            // The store was cleared for a whole-session rebuild that did not
+            // finish. Restore what the client was reading and mark the hole so
+            // no later cache save can call this transcript current.
+            if let Some(painted) = self.painted.take() {
+                self.store.replace_rich(painted, false);
+            }
+            self.host.mark_incomplete(self.key);
+        }
+        if self.merge {
+            // Every exit owes `end_merge()`: leaving the store armed lets a
+            // later chunk truncate it at an anchor from this abandoned load.
+            let _ = self.store.end_merge();
+        }
         if self.ends {
             self.host.end_replay(self.key);
         }
@@ -2381,37 +2824,57 @@ async fn replay_held(
     // because only a merge can end in a gap — and the gap path has to clear the
     // store to rebuild it (see below), so this is the only copy of the rows the
     // screen is showing.
-    let painted = if merge { Some(store.rich_transcript()) } else { None };
-    let mut guard = ReplayGuard { host, store, key, ends: true, holds: true };
+    let painted = if merge {
+        let painted = store.rich_transcript();
+        // Re-arm the paint as a merge base even when it was applied BEFORE the
+        // verification decided to merge (the main wire paints in
+        // `Core::open_session_inner`, then probes in its handshake). Without
+        // this `end_merge()` below sees no merge gate, and the overlapping tail
+        // is APPENDED to rows the client already has: the newest turn twice.
+        // `replace_rich` is a no-op for identical rows, so this cannot re-paint
+        // a merge that was already armed by `apply_paint_decision`.
+        store.replace_rich_for_merge(painted.clone());
+        Some(painted)
+    } else {
+        None
+    };
+    let mut guard = ReplayGuard {
+        host,
+        store,
+        key,
+        ends: true,
+        holds: true,
+        merge,
+        painted,
+        rebuilding: false,
+    };
     let reply = load_request(endpoint, key, cwd, tail).await;
     let reply = match reply {
         Ok(reply) => reply,
-        // The rows on screen are the provisional cache paint, which is the right
-        // thing to keep for a chat that failed to load; the guard releases the hold
-        // and tells the host the replay is over, so the session can be reloaded again.
+        // The rows on screen are still the cache paint, which is what the client
+        // should keep for a failed load. The guard disarms the merge, releases the
+        // hold and ends the replay, so the chat can be reloaded again.
         Err(error) => return Err(error),
     };
     let mut reply = reply;
     // Merge gap: the tail started past the cached prefix, so extending the
     // cache would leave a hole. Clear and load the whole transcript now — but a
     // rebuild is allowed to FAIL (it is capped at `REBUILD_TIMEOUT_SECS`, and a
-    // roam link can drop mid-stream), and by then the store has been cleared. Left
-    // unrepaired, the release below then painted whatever prefix of the rebuild had
-    // arrived: the transcript ended in the middle of the conversation — the newest
-    // turn gone, an older one at the bottom — with nothing reported. So the paint
-    // is put back, and the session is marked incomplete so no cache save can call
-    // this transcript current.
-    if store.end_merge() {
+    // roam link can drop mid-stream), and by then the store has been cleared. If
+    // it fails, or this future is DROPPED while it waits, the guard puts the
+    // paint back and marks the session incomplete so a later save cannot call a
+    // transcript with a hole current.
+    let gap = merge && store.end_merge();
+    guard.merge = false;
+    if gap {
+        guard.rebuilding = true;
         store.clear();
-        match load_request(endpoint, key, cwd, None).await {
-            Ok(full_reply) => reply = full_reply,
-            Err(_) => {
-                if let Some(painted) = painted {
-                    store.replace_rich(painted, false);
-                }
-                host.mark_incomplete(key);
-            }
+        if let Ok(full_reply) = load_request(endpoint, key, cwd, None).await {
+            reply = full_reply;
+            guard.rebuilding = false;
         }
+        // On failure (or cancellation) the guard's `Drop` restores the painted
+        // rows and marks the hole — whichever way this load ends.
     }
     // Tell the host how much history the server still holds BEFORE the paint is
     // released: a bounded replay leaves a backlog, and the cursor that paint
@@ -2695,6 +3158,14 @@ impl DispatchHost for PrefixHost {
             host.session_stamp(key, updated_at);
         }
     }
+    fn session_mode(&self, key: &str, mode: &str) {
+        // The trait's default is a no-op, so forgetting this forward silently
+        // stranded every roam DEV session's mode at the core: the advisor runs
+        // at turn end, long after the list that taught us the mode.
+        if let Some(host) = self.host() {
+            host.session_mode(key, mode);
+        }
+    }
     /// FORWARDED, not defaulted. The trait's defaults are the empty stamp and
     /// `false`, which is exactly the wrong answer here: a peer's paint plan would
     /// then compare the cache against the peer's own session list again (the
@@ -2878,26 +3349,30 @@ pub(crate) fn dispatch(
                 // is what keeps the card out of the model's prose.
                 if let Some(file) = share_from_tool_call(&tool) {
                     store.shared_file(&file, &id);
-                    return;
-                }
-                let (kind, detail) = tool_call_kind(&tool);
-                store.tool_call(&tool.title, &detail, &id, kind);
-                // Keep the tool NAME: the title is the model's prose, and the activity
-                // panel needs to know a call is a delegate (background work) rather
-                // than a step of this turn.
-                store.tool_name(&id, &tool_call_name(&tool));
-                // The end-of-turn summarizer labels the turn's plain runs.
-                if let Some(run_id) = store.run_id_for(&id).filter(|_| !paging) {
-                    // The call anchors its own run ⇒ it OPENED a step, so the one
-                    // above it is finished and can be labelled now rather than at
-                    // the end of the turn.
-                    let opened_step = run_id == id;
-                    host.tool_run(&key, &run_id);
-                    if opened_step {
-                        host.step_closed(&key);
+                    // A share is still CONTENT: the background green dot must be
+                    // set for a chat that produced a file. The early `return`
+                    // here used to skip the `host.background` below entirely.
+                    content = true;
+                } else {
+                    let (kind, detail) = tool_call_kind(&tool);
+                    store.tool_call(&tool.title, &detail, &id, kind);
+                    // Keep the tool NAME: the title is the model's prose, and the activity
+                    // panel needs to know a call is a delegate (background work) rather
+                    // than a step of this turn.
+                    store.tool_name(&id, &tool_call_name(&tool));
+                    // The end-of-turn summarizer labels the turn's plain runs.
+                    if let Some(run_id) = store.run_id_for(&id).filter(|_| !paging) {
+                        // The call anchors its own run ⇒ it OPENED a step, so the one
+                        // above it is finished and can be labelled now rather than at
+                        // the end of the turn.
+                        let opened_step = run_id == id;
+                        host.tool_run(&key, &run_id);
+                        if opened_step {
+                            host.step_closed(&key);
+                        }
                     }
+                    content = true;
                 }
-                content = true;
             }
         }
         SessionUpdate::ToolCallUpdate(update) => {
@@ -2932,7 +3407,12 @@ pub(crate) fn dispatch(
             //              the middle of a live run.
             if let Some(run_id) = declared_run_state(&info) {
                 host.active_run(key.clone(), run_id.clone());
-                if !run_id.is_empty() {
+                // A live run id can arrive WHILE a load is replaying (the server
+                // pushes touches for other clients' writes too). Ending the
+                // replay here also clears the suppression window, so the rest
+                // of the replay paints on top of the cache. The replay's own
+                // guard owns `end_replay` and closes it at the right time.
+                if !run_id.is_empty() && !host.replaying(&key) {
                     host.end_replay(&key);
                 }
             }
@@ -3150,6 +3630,11 @@ impl SessionHub {
     /// Drop a session's store (deleted session, closed peer).
     pub(crate) fn forget(&self, key: &str) {
         self.stores.lock().remove(key);
+        // A page claimed this key just before the session was deleted or the
+        // peer closed. Leaving the target installed would route that key's late
+        // notifications into a scratch store nobody reads (and resurrect a
+        // store we just dropped).
+        self.page_targets.lock().remove(key);
         self.has_new.lock().remove(key);
         if self.displayed_key().as_deref() == Some(key) {
             self.clear_display();

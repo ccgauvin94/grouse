@@ -23,10 +23,14 @@ What it checks
    the ledger. The count can only change by editing the number, which is a line
    a reviewer cannot miss. That is the ratchet: exclusions can shrink freely and
    grow only on purpose.
-5. `LISTENER_EVENTS` in surface.rs must equal the `CoreListener` trait's
-   callbacks, parsed out of `lib.rs`. The trait has defaults, so an added
-   `fn on_*` compiles without touching the inventory; this is the check that
-   closes that hole.
+5. `LISTENER_EVENTS` AND `LISTENER_SIGNATURES` in surface.rs must equal the
+   `CoreListener` trait's callbacks and their parameter TYPES, parsed out of
+   `lib.rs`. The trait has defaults, so an added `fn on_*` — or a changed
+   payload type behind an unchanged name — compiles without touching the
+   inventory; this is the check that closes both holes.
+6. Evidence anchors must be relative paths inside the client's declared root,
+   with no `..` and no token that exists only in a source comment. A `yes:`
+   backed by `../core/…` or a commented-out call is not evidence.
 
 Usage
 -----
@@ -45,6 +49,7 @@ import pathlib
 import re
 import sys
 import tempfile
+from pathlib import PurePosixPath
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SURFACE_RS = "core/grouse-core/src/surface.rs"
@@ -85,9 +90,10 @@ def parse_inventory(text: str) -> dict:
     for name, body in re.findall(
         r"pub static ([A-Z_]+): &\[&str\] = &\[(.*?)\];", text, re.S
     ):
-        if name != "LISTENER_EVENTS":
+        if name not in ("LISTENER_EVENTS", "LISTENER_SIGNATURES"):
             continue  # macro-generated consts have no literal text; see below
-        ids = re.findall(r'"(listener\.[a-z_]+)"', body)
+        ids = re.findall(r'"[^"]+"', body)
+        ids = [i[1:-1] for i in ids]
         if not ids:
             raise SystemExit(f"check-parity: {name} parsed as empty in {SURFACE_RS}")
         groups[name] = ids
@@ -120,8 +126,52 @@ def parse_inventory(text: str) -> dict:
     return groups
 
 
+def split_params(params: str) -> list:
+    """Split a parameter list on top-level commas (types contain `<…>`)."""
+    out, depth, current = [], 0, ""
+    for ch in params:
+        if ch in "<([{":
+            depth += 1
+        elif ch in ">)]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append(current)
+            current = ""
+        else:
+            current += ch
+    if current.strip():
+        out.append(current)
+    return out
+
+
+def normalize_signature(sig: str) -> str:
+    """`fn on_x(&self, id: String)` / `on_x(id: String)` -> `on_x(String)`.
+
+    Parameter names and `&self` are presentation; types are the ABI. Whitespace
+    inside a type is insignificant (`Vec < String >` is `Vec<String>`).
+    """
+    sig = sig.strip()
+    sig = re.sub(r"^fn\s+", "", sig)
+    m = re.fullmatch(r"(on_[a-z_]+)\s*\((.*)\)", sig, re.S)
+    if not m:
+        raise SystemExit(f"check-parity: not a listener signature: {sig[:80]!r}")
+    name, params = m.groups()
+    types = []
+    for param in split_params(params):
+        param = param.strip()
+        if not param or param == "&self" or param.startswith("&self "):
+            continue
+        param = re.sub(r"^mut\s+", "", param)
+        if ":" in param:
+            param = param.split(":", 1)[1]
+        types.append(re.sub(r"\s+", "", param))
+    if not all(types):
+        raise SystemExit(f"check-parity: empty parameter type in {sig[:80]!r}")
+    return f"{name}({','.join(types)})"
+
+
 def parse_listener_trait(text: str) -> list:
-    """The `on_*` callbacks declared by `pub trait CoreListener`."""
+    """Normalized signatures of every `on_*` callback in `CoreListener`."""
     start = text.find("pub trait CoreListener")
     if start < 0:
         raise SystemExit(f"check-parity: `pub trait CoreListener` not found in {LIB_RS}")
@@ -129,7 +179,12 @@ def parse_listener_trait(text: str) -> list:
     if end < 0:
         raise SystemExit("check-parity: unterminated CoreListener trait")
     body = text[start:end]
-    return re.findall(r"\n\s*fn (on_[a-z_]+)\s*\(", body)
+    # Remove doc comments first: an example signature in prose is not a method.
+    body = "\n".join(line for line in body.splitlines() if not line.strip().startswith("///"))
+    found = re.findall(r"\bfn\s+(on_[a-z_]+)\s*\(([^)]*)\)\s*(?:->[^;]+)?;", body, re.S)
+    if not found:
+        raise SystemExit("check-parity: no listener methods parsed out of CoreListener")
+    return [normalize_signature(f"fn {name}({params})") for name, params in found]
 
 
 # --------------------------------------------------------------------------
@@ -137,6 +192,20 @@ def parse_listener_trait(text: str) -> list:
 # --------------------------------------------------------------------------
 CELL_YES = "yes:"
 CELL_EXCLUDED = "excluded:"
+
+
+def anchor_problem(path: str, token: str) -> str:
+    """Why this `file#token` cannot be trusted as evidence ('' when fine)."""
+    if not path or not token:
+        return "empty path or token"
+    if ".." in path or ".." in token:
+        return "`..` is not allowed in an anchor"
+    if "\\" in path or path.startswith("~") or re.match(r"^[A-Za-z]:", path):
+        return "anchor paths are POSIX and relative to the client root"
+    posix = PurePosixPath(path)
+    if posix.is_absolute():
+        return "anchor path must be relative to the client root"
+    return ""
 
 
 def parse_cell(text: str) -> dict:
@@ -152,7 +221,11 @@ def parse_cell(text: str) -> dict:
             if "#" not in part:
                 return {"kind": "bad-anchor", "raw": raw}
             path, token = part.split("#", 1)
-            anchors.append((path.strip(), token.strip()))
+            path, token = path.strip(), token.strip()
+            problem = anchor_problem(path, token)
+            if problem:
+                return {"kind": "unsafe-anchor", "raw": raw, "why": problem}
+            anchors.append((path, token))
         if not anchors:
             return {"kind": "bad-anchor", "raw": raw}
         return {"kind": "yes", "anchors": anchors}
@@ -243,6 +316,8 @@ def validate(core_ids: list, clients: list, rows: list, pins: dict) -> list:
                 )
             elif kind == "bad-anchor":
                 errors.append(f"{rid}/{client}: `{cell['raw']}` is not `file#token`")
+            elif kind == "unsafe-anchor":
+                errors.append(f"{rid}/{client}: unsafe anchor `{cell['raw']}`: {cell['why']}")
             elif kind == "excluded":
                 reason = cell["reason"]
                 low = reason.lower()
@@ -270,35 +345,140 @@ def validate(core_ids: list, clients: list, rows: list, pins: dict) -> list:
     return errors
 
 
+def strip_comments(text: str) -> str:
+    """Remove comment-only occurrences of a token from source before grepping.
+
+    A regex is not enough here: `// is the _goose/unstable/* shim` in a Kotlin
+    LINE comment opens a naive `/*…*/` match that swallows the whole CoreListener
+    block. Scan in order, keep strings intact, and let the earliest marker win.
+    """
+    out = []
+    i, n, state = 0, len(text), None
+    at_line_start = True
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if state == "line":
+            if c == "\n":
+                state = None
+                out.append(c)
+                at_line_start = True
+            i += 1
+            continue
+        if state == "block":
+            if c == "*" and nxt == "/":
+                state = None
+                i += 2
+            else:
+                if c == "\n":
+                    out.append(c)
+                    at_line_start = True
+                i += 1
+            continue
+        if state in ("str", "char"):
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(nxt)
+                i += 2
+                continue
+            if (state == "str" and c == '"') or (state == "char" and c == "'"):
+                state = None
+            i += 1
+            at_line_start = False
+            continue
+        if c == "/" and nxt == "/":
+            state = "line"
+            i += 2
+            continue
+        if c == "/" and nxt == "*":
+            state = "block"
+            i += 2
+            continue
+        if c == "#" and at_line_start:
+            state = "line"
+            i += 1
+            continue
+        if c in ('"', "'"):
+            state = "str" if c == '"' else "char"
+        out.append(c)
+        at_line_start = c == "\n"
+        i += 1
+    return "".join(out)
+
+
+def inside(child: pathlib.Path, parent: pathlib.Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
 def check_anchors(rows: list, clients: list, roots: dict, root: pathlib.Path) -> list:
     errors = []
+    root = root.resolve()
     for row in rows:
         for client in clients:
             cell = row.get(client, {})
             if cell.get("kind") != "yes":
                 continue
-            base = root / roots.get(client, f"clients/{client}")
+            declared = roots.get(client, f"clients/{client}")
+            if anchor_problem(declared, "x"):
+                errors.append(f"{row['id']}/{client}: unsafe client root `{declared}`")
+                continue
+            base = (root / declared).resolve()
+            if not inside(base, root):
+                errors.append(f"{row['id']}/{client}: client root `{declared}` escapes the repo")
+                continue
             for path, token in cell["anchors"]:
-                target = base / path
+                problem = anchor_problem(path, token)
+                if problem:
+                    errors.append(f"{row['id']}/{client}: unsafe anchor {path}#{token}: {problem}")
+                    continue
+                target = (base / path).resolve()
                 if not target.is_file():
                     errors.append(f"{row['id']}/{client}: no such file {path} (root {base})")
                     continue
-                if token not in target.read_text(encoding="utf-8", errors="replace"):
-                    errors.append(f"{row['id']}/{client}: `{token}` not found in {path}")
+                if not inside(target, base):
+                    errors.append(f"{row['id']}/{client}: anchor {path} escapes the client root")
+                    continue
+                source = strip_comments(target.read_text(encoding="utf-8", errors="replace"))
+                if token not in source:
+                    errors.append(
+                        f"{row['id']}/{client}: `{token}` not found in {path} outside comments"
+                    )
     return errors
 
 
 def check_listener_parity(groups: dict, lib_text: str) -> list:
     declared = [i.split(".", 1)[1] for i in groups.get("LISTENER_EVENTS", [])]
+    signatures = groups.get("LISTENER_SIGNATURES", [])
+    if not signatures:
+        return ["surface.rs has no LISTENER_SIGNATURES — the checker cannot compare payload types"]
     trait = parse_listener_trait(lib_text)
+    trait_names = [sig.split("(", 1)[0] for sig in trait]
     errors = []
-    for missing in sorted(set(trait) - set(declared)):
+    for missing in sorted(set(trait_names) - set(declared)):
         errors.append(
             f"CoreListener::{missing} is not in surface.rs LISTENER_EVENTS"
             f" — add it there and give it a ledger row"
         )
-    for stale in sorted(set(declared) - set(trait)):
+    for stale in sorted(set(declared) - set(trait_names)):
         errors.append(f"surface.rs LISTENER_EVENTS lists {stale}, which CoreListener no longer has")
+    if sorted(declared) != sorted(sig.split("(", 1)[0] for sig in signatures):
+        errors.append("surface.rs LISTENER_EVENTS and LISTENER_SIGNATURES disagree on the callbacks")
+    try:
+        normalized = {normalize_signature(sig) for sig in signatures}
+    except SystemExit as exc:
+        return errors + [str(exc)]
+    for sig in sorted(set(trait) - normalized):
+        name = sig.split("(", 1)[0]
+        errors.append(
+            f"CoreListener::{name} signature {sig} is not in surface.rs LISTENER_SIGNATURES"
+            f" — a trampoline built for the old payload would read it with the wrong shape"
+        )
+    for sig in sorted(normalized - set(trait)):
+        errors.append(f"surface.rs LISTENER_SIGNATURES lists {sig}, which CoreListener no longer has")
     return errors
 
 
@@ -362,6 +542,14 @@ def self_test() -> int:
     expect("an anchor with no token", validate(core, clients, bad_anchor, {"excluded": 0}),
            "is not `file#token`")
 
+    traversal = [good[0], dict(good[1], desktop=cell("yes: ../core/lib.rs#some_token"))]
+    expect("an anchor that climbs out of the client root",
+           validate(core, clients, traversal, {"excluded": 0}), "unsafe anchor")
+
+    escape = [good[0], dict(good[1], desktop=cell("yes: /etc/passwd#root"))]
+    expect("an absolute anchor path", validate(core, clients, escape, {"excluded": 0}),
+           "unsafe anchor")
+
     # Anchor resolution, against a throwaway tree.
     with tempfile.TemporaryDirectory() as tmp:
         base = pathlib.Path(tmp) / "clients" / "android"
@@ -378,11 +566,39 @@ def self_test() -> int:
                  "desktop": cell("excluded: the desktop draws no card yet")}]
         expect("a file that is not there", check_anchors(gone, ["android"], {}, pathlib.Path(tmp)),
                "no such file")
+        (base / "C.kt").write_text("// item.files\n", encoding="utf-8")
+        commented = [{"id": "item.files", "android": cell("yes: C.kt#item.files"),
+                      "desktop": cell("excluded: the desktop draws no card yet")}]
+        expect("a token that exists only in a comment",
+               check_anchors(commented, ["android"], {}, pathlib.Path(tmp)), "outside comments")
+        expect("a checked anchor that escapes its root",
+               check_anchors([{"id": "item.files",
+                               "android": {"kind": "yes", "anchors": [("A.kt", "item.files")]},
+                               "desktop": cell("excluded: x" * 3)}], ["android"],
+                             {"android": "../../etc"}, pathlib.Path(tmp)), "unsafe client root")
 
     # A listener the trait gained and the inventory missed.
     fake_lib = "pub trait CoreListener: Send + Sync {\n    fn on_status(&self);\n    fn on_brand_new(&self);\n}\n"
-    errors = check_listener_parity({"LISTENER_EVENTS": ["listener.on_status"]}, fake_lib)
+    groups = {"LISTENER_EVENTS": ["listener.on_status"],
+              "LISTENER_SIGNATURES": ["on_status()"]}
+    errors = check_listener_parity(groups, fake_lib)
     expect("a trait callback missing from the inventory", errors, "on_brand_new")
+
+    # Same callback NAME, different payload: the old signature guard missed this.
+    changed_lib = "pub trait CoreListener: Send + Sync {\n    fn on_file(&self, event: String);\n}\n"
+    groups = {"LISTENER_EVENTS": ["listener.on_file"],
+              "LISTENER_SIGNATURES": ["on_file(event: crate::attachments::FileEvent)"]}
+    errors = check_listener_parity(groups, changed_lib)
+    expect("a listener whose parameter type changed", errors, "signature")
+    expect("a missing signature inventory", check_listener_parity(
+        {"LISTENER_EVENTS": ["listener.on_file"]}, changed_lib), "no LISTENER_SIGNATURES")
+
+    # Signature normalization ignores names/whitespace, not arity/types.
+    spaced_lib = "pub trait CoreListener: Send + Sync {\n    fn on_file(&self, renamed: crate::attachments::FileEvent);\n}\n"
+    expect("parameter names are presentation", check_listener_parity(
+        {"LISTENER_EVENTS": ["listener.on_file"],
+         "LISTENER_SIGNATURES": ["on_file(  event :  crate :: attachments :: FileEvent )"]},
+        spaced_lib), "signature", should_fail=False)
 
     print("\nself-test:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
@@ -399,7 +615,8 @@ def main(argv=None) -> int:
         return self_test()
 
     groups = parse_inventory(read(SURFACE_RS))
-    core_ids = [i for g in groups.values() for i in g]
+    # LISTENER_SIGNATURES is a second view of LISTENER_EVENTS, not new ledger ids.
+    core_ids = [i for name, g in groups.items() if name != "LISTENER_SIGNATURES" for i in g]
     ledger = parse_ledger(read(LEDGER))
     active = active_clients()
 

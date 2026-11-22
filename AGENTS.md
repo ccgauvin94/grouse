@@ -422,14 +422,16 @@ gitleaks detect --source .    # CI-gated; a commit must not contain secrets
 |Workflow|What it runs|Required check|
 |---|---|---|
 |`core.yml`|`cargo test` + `cargo clippy --all-targets -- -D warnings`, pinned toolchain 1.97.1|`Core / test`|
-|`android.yml`|`./gradlew --no-daemon assembleDebug` + APK artifact|`Android / apk`|
+|`android.yml`|`./gradlew --no-daemon testDebugUnitTest` + `assembleDebug` + APK artifact|`Android / apk`|
 |`codeql.yml`|CodeQL analysis of the Android build (push + weekly schedule)|CodeQL `analyze`|
-|`flatpak.yml`|KRunner plugin + `libgrouse_core.so` host build (Fedora container), then Flatpak bundle (org.kde.Platform 6.10)|`Flatpak / host-components`, `Flatpak / flatpak`|
+|`flatpak.yml`|KRunner plugin + `libgrouse_core.so` host build and desktop `ctest` (Fedora containers), then Flatpak bundle with `-DBUILD_TESTING=OFF` (org.kde.Platform 6.10)|`Flatpak / host-components`, `Flatpak / desktop-tests`, `Flatpak / flatpak`|
 |`secrets.yml`|gitleaks|`Secrets scan / gitleaks`|
 |`release.yml`|On a `v*` tag: signed release APK + desktop Flatpak, published as GitHub Release assets|— (not a PR check)|
 
-**There are NO test jobs in CI for Android unit tests or desktop `ctest`** — run
-those locally.
+CI now gates Android JVM unit tests (`android.yml`) and desktop `ctest`
+(`flatpak.yml`, Fedora Qt container); run them locally too when changing the
+corresponding client code. QML lint and the `xvfb-run` page-load check remain
+manual.
 
 **Releases** are cut by pushing a version tag (`git tag v0.69 && git push origin
 v0.69`). `release.yml` then builds the signed `assembleRelease` APK and the
@@ -445,9 +447,10 @@ change before tagging.
 
 ### Rust core
 
-- **Versioning/toolchain**: edition 2021, no `rust-toolchain.toml`, no pinned MSRV.
-  CI pins stable 1.97.1 (`core.yml`, `components: clippy`) and the devcontainer
-  pins the same `RUST_VERSION`; `uniffi = "0.32"` and `tokio = "1"` across
+- **Versioning/toolchain**: edition 2021; `core/rust-toolchain.toml` pins the
+  channel to 1.97.1 (no separate MSRV declaration). CI pins the same stable
+  1.97.1 (`core.yml`, `components: clippy`) and the devcontainer sets the same
+  `RUST_VERSION`; `uniffi = "0.32"` and `tokio = "1"` across
   members.
 - **Threading**: one tokio runtime on a worker thread; all `#[uniffi::export]`
   intents are synchronous (enqueue + return). `connect()` is the sole exception
@@ -593,8 +596,9 @@ change before tagging.
 
 ## Runtime/Tooling Preferences
 
-- **Rust core** (`core/`): `cargo`; std test harness; tokio runtime. No
-  `rust-toolchain.toml`, but both CI and the devcontainer pin 1.97.1
+- **Rust core** (`core/`): `cargo`; std test harness; tokio runtime.
+  `core/rust-toolchain.toml` pins 1.97.1 for local builds; both CI and the
+  devcontainer pin the same version explicitly
   (`dtolnay/rust-toolchain@stable` with the explicit toolchain + clippy).
   Workspace release profile is size-optimized (`opt-level "z"`, `lto`, `strip`)
   because the cdylib ships inside the APK and the desktop bundle.
@@ -648,11 +652,16 @@ change before tagging.
 - Suites: `tst_markdown`, `tst_messagelistmodel` (deferred/coalesced model
   updates), `tst_sessionlistmodel` (grouping / collapse / cwdFor / no-op reset
   guard), `tst_roamlistmodel`, `tst_appbridge` (the loopback MCP-Apps host),
-  `tst_manager` (intent mapping: `Mgr` Q_INVOKABLE → `CoreBridge` → the ABI),
-  `tst_qml` (QtQuickTest: ChartBubble, ComboBox `valueRole`, RecipesDialog).
+  `tst_manager` (model invariants, the item-stream → row mapping, state/parser
+  helpers and a no-crash Q_INVOKABLE smoke — **not** an intent→ABI proof: it
+  passes with no core loaded and its `setInstanceForTesting` seam is unused),
+  `tst_qml` (QtQuickTest: ChartBubble, ComboBox `valueRole`, RecipesDialog,
+  MyDayPage).
 - Run locally: `cd clients/desktop/build && ctest --output-on-failure`, or one
-  suite with `ctest -R tst_manager --verbose`. **CI runs none of these** — the
-  desktop's protocol behavior is covered by `core/grouse-core/tests/spine.rs`.
+  suite with `ctest -R tst_manager --verbose`. CI runs these in a Fedora Qt job
+  in `.github/workflows/flatpak.yml`; the Flatpak bundle job itself still builds
+  with `-DBUILD_TESTING=OFF`. The desktop's wire-level protocol behavior is
+  covered by `core/grouse-core/tests/spine.rs`.
 - Manual QA on top: `qmllint` (static QML), `xvfb-run` page-load (silence =
   success — offscreen won't catch page-internal type errors), and a live
   `goose serve` smoke test of the changed path.

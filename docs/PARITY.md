@@ -25,31 +25,39 @@ This file is the ledger that makes that impossible to do quietly. Two rules:
 - **The inventory comes from the core, not from this file.**
   `core/grouse-core/src/surface.rs` enumerates every record field, transcript
   op, item kind and listener callback the clients render, and that module is
-  itself compile-guarded: it destructures `Item`/`ToolCall`/`SubagentStep`/
-  `UploadedFile` with **no `..` rest** and matches the enums with **no `_` arm**,
-  so adding a field or a variant breaks the core build until the new id is added
-  to the inventory — which is the same list this ledger is checked against. A
-  surface therefore cannot appear in the core without appearing here.
+  itself compile-guarded: it destructures every guarded record (`Item`,
+  `ToolCall`, `SubagentStep`, `UploadedFile`, `SessionSummary`, `ConfigOption`,
+  `ConfigChoice`, `PermissionRequest`, `PermissionOption`, `ProjectSummary`,
+  `ActiveWork`) with **no `..` rest** and matches the enums (`TranscriptOp`,
+  `ItemKind`, `PromptBlock`, `FileEvent`) with **no `_` arm**, so adding a field
+  or a variant breaks the core build until the new id is added to the inventory
+  — which is the same list this ledger is checked against. A surface therefore
+  cannot appear in the core without appearing here.
 - **Every id needs a cell per client**, and the client columns must match the
   clients that actually have source in `clients/`. The day `clients/cli` gains a
   `Cargo.toml` and a `src/`, CI demands a column for it — a new client cannot
   slip in unratcheted.
 - **`yes:` is evidence, not a claim.** The cell cites `file#token` (relative to
-  that client's root, declared below) and the checker greps for the token. A
-  rename in the client breaks its own row instead of silently retiring it.
+  that client's root, declared below) and the checker greps for the token OUTSIDE
+  comments. Paths must be relative and may not use `..`; a commented-out call
+  or a file outside the client root is not evidence. A rename in the client
+  breaks its own row instead of silently retiring it.
 - **`excluded:` moves a pinned counter.** `excluded = N` below must equal the
   number of excluded cells. Opting a client out of a surface is allowed — it is
   one line, in a diff, with a reason a reviewer reads. It is *not* allowed to
   happen by accident, and the number is the ratchet's teeth: it can be lowered
   any time for free, and raising it is a decision someone signs.
 
-`LISTENER_EVENTS` in `surface.rs` is the only hand-kept list (the `CoreListener`
-trait has default bodies, so an added `fn on_*` compiles without noticing); the
-checker parses the trait out of `lib.rs` and fails if the two disagree.
+`LISTENER_EVENTS` and `LISTENER_SIGNATURES` in `surface.rs` are the hand-kept
+lists (the `CoreListener` trait has default bodies, so an added `fn on_*` — or a
+changed payload type behind the same name — compiles without noticing); the
+checker parses the trait out of `lib.rs` and compares normalized signatures, so
+a C ABI trampoline built for an old payload cannot pass parity by name alone.
 
 The checker tests itself: `python3 scripts/check-parity.py --self-test` feeds it
-a missing row, a rotted row, a dead anchor, a placeholder exclusion and both
-directions of pin drift, and fails if any of them stops being caught.
+a missing row, a rotted row, a dead anchor, a traversal/absolute anchor, a
+comment-only token, a changed callback signature, a placeholder exclusion and
+both directions of pin drift, and fails if any of them stops being caught.
 
 ## Adding a feature
 
@@ -68,7 +76,7 @@ Anchors are `file#token`; `+` joins more than one (all must resolve). Roots:
 android root = clients/android/app/src/main/java/id/gauvin/grouse
 desktop root = clients/desktop
 
-excluded = 15
+excluded = 19
 
 | surface | android | desktop |
 |---|---|---|
@@ -112,6 +120,40 @@ excluded = 15
 | `file.bytes` | yes: ConnectionManager.kt#it.bytes | yes: src/manager.cpp#o.value(QStringLiteral("bytes")) |
 | `file.path` | excluded: a server-side path — clients show the file, never address it | excluded: same; the desktop reads name/mime/bytes off the record only |
 | `file.sha256` | excluded: content identity belongs to the core and the server, not the UI | excluded: same reasoning — the desktop never hashes a file it did not upload |
+| `session.id` | yes: Wire.kt#sessionId = id | yes: src/manager.cpp#o.value("id") |
+| `session.title` | yes: Wire.kt#title = title | yes: src/manager.cpp#o.value("title") |
+| `session.updated_at` | yes: Wire.kt#updatedAt = updatedAt | yes: src/manager.cpp#o.value("updated_at") |
+| `session.last_message_snippet` | yes: Wire.kt#lastMessageSnippet.orEmpty() | yes: src/manager.cpp#o.value("last_message_snippet") |
+| `session.project_id` | yes: Wire.kt#projectId = projectId | yes: src/manager.cpp#o.value("project_id") |
+| `session.message_count` | yes: Wire.kt#messageCount = messageCount.toInt() | yes: src/manager.cpp#o.value("message_count") |
+| `session.model` | yes: Wire.kt#model = model | excluded: the sidebar shows title, snippet and mode but never a per-session model; the model picker reads ConfigOption instead |
+| `session.has_recipe` | yes: Wire.kt#hasRecipe = hasRecipe | yes: src/manager.cpp#o.value("has_recipe") |
+| `session.has_new` | yes: Wire.kt#hasNew = hasNew | excluded: no green-dot state in the desktop sidebar model; a staged chat is not marked there |
+| `session.mode` | yes: Wire.kt#mode = mode.orEmpty() | yes: src/manager.cpp#o.value("mode") |
+| `session.archived` | yes: Wire.kt#archived = archived | yes: src/manager.cpp#o.value("archived") |
+| `config.id` | yes: Wire.kt#id = id | yes: src/manager.cpp#o.value("id").toString() |
+| `config.value` | yes: Wire.kt#currentValue = value | yes: src/manager.cpp#o.value("value").toString() |
+| `config.name` | yes: Wire.kt#name = name | yes: src/manager.cpp#{"name", o.value("name").toString()} |
+| `config.choices` | yes: Wire.kt#choices = choices.map | yes: src/manager.cpp#o.value("choices").toArray() |
+| `choice.value` | yes: Wire.kt#Choice(it.value, it.name) | yes: src/manager.cpp#co.value("value") |
+| `choice.name` | yes: Wire.kt#Choice(it.value, it.name) | yes: src/manager.cpp#co.value("name") |
+| `permission.tool_call_id` | yes: ConnectionManager.kt#request.toolCallId | yes: src/manager.cpp#req.value("tool_call_id") |
+| `permission.title` | yes: ConnectionManager.kt#request.title | yes: src/manager.cpp#req.value("title") |
+| `permission.detail` | yes: ConnectionManager.kt#request.detail | yes: src/manager.cpp#req.value("detail") |
+| `permission.options` | yes: ConnectionManager.kt#request.options.map | yes: src/manager.cpp#req.value("options").toArray() |
+| `permission_option.option_id` | yes: ConnectionManager.kt#it.optionId | yes: src/manager.cpp#oo.value("option_id") |
+| `permission_option.name` | yes: ConnectionManager.kt#it.name | yes: src/manager.cpp#oo.value("name") |
+| `permission_option.kind` | yes: ConnectionManager.kt#it.kind | yes: src/manager.cpp#oo.value("kind") |
+| `project.path` | yes: Wire.kt#path = path | yes: src/manager.cpp#o.value("path").toString() |
+| `project.name` | yes: Wire.kt#name = name | yes: src/manager.cpp#o.value("name").toString() |
+| `project.description` | yes: Wire.kt#description = description.orEmpty() | yes: src/manager.cpp#o.value("description").toString() |
+| `prompt_block.Text` | yes: ConnectionManager.kt#PromptBlock.Text(text) | yes: src/manager.cpp#QJsonObject{{"Text" |
+| `prompt_block.Image` | yes: ConnectionManager.kt#PromptBlock.Image(img.mimeType | yes: src/manager.cpp#QJsonObject{{"Image" |
+| `prompt_block.Resource` | excluded: the phone never builds a blob Resource block; goose drops it, so files go through sendPromptWithFiles and the core appends the link itself | yes: src/manager.cpp#QJsonObject{{"Resource" |
+| `prompt_block.Link` | yes: ConnectionManager.kt#core.sendPromptWithFiles | yes: src/manager.cpp#grouse_send_prompt_with_paths |
+| `file_event.Progress` | yes: ConnectionManager.kt#FileEvent.Progress | yes: ui/ChatPage.qml#ev.Progress !== undefined |
+| `file_event.Saved` | yes: ConnectionManager.kt#FileEvent.Saved | yes: ui/ChatPage.qml#ev.Saved !== undefined |
+| `file_event.Failed` | yes: ConnectionManager.kt#FileEvent.Failed | yes: ui/ChatPage.qml#ev.Failed !== undefined |
 | `op.Reset` | yes: ConnectionManager.kt#TranscriptOp.Reset | yes: src/manager.cpp#QStringLiteral("Reset") |
 | `op.Upsert` | yes: ConnectionManager.kt#TranscriptOp.Upsert | yes: src/manager.cpp#QStringLiteral("Upsert") |
 | `op.AppendText` | yes: ConnectionManager.kt#TranscriptOp.AppendText | yes: src/manager.cpp#QStringLiteral("AppendText") |
@@ -159,7 +201,7 @@ excluded = 15
 | `ui.my-day-lazy-cache` | yes: ConnectionManager.kt#fun paintTasks | yes: src/manager.cpp#void Manager::paintCachedTasks |
 | `ui.my-day-thread-chat` | yes: ConnectionManager.kt#fun openThreadChat | yes: src/manager.cpp#grouse_open_thread |
 | `ui.chat-scroll-pinned` | yes: ChatScreen.kt#var follow by remember | yes: ui/ChatPage.qml#function pinToEnd |
-| `ui.chat-stream-hold` | yes: ChatScreen.kt#var heldStream | yes: ui/ChatPage.qml#function pinToEnd |
+| `ui.chat-stream-hold` | yes: ChatScreen.kt#var heldStream | excluded: the desktop has no frozen streamed row; pinToEnd only scrolls at bounded intervals while the bubble is rewritten in place, so it is not a hold |
 | `ui.chat-stream-markdown` | yes: Bubbles.kt#fun settledParagraphEnd | excluded: the desktop streams the reply as plain text and re-parses rich text once at finalize (ui/ChatPage.qml) — its own answer to the same per-token cost |
 | `ui.tools-sheet-catalog` | yes: ConnectionManager.kt#fun onExtensionCatalog | yes: src/manager.cpp#void Manager::coreOnExtensionCatalog |
 | `ui.dev-mode` | yes: Drawer.kt#ic_dev_mode+ConnectionManager.kt#fun newRoamSession | yes: ui/main.qml#newChatInMode+ui/main.qml#dev-mode-symbolic |

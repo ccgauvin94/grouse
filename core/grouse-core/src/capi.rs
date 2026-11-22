@@ -53,7 +53,15 @@ use crate::{
 /// two symbols — but left this constant at 15, so a build from the repo refused
 /// its own core ("core library ABI 15, expected 16") and the app could not start.
 /// The constant is the one that was wrong.
-pub const GROUSE_ABI_VERSION: u32 = 16;
+///
+/// 17: four new symbols, no listener-table change — `grouse_connect_attach` and
+/// `grouse_connected` (bindless reconnect + a wire-up check that is true without
+/// a bound session), `grouse_unstable_tools_call_named` (goose requires
+/// `extensionName`; the old three-argument export now fails loudly), and
+/// `grouse_push_decide_run` (run-id-aware notification policy). A desktop built
+/// for 17 calls these unconditionally, so an old `.so` must be refused at load:
+/// the ABI gate, not a NULL check at first use, is what keeps it from crashing.
+pub const GROUSE_ABI_VERSION: u32 = 17;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
@@ -61,12 +69,20 @@ pub extern "C" fn grouse_abi_version() -> u32 {
     GROUSE_ABI_VERSION
 }
 
-/// malloc-allocated UTF-8 copy of `s`; NULL when the input contains an interior
-/// NUL byte.
+/// malloc-allocated UTF-8 copy of `s`, freed with `grouse_string_free`.
+///
+/// Server text is untrusted and can contain U+0000. `CString::new` rejects that
+/// and used to return NULL, which made every `cb_str*` silently SKIP the event
+/// (a turn, a permission request, a tool result — all lost). Replace interior
+/// NULs with U+FFFD instead: the callback always fires and the C string is
+/// always well-formed. The common no-NUL path costs no extra allocation.
 fn c_str(s: &str) -> *mut c_char {
-    CString::new(s)
-        .map(CString::into_raw)
-        .unwrap_or(std::ptr::null_mut())
+    let encoded = if s.as_bytes().contains(&0) {
+        CString::new(s.replace('\0', "\u{FFFD}").into_bytes())
+    } else {
+        CString::new(s.as_bytes())
+    };
+    encoded.map(CString::into_raw).unwrap_or(std::ptr::null_mut())
 }
 
 unsafe fn c_param<'a>(p: *const c_char) -> Option<&'a str> {
@@ -106,12 +122,28 @@ pub extern "C" fn grouse_string_free(s: *mut c_char) {
 
 /// Decode a push payload into a `PushEnvelope` JSON record (see `notify.rs`). The
 /// same function the Kotlin binding exports, so both clients share one parser.
+/// Untrusted input crosses this boundary, so a panic is a JSON-`""` no-show,
+/// never a panic across `extern "C"`.
 #[no_mangle]
 pub extern "C" fn grouse_push_parse(raw: *const c_char) -> *mut c_char {
-    match unsafe { c_param(raw) } {
+    catch_unwind(AssertUnwindSafe(|| match unsafe { c_param(raw) } {
         Some(raw) => c_json(&crate::notify::parse_push(raw)),
         None => c_str(""),
-    }
+    }))
+    .unwrap_or_else(|_| c_str(""))
+}
+
+/// A missing/malformed context is a no-show, never a crash: `app_visible: true`
+/// is the safe side of the notification policy (CONTRACT §5.5).
+fn push_context(context_json: *const c_char) -> crate::notify::NotifyContext {
+    c_json_in(context_json).unwrap_or(crate::notify::NotifyContext {
+        app_visible: true,
+        armed_session: None,
+        session_title: None,
+        announced_session: None,
+        announced_secs_ago: None,
+        announce_any_turn: false,
+    })
 }
 
 /// Decide whether a decoded payload should become a notification, given what the
@@ -120,20 +152,41 @@ pub extern "C" fn grouse_push_parse(raw: *const c_char) -> *mut c_char {
 #[no_mangle]
 pub extern "C" fn grouse_push_decide(envelope_json: *const c_char,
                                      context_json: *const c_char) -> *mut c_char {
-    let envelope: crate::notify::PushEnvelope = match c_json_in(envelope_json) {
-        Some(e) => e,
-        None => return c_str(""),
-    };
-    let context: crate::notify::NotifyContext =
-        c_json_in(context_json).unwrap_or(crate::notify::NotifyContext {
-            app_visible: true, // no context -> nothing to show (the safe side)
-            armed_session: None,
-            session_title: None,
-            announced_session: None,
-            announced_secs_ago: None,
-            announce_any_turn: false,
-        });
-    c_json(&crate::notify::decide_notify(envelope, context))
+    catch_unwind(AssertUnwindSafe(|| {
+        let envelope: crate::notify::PushEnvelope = match c_json_in(envelope_json) {
+            Some(e) => e,
+            None => return c_str(""),
+        };
+        c_json(&crate::notify::decide_notify(envelope, push_context(context_json)))
+    }))
+    .unwrap_or_else(|_| c_str(""))
+}
+
+/// As `grouse_push_decide`, with the run id the client announced the last time
+/// it showed a notification (`Some(JSON string)`; a NULL pointer, JSON `null` or
+/// an empty string all mean "unknown"). Run ids stop a genuine second turn in
+/// the same chat from being swallowed as a duplicate delivery.
+#[no_mangle]
+pub extern "C" fn grouse_push_decide_run(
+    envelope_json: *const c_char,
+    context_json: *const c_char,
+    announced_run_json_or_null: *const c_char,
+) -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| {
+        let envelope: crate::notify::PushEnvelope = match c_json_in(envelope_json) {
+            Some(e) => e,
+            None => return c_str(""),
+        };
+        let announced_run = c_json_in::<Option<String>>(announced_run_json_or_null)
+            .unwrap_or_else(|| unsafe { c_param(announced_run_json_or_null) }.map(str::to_owned))
+            .filter(|s| !s.is_empty());
+        c_json(&crate::notify::decide_notify_run(
+            envelope,
+            push_context(context_json),
+            announced_run,
+        ))
+    }))
+    .unwrap_or_else(|_| c_str(""))
 }
 
 // ---------------------------------------------------------------------------
@@ -773,6 +826,23 @@ pub extern "C" fn grouse_connect(h: *mut c_void, config_json: *const c_char, out
     });
 }
 
+/// Bring the MAIN wire up and bind NOTHING (see `Core::connect_attach`). For a
+/// reconnect whose screen belongs to a roam peer — or a landing page with no
+/// chat — resuming the last main chat would repaint it over the current one.
+#[no_mangle]
+pub extern "C" fn grouse_connect_attach(h: *mut c_void, config_json: *const c_char, out_err: *mut *mut c_char) {
+    if !out_err.is_null() {
+        unsafe { *out_err = std::ptr::null_mut() };
+    }
+    let Some(config) = c_json_in::<ServerConfig>(config_json) else {
+        set_err(out_err, "invalid ServerConfig JSON");
+        return;
+    };
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.connect_attach(config))).unwrap_or_else(|_| {
+        set_err(out_err, "panic in grouse_connect_attach");
+    });
+}
+
 #[no_mangle]
 pub extern "C" fn grouse_disconnect(h: *mut c_void) {
     catch_unwind(AssertUnwindSafe(|| handle(h).core.disconnect())).ok();
@@ -1160,6 +1230,13 @@ pub extern "C" fn grouse_status(h: *mut c_void) -> *mut c_char {
 #[no_mangle]
 pub extern "C" fn grouse_ready(h: *mut c_void) -> i32 {
     catch_unwind(AssertUnwindSafe(|| handle(h).core.ready() as i32)).unwrap_or(0)
+}
+
+/// Is the MAIN wire up? Unlike `grouse_ready` this is true after an attach,
+/// where no session is bound — it answers "may I reuse this connection?".
+#[no_mangle]
+pub extern "C" fn grouse_connected(h: *mut c_void) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| handle(h).core.connected() as i32)).unwrap_or(0)
 }
 
 /// Rewrite each tool run's label with a short model-written line (issue #13).
@@ -1688,6 +1765,33 @@ pub extern "C" fn grouse_unstable_tools_call(h: *mut c_void, sid: *const c_char,
         return;
     };
     catch_unwind(AssertUnwindSafe(|| handle(h).unstable.tools_call(sid, name, args_json))).ok();
+}
+
+/// The usable `tools/call`: `extension_name` is goose's REQUIRED
+/// `extensionName`, which the deprecated three-argument call had no way to
+/// send. The reply arrives on `on_tool_result` as JSON `(text, isError)`.
+#[no_mangle]
+pub extern "C" fn grouse_unstable_tools_call_named(
+    h: *mut c_void,
+    sid: *const c_char,
+    extension_name: *const c_char,
+    name: *const c_char,
+    args_json: *const c_char,
+) {
+    let (Some(sid), Some(extension_name), Some(name), Some(args)) = (
+        (unsafe { c_param(sid) }).map(str::to_owned),
+        (unsafe { c_param(extension_name) }).map(str::to_owned),
+        (unsafe { c_param(name) }).map(str::to_owned),
+        (unsafe { c_param(args_json) }).map(str::to_owned),
+    ) else {
+        return;
+    };
+    catch_unwind(AssertUnwindSafe(|| {
+        handle(h)
+            .unstable
+            .tools_call_named(sid, extension_name, name, args)
+    }))
+    .ok();
 }
 
 #[no_mangle]

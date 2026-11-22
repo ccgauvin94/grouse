@@ -257,7 +257,10 @@ fun SkillScreen(cm: ConnectionManager, nav: NavController, name: String) {
             Text(sk.description, style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline,
                 modifier = Modifier.padding(vertical = 8.dp))
-            var body by remember(sk.path, sk.content) { mutableStateOf(sk.content) }
+            // The editor is unsaved until Save: keep the draft across rotation, but drop it
+            // when the skill's saved content changes (the commit), just as the old remember
+            // key did.
+            var body by rememberSaveable(sk.path, sk.content) { mutableStateOf(sk.content) }
             var showPreview by remember { mutableStateOf(false) }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = { showPreview = !showPreview }) {

@@ -17,9 +17,12 @@ class QTcpSocket;
 /// (theme/display context) and delivers `ui/message` back into the chat the
 /// app came from — exactly what Android's WebView host page does locally.
 ///
-/// Per-app tokens (opaque path segments) scope every route; nothing is served
-/// without one. The page and its shim are server-supplied content — treated as
-/// untrusted, isolated by the browser's own origin sandbox.
+/// Per-app tokens (128 bits of OS entropy, opaque path segments) scope every
+/// route; nothing is served without one. Host must be loopback, any browser-
+/// supplied Origin/Sec-Fetch-Site must agree, and POSTs must be JSON — a token
+/// alone is not an access-control decision. The page and its shim are
+/// server-supplied content — treated as untrusted, isolated by the browser's
+/// own origin sandbox.
 class AppBridgeServer : public QObject
 {
     Q_OBJECT

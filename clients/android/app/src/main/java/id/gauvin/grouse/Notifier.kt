@@ -67,9 +67,13 @@ class Notifier(context: Context) {
     private fun postReplyable(title: String, text: String, requestCode: Int, id: Int,
                               sessionId: String? = null, myDay: Boolean = false) {
         val remote = RemoteInput.Builder(KEY_REPLY).setLabel("Reply to goose").build()
-        val replyPi = PendingIntent.getBroadcast(app, requestCode,
-            Intent(app, ReplyReceiver::class.java).setAction(ACTION_REPLY).putExtra(EXTRA_NOTIF_ID, id),
-            flags(mutable = true))
+        // The reply must go to the chat the notification is ABOUT, not whichever chat
+        // happens to be on screen when the user taps Reply. Same extra key as the content
+        // intent so there is one vocabulary for "which session did this alert come from".
+        val replyIntent = Intent(app, ReplyReceiver::class.java).setAction(ACTION_REPLY)
+            .putExtra(EXTRA_NOTIF_ID, id)
+            .putExtra(EXTRA_SESSION_ID, sessionId)
+        val replyPi = PendingIntent.getBroadcast(app, requestCode, replyIntent, flags(mutable = true))
         val replyAction = NotificationCompat.Action.Builder(R.drawable.ic_reply, "Reply", replyPi)
             .addRemoteInput(remote)
             .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY)
@@ -136,5 +140,7 @@ class Notifier(context: Context) {
         const val ACTION_REPLY = "id.gauvin.grouse.action.REPLY"
         const val ACTION_MARK_READ = "id.gauvin.grouse.action.MARK_READ"
         const val EXTRA_NOTIF_ID = "id.gauvin.grouse.extra.NOTIF_ID"
+        /** Same key MainActivity uses for the tap intent's session deep link. */
+        const val EXTRA_SESSION_ID = MainActivity.EXTRA_SESSION_ID
     }
 }

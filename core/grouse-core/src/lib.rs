@@ -928,8 +928,17 @@ struct CoreState {
     touch_gen: u64,
     /// Follow-up probes left in the current resync cycle (desktop m_resyncTicks).
     resync_ticks: i32,
-    /// Last probed (updatedAt, messageCount) — the "did it move?" comparison.
-    sync_stamp: Option<(String, i64)>,
+    /// Last probed (updatedAt, messageCount) per DISPLAY id — the "did it move?"
+    /// comparison. One global tuple let a probe for chat B overwrite chat A's
+    /// baseline, so A's next touch either replayed a harmless update or (worse)
+    /// compared against B's stamp and missed a real one.
+    sync_stamps: HashMap<String, (String, i64)>,
+    /// A `session_info_update` for THIS session arrived while our own turn was
+    /// in flight. Its debounce cannot resync mid-turn (the replay would drop the
+    /// stream reply), but it must not be forgotten: `finish_turn` used to stamp
+    /// the cache from the server and re-baseline the move test, so those remote
+    /// rows were never fetched. Keyed by display id, like `in_flight`.
+    touched_during_turn: HashSet<String>,
     /// Ask the model to rewrite each tool run's label at the end of a turn
     /// (issue #13). On by default; costs one short inference per turn, spent on
     /// a hidden session so it never appears in a chat.
@@ -1243,14 +1252,9 @@ impl Core {
         // owning a `roam:<label>:<id>` session so session-bound RPCs reach it.
         let weak = Arc::downgrade(&core);
         crate::spine::register_peer_resolver(Arc::new(move |session_id: &str| {
-            let rest = session_id.strip_prefix("roam:")?;
-            let label = rest.split(':').next()?;
             let core = weak.upgrade()?;
             let peers = core.inner.peers.lock();
-            peers
-                .iter()
-                .find(|peer| peer.label() == label)
-                .cloned()
+            crate::roam::peer_for_session(&peers, session_id)
                 .map(|peer: Arc<crate::roam::RoamPeer>| peer as Arc<dyn crate::spine::RpcConn>)
         }));
         // The unstable shim resolves the active chat (main or peer) through
@@ -1294,7 +1298,7 @@ impl Core {
     /// skips the wire replay — identical fast path, minus the orphan.
     pub fn connect_resume(&self, config: ServerConfig, session_id: String) {
         *self.inner.active_peer_label.write() = None;
-        self.reset_chat_state();
+        self.reset_chat_state(Some(&session_id));
         let cwd = self.resolve_cwd(&session_id);
         let paint = self.plan_cache_paint(&session_id, false);
         let (suppress, merge) = (paint.suppress, paint.merge);
@@ -1358,7 +1362,8 @@ impl Core {
                 state.in_flight.remove(&key);
                 state.incomplete.insert(key);
             }
-            state.sync_stamp = None;
+            state.sync_stamps.clear();
+            state.touched_during_turn.clear();
             state.resync_ticks = 0;
         }
         crate::spine::set_current_conn(None);
@@ -1469,7 +1474,7 @@ impl Core {
         mode: Option<String>,
     ) {
         *self.inner.active_peer_label.write() = None;
-        self.reset_chat_state();
+        self.reset_chat_state(None);
         if let Some(store) = self.store() {
             store.clear();
         }
@@ -1623,7 +1628,7 @@ impl Core {
 
     fn open_session_inner(&self, session_id: String, force_replay: bool) {
         *self.inner.active_peer_label.write() = None;
-        self.reset_chat_state();
+        self.reset_chat_state(Some(&session_id));
         // Move the chat-event gate BEFORE anything that can block. Everything
         // below this line runs before the connection rebinds the gate itself, and
         // `resolve_cwd` is the expensive part of "everything below" — so without
@@ -2034,15 +2039,26 @@ impl Core {
     /// Connect a roam peer in browse mode (CONTRACT §6). The peer's identity
     /// is generated + persisted on first use.
     pub fn roam_connect(&self, card: String, label: String) {
-        let mut peers = self.inner.peers.lock();
-        peers.retain(|peer| {
-            if peer.label() == label {
-                peer.close();
-                false
-            } else {
-                true
-            }
-        });
+        // `close()` synchronously invokes listener callbacks and `connect`
+        // dials for seconds; neither may run under the registry lock (a
+        // re-entrant listener would deadlock, and every other chat's routing
+        // would block for the whole dial).
+        let old: Vec<Arc<RoamPeer>> = {
+            let mut peers = self.inner.peers.lock();
+            let mut old = Vec::new();
+            peers.retain(|peer| {
+                if peer.label() == label {
+                    old.push(peer.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            old
+        };
+        for peer in old {
+            peer.close();
+        }
         let secret = self.roam_identity();
         let host: Arc<dyn crate::session::DispatchHost> = Arc::new(
             crate::session::PrefixHost::new(label.clone(), self.host(), self.inner.hub.clone()),
@@ -2056,26 +2072,58 @@ impl Core {
             self.inner.hub.clone(),
             self.inner.cache.clone(),
         );
-        peers.push(peer);
+        self.inner.peers.lock().push(peer);
     }
 
     /// Disconnect a roam peer (parallel peers stay live; only the named one
-    /// is closed).
+    /// is closed). Turns owned by that peer are lost with its link: without
+    /// this they kept `in_flight`/`active_runs`/`incomplete` keys alive, so
+    /// paging stayed blocked, prompts queued forever and reopens took the
+    /// bind-only path for a chat that no longer existed on any wire.
     pub fn roam_disconnect(&self, label: String) {
-        let mut peers = self.inner.peers.lock();
-        peers.retain(|peer| {
-            if peer.label() == label {
-                peer.close();
-                false
-            } else {
+        let old: Vec<Arc<RoamPeer>> = {
+            let mut peers = self.inner.peers.lock();
+            let mut old = Vec::new();
+            peers.retain(|peer| {
+                if peer.label() == label {
+                    old.push(peer.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            old
+        };
+        for peer in old {
+            peer.close();
+        }
+        let was_active = {
+            let mut active = self.inner.active_peer_label.write();
+            if *active == Some(label.clone()) {
+                *active = None;
                 true
+            } else {
+                false
             }
-        });
-        let mut active = self.inner.active_peer_label.write();
-        if *active == Some(label) {
-            *active = None;
+        };
+        if was_active {
             self.inner.hub.clear_display();
         }
+        let prefix = format!("roam:{label}:");
+        let keys = {
+            let state = self.inner.state.lock();
+            let mut keys: Vec<String> = state
+                .in_flight
+                .iter()
+                .chain(state.active_runs.keys())
+                .filter(|key| key.starts_with(&prefix))
+                .cloned()
+                .collect();
+            keys.sort();
+            keys.dedup();
+            keys
+        };
+        self.turns_lost(keys);
     }
 
     /// Open a session on a roam peer; the peer becomes the chat owner until a
@@ -2212,6 +2260,13 @@ impl Core {
     /// Answer a permission request (CONTRACT §5); routes to the active peer
     /// when one owns the chat.
     pub fn respond_permission(&self, tool_call_id: String, outcome: PermissionOutcome) {
+        // The prompt's OWNING connection is registered by tool_call_id: a
+        // prompt raised on the main wire must stay answerable while a roam chat
+        // is on screen (and vice versa). Only fall back to ownership-by-screen
+        // for responders that predate that registry.
+        if crate::spine::respond_permission(&tool_call_id, outcome.clone()).is_ok() {
+            return;
+        }
         if let Some(peer) = self.active_peer() {
             let _ = peer.respond_permission(&tool_call_id, outcome);
             return;
@@ -3678,10 +3733,18 @@ impl Core {
     /// openSession/newChat: cancel any in-flight resync cycle). Turns and the
     /// pending queues are PER SESSION and deliberately survive: opening chat B
     /// must not clear chat A's in-flight turn or its queued prompts.
-    fn reset_chat_state(&self) {
+    ///
+    /// `key` is the display id being opened, when there is one. Only ITS resync
+    /// baseline is dropped: a global clear let opening B forget A's move test.
+    fn reset_chat_state(&self, key: Option<&str>) {
         let mut state = self.inner.state.lock();
         state.resync_ticks = 0;
-        state.sync_stamp = None;
+        // A new chat has no id yet: leave other sessions' pending remote
+        // touches alone.
+        if let Some(key) = key {
+            state.sync_stamps.remove(key);
+            state.touched_during_turn.remove(key);
+        }
         state.touch_gen += 1; // stale debounces no-op
     }
 
@@ -3722,9 +3785,12 @@ impl Core {
         );
         conn.set_suppress_replay(suppress_replay);
         conn.set_merge_replay(merge_replay);
-        conn.set_on_status(self.status_hook());
-        conn.set_on_open_failed(self.open_failed_hook());
-        conn.set_on_config(self.config_hook());
+        // Every hook is generation-bound. A superseded wire can still deliver a
+        // handshake failure, config reply or terminal status after the new one
+        // is live; without the guard it rewinds the new wire's state machine.
+        conn.set_on_status(self.status_hook(gen));
+        conn.set_on_open_failed(self.open_failed_hook(gen));
+        conn.set_on_config(self.config_hook(gen));
         conn.set_on_ended(self.ended_hook(gen));
         crate::spine::set_current_conn(Some(conn.clone()));
 
@@ -3766,9 +3832,20 @@ impl Core {
         });
     }
 
-    /// Mirror a conn status transition: emit it (Disconnected when an explicit
-    /// disconnect wins), reset the reconnect budget on Ready.
+    /// Mirror a conn status transition emitted by a specific wire. The direct
+    /// callers (live new/load reuse) have no wire generation — they emit on
+    /// behalf of the current one and stay unguarded.
     fn on_conn_status(&self, status: ConnectionStatus) {
+        self.on_conn_status_from(None, status);
+    }
+
+    fn on_conn_status_from(&self, gen: Option<u64>, status: ConnectionStatus) {
+        if let Some(gen) = gen {
+            let current = self.inner.state.lock().conn_gen == gen;
+            if !current {
+                return; // a superseded wire cannot rewind the current state
+            }
+        }
         let mut state = self.inner.state.lock();
         if state.user_disconnect {
             drop(state);
@@ -3776,24 +3853,25 @@ impl Core {
             return;
         }
         state.status = status.clone();
-        if matches!(status, ConnectionStatus::Ready) {
+        let lost = if matches!(status, ConnectionStatus::Ready) {
             state.reconnect_attempts = 0;
             state.reconnect_gen += 1;
+            Vec::new()
         } else {
             // A main-wire drop kills ITS turns; a roam peer's turn is a
-            // different connection and must survive this.
-            let lost: Vec<String> = state
+            // different connection and must survive this. Do NOT remove the
+            // keys here: `turn_lost` is the one helper that ends a lost turn
+            // everywhere (roam uses it too) — it releases `in_flight`, marks
+            // the store incomplete, seals/saves it and emits `run_ended`.
+            state
                 .in_flight
                 .iter()
                 .filter(|key| !key.starts_with(crate::session::ROAM_PREFIX))
                 .cloned()
-                .collect();
-            for key in lost {
-                state.in_flight.remove(&key);
-                state.incomplete.insert(key);
-            }
-        }
+                .collect()
+        };
         drop(state);
+        self.turns_lost(lost);
         if matches!(status, ConnectionStatus::Ready) {
             // A session/load replay just finished — fresh-cache opens, resume
             // after reconnect, and in-place resync all land here with the full
@@ -3835,10 +3913,25 @@ impl Core {
         self.inner.listener.on_status(status);
     }
 
+    /// End every turn in `keys` whose wire is gone. The roam path does exactly
+    /// this in `RoamPeer::connection_ended`; the main wire and `roam_disconnect`
+    /// used to drop their keys from `in_flight` by hand, leaving the client
+    /// "working" forever with a composer full of queued prompts. Clearing
+    /// `active_runs` here also stops a dead run id from re-arming the turn on a
+    /// later touch; the empty run id frees busy/steer state on the client.
+    fn turns_lost(&self, keys: impl IntoIterator<Item = String>) {
+        let host = self.host();
+        for key in keys {
+            self.inner.state.lock().active_runs.remove(&key);
+            self.inner.listener.on_active_run(key.clone(), String::new());
+            crate::session::DispatchHost::turn_lost(&*host, &key);
+        }
+    }
+
     /// `session/info` probe for the active session: record its updatedAt (the
-    /// cache-freshness comparison) and refresh the resync baseline
-    /// (`sync_stamp`) so our own just-completed change does not read as a
-    /// remote one. Does not write the cache — see [`Self::refresh_stamp`].
+    /// cache-freshness comparison) and refresh the per-session resync baseline
+    /// so our own just-completed change does not read as a remote one. Does not
+    /// write the cache — see [`Self::refresh_stamp`].
     fn probe_stamp(&self) {
         if let Some(session_id) = self.active_session_id() {
             self.refresh_stamp(&session_id, false);
@@ -3874,6 +3967,10 @@ impl Core {
                             .unwrap_or(-1);
                         (updated_at, message_count)
                     });
+            let remote_touched = {
+                let state = core.inner.state.lock();
+                state.touched_during_turn.contains(&key)
+            };
             if let Some((updated_at, message_count)) = probed {
                 let mut state = core.inner.state.lock();
                 if !updated_at.is_empty() {
@@ -3887,48 +3984,65 @@ impl Core {
                 // Baseline for the move test in `on_session_probe`. Without
                 // this, the first `session_info_update` after a prompt (the
                 // server's own run-end touch) probes "moved" and replays the
-                // session we just finished streaming.
-                if !updated_at.is_empty() && message_count >= 0 {
-                    state.sync_stamp = Some((updated_at, message_count));
+                // session we just finished streaming. A touch that arrived
+                // DURING our turn is the exception: re-baselining here would
+                // hide the remote rows forever (finish_turn re-arms the resync).
+                if !remote_touched && !updated_at.is_empty() && message_count >= 0 {
+                    state.sync_stamps.insert(key.clone(), (updated_at, message_count));
                 }
             }
-            if persist {
+            if persist && !remote_touched {
                 core.save_cache_for(&key);
             }
         });
     }
 
     /// A connection ended. Explicit disconnect → nothing more (status already
-    /// surfaced as Disconnected). Superseded connection → inert. Otherwise:
-    /// unexpected drop → clear the registry and schedule the backoff
-    /// reconnect when a session was bound (resume it), else stay Error.
+    /// surfaced as Disconnected). Superseded connection → inert. Every OTHER
+    /// drop advances the backoff budget, including a wire established by
+    /// `connect_attach` that bound nothing — those previously stayed offline
+    /// forever because reconnect was gated on `active_session_id()`.
+    ///
+    /// The resume target is explicit and conservative: bind/display only the
+    /// session the client is actually showing, and only if the main wire owns
+    /// it. A roam chat on screen (`roam:` display id or an active peer label)
+    /// means the main wire reconnects ATTACHED, never repainting the peer's
+    /// chat with a stale main session (bind == display; grouse#58aaef0a).
     fn on_connection_ended(&self, gen: u64, _result: Result<(), String>) {
-        let state = self.inner.state.lock();
-        if state.user_disconnect {
-            drop(state);
-            crate::spine::set_current_conn(None);
-            return;
-        }
-        if state.conn_gen != gen {
-            drop(state);
-            return;
-        }
-        let resume = self
-            .inner
-            .conn
-            .lock()
-            .as_ref()
-            .and_then(|conn| conn.active_session_id());
-        drop(state);
+        let resume = {
+            let state = self.inner.state.lock();
+            if state.user_disconnect {
+                drop(state);
+                crate::spine::set_current_conn(None);
+                return;
+            }
+            if state.conn_gen != gen {
+                return;
+            }
+            let displayed = self.inner.hub.displayed_key();
+            let bound = self
+                .inner
+                .conn
+                .lock()
+                .as_ref()
+                .and_then(|conn| conn.active_session_id());
+            let peer = self.inner.active_peer_label.read().clone();
+            match (bound, displayed, peer) {
+                (Some(session), Some(key), None)
+                    if session == key && !session.starts_with(crate::session::ROAM_PREFIX) =>
+                {
+                    Some(session)
+                }
+                _ => None,
+            }
+        };
         crate::spine::set_current_conn(None);
-        if let Some(session_id) = resume {
-            self.schedule_reconnect(session_id);
-        }
+        self.schedule_reconnect(resume);
     }
 
     /// Exponential backoff: 500ms·2^n capped at 15s, at most 6 attempts; reset
     /// on Ready (desktop maybeReconnect). Surfaced only via `on_status`.
-    fn schedule_reconnect(&self, resume: String) {
+    fn schedule_reconnect(&self, resume: Option<String>) {
         let mut state = self.inner.state.lock();
         if state.user_disconnect {
             return;
@@ -3951,7 +4065,7 @@ impl Core {
         });
     }
 
-    fn on_reconnect_timer(&self, gen: u64, resume: String) {
+    fn on_reconnect_timer(&self, gen: u64, resume: Option<String>) {
         let mut state = self.inner.state.lock();
         if state.user_disconnect || state.reconnect_gen != gen {
             return;
@@ -3960,6 +4074,26 @@ impl Core {
         let config = state.last_config.clone();
         drop(state);
         let Some(config) = config else { return };
+        let Some(resume) = resume else {
+            // No main-owned chat on screen: bring the wire back WITHOUT binding
+            // one (a roam chat or a landing page is still displayed).
+            let (_, _rx) = self.connect_impl(config, ConnectSpec::Attach, false, false);
+            return;
+        };
+        // The reader may have switched to a peer chat during the backoff. The
+        // display gate is checked again here — resuming now would bind and
+        // repaint a chat nobody is looking at.
+        let still_displayed = {
+            let displayed = self.inner.hub.displayed_key();
+            let peer = self.inner.active_peer_label.read().clone();
+            peer.is_none()
+                && displayed.as_deref() == Some(resume.as_str())
+                && !resume.starts_with(crate::session::ROAM_PREFIX)
+        };
+        if !still_displayed {
+            let (_, _rx) = self.connect_impl(config, ConnectSpec::Attach, false, false);
+            return;
+        }
         let cwd = self.resolve_cwd(&resume);
         // The freshness gate open_session applies: a session whose cached
         // transcript is up to date must not replay just because the socket
@@ -4140,6 +4274,9 @@ impl Core {
         self.inner.state.lock().turn_runs.remove(&session_id);
         {
             let mut state = self.inner.state.lock();
+            // A marker left by a remote touch before an earlier turn ended is
+            // stale now: this is a NEW local turn with its own stamp story.
+            state.touched_during_turn.remove(&session_id);
             // Only THIS session is busy; a turn elsewhere is unrelated.
             state.in_flight.insert(session_id.clone());
             // The turn's rows are not final until it ends: mark THIS session
@@ -4725,9 +4862,13 @@ impl Core {
     /// Callers must treat `false` as "nothing to do", never as "retry": the
     /// peer in flight is a different turn's.
     fn finish_turn(&self, key: &str, stop: &str, clean: bool) -> bool {
-        let ignored = {
+        let (ignored, remote_touched) = {
             let mut state = self.inner.state.lock();
-            if !state.in_flight.remove(key) {
+            // Consume the "someone else edited this chat while we were
+            // streaming" marker. Its rows are not in our store, so this turn
+            // must NOT be allowed to declare the cache current (below).
+            let remote_touched = state.touched_during_turn.remove(key);
+            let ignored = if !state.in_flight.remove(key) {
                 // A CLEAN end still means "this chat's transcript is settled". The
                 // turn can be released before its reply arrives (`turn_lost` marks
                 // the chat incomplete), and if only the release path could clear
@@ -4751,7 +4892,8 @@ impl Core {
                     state.incomplete.insert(key.to_string());
                 }
                 None
-            }
+            };
+            (ignored, remote_touched)
         };
         if let Some(detail) = ignored {
             self.note(format!("finish {key} stop={stop} IGNORED (no turn in flight) {detail}"));
@@ -4768,7 +4910,11 @@ impl Core {
         self.note("  stage: sealing");
         self.store_for(key).seal_turn();
         self.note("  stage: sealed");
-        self.save_cache_for(key);
+        if remote_touched {
+            self.save_cache_unstamped(key);
+        } else {
+            self.save_cache_for(key);
+        }
         self.note("  stage: cached");
         let announced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.store_for(key).announce_run_ended(stop);
@@ -4785,7 +4931,28 @@ impl Core {
         // a full-history reload of the turn we just streamed (painful on a
         // long chat). Recording the post-turn stamp here makes that probe a
         // no-op while a genuine remote change still differs and resyncs.
-        self.refresh_stamp(key, true);
+        if remote_touched {
+            // The stamp we would probe now belongs to BOTH our turn and the
+            // remote edit. Re-baselining on it would make the later move test
+            // see no change and drop the remote rows. Keep the old baseline
+            // and re-arm the debounced resync now that our turn released the
+            // transcript gate (touch heartbeat blocked while in_flight).
+            self.note(format!("finish {key}: remote touch during turn — re-arming resync"));
+            let gen = {
+                let mut state = self.inner.state.lock();
+                state.resync_ticks = 4;
+                state.touch_gen += 1;
+                state.touch_gen
+            };
+            let core = self.clone();
+            let key = key.to_string();
+            crate::roam::runtime().spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                core.on_touch_debounced(gen, key);
+            });
+        } else {
+            self.refresh_stamp(key, true);
+        }
         self.flush_pending();
         true
     }
@@ -4908,6 +5075,17 @@ impl Core {
     /// Persist one session's store. The store is keyed by display id, so the
     /// rows can never be filed under another chat.
     fn save_cache_for(&self, session_id: &str) {
+        self.save_cache_for_inner(session_id, false);
+    }
+
+    /// Persist the rows but refuse the current `updatedAt` stamp. Used when a
+    /// remote edit landed during our turn: the rows are worth painting, but the
+    /// cache must not claim to be current, or the remote rows would never load.
+    fn save_cache_unstamped(&self, session_id: &str) {
+        self.save_cache_for_inner(session_id, true);
+    }
+
+    fn save_cache_for_inner(&self, session_id: &str, unstamped: bool) {
         let store = self.store_for(session_id);
         let items = store.rich_transcript();
         // A cache that does not reach the conversation's origin is still a
@@ -4926,7 +5104,7 @@ impl Core {
                     .unwrap_or_default(),
             )
         };
-        let stamp = if incomplete { "" } else { &updated_at };
+        let stamp = if unstamped || incomplete { "" } else { &updated_at };
         self.inner
             .cache
             .save_transcript(session_id, &items, stamp, complete);
@@ -5103,14 +5281,8 @@ impl Core {
 
     /// Resolve the roam peer owning a `roam:<label>:<id>` session, if any.
     fn peer_for_session(&self, session_id: &str) -> Option<Arc<crate::roam::RoamPeer>> {
-        let rest = session_id.strip_prefix("roam:")?;
-        let label = rest.split(':').next()?;
-        self.inner
-            .peers
-            .lock()
-            .iter()
-            .find(|peer| peer.label() == label)
-            .cloned()
+        let peers = self.inner.peers.lock();
+        crate::roam::peer_for_session(&peers, session_id)
     }
 
     // -- remote-change resync (CONTRACT §4) -----------------------------------
@@ -5158,8 +5330,12 @@ impl Core {
             return;
         }
         // THIS chat's own turn owns its transcript; other chats' turns are
-        // irrelevant to whether a resync of this one is safe.
+        // irrelevant to whether a resync of this one is safe. Remember the
+        // touch though: `finish_turn` must neither stamp this chat current nor
+        // re-baseline its move test, and must re-arm the resync when the turn
+        // releases the gate.
         if state.in_flight.contains(&session_id) {
+            state.touched_during_turn.insert(session_id.clone());
             return;
         }
         if self.active_session_id().as_deref() != Some(session_id.as_str()) {
@@ -5167,10 +5343,10 @@ impl Core {
         }
         state.resync_ticks = 4; // initial probe + 3 follow-ups
         drop(state);
-        self.probe_and_maybe_resync(session_id);
+        self.probe_and_maybe_resync(session_id, gen);
     }
 
-    fn probe_and_maybe_resync(&self, session_id: String) {
+    fn probe_and_maybe_resync(&self, session_id: String, gen: u64) {
         let Some(owner) = self.owner_for(&session_id) else {
             return;
         };
@@ -5194,46 +5370,55 @@ impl Core {
                             .unwrap_or(-1);
                         (updated_at, message_count)
                     });
-            core.on_session_probe(session_id, probe);
+            core.on_session_probe(session_id, probe, gen);
         });
     }
 
     /// The probe moved (updatedAt/messageCount differ) → replay the session
-    /// in place, then re-probe at 8s a few times to catch a turn that is still
-    /// streaming on the prompting client (desktop onSessionProbe +
-    /// turnResyncTick; one implementation replaces both).
-    fn on_session_probe(&self, session_id: String, probe: Option<(String, i64)>) {
+    /// in place. Every probe consumes one tick, so the 8s follow-ups stop after
+    /// `resync_ticks` even when a probe finds no move or fails — the old code
+    /// only armed the next one in the `moved` branch, so a remote turn that had
+    /// not landed by the first probe was never picked up.
+    fn on_session_probe(&self, session_id: String, probe: Option<(String, i64)>, gen: u64) {
         let mut state = self.inner.state.lock();
+        if state.touch_gen != gen {
+            return; // a newer debounce owns this cycle; leave ITS ticks alone
+        }
         if self.active_session_id().as_deref() != Some(session_id.as_str()) {
-            return; // stale probe for a session we left
-        }
-        let Some((updated_at, message_count)) = probe else {
-            return; // probe failed; leave the transcript as-is
-        };
-        if updated_at.is_empty() || message_count < 0 {
+            state.resync_ticks = 0; // stale probe for a session we left
             return;
         }
-        let moved = match &state.sync_stamp {
-            Some((stamp_at, stamp_count)) => {
-                *stamp_at != updated_at || *stamp_count != message_count
-            }
-            None => true,
-        };
-        if !moved {
+        if state.resync_ticks <= 0 {
             return;
         }
-        state.sync_stamp = Some((updated_at.clone(), message_count));
-        if state.resync_ticks > 0 {
-            state.resync_ticks -= 1;
-        }
+        state.resync_ticks -= 1;
         let follow_up = state.resync_ticks > 0;
+        let mut replay = None;
+        if let Some((updated_at, message_count)) = probe {
+            if !updated_at.is_empty() && message_count >= 0 {
+                let moved = match state.sync_stamps.get(&session_id) {
+                    Some((stamp_at, stamp_count)) => {
+                        *stamp_at != updated_at || *stamp_count != message_count
+                    }
+                    None => true,
+                };
+                if moved {
+                    state
+                        .sync_stamps
+                        .insert(session_id.clone(), (updated_at, message_count));
+                    replay = Some(session_id.clone());
+                }
+            }
+        }
         drop(state);
-        self.resync_current_session(&session_id);
+        if let Some(key) = replay {
+            self.resync_current_session(&key);
+        }
         if follow_up {
             let core = self.clone();
             crate::roam::runtime().spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-                core.probe_and_maybe_resync(session_id);
+                core.probe_and_maybe_resync(session_id, gen);
             });
         }
     }
@@ -5306,19 +5491,31 @@ impl Core {
 
     // -- hooks ----------------------------------------------------------------
 
-    fn status_hook(&self) -> Arc<dyn Fn(ConnectionStatus) + Send + Sync> {
+    fn status_hook(&self, gen: u64) -> Arc<dyn Fn(ConnectionStatus) + Send + Sync> {
         let core = self.clone();
-        Arc::new(move |status| core.on_conn_status(status))
+        Arc::new(move |status| core.on_conn_status_from(Some(gen), status))
     }
 
-    fn config_hook(&self) -> Arc<dyn Fn(Vec<ConfigOption>) + Send + Sync> {
+    fn config_hook(&self, gen: u64) -> Arc<dyn Fn(Vec<ConfigOption>) + Send + Sync> {
         let core = self.clone();
-        Arc::new(move |options| core.on_config_reply(options))
+        Arc::new(move |options| {
+            // Config belongs to the wire that answered the initialize handshake;
+            // a late reply from a dead wire must not overwrite the new one's.
+            let current = core.inner.state.lock().conn_gen == gen;
+            if current {
+                core.on_config_reply(options);
+            }
+        })
     }
 
-    fn open_failed_hook(&self) -> Arc<dyn Fn(String, String) + Send + Sync> {
+    fn open_failed_hook(&self, gen: u64) -> Arc<dyn Fn(String, String) + Send + Sync> {
         let core = self.clone();
-        Arc::new(move |session_id, message| core.on_session_open_failed(session_id, message))
+        Arc::new(move |session_id, message| {
+            let current = core.inner.state.lock().conn_gen == gen;
+            if current {
+                core.on_session_open_failed(session_id, message);
+            }
+        })
     }
 
     /// Apply the outbound image policy to a prompt's image blocks: every

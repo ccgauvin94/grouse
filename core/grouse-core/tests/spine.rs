@@ -173,6 +173,19 @@ fn wait_for<F: Fn(&Ev) -> bool>(rx: &Receiver<Ev>, pred: F, what: &str) -> Ev {
     panic!("timed out waiting for {what}");
 }
 
+/// Poll the recorded wire frames for `count` requests of `method`.
+fn wait_for_frames(server: &FakeServer, method: &str, count: usize, what: &str) -> Vec<Value> {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        let frames = server.frames_for(method);
+        if frames.len() >= count {
+            return frames;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {count} {method} frames ({what})");
+}
+
 // ---------------------------------------------------------------------------
 // Fake goosed server (in-process, scripted per method)
 // ---------------------------------------------------------------------------
@@ -232,6 +245,14 @@ struct FakeServer {
     /// followed the cursor silently truncated (2026-11-08: the Media project
     /// showed one chat where it used to show five).
     page_lists: Arc<std::sync::atomic::AtomicBool>,
+    /// Hold the FIRST `initialize` until `release_initialize` fires, so a test
+    /// can start a handshake, supersede it with a newer connect, and then let
+    /// the stale handshake continue.
+    hold_first_initialize: Arc<std::sync::atomic::AtomicBool>,
+    release_initialize: Arc<tokio::sync::Notify>,
+    /// Add a session whose listed message time matches a cached stamp — the
+    /// fresh-cache baseline a verification probe must be able to refute.
+    fresh_session_row: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FakeServer {
@@ -254,6 +275,9 @@ impl FakeServer {
             history: Arc::new(Mutex::new(0)),
             release_load: Arc::new(tokio::sync::Notify::new()),
             page_lists: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            hold_first_initialize: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            release_initialize: Arc::new(tokio::sync::Notify::new()),
+            fresh_session_row: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -350,7 +374,29 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
         let Some(id) = id else { continue };
 
         let result = match method.as_str() {
-            "initialize" => json!({ "protocolVersion": 1 }),
+            "initialize" => {
+                if server
+                    .hold_first_initialize
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    server.release_initialize.notified().await;
+                }
+                json!({ "protocolVersion": 1 })
+            }
+            "session/list" if server.fresh_session_row.load(std::sync::atomic::Ordering::SeqCst) => {
+                json!({
+                    "sessions": [{
+                        "sessionId": "sess-fresh",
+                        "title": "Fresh baseline",
+                        "cwd": "/tmp",
+                        // Cache stamp below matches this value byte-for-byte.
+                        "_meta": {
+                            "lastMessageAt": "2026-08-12T06:00:00Z",
+                            "messageCount": 2
+                        }
+                    }]
+                })
+            }
             // The core's hidden summarizer session (issue #13) asks with
             // `_meta.hidden`; give it an id of its own so its turn is
             // distinguishable from a chat's.
@@ -2581,5 +2627,253 @@ fn a_prompt_survives_a_reopen_because_the_core_echoes_it() {
     );
 
     core2.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+
+// ---------------------------------------------------------------------------
+// 2026-11-22 regression cluster: superseded handshakes, bindless reconnect,
+// and a verification that downgrades a fresh-cache paint to a merge
+// ---------------------------------------------------------------------------
+
+/// An attach wire's unexpected drop must redial with an ATTACH spec, not a
+/// resume: no `session/load`, no `session/new`, and no session bound. The core
+/// owns the reconnect budget, so this is where the bind==display invariant has
+/// to hold even when the client never asks for a reconnect itself.
+#[test]
+fn an_attach_reconnect_restores_the_wire_without_binding() {
+    let _cache_guard = CACHE_TEST_LOCK.lock();
+    let data_dir =
+        std::env::temp_dir().join(format!("grouse-attach-redial-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        data_dir.to_string_lossy().to_string(),
+    );
+    let config = || grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+        initial_project_id: None,
+    };
+
+    core.connect_attach(config());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "attach ready");
+    assert!(core.connected());
+    assert!(!core.ready(), "attach has a wire but no open session");
+    assert!(server.frames_for("session/load").is_empty());
+    assert!(server.frames_for("session/new").is_empty());
+    while ev_rx.try_recv().is_ok() {}
+
+    // Drop the socket out from under the core. Its own backoff must bring a
+    // SECOND wire up, and that wire must also be bindless.
+    server.drop_connections();
+    wait_for_frames(&server, "initialize", 2, "the attach wire's reconnect");
+    wait_for(
+        &ev_rx,
+        |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)),
+        "reconnected ready",
+    );
+    assert!(core.connected(), "the reconnect brought the wire back");
+    assert_eq!(core.active_session_id(), None, "a reconnect without a displayed chat must not bind one");
+    assert!(
+        server.frames_for("session/load").is_empty(),
+        "reconnect must not resume (and repaint) a session: {:#?}",
+        server.frames_for("session/load")
+    );
+    assert!(
+        server.frames_for("session/new").is_empty(),
+        "reconnect must not mint a throwaway session"
+    );
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// A handshake held at `initialize` is superseded by a newer connect. When the
+/// stale reply finally lands, that wire must not load, bind, emit config, or
+/// emit Ready — every one of those would overwrite the newer wire's state.
+#[test]
+fn a_superseded_handshake_never_binds_or_emits_ready() {
+    let _cache_guard = CACHE_TEST_LOCK.lock();
+    let data_dir =
+        std::env::temp_dir().join(format!("grouse-stale-hs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    server.hold_first_initialize.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        data_dir.to_string_lossy().to_string(),
+    );
+    let config = || grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+        initial_project_id: None,
+    };
+
+    // The OLD connect is parked inside initialize. Its `connect_resume` would
+    // bind `sess-old` and emit config if the shutdown flag were ignored.
+    let old_core = core.clone();
+    let old_config = config();
+    let old = std::thread::spawn(move || {
+        old_core.connect_resume(old_config, "sess-old".to_string());
+    });
+    wait_for_frames(&server, "initialize", 1, "the old handshake's initialize");
+
+    // The NEW connect shuts the old wire down and owns the status story.
+    core.connect(config());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut ready = 0;
+    while Instant::now() < deadline {
+        match ev_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Ev::Status(ConnectionStatus::Ready)) => { ready += 1; break; }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    assert_eq!(ready, 1, "only the new wire may emit Ready");
+
+    // Let the stale initialize answer land. A cancelled wire must stop before
+    // session/load; `shutdown()` also has to wake its bounded connect() now.
+    server.release_initialize.notify_one();
+    old.join().expect("the superseded connect must not panic");
+    std::thread::sleep(Duration::from_millis(400));
+
+    assert!(
+        server.frames_for("session/load").is_empty(),
+        "a superseded handshake must never load a session: {:#?}",
+        server.frames_for("session/load")
+    );
+    assert_eq!(
+        server.frames_for("session/new").len(),
+        1,
+        "only the new connect may mint its transient session"
+    );
+    let mut late_ready = 0;
+    let mut stale_configs = 0;
+    for ev in ev_rx.try_iter() {
+        match ev {
+            Ev::Status(ConnectionStatus::Ready) => late_ready += 1,
+            Ev::Config(options) if options.len() < 2 => stale_configs += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(late_ready, 0, "the stale wire emitted Ready after shutdown");
+    assert_eq!(stale_configs, 0, "the stale wire emitted config after shutdown");
+    assert_eq!(core.active_session_id().as_deref(), Some("sess-e2e"));
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// The paint/verify duplicate-tail case at the wire level: the cache looks
+/// FRESH against `session/list`, so it is painted authoritatively, but the
+/// `_goose/unstable/session/info` probe says another client moved the session.
+/// The ask is downgraded to a bounded merge tail; that tail must replace the
+/// stale suffix rather than append a second copy of the newest turn.
+#[test]
+fn a_verification_downgrade_does_not_duplicate_the_replayed_tail() {
+    let _cache_guard = CACHE_TEST_LOCK.lock();
+    let data_dir =
+        std::env::temp_dir().join(format!("grouse-verify-merge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    let cache = grouse_core::cache::CacheStore::new(data_dir.clone());
+    let cached = vec![
+        item("old-1", grouse_core::ItemKind::User, "CACHED-PREFIX"),
+        item("r-1", grouse_core::ItemKind::Agent, "replayed line one and two"),
+    ];
+    // Byte-for-byte the listed `lastMessageAt` below: the paint plan calls it
+    // fresh, but the session/info probe (13:00) refutes it.
+    assert!(cache.save_transcript(
+        "sess-fresh",
+        &cached,
+        "2026-08-12T06:00:00Z",
+        true
+    ));
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    server.fresh_session_row.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        data_dir.to_string_lossy().to_string(),
+    );
+    core.connect(grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+        initial_project_id: None,
+    });
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
+    core.list_sessions();
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Sessions(_)), "the fresh session baseline");
+
+    core.open_session("sess-fresh".to_string());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "verified open ready");
+
+    // The probe refuted the fresh verdict, so the wire asked for the bounded
+    // merge tail — not one message (suppression) and not a full rebuild.
+    let loads = server.frames_for("session/load");
+    let last = loads.last().expect("the open's session/load");
+    assert_eq!(
+        last.pointer("/params/_meta/replayTail").and_then(Value::as_u64),
+        Some(100),
+        "verification downgrade must merge a tail: {last:?}"
+    );
+
+    let text: String = core
+        .transcript()
+        .iter()
+        .map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        text.contains("CACHED-PREFIX"),
+        "the older cached prefix must survive the merge: {text}"
+    );
+    assert_eq!(
+        text.matches("replayed line one").count(),
+        1,
+        "the merged tail replaced the stale suffix instead of appending it: {text}"
+    );
+
+    core.disconnect();
     let _ = std::fs::remove_dir_all(&data_dir);
 }

@@ -55,6 +55,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::cache::CacheStore;
+use crate::session::ChatEndpoint;
 use crate::spine::{PendingRequest, RpcConn};
 use crate::{ConnectionStatus, CoreListener, PermissionOutcome, SessionSummary};
 
@@ -328,10 +329,21 @@ struct PeerInner {
     /// until the session has a message and the walk catches up. Cleared when a
     /// different session is opened, so the synthetic row cannot inherit it.
     open_session_mode: Option<String>,
+    /// Whether the open session appeared in a SERVER list (as opposed to only
+    /// in our synthetic empty-chat row). A session that was listed and then
+    /// disappears on the next relist was archived/deleted: unioning it back in
+    /// would resurrect a ghost row, and keeping it as `resume_pending` would
+    /// re-open a dead chat after a link drop.
+    open_session_listed: bool,
     /// Each listed session's working directory, keyed by RAW session id
     /// (populated from `session/list`; `session/load` must use the session's
     /// own cwd — the main connection's `last_config` cwd is empty on a
     /// roam-only client and `session/load` hard-fails on a blank cwd).
+    ///
+    /// Entries are MERGED on relist: goose omits empty sessions, so replacing
+    /// this map with the fresh list wipes the cwd of the just-created chat (and
+    /// of hidden sessions the drawer never lists). Later loads then send `""`
+    /// and goose rewrites `working_dir`. Only pathological growth is pruned.
     session_cwds: HashMap<String, String>,
     /// A dropped link with a session open sets this: once the re-dial's
     /// handshake lands and `session/list` arrives, the peer re-opens the same
@@ -369,6 +381,7 @@ impl PeerInner {
             sessions: Vec::new(),
             open_session_id: None,
             open_session_mode: None,
+            open_session_listed: false,
             resume_pending: None,
             session_cwds: HashMap::new(),
             active_run: None,
@@ -390,6 +403,13 @@ impl RoamPeer {
     /// visit to the endpoints screen. ~25 attempts ≈ 6 minutes of retrying at
     /// the cap before the peer surfaces a terminal error.
     const RECONNECT_MAX: u32 = 25;
+
+    /// Upper bound on remembered working directories. A cwd entry is a couple
+    /// of strings; this is only a guard against unbounded growth if a peer's
+    /// session churns through thousands of ids. Entries not in the latest list
+    /// (and not the open session) are pruned first, so real sessions and the
+    /// hidden ones survive; only beyond the cap do we drop any other key.
+    const MAX_SESSION_CWDS: usize = 4096;
 
     /// Connect to a roam peer in browse mode, supervised. The dial (blocking,
     /// seconds) and the ACP handshake run on the core runtime; this returns
@@ -535,7 +555,16 @@ impl RoamPeer {
                 )
             }),
             permission: std::sync::Arc::new(move |req, responder| {
-                permission_peer.on_permission_request(req, responder)
+                // Register the OWNER by tool_call_id before parking the responder,
+                // so Core::respond_permission can answer a main-wire prompt while
+                // this peer owns the screen (and this one while a main chat does).
+                let tool_call_id = crate::session::permission_request(&req).tool_call_id;
+                let peer = permission_peer.clone();
+                peer.on_permission_request(req, responder);
+                crate::spine::register_permission_answer(
+                    tool_call_id,
+                    std::sync::Arc::new(move |id, outcome| peer.respond_permission(id, outcome)),
+                );
             }),
             request: std::sync::Arc::new(move |method, params, responder| {
                 request_peer.on_server_request(method, params, responder)
@@ -618,7 +647,10 @@ impl RoamPeer {
             .sessions
             .iter()
             .map(|s| SessionSummary {
-                mode: None,
+                // The effective mode was resolved by the per-mode walk when the
+                // list arrived. Dropping it here cost a peer's dev chats their
+                // badge in every client that reads `on_roam_sessions`.
+                mode: s.mode.clone(),
                 id: s.id.clone(),
                 title: s.title.clone(),
                 updated_at: s.updated_at.clone(),
@@ -671,23 +703,17 @@ impl RoamPeer {
             | ConnectionStatus::Syncing => {}
             _ => return,
         }
-        // The raw id is derived by stripping the prefix when the caller passed
-        // a prefixed id.
+        // The wire id is raw; the display id carries this peer's namespace.
         let raw = self.strip_prefix(&session_id);
-        // session/load hard-fails on a blank cwd. The passed cwd can be empty
-        // on a roam-only client (no main connection to seed last_config), so
-        // fall back to the session's own cwd from session/list — the remote
-        // goose rewrote it there, so it's the guaranteed-valid one.
-        let cwd = if cwd.is_empty() {
-            self.inner
-                .lock()
-                .session_cwds
-                .get(&raw)
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            cwd
-        };
+        // The peer's OWN cwd beats the caller's: `open_on_peer` in lib.rs only
+        // has the main connection's `last_config`, which is empty on a
+        // roam-only client and wrong when the remote goose rewrote
+        // `working_dir`. `session/load` silently rewrites it from what we send,
+        // so using the main cwd would move the peer's session. The caller's
+        // value is still the fallback for a session we know nothing about.
+        let cwd = <Self as ChatEndpoint>::session_cwd(self, &session_id)
+            .filter(|known| !known.is_empty())
+            .unwrap_or(cwd);
         let _ = self.cmd_tx.send(PeerCommand::OpenSession {
             session_id: raw,
             cwd,
@@ -947,7 +973,7 @@ impl RoamPeer {
                 .cloned()
                 .unwrap_or_default();
             if let Err(error) = self.load_session(raw, cwd, false).await {
-                self.fail(format!("roam resume: {error}"));
+                self.command_failed(format!("roam resume: {error}"));
             }
         }
 
@@ -995,14 +1021,14 @@ impl RoamPeer {
                     }
                     let raw = self.strip_prefix(&session_id);
                     if let Err(error) = self.load_session(raw, cwd, force).await {
-                        self.fail(format!("roam session/open: {error}"));
+                        self.command_failed(format!("roam session/open: {error}"));
                     }
                 }
                 PeerCommand::NewSession { cwd, mode } => {
                     match self.create_session(&cx, &cwd, mode.as_deref(), true).await {
                         Ok(()) => {}
                         Err(error) => {
-                            self.fail(format!("roam session/new: {error}"));
+                            self.command_failed(format!("roam session/new: {error}"));
                         }
                     }
                 }
@@ -1071,6 +1097,9 @@ impl RoamPeer {
             // This is a session that already exists on the peer, so its mode is the
             // walk's business, not a mode this client wrote.
             inner.open_session_mode = None;
+            // It is (or was) in the server's list: if a later relist drops it,
+            // that is an archive/delete, not an empty chat to union back in.
+            inner.open_session_listed = inner.sessions.iter().any(|s| s.id == key);
             if !cwd.is_empty() {
                 // Remember the resolved cwd for the hidden summarizer session.
                 inner.session_cwds.insert(raw.clone(), cwd.clone());
@@ -1116,8 +1145,12 @@ impl RoamPeer {
                 // it with a fresh session on the peer: the user asked for THIS
                 // session, and a blank replacement is the defect (grouse#19).
                 // Keep the painted cache and report against the prefixed id.
-                self.inner.lock().open_session_id = None;
-                self.inner.lock().open_session_mode = None;
+                {
+                    let mut inner = self.inner.lock();
+                    inner.open_session_id = None;
+                    inner.open_session_mode = None;
+                    inner.open_session_listed = false;
+                }
                 self.listener.on_session_open_failed(
                     format!("roam:{}:{}", self.label, raw),
                     format!("session/load failed: {error}"),
@@ -1163,6 +1196,9 @@ impl RoamPeer {
             // chat with no messages is in neither the peer's list nor the mode walk.
             inner.open_session_mode =
                 mode.map(str::to_string).filter(|m| !m.is_empty());
+            // A just-created chat is EMPTY: goose will not list it until its
+            // first message, so it lives only in the synthetic row for now.
+            inner.open_session_listed = false;
             // The hidden summarizer needs this session's own cwd on the peer.
             inner.session_cwds.insert(sid.clone(), cwd.to_string());
         }
@@ -1206,6 +1242,57 @@ impl RoamPeer {
         }
     }
 
+    /// Fold a fresh `session/list`'s cwds into what we already know, instead
+    /// of replacing it: goose omits empty and hidden sessions, so a replace
+    /// drops the cwd of the chat just created on this peer and every later
+    /// `session/load` sends `""` (which goose treats as permission to rewrite
+    /// `working_dir`). A changed cwd from the server wins; an absent one is
+    /// left alone. Only a pathological map is pruned, oldest-looking
+    /// non-listed keys first (HashMap has no order, so any stale key will do),
+    /// and the open session's key is never dropped.
+    fn merge_session_cwds(
+        stored: &mut HashMap<String, String>,
+        fresh: HashMap<String, String>,
+        open: Option<&str>,
+    ) {
+        for (id, cwd) in &fresh {
+            // A row with no cwd is not authority to forget one we already
+            // learned (the remote can omit it on some list shapes).
+            if cwd.is_empty() && stored.get(id).is_some_and(|old| !old.is_empty()) {
+                continue;
+            }
+            stored.insert(id.clone(), cwd.clone());
+        }
+        if stored.len() <= Self::MAX_SESSION_CWDS {
+            return;
+        }
+        let mut stale: Vec<String> = stored
+            .keys()
+            .filter(|id| !fresh.contains_key(id.as_str()) && Some(id.as_str()) != open)
+            .cloned()
+            .collect();
+        for id in stale.drain(..) {
+            stored.remove(&id);
+            if stored.len() <= Self::MAX_SESSION_CWDS {
+                return;
+            }
+        }
+        // The fresh list itself can exceed the cap; drop arbitrary non-open
+        // entries rather than growing the map without bound.
+        while stored.len() > Self::MAX_SESSION_CWDS {
+            let victim = stored
+                .keys()
+                .find(|id| Some(id.as_str()) != open)
+                .cloned();
+            match victim {
+                Some(id) => {
+                    stored.remove(&id);
+                }
+                None => break,
+            }
+        }
+    }
+
     /// `session/list` arrived: store it, flip to Ready, emit. Browse mode — no
     /// session is auto-opened here (open only via `open_session`).
     ///
@@ -1223,13 +1310,13 @@ impl RoamPeer {
         list: &ListSessionsResponse,
         modes: &HashMap<String, String>,
     ) {
-        let mut cwds = HashMap::new();
+        let mut fresh_cwds = HashMap::new();
         let mut sessions: Vec<SessionSummary> = list
             .sessions
             .iter()
             .filter_map(|s| {
                 let id = s.session_id.to_string();
-                cwds.insert(id.clone(), crate::session::info_cwd(s));
+                fresh_cwds.insert(id.clone(), crate::session::info_cwd(s));
                 let mut summary = crate::session::summary_from_info(Some(&self.label), s)?;
                 summary.has_new = self.hub.has_new(&summary.id);
                 // The effective mode, never absent: an untagged chat IS a chat, the same
@@ -1246,6 +1333,26 @@ impl RoamPeer {
             .collect();
         {
             let mut inner = self.inner.lock();
+            // A session the server USED to list but no longer does was
+            // archived/deleted (lib.rs re-lists after those mutations). Without
+            // this check the synthetic union below resurrects it as a ghost
+            // row, and a later link drop queues it as `resume_pending` and
+            // re-opens a chat the user deleted. An empty chat that was never
+            // listed is NOT deleted — it has just not posted a message yet.
+            if let Some(raw) = inner.open_session_id.clone() {
+                let still_listed = list
+                    .sessions
+                    .iter()
+                    .any(|s| s.session_id.to_string() == raw);
+                if inner.open_session_listed && !still_listed {
+                    inner.open_session_id = None;
+                    inner.open_session_mode = None;
+                    inner.open_session_listed = false;
+                    inner.resume_pending = None;
+                } else {
+                    inner.open_session_listed = still_listed;
+                }
+            }
             // The peer's list only contains sessions that HAVE messages (goose's
             // session/list filters empty ones). A chat this client just created is
             // open but empty — invisible to the relist. Union it in: once its first
@@ -1288,7 +1395,12 @@ impl RoamPeer {
                 }
             }
             inner.sessions = sessions;
-            inner.session_cwds = cwds;
+            let open_key = inner.open_session_id.clone();
+            Self::merge_session_cwds(
+                &mut inner.session_cwds,
+                fresh_cwds,
+                open_key.as_deref(),
+            );
             inner.status = ConnectionStatus::Ready;
             // The supervisor's outage posture keys on this: a link that has
             // been live earns the long budget and a fresh one per outage.
@@ -1312,6 +1424,13 @@ impl RoamPeer {
         self.save_open_transcript();
         let mut inner = self.inner.lock();
         inner.conn = None;
+        // A permission prompt answered after the link is gone has no wire to
+        // reply on, and its responder used to sit in this map across every
+        // re-dial. Drop them all with the connection.
+        for id in inner.pending_permission.keys() {
+            crate::spine::unregister_permission_answer(id);
+        }
+        inner.pending_permission.clear();
         if inner.closing {
             inner.status = ConnectionStatus::Disconnected;
             return;
@@ -1357,6 +1476,28 @@ impl RoamPeer {
         };
         drop(inner);
         self.emit_status(&format!("error: {message}"));
+    }
+
+    /// A command (open/create/resume) failed on a link that is otherwise up.
+    /// `fail()` made this terminal, but the command loop kept running: the
+    /// status said Error, every later intent was rejected by the Ready gate,
+    /// and the supervisor saw a healthy link and never redialed — one
+    /// transient `session/new` error stranded a live peer. Keep the link and
+    /// its queue, restore Ready so the next tap is accepted, and surface the
+    /// message as an advisory (the UI treats `error:` as a dead peer).
+    fn command_failed(&self, message: String) {
+        eprintln!("grouse-core: roam peer '{}' command failed: {message}", self.label);
+        {
+            let mut inner = self.inner.lock();
+            if inner.closing {
+                return;
+            }
+            inner.status = ConnectionStatus::Ready;
+        }
+        // Ready first (settles any replay/watchdog state in the clients), then
+        // the text. The raw cause is logged above for diagnosis.
+        self.emit_status("ready");
+        self.emit_status(&format!("alert: {message}"));
     }
 
     fn strip_prefix(&self, id: &str) -> String {
@@ -1585,6 +1726,35 @@ pub(crate) fn active_peer<'a>(
     peers.iter().find(|peer| &peer.label == label)
 }
 
+/// Resolve the peer that owns a `roam:<label>:<id>` session.
+///
+/// The id is a namespaced string, not a tuple: the label itself may contain
+/// `:` (connection-card labels are free-form). Splitting on the first `:` and
+/// looking for a peer with the first component used to miss those peers and
+/// let the id fall through to the MAIN wire, where a `roam:` session silently
+/// no-ops. Match the full `roam:<label>:` prefix of each KNOWN peer instead,
+/// and take the longest match so that a label `desk:1` wins over `desk` for
+/// `roam:desk:1:s2` while `roam:desk:s1` still resolves to `desk`.
+///
+/// Called from `Core`'s routing seam in `lib.rs`; the allow keeps the lib
+/// target quiet until that call site is switched over from `split(':')`.
+#[allow(dead_code)]
+pub(crate) fn peer_for_session(
+    peers: &[Arc<RoamPeer>],
+    session_id: &str,
+) -> Option<Arc<RoamPeer>> {
+    let rest = session_id.strip_prefix(crate::session::ROAM_PREFIX)?;
+    peers
+        .iter()
+        .filter(|peer| {
+            rest.len() > peer.label.len()
+                && rest.starts_with(&peer.label)
+                && rest.as_bytes()[peer.label.len()] == b':'
+        })
+        .max_by_key(|peer| peer.label.len())
+        .cloned()
+}
+
 /// Every page of a peer's `session/list`, merged into one reply.
 ///
 /// The peer's goose pages at 50 rows ordered by last message, exactly like the main
@@ -1599,6 +1769,10 @@ async fn list_all_peer_sessions(
     cx: &agent_client_protocol::ConnectionTo<Agent>,
     tags: &[(String, String)],
 ) -> Result<ListSessionsResponse, AcpError> {
+    // Every page needs the bound, not just the first one in the handshake:
+    // the mode walk and Relist call this helper too, and a stalled page there
+    // used to park the peer's whole command loop forever.
+    const PAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
     let mut all: Vec<SessionInfo> = Vec::new();
     let mut cursor: Option<String> = None;
     let mut first = true;
@@ -1607,7 +1781,13 @@ async fn list_all_peer_sessions(
         if let Some(next) = cursor.clone() {
             req = req.cursor(next);
         }
-        match cx.send_request(req).block_task().await {
+        let page = tokio::time::timeout(PAGE_TIMEOUT, cx.send_request(req).block_task()).await;
+        let page = match page {
+            Ok(reply) => reply,
+            Err(_) => Err(AcpError::internal_error()
+                .data("roam session/list page timed out")),
+        };
+        match page {
             Ok(page) => {
                 first = false;
                 all.extend(page.sessions);
@@ -2175,6 +2355,40 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_load_prefers_the_peers_own_cwd_over_the_callers() {
+        // `open_on_peer` in lib.rs supplies the MAIN connection's cwd, which
+        // can be empty (roam-only client) or just wrong (the remote goose
+        // rewrote working_dir). `session/load` rewrites from what we send, so
+        // the peer's own remembered cwd must win.
+        let listener = test_listener();
+        let (peer, mut cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        peer.inner.lock().session_cwds.insert(
+            "s1".to_string(),
+            "/home/remote/work".to_string(),
+        );
+        peer.open_session(
+            "roam:laptop:s1".to_string(),
+            "/home/local/other".to_string(),
+        );
+        match cmd_rx.try_recv() {
+            Ok(PeerCommand::OpenSession { cwd, .. }) => {
+                assert_eq!(cwd, "/home/remote/work");
+            }
+            other => panic!("expected OpenSession command, got {other:?}"),
+        }
+
+        // Unknown session: the caller's value remains the fallback.
+        peer.open_session("s2".to_string(), "/home/local/fallback".to_string());
+        match cmd_rx.try_recv() {
+            Ok(PeerCommand::OpenSession { cwd, .. }) => {
+                assert_eq!(cwd, "/home/local/fallback");
+            }
+            other => panic!("expected OpenSession command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn session_list_meta_survives_typed_deserialization() {
         // Decisive: does the typed SDK schema keep `_meta` on a session/list
         // entry, or drop it before to_summary can read it?
@@ -2277,6 +2491,37 @@ mod tests {
     }
 
     #[test]
+    fn a_command_failure_stays_advisory_and_keeps_the_peer_ready() {
+        // `fail()` alone set the terminal Error status while the command loop
+        // kept running: no redial, no later intents accepted, one stranded
+        // peer after a transient session/new error.
+        let listener = test_listener();
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener.clone(), gate(Arc::new(AtomicBool::new(true))));
+        peer.inner.lock().status = ConnectionStatus::Error {
+            message: "stale".to_string(),
+        };
+        peer.command_failed("roam session/new: timeout".to_string());
+
+        assert!(matches!(peer.status(), ConnectionStatus::Ready));
+        let events = listener.events.lock();
+        assert!(
+            events.iter().any(|e| e == "peer_status laptop ready"),
+            "Ready must be restored so the next intent is queued: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e == "peer_status laptop alert: roam session/new: timeout"),
+            "a command failure is text only, not a dead peer: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| e.starts_with("peer_status laptop error:")),
+            "an advisory failure must not look terminal: {events:?}"
+        );
+    }
+
+    #[test]
     fn clean_end_is_terminal_and_owes_nothing() {
         let listener = test_listener();
         let (peer, _cmd_rx) = offline_peer(
@@ -2331,6 +2576,97 @@ mod tests {
         };
         assert_eq!(mode_of("s2").as_deref(), Some("dev"));
         assert_eq!(mode_of("s1").as_deref(), Some("chat"));
+    }
+
+    #[test]
+    fn emitted_rows_keep_the_effective_mode() {
+        // `sessions()` rebuilds the uniffi record field by field; it used to
+        // hardcode `mode: None` here, so the walk's answer was stored but every
+        // client saw a plain chat badge for a peer's dev chats.
+        let listener = test_listener();
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let mut modes = HashMap::new();
+        modes.insert("s2".to_string(), "dev".to_string());
+        peer.apply_sessions_with_modes(
+            &list_response(&[
+                ("s1", "Plain", "2026-01-01T00:00:00Z"),
+                ("s2", "Dev", "2026-01-02T00:00:00Z"),
+            ]),
+            &modes,
+        );
+
+        let emitted = peer.sessions();
+        let mode_of = |raw: &str| {
+            emitted
+                .iter()
+                .find(|s| s.id == format!("roam:laptop:{raw}"))
+                .and_then(|s| s.mode.clone())
+        };
+        assert_eq!(mode_of("s2").as_deref(), Some("dev"));
+        assert_eq!(mode_of("s1").as_deref(), Some("chat"));
+    }
+
+    #[test]
+    fn a_relist_merges_cwds_instead_of_replacing_them() {
+        let listener = test_listener();
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        peer.apply_sessions(&list_response(&[("s1", "Old", "2026-01-01T00:00:00Z")]));
+        // A just-created empty session is invisible to the server list, but
+        // its cwd was learned at session/new. The hidden summarizer has one
+        // too, under a session the drawer never lists.
+        peer.inner
+            .lock()
+            .session_cwds
+            .insert("s9".to_string(), "/work/new".to_string());
+        peer.inner.lock().session_cwds.insert(
+            "summary-1".to_string(),
+            "/work/summary".to_string(),
+        );
+
+        peer.apply_sessions(&list_response(&[("s2", "New", "2026-02-01T00:00:00Z")]));
+
+        let cwds = peer.inner.lock().session_cwds.clone();
+        assert_eq!(cwds.get("s2").map(String::as_str), Some("/home/user"));
+        assert_eq!(cwds.get("s9").map(String::as_str), Some("/work/new"));
+        assert_eq!(
+            cwds.get("summary-1").map(String::as_str),
+            Some("/work/summary"),
+            "hidden sessions' cwds must survive a relist too"
+        );
+
+        // Server truth wins when the same session is listed with a new cwd.
+        let mut moved = list_response(&[("s2", "New", "2026-02-01T00:00:00Z")]);
+        moved.sessions[0].cwd = "/work/moved".into();
+        peer.apply_sessions(&moved);
+        assert_eq!(
+            peer.inner.lock().session_cwds.get("s2").map(String::as_str),
+            Some("/work/moved")
+        );
+    }
+
+    #[test]
+    fn cwd_memory_is_bounded_without_dropping_the_open_session() {
+        let listener = test_listener();
+        let (_peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        let mut stored = HashMap::new();
+        for i in 0..(RoamPeer::MAX_SESSION_CWDS + 10) {
+            stored.insert(format!("old-{i}"), "/old".to_string());
+        }
+        let fresh: HashMap<String, String> = (0..10)
+            .map(|i| (format!("new-{i}"), "/new".to_string()))
+            .collect();
+        RoamPeer::merge_session_cwds(&mut stored, fresh.clone(), None);
+        assert!(stored.len() <= RoamPeer::MAX_SESSION_CWDS);
+        assert!(fresh.keys().all(|k| stored.contains_key(k)));
+
+        // The open session's entry is protected even when everything else is
+        // stale, and a smaller list does not prune at all.
+        stored.insert("open".to_string(), "/open".to_string());
+        RoamPeer::merge_session_cwds(&mut stored, HashMap::new(), Some("open"));
+        assert_eq!(stored.get("open").map(String::as_str), Some("/open"));
     }
 
     #[test]
@@ -2454,6 +2790,50 @@ mod tests {
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].id, "roam:laptop:s9");
         assert_eq!(sessions[0].title, "New");
+    }
+
+    #[test]
+    fn archiving_the_open_session_does_not_resurrect_it() {
+        let listener = test_listener();
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        peer.apply_sessions(&list_response(&[("s1", "Open", "2026-01-01T00:00:00Z")]));
+        {
+            let mut inner = peer.inner.lock();
+            inner.open_session_id = Some("s1".to_string());
+            inner.open_session_listed = true;
+            inner.resume_pending = Some("s1".to_string());
+        }
+
+        // lib.rs re-lists after archive/delete; the server no longer lists s1.
+        peer.apply_sessions(&list_response(&[("s2", "Other", "2026-02-01T00:00:00Z")]));
+
+        let sessions = peer.sessions();
+        assert_eq!(sessions.len(), 1, "no ghost row for the deleted chat");
+        assert_eq!(sessions[0].id, "roam:laptop:s2");
+        let inner = peer.inner.lock();
+        assert_eq!(inner.open_session_id, None);
+        assert_eq!(inner.resume_pending, None, "a dead chat owes no resume");
+    }
+
+    #[test]
+    fn an_empty_open_chat_survives_a_relist_that_does_not_show_it() {
+        // The opposite case: goose omits zero-message sessions, so absence
+        // from the list alone must NOT clear the synthetic row.
+        let listener = test_listener();
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        {
+            let mut inner = peer.inner.lock();
+            inner.open_session_id = Some("s9".to_string());
+            inner.open_session_mode = Some("dev".to_string());
+            inner.open_session_listed = false;
+        }
+        peer.apply_sessions(&list_response(&[("s1", "Other", "2026-01-01T00:00:00Z")]));
+        let sessions = peer.sessions();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].id, "roam:laptop:s9");
+        assert_eq!(sessions[0].mode.as_deref(), Some("dev"));
     }
 
     /// The freshness baseline is the CORE's stamp, not the peer's own list.
@@ -2742,6 +3122,26 @@ mod tests {
         // The "last-opened" peer is whoever the spine's slot names; labels are unique.
         let picked = active_peer(&peers, &Some("alice".to_string())).unwrap();
         assert_eq!(picked.label(), "alice");
+    }
+
+    #[test]
+    fn routing_matches_the_longest_known_label_prefix() {
+        // Connection-card labels are free-form and may contain ':'. The old
+        // `rest.split(':').next()` found no peer for `desk:1`, so the roam id
+        // fell through to the main wire with a `roam:` prefix and no-oped.
+        let listener = test_listener();
+        let off = gate(Arc::new(AtomicBool::new(false)));
+        let desk = offline_peer("desk", listener.clone(), off.clone()).0;
+        let nested = offline_peer("desk:1", listener, off).0;
+        let peers = vec![desk, nested];
+
+        let owner = |id: &str| peer_for_session(&peers, id).map(|p| p.label().to_string());
+        assert_eq!(owner("roam:desk:s1").as_deref(), Some("desk"));
+        assert_eq!(owner("roam:desk:1:s2").as_deref(), Some("desk:1"));
+        // A longer label must not swallow a different short label's id.
+        assert_eq!(owner("roam:desktop:s3"), None);
+        assert_eq!(owner("roam:unknown:s4"), None);
+        assert_eq!(owner("s5"), None);
     }
 
     #[test]

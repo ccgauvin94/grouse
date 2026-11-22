@@ -26,16 +26,20 @@ final class Listener: CoreListener, @unchecked Sendable {
     }
 
     func onStatus(status: ConnectionStatus) {
-        let text: String
+        // Alert is NOT a connection transition: the core sends it for a one-off failure
+        // on a control path while the wire stays up. It goes to the status line only —
+        // routing it through handleStatus would flip `online` and swap the whole chat
+        // window for ConnectView.
+        let deliver: (CoreBridge) -> Void
         switch status {
-        case .disconnected: text = "disconnected"
-        case .connecting: text = "connecting"
-        case .ready: text = "ready"
-        case .syncing: text = "syncing"
-        case .error(let message): text = "error: \(message)"
-        case .alert(let message): text = "alert: \(message)"
+        case .disconnected: deliver = { $0.handleStatus("disconnected") }
+        case .connecting: deliver = { $0.handleStatus("connecting") }
+        case .ready: deliver = { $0.handleStatus("ready") }
+        case .syncing: deliver = { $0.handleStatus("syncing") }
+        case .error(let message): deliver = { $0.handleStatus("error: \(message)") }
+        case .alert(let message): deliver = { $0.handleAlert(message) }
         }
-        onMain { $0.handleStatus(text) }
+        onMain(deliver)
     }
 
     func onSessions(sessions: [SessionSummary]) {
@@ -67,7 +71,7 @@ final class Listener: CoreListener, @unchecked Sendable {
     }
 
     func onReplayProgress(sessionId: String, loaded: Int64, total: Int64, done: Bool) {
-        onMain { $0.handleReplay(loaded: loaded, total: total, done: done) }
+        onMain { $0.handleReplay(sessionId: sessionId, loaded: loaded, total: total, done: done) }
     }
 
     func onConfig(options: [ConfigOption]) {

@@ -38,7 +38,28 @@ final class ChatModel: ObservableObject, @unchecked Sendable {
     /// `window.has_older` from the last Window op — history the core can still page in.
     @Published private(set) var hasOlder = false
 
+    /// Everything needed to put the previous conversation back if a chat open fails
+    /// after the core has already painted the target (a cached paint precedes the
+    /// `session/load` that can still be refused).
+    struct Snapshot {
+        let rows: [ChatRow]
+        let streamingId: String?
+        let hasOlder: Bool
+    }
+
     private var index: [String: Int] = [:]
+
+    func snapshot() -> Snapshot {
+        Snapshot(rows: rows, streamingId: streamingId, hasOlder: hasOlder)
+    }
+
+    func restore(_ snapshot: Snapshot) {
+        rows = snapshot.rows
+        index = [:]
+        for (i, row) in rows.enumerated() { index[row.id] = i }
+        streamingId = snapshot.streamingId
+        hasOlder = snapshot.hasOlder
+    }
 
     func reset() {
         rows = []

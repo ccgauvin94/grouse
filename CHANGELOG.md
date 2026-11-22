@@ -6,6 +6,72 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — the full 2026-11-22 audit sweep
+
+Twelve parallel agents audited the core, both transports, the C ABI and every client
+(`docs/FULL_AUDIT_2026-11-22.md`); twelve more landed the fixes, partitioned by file
+ownership. Highlights, all with regression coverage where the layer has a test suite:
+
+- **Core reconnect never displays a chat the wire does not own.** The ended hook now advances
+  the backoff regardless of whether a session was bound, and carries an explicit optional
+  resume target; a displayed peer chat, a roam id or no chat at all produces `ConnectSpec::Attach`
+  (no `session/load`, no `session/new`, nothing bound). A chat switch during the backoff is
+  re-checked at timer time. Superseded wires' status/config/open-failure hooks are generation-
+  bound, and their in-flight handshake now races shutdown, so a stale connection cannot bind,
+  repaint or emit `Ready` over a newer one. Handshake and control RPCs are bounded; a second
+  recipe/elicitation request errors the responder it supersedes. `connect()` no longer parks for
+  15 s when superseded.
+- **Paint/verify/merge ordering.** Verification now happens BEFORE the paint: when a "fresh"
+  cache fails its probe, the paint is re-armed as a merge instead of leaving `merging` off and
+  appending the replay tail over the cached rows (the duplicated-newest-turn bug). Cold
+  `connect_resume` uses the same policy. Failed or cancelled merge loads disarm the merge gate
+  and restore the painted snapshot from `ReplayGuard::Drop`. Resync no longer ends a replay mid-
+  load, and a remote touch during our own turn can no longer be stamped current by `finish_turn`
+  (the rows were never fetched). `sync_stamp` is per session; resync's 8s×3 follow-ups survive a
+  no-move probe.
+- **Turn bookkeeping on loss.** A dropped main wire and an explicit roam disconnect now release
+  their turns through the shared `turn_lost` path (empty active run, run end, incomplete store)
+  instead of leaving clients stuck "working". Permission answers route by `tool_call_id` to the
+  owning wire — a main prompt stays answerable while a roam chat is on screen.
+- **Transcript and cache round-trips** keep ToolGroup subagent steps, `seq` and the server's
+  `created` stamp; the first id-less chunk adopts the next id instead of merging distinct
+  messages; an identical repaint keeps the backlog cursor; a lenient load with a skipped row is
+  marked unsettled; an empty save removes the stale file.
+- **Roam lifecycle:** relists merge cwds instead of wiping a new chat's; emitted sessions carry
+  their `dev` mode; a transient command error stays advisory so the supervisor can redial; a
+  deleted open chat stops being resurrected; labels containing ':' route by longest peer prefix;
+  every `session/list` page is bounded; stale permission responders die with the link.
+- **Unstable shim:** `config_read` echoes the requested key and stringifies non-string values;
+  new `tools_call_named` sends goose's required `extensionName` and propagates `isError` (the old
+  three-arg call now fails loudly while a wire exists, silent when disconnected); malformed
+  extension JSON reports an error; push dedupe is run-id aware.
+- **Android:** notification inline Reply carries the session id; a deferred main open can no
+  longer land over a roam chat; lost turns are removed from the client's in-flight set; turn
+  release uses the actual owner; pinned MCP Apps use the right `resourcesRead` argument order;
+  item ops are dropped when their owner is not the displayed chat; downloads are keyed by
+  endpoint/session/path. The chart WebView now renders errors as text under a CSP with JS file
+  access off and navigation blocked; entry intents are consumed only on a real launch; permission
+  and elicitation sheets are hosted above the nav graph; reading position, elicitation forms and
+  connection forms survive rotation; one shared fence grammar drives streaming and final Markdown;
+  the project dialog scrolls.
+- **Desktop:** new roam sessions use `roam:<label>:<id>`; a main-wire `Ready` no longer clears a
+  peer's turn state; `grouse_load_cached_transcript` no longer overwrites the live/bind-only paint;
+  AppBridge uses a 128-bit token with loopback origin and JSON content-type checks; TLS
+  verification is a persisted setting (migration-safe default); wire-only connects attach;
+  `grouse_tasks_paint` runs off the Qt thread. C ABI is 17 with all 102 symbols validated,
+  `catch_unwind` on the push parsers, NUL-safe strings, and a use-after-free fixed in the
+  core-create failure path.
+- **macOS:** an advisory `Alert` no longer logs the user out; a failed open restores the previous
+  transcript; the turn flag reconciles with `core.turnInFlight`; older history is reachable.
+- **Ratchet and CI:** the core inventory now compile-guards 34 more client-visible record fields;
+  the checker compares listener signatures, rejects escaping/anchor-comment evidence, and the
+  ledger has 112 surfaces / 126 rows with 19 pinned exclusions. Android unit tests and desktop
+  ctest now run in CI.
+
+Core: 323 unit + 27 spine + 1 roam lib + 4 roam core + 2 unstable tests; clippy `-D warnings`
+clean; parity self-test and checker pass; Android: 150 JVM tests and a debug APK build.
+Desktop Qt and macOS Swift builds are NOT possible on this host and remain unverified here.
+
 ### Fixed — the app comes back to the screen you left, not to the last main chat
 
 - **A reconnect binds nothing when the screen belongs to a peer.** Reported as "when I

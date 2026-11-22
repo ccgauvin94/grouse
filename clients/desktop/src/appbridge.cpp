@@ -4,9 +4,11 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QHostAddress>
 #include <QLocale>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QUrl>
 
 namespace {
 
@@ -84,6 +86,62 @@ window.addEventListener('message',function(ev){
     if (headCi >= 0)
         return (html.left(headCi + 6) + shim + html.mid(headCi + 6)).toUtf8();
     return (shim + html).toUtf8();
+}
+
+/// The server binds 127.0.0.1, but a listening socket alone is not an access
+/// control: any page in the user's browser can request a loopback URL. Check the
+/// Host the browser actually used (no DNS-rebinding aliases) and the Origin it
+/// claims, when it supplies one. A raw HTTP client (the unit tests, a CLI) has
+/// no Origin; a BROWSER always sends Sec-Fetch-Site, so require that one to say
+/// same-origin/none when present.
+bool isLoopbackHost(const QString &raw, quint16 port)
+{
+    const QString h = raw.trimmed();
+    QString host = h;
+    quint16 hostPort = 0;
+    if (h.startsWith(QLatin1Char('['))) {           // [::1]:1234
+        const int end = h.indexOf(QLatin1Char(']'));
+        if (end < 0)
+            return false;
+        host = h.mid(1, end - 1);
+        if (h.size() > end + 1) {
+            if (h.at(end + 1) != QLatin1Char(':'))
+                return false;
+            bool ok = false;
+            hostPort = quint16(h.mid(end + 2).toUInt(&ok));
+            if (!ok)
+                return false;
+        }
+    } else {
+        // QUrl::host() hands back a bare IPv6 literal ("::1"), which must not
+        // be split at its last colon as if it carried a port.
+        const QHostAddress bare(h);
+        if (!bare.isNull())
+            return bare.isLoopback();
+        const int colon = h.lastIndexOf(QLatin1Char(':'));
+        if (colon >= 0) {
+            bool ok = false;
+            hostPort = quint16(h.mid(colon + 1).toUInt(&ok));
+            if (!ok)
+                return false;
+            host = h.left(colon);
+        }
+    }
+    if (hostPort != 0 && hostPort != port)
+        return false;
+    if (host.compare(QLatin1String("localhost"), Qt::CaseInsensitive) == 0)
+        return true;
+    const QHostAddress addr(host);
+    return !addr.isNull() && addr.isLoopback();
+}
+
+bool isLoopbackOrigin(const QString &raw, quint16 port)
+{
+    const QUrl u(raw.trimmed());
+    if (!u.isValid() || u.scheme() != QLatin1String("http")
+        || (!u.host().isEmpty() && !isLoopbackHost(u.host(), 0)))
+        return false;
+    return u.port() == -1 || quint16(u.port()) == port;
 }
 
 } // namespace
@@ -198,6 +256,41 @@ void AppBridgeServer::handleRequest(QTcpSocket *sock, const QByteArray &all)
     const QList<QByteArray> first = lines.first().trimmed().split(' ');
     const QByteArray method = first.value(0);
     const QByteArray path = first.value(1);
+
+    QHash<QByteArray, QByteArray> headers;
+    for (int i = 1; i < lines.size(); ++i) {
+        const int colon = lines.at(i).indexOf(':');
+        if (colon > 0)
+            headers.insert(lines.at(i).left(colon).trimmed().toLower(),
+                           lines.at(i).mid(colon + 1).trimmed());
+    }
+    // The token is a capability, not a substitute for checking WHO is asking.
+    // Host is mandatory; Origin/Sec-Fetch-Site are browser-supplied and checked
+    // when present. Rejecting a cross-origin site here means a malicious local
+    // tab cannot inject a prompt into the user's chat even if it learns a token.
+    if (!isLoopbackHost(QString::fromLatin1(headers.value("host")), port())) {
+        respond(sock, 403, "text/plain", "loopback host required");
+        return;
+    }
+    if (headers.contains("origin")
+        && !isLoopbackOrigin(QString::fromLatin1(headers.value("origin")), port())) {
+        respond(sock, 403, "text/plain", "loopback origin required");
+        return;
+    }
+    const QByteArray fetchSite = headers.value("sec-fetch-site").toLower();
+    if (!fetchSite.isEmpty() && fetchSite != "same-origin" && fetchSite != "none") {
+        respond(sock, 403, "text/plain", "same-origin requests only");
+        return;
+    }
+    if (method == "POST") {
+        // A cross-site <form> cannot set application/json without a CORS
+        // preflight — which this server never answers favourably. Enforce the
+        // same rule server-side so a raw client cannot slip text/plain through.
+        if (!headers.value("content-type").toLower().startsWith("application/json")) {
+            respond(sock, 415, "text/plain", "application/json required");
+            return;
+        }
+    }
 
     // token = last path segment
     const int slash = path.lastIndexOf('/');

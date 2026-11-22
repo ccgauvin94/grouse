@@ -1029,6 +1029,8 @@ internal object IntegrityCheckingUniffiLib {
     }
     external fun uniffi_grouse_core_checksum_func_decide_notify(
     ): Int
+    external fun uniffi_grouse_core_checksum_func_decide_notify_run(
+    ): Int
     external fun uniffi_grouse_core_checksum_func_parse_push(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_active_session_id(
@@ -1238,6 +1240,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_grouse_core_checksum_method_grouseunstable_supported_models(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_tools_call(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_grouseunstable_tools_call_named(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_working_dir_update(
     ): Int
@@ -1586,6 +1590,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_tools_call(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`args`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_grouseunstable_tools_call_named(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`extensionName`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`args`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_working_dir_update(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`dir`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_init_callback_vtable_corelistener(`vtable`: UniffiVTableCallbackInterfaceCoreListener,
@@ -1593,6 +1599,8 @@ internal object UniffiLib {
     external fun uniffi_grouse_core_fn_init_callback_vtable_grouseunstablelistener(`vtable`: UniffiVTableCallbackInterfaceGrouseUnstableListener,
     ): Unit
     external fun uniffi_grouse_core_fn_func_decide_notify(`envelope`: RustBuffer.ByValue,`ctx`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_grouse_core_fn_func_decide_notify_run(`envelope`: RustBuffer.ByValue,`ctx`: RustBuffer.ByValue,`announcedRun`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_func_parse_push(`raw`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1715,7 +1723,10 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if ((lib.uniffi_grouse_core_checksum_func_decide_notify() and 0xFFFF) != 46161) {
+    if ((lib.uniffi_grouse_core_checksum_func_decide_notify() and 0xFFFF) != 17117) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_func_decide_notify_run() and 0xFFFF) != 13040) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_func_parse_push() and 0xFFFF) != 24581) {
@@ -1820,7 +1831,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_roam_connect() and 0xFFFF) != 53647) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_roam_disconnect() and 0xFFFF) != 55425) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_roam_disconnect() and 0xFFFF) != 23631) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_roam_new_session() and 0xFFFF) != 41163) {
@@ -1925,7 +1936,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_add_extension() and 0xFFFF) != 24761) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_read() and 0xFFFF) != 16179) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_read() and 0xFFFF) != 60159) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_upsert() and 0xFFFF) != 60061) {
@@ -2030,7 +2041,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_supported_models() and 0xFFFF) != 34598) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_tools_call() and 0xFFFF) != 444) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_tools_call() and 0xFFFF) != 57897) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_tools_call_named() and 0xFFFF) != 32334) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_working_dir_update() and 0xFFFF) != 28181) {
@@ -2999,7 +3013,10 @@ public interface CoreInterface {
     
     /**
      * Disconnect a roam peer (parallel peers stay live; only the named one
-     * is closed).
+     * is closed). Turns owned by that peer are lost with its link: without
+     * this they kept `in_flight`/`active_runs`/`incomplete` keys alive, so
+     * paging stayed blocked, prompts queued forever and reopens took the
+     * bind-only path for a chat that no longer existed on any wire.
      */
     fun `roamDisconnect`(`label`: kotlin.String)
     
@@ -4018,7 +4035,10 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     
     /**
      * Disconnect a roam peer (parallel peers stay live; only the named one
-     * is closed).
+     * is closed). Turns owned by that peer are lost with its link: without
+     * this they kept `in_flight`/`active_runs`/`incomplete` keys alive, so
+     * paging stayed blocked, prompts queued forever and reopens took the
+     * bind-only path for a chat that no longer existed on any wire.
      */override fun `roamDisconnect`(`label`: kotlin.String)
         = 
     callWithHandle {
@@ -5169,6 +5189,10 @@ public interface GrouseUnstableInterface {
     
     /**
      * Read one global config.yaml value; surfaces as `on_config_value(key, value)`.
+     *
+     * Goose's `ConfigReadResponse` carries ONLY `value` — there is no `key` to
+     * read back. The requested key is the one the UI matched against, so it is
+     * echoed unchanged; a reply that tried to name a key is not authoritative.
      */
     fun `configRead`(`key`: kotlin.String)
     
@@ -5394,10 +5418,23 @@ public interface GrouseUnstableInterface {
     fun `supportedModels`(`provider`: kotlin.String)
     
     /**
-     * Invoke a tool DIRECTLY — no model turn, deterministic. The concatenated text content
-     * blocks (or the error text) arrive on `on_tool_result`.
+     * DEPRECATED: use [`Self::tools_call_named`].
+     *
+     * Goose's `ToolsCallRequest` REQUIRES `extensionName`; this three-argument
+     * shape has no way to supply it and every call was rejected as invalid
+     * params. It stays on the contract so existing clients keep compiling, but
+     * it now fails LOUDLY on `on_tool_result` instead of silently sending a
+     * request the server throws away (which left clients' reply FIFO wedged).
      */
     fun `toolsCall`(`sessionId`: kotlin.String, `name`: kotlin.String, `args`: kotlin.String)
+    
+    /**
+     * Invoke a tool DIRECTLY — no model turn, deterministic. `extension_name`
+     * is goose's REQUIRED `extensionName` field (e.g. `shell` for
+     * `shell__run`); the concatenated text content blocks (or the error text)
+     * arrive on `on_tool_result`, with the reply's `isError` flag propagated.
+     */
+    fun `toolsCallNamed`(`sessionId`: kotlin.String, `extensionName`: kotlin.String, `name`: kotlin.String, `args`: kotlin.String)
     
     /**
      * Sanctioned working-directory rewrite for a session (Android-only wire method).
@@ -5545,6 +5582,10 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
     
     /**
      * Read one global config.yaml value; surfaces as `on_config_value(key, value)`.
+     *
+     * Goose's `ConfigReadResponse` carries ONLY `value` — there is no `key` to
+     * read back. The requested key is the one the UI matched against, so it is
+     * echoed unchanged; a reply that tried to name a key is not authoritative.
      */override fun `configRead`(`key`: kotlin.String)
         = 
     callWithHandle {
@@ -6173,8 +6214,13 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
 
     
     /**
-     * Invoke a tool DIRECTLY — no model turn, deterministic. The concatenated text content
-     * blocks (or the error text) arrive on `on_tool_result`.
+     * DEPRECATED: use [`Self::tools_call_named`].
+     *
+     * Goose's `ToolsCallRequest` REQUIRES `extensionName`; this three-argument
+     * shape has no way to supply it and every call was rejected as invalid
+     * params. It stays on the contract so existing clients keep compiling, but
+     * it now fails LOUDLY on `on_tool_result` instead of silently sending a
+     * request the server throws away (which left clients' reply FIFO wedged).
      */override fun `toolsCall`(`sessionId`: kotlin.String, `name`: kotlin.String, `args`: kotlin.String)
         = 
     callWithHandle {
@@ -6183,6 +6229,28 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
         it,
         
         FfiConverterString.lower(`sessionId`),
+        FfiConverterString.lower(`name`),
+        FfiConverterString.lower(`args`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Invoke a tool DIRECTLY — no model turn, deterministic. `extension_name`
+     * is goose's REQUIRED `extensionName` field (e.g. `shell` for
+     * `shell__run`); the concatenated text content blocks (or the error text)
+     * arrive on `on_tool_result`, with the reply's `isError` flag propagated.
+     */override fun `toolsCallNamed`(`sessionId`: kotlin.String, `extensionName`: kotlin.String, `name`: kotlin.String, `args`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_grouseunstable_tools_call_named(
+        it,
+        
+        FfiConverterString.lower(`sessionId`),
+        FfiConverterString.lower(`extensionName`),
         FfiConverterString.lower(`name`),
         FfiConverterString.lower(`args`),_status)
 }
@@ -6775,9 +6843,9 @@ data class NotifyContext (
      * The session and age of the last notification THIS client showed for a finished
      * turn. The two delivery paths overlap by design (a live connection sees the turn
      * end; the operator's sender pushes for the same turn), so the same event would be
-     * announced twice. Senders cannot disambiguate — goose's hook payload carries no run
-     * id — so recency is the available identity: the same session inside the window is
-     * the same turn.
+     * announced twice. Session alone is NOT enough: a genuine second turn in the same
+     * chat inside the window must still be announced. Pair it with a run id through
+     * [`decide_notify_run`]; without a run id only a short burst is suppressed.
      */
     var `announcedSession`: kotlin.String?
     , 
@@ -7073,6 +7141,15 @@ data class PushEnvelope (
     var `sessionId`: kotlin.String?
     , 
     var `text`: kotlin.String
+    , 
+    /**
+     * The run this turn ended, when the sender knows it. Goose's hook payload
+     * has no run id, so older senders leave this empty; clients that watched
+     * the turn end can supply it on the context side instead (see
+     * [`decide_notify_run`]). Optional with a default so existing callers and
+     * JSON payloads stay valid.
+     */
+    var `runId`: kotlin.String? = null 
     
 ){
     
@@ -7092,19 +7169,22 @@ public object FfiConverterTypePushEnvelope: FfiConverterRustBuffer<PushEnvelope>
             FfiConverterTypePushKind.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: PushEnvelope) = (
             FfiConverterTypePushKind.allocationSize(value.`kind`) +
             FfiConverterOptionalString.allocationSize(value.`sessionId`) +
-            FfiConverterString.allocationSize(value.`text`)
+            FfiConverterString.allocationSize(value.`text`) +
+            FfiConverterOptionalString.allocationSize(value.`runId`)
     )
 
     override fun write(value: PushEnvelope, buf: ByteBuffer) {
             FfiConverterTypePushKind.write(value.`kind`, buf)
             FfiConverterOptionalString.write(value.`sessionId`, buf)
             FfiConverterString.write(value.`text`, buf)
+            FfiConverterOptionalString.write(value.`runId`, buf)
     }
 }
 
@@ -10526,6 +10606,9 @@ public object FfiConverterSequenceTypePromptBlock: FfiConverterRustBuffer<List<P
          * The show/don't-show rule, shared by push delivery and by the in-session paths
          * (a client that watched a turn end constructs a `Turn` envelope from what it has
          * and asks the same question).
+         *
+         * Legacy entry point: callers that can name the run should use
+         * [`decide_notify_run`], which suppresses only the SECOND delivery of that run.
          */ fun `decideNotify`(`envelope`: PushEnvelope, `ctx`: NotifyContext): NotifyDecision {
             return FfiConverterTypeNotifyDecision.lift(
     uniffiRustCall() { _status ->
@@ -10534,6 +10617,26 @@ public object FfiConverterSequenceTypePromptBlock: FfiConverterRustBuffer<List<P
         
         FfiConverterTypePushEnvelope.lower(`envelope`),
         FfiConverterTypeNotifyContext.lower(`ctx`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * As [`decide_notify`], but with the run id the client announced last time
+         * (its live `activeRunId` at the moment it showed the notification). Pass it
+         * alongside [`PushEnvelope::run_id`] so two turns in the same chat are not
+         * mistaken for one; either id may be absent, in which case only a short
+         * same-session burst is suppressed.
+         */ fun `decideNotifyRun`(`envelope`: PushEnvelope, `ctx`: NotifyContext, `announcedRun`: kotlin.String?): NotifyDecision {
+            return FfiConverterTypeNotifyDecision.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_func_decide_notify_run(
+    
+        
+        FfiConverterTypePushEnvelope.lower(`envelope`),
+        FfiConverterTypeNotifyContext.lower(`ctx`),
+        FfiConverterOptionalString.lower(`announcedRun`),_status)
 }
     )
     }

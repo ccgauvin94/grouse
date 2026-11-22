@@ -534,16 +534,26 @@ internal fun SessionActionsDialog(
                 onDismissRequest = onDone,
                 title = { Text(stringResource(R.string.move_to_project)) },
                 text = {
-                    Column {
-                        // Sets project_id. It used to rewrite working_dir, which also moved where
-                        // the session's tools ran -- filing a chat and re-homing it were one act.
-                        TextButton(enabled = s.projectId != null, onClick = {
-                            cm.fileSession(s.sessionId, null); onDone()
-                        }) { Text(stringResource(R.string.chats_no_project)) }
-                        cm.projects.value.forEach { proj ->
-                            TextButton(enabled = proj.id != s.projectId, onClick = {
-                                cm.fileSession(s.sessionId, proj.id); onDone()
-                            }) { Text(proj.name) }
+                    // The project list comes from the server and has no upper bound. In a plain
+                    // Column it grew past the dialog and clipped Cancel, trapping the reader in
+                    // the chooser. A bounded, weighted LazyColumn scrolls the choices while the
+                    // real dialog button below stays reachable.
+                    Column(Modifier.fillMaxWidth().heightIn(max = 320.dp)) {
+                        LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+                            item {
+                                // Sets project_id. It used to rewrite working_dir, which also moved
+                                // where the session's tools ran -- filing a chat and re-homing it
+                                // were one act.
+                                TextButton(enabled = s.projectId != null, onClick = {
+                                    cm.fileSession(s.sessionId, null); onDone()
+                                }) { Text(stringResource(R.string.chats_no_project)) }
+                                HorizontalDivider()
+                            }
+                            items(cm.projects.value, key = { it.id }) { proj ->
+                                TextButton(enabled = proj.id != s.projectId, onClick = {
+                                    cm.fileSession(s.sessionId, proj.id); onDone()
+                                }) { Text(proj.name) }
+                            }
                         }
                     }
                 },

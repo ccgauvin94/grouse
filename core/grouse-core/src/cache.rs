@@ -167,7 +167,9 @@ impl CacheStore {
 
     /// Persist a session transcript as the RICH item list. An empty transcript
     /// (or empty session id) is not cached, so `load_transcript` reports
-    /// `None` for it. Returns whether the file was written.
+    /// `None` for it: a file left behind from an earlier, non-empty save would
+    /// otherwise keep painting rows the server no longer has. Returns whether
+    /// the file was written.
     pub fn save_transcript(
         &self,
         session_id: &str,
@@ -175,7 +177,11 @@ impl CacheStore {
         updated_at: &str,
         complete: bool,
     ) -> bool {
-        if session_id.is_empty() || items.is_empty() {
+        if session_id.is_empty() {
+            return true;
+        }
+        if items.is_empty() {
+            let _ = fs::remove_file(self.transcript_path(session_id));
             return true;
         }
         // Borrowed view, serialized straight: `to_value(items)` built a whole
@@ -250,14 +256,29 @@ impl CacheStore {
         if arr.is_empty() {
             return None;
         }
+        let mut skipped = false;
         let items: Vec<Item> = arr
             .iter()
-            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .filter_map(|v| match serde_json::from_value(v.clone()) {
+                Ok(item) => Some(item),
+                Err(_) => {
+                    skipped = true;
+                    None
+                }
+            })
             .collect();
         if items.is_empty() {
             return None;
         }
-        Some((items, updated_at, complete))
+        // The surviving rows are a PARTIAL conversation. A fresh stamp here
+        // would suppress the replay that would fetch the missing ones, so the
+        // store must look unsettled: `plan_paint` treats an empty stamp as a
+        // reason to load, and `complete: false` keeps paging honest.
+        if skipped {
+            Some((items, String::new(), false))
+        } else {
+            Some((items, updated_at, complete))
+        }
     }
 
     /// Delete a session's cached transcript and its tool cache.
@@ -481,7 +502,7 @@ mod tests {
     fn cache_transcript_round_trip() {
         let dir = temp_cache_dir("roundtrip");
         let store = CacheStore::new(dir.clone());
-        let items = vec![
+        let mut items = vec![
             text("m1", ItemKind::User, "hi"),
             text("m2", ItemKind::Agent, "hello there"),
             Item {
@@ -505,12 +526,16 @@ mod tests {
             },
             text("@1", ItemKind::Thought, "hmm"),
         ];
+        // The server clock is part of the rich row: a cache that dropped it
+        // sorted every painted row to the end of a merged timeline.
+        items[0].created = 1_710_000_000;
 
         assert!(store.save_transcript("sess/1", &items, "2026-08-12T10:00:00Z", true));
         let (loaded, updated_at, complete) =
             store.load_transcript("sess/1").expect("cache must load back");
         assert!(complete, "a saved complete transcript says so");
         assert_eq!(updated_at, "2026-08-12T10:00:00Z");
+        assert_eq!(loaded[0].created, 1_710_000_000, "the timeline clock is cached");
         assert_eq!(loaded, items, "the rich snapshot must round-trip exactly");
 
         // Desktop file naming: `/` escaped to `_`, `.json` suffix.
@@ -519,6 +544,13 @@ mod tests {
         // Empty transcripts are not cached (desktop semantics) → None on load.
         assert!(store.save_transcript("empty", &[], "2026-08-12T10:00:00Z", true));
         assert!(store.load_transcript("empty").is_none());
+
+        // Saving an EMPTY transcript must remove an earlier file, not just skip
+        // the write: a stale file left on disk keeps painting deleted rows.
+        assert!(dir.join("sess_1.json").exists());
+        assert!(store.save_transcript("sess/1", &[], "2026-08-12T11:00:00Z", true));
+        assert!(!dir.join("sess_1.json").exists(), "the stale file must be gone");
+        assert!(store.load_transcript("sess/1").is_none());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -643,6 +675,37 @@ mod tests {
         let (loaded, updated_at, _) = store.load_transcript("s1").expect("v3 cache loads");
         assert_eq!(updated_at, "2026-08-12T10:00:00Z");
         assert_eq!(loaded, items);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_lenient_load_with_a_skipped_row_is_unsettled() {
+        // A malformed item makes the typed parse fail; the lenient fallback
+        // keeps the readable rows but must NOT keep the fresh stamp, or the
+        // replay that would repair the missing row is suppressed forever.
+        let dir = temp_cache_dir("lenient");
+        let store = CacheStore::new(dir.clone());
+        let raw = serde_json::json!({
+            "v": super::TRANSCRIPT_CACHE_VERSION,
+            "updatedAt": "2026-11-22T21:00:00Z",
+            "complete": true,
+            "items": [
+                {
+                    "id": "m1", "kind": "Agent", "text": "kept", "detail": "",
+                    "output": "", "status": "", "app_key": "", "calls": []
+                },
+                { "id": "broken" }
+            ]
+        });
+        fs::write(dir.join("s1.json"), raw.to_string()).unwrap();
+        let (items, updated_at, complete) = store
+            .load_transcript("s1")
+            .expect("the readable row is still a useful paint");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "m1");
+        assert_eq!(updated_at, "", "a partial read is never fresh");
+        assert!(!complete, "a partial read does not reach the origin");
 
         let _ = fs::remove_dir_all(&dir);
     }

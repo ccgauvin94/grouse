@@ -60,11 +60,20 @@ import androidx.navigation.compose.rememberNavController
 import id.gauvin.grouse.ui.theme.GooseTheme
 import kotlinx.coroutines.launch
 
+/** Entry intents are one-shot: consume a fresh creation's launch intent and every real
+ *  `onNewIntent` delivery, but not the replay Android hands a recreated activity. Pure so
+ *  the rule (and its rotation case) can be checked without an Activity. */
+internal fun shouldConsumeEntryIntent(hasSavedState: Boolean, fromNewIntent: Boolean): Boolean =
+    fromNewIntent || !hasSavedState
+
 class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val cm = ConnectionManager.get(this)
-        handleEntry(intent, cm)
+        // A rotation (or any other recreation) replays the SAME intent. New chat / open
+        // session / send are one-shot launch instructions: consume them on a fresh start
+        // or on a real new delivery, never twice.
+        if (shouldConsumeEntryIntent(savedInstanceState != null, false)) handleEntry(intent, cm)
         setContent {
             GooseTheme(dynamicColor = cm.dynamicColor.value) {
                 AppRoot(this@MainActivity, cm)
@@ -75,7 +84,9 @@ class MainActivity : FragmentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleEntry(intent, ConnectionManager.get(this))
+        if (shouldConsumeEntryIntent(false, true)) {
+            handleEntry(intent, ConnectionManager.get(this))
+        }
     }
 
     /** Route share-sheet / shortcut / tile intents into ConnectionManager for the UI to pick up. */
@@ -229,6 +240,25 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
     // the Assistant thread must not fire once they have gone somewhere else (My Day, a
     // project, a roam endpoint, the drawer). See ConnectionManager.noteRoute.
     LaunchedEffect(route, drawerState.isOpen) { cm.noteRoute(route, drawerState.isOpen) }
+
+    // Approval and form requests are NOT chat-local: a tool can ask while the reader is on
+    // My Day, a project or Settings. They are hosted ONCE above the NavHost (below the lock
+    // overlay), so no route can park a request with no UI to answer it. A permission belongs
+    // to the running turn, so bring that chat forward; recipe parameters may be raised from
+    // the catalog, where their own screen is the better context, and only need the sheet.
+    val pendingPermission = cm.permissions.firstOrNull()
+    val pendingElicitation = cm.elicitations.firstOrNull()
+    LaunchedEffect(pendingPermission?.toolCallId, route) {
+        if (pendingPermission != null && route != "chat" && cm.configured) {
+            nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
+        }
+    }
+    LaunchedEffect(pendingElicitation?.requestKey, route) {
+        if (pendingElicitation != null && !pendingElicitation.recipeParams &&
+            route != "chat" && cm.configured) {
+            nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
+        }
+    }
     fun closeDrawer() = drawerScope.launch { drawerState.close() }
     fun openDrawer() = drawerScope.launch { drawerState.open() }
 
@@ -416,8 +446,20 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
                 cm.openSession(sid)
                 nav.navigate("chat") { launchSingleTop = true; popUpTo("landing") { inclusive = true } }
             }) }
+            }
+            // The one and only host of these sheets. They sit above every route, so a
+            // request that lands while the reader is on My Day or Settings is still
+            // actionable; ChatScreen deliberately hosts no copies.
+            pendingPermission?.let { req ->
+                PermissionSheet(req, onChoose = { cm.answerPermission(req, it) })
+            }
+            pendingElicitation?.let { e ->
+                ElicitationSheet(e,
+                    onAccept = { values -> cm.answerElicitation(e, values) },
+                    onDecline = { cm.answerElicitation(e, null) },
+                    onCancel = { cm.answerElicitation(e, null, cancelled = true) })
+            }
         }
-    }
     }
 }
 

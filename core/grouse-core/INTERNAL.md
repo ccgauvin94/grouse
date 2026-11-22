@@ -116,9 +116,11 @@ roam.rs        the peer registry: RoamPeer { label, transport, session list },
      rule. `Core` implements `DispatchHost`; a peer wraps it in `PrefixHost`.
    - `SessionHub` + `SessionGate` — ONE `TranscriptStore` per display session id,
      for every transport, with ONE display gate (see below).
-   - `PaintPlan` / `plan_paint` / `apply_paint` — the ONE cache policy (fresh
-     suppresses the replay, settled-but-stale merges a bounded `REPLAY_TAIL`,
-     incomplete/forced paints provisionally).
+   - `PaintPlan` / `plan_paint` / `apply_paint` / `PaintPlan::bind_only` — the ONE
+     cache policy with FOUR modes: fresh suppresses the replay, settled-but-stale
+     merges a bounded `REPLAY_TAIL`, incomplete/forced paints provisionally, and
+     a session with a turn in flight binds without painting (the server has no
+     copy of a reply that is still streaming, so a replay would delete it).
    - `ClientHandlers` / `connect_client` — the ONE SDK client builder: typed
      `session/update`, untyped custom notifications, permission requests, and
      server requests. Both transports register the same table, so a custom
@@ -320,6 +322,8 @@ the paint policy is `session::plan_paint` for both.
 ## Build & test
 
 - `cargo check`/`cargo test` via `distrobox enter kde-build`.
+  At the 2026-11-22 audit that was 300 unit + 24 spine tests (plus roam and
+  unstable); the spine file has grown since.
 - Tests: pure unit tests for stores/unstable (no server). For the spine, a
   minimal in-process scripted WS server (tokio-tungstenite). The desktop is no
   longer a reference implementation: it is a thin client over the C ABI

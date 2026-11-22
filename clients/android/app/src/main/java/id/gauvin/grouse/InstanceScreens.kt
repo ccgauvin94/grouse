@@ -106,9 +106,10 @@ import kotlinx.serialization.json.contentOrNull
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
-    var host by remember { mutableStateOf(cm.store.host) }
-    var port by remember { mutableStateOf(cm.store.port) }
-    var newKey by remember { mutableStateOf("") }
+    // Unsaved connection edits must survive rotation: the connect button is the commit point.
+    var host by rememberSaveable { mutableStateOf(cm.store.host) }
+    var port by rememberSaveable { mutableStateOf(cm.store.port) }
+    var newKey by rememberSaveable { mutableStateOf("") }
     var persistent by remember { mutableStateOf(cm.persistent) }
     val ctx = LocalContext.current
     Scaffold(topBar = {
@@ -130,7 +131,7 @@ fun InstanceScreen(cm: ConnectionManager, nav: NavController) {
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
                 OutlinedTextField(newKey, { newKey = it }, label = { Text(stringResource(R.string.replace_secret_key)) },
                     singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-                var wdir by remember { mutableStateOf(cm.store.workingDir) }
+                var wdir by rememberSaveable { mutableStateOf(cm.store.workingDir) }
                 OutlinedTextField(wdir, { wdir = it }, label = { Text(stringResource(R.string.working_directory)) },
                     supportingText = { Text(stringResource(R.string.instance_workdir_hint)) },
                     singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))

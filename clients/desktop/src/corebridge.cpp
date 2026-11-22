@@ -9,7 +9,11 @@
 #include <QLibrary>
 #include <QMetaObject>
 #include <QObject>
+#include <QRunnable>
+#include <QStringList>
+#include <QThreadPool>
 
+#include <functional>
 #include <utility>
 
 // ---------------------------------------------------------------------------
@@ -44,6 +48,18 @@ static QLibrary *loadLibrary()
 
 namespace {
 CoreBridge *g_testInstance = nullptr;
+
+// Plain QRunnable, not QThreadPool::start(callable) — Qt 6.7+ only, and the
+// Flatpak SDK / dev distrobox do not have to agree on a version.
+class CoreLambdaTask : public QRunnable
+{
+public:
+    explicit CoreLambdaTask(std::function<void()> fn) : m_fn(std::move(fn)) {}
+    void run() override { if (m_fn) m_fn(); }
+
+private:
+    std::function<void()> m_fn;
+};
 } // namespace
 
 CoreBridge *CoreBridge::instance()
@@ -82,7 +98,9 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_string_free);
     RESOLVE(grouse_push_parse);
     RESOLVE(grouse_push_decide);
+    RESOLVE(grouse_push_decide_run);
     RESOLVE(grouse_connect);
+    RESOLVE(grouse_connect_attach);
     RESOLVE(grouse_disconnect);
     RESOLVE(grouse_new_session);
     RESOLVE(grouse_new_session_with_mode);
@@ -105,6 +123,7 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_respond_permission);
     RESOLVE(grouse_status);
     RESOLVE(grouse_ready);
+    RESOLVE(grouse_connected);
     RESOLVE(grouse_set_run_summaries);
     RESOLVE(grouse_set_image_rescale);
     RESOLVE(grouse_image_rescale);
@@ -171,6 +190,7 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_unstable_schedules_update);
     RESOLVE(grouse_unstable_working_dir_update);
     RESOLVE(grouse_unstable_tools_call);
+    RESOLVE(grouse_unstable_tools_call_named);
     RESOLVE(grouse_unstable_resources_read);
     RESOLVE(grouse_unstable_respond_recipe_params);
     RESOLVE(grouse_unstable_respond_elicitation);
@@ -182,7 +202,7 @@ bool CoreBridge::resolve()
     // The listener table's layout and the symbol signatures are the contract.
     // An older core (or a stale GROUSE_CORE) is refused before any callback can
     // be invoked with the wrong arity.
-    static constexpr unsigned kExpectedAbiVersion = 16;
+    static constexpr unsigned kExpectedAbiVersion = 17;
     if (!a.grouse_abi_version) {
         qWarning() << "CoreBridge: core library predates the ABI version symbol; refusing it";
         return false;
@@ -192,23 +212,44 @@ bool CoreBridge::resolve()
                    << kExpectedAbiVersion << "; refusing it";
         return false;
     }
-    // The core must export every stable+unstable intent we depend on. If any
-    // resolved NULL, the core is not the expected version — refuse to proceed
-    // so failures are loud rather than segfaults on a NULL call later.
-    static_assert(sizeof(AimsApi) > 0, "AimsApi must be non-empty");
-    auto check = [&](auto *p) { return p != nullptr; };
-    const bool ok = check(a.grouse_core_create) && check(a.grouse_core_free)
-        && check(a.grouse_string_free) && check(a.grouse_connect)
-        && check(a.grouse_send_prompt) && check(a.grouse_new_session)
-        && check(a.grouse_open_session) && check(a.grouse_list_sessions)
-        && check(a.grouse_status) && check(a.grouse_ready)
-        && check(a.grouse_turn_log) && check(a.grouse_turn_diag)
-        && check(a.grouse_set_image_rescale) && check(a.grouse_image_rescale)
-        && check(a.grouse_tasks_refresh) && check(a.grouse_task_close)
-        && check(a.grouse_task_snooze) && check(a.grouse_task_react)
-        && check(a.grouse_assistant_project);
-    if (!ok) {
-        qWarning() << "CoreBridge: core library is missing required grouse_* symbols";
+    // EVERY symbol in AimsApi is required by ABI 17. Checking only a handful
+    // left an otherwise accepted .so one NULL call away from a crash (the first
+    // user of an unchecked Q_INVOKABLE). The size assertion makes a future
+    // member without a REQUIRE line a build error instead of a runtime gap.
+    static_assert(sizeof(AimsApi) / sizeof(void (*)()) == 102,
+                  "AimsApi gained a symbol: add it to the resolve + REQUIRE lists");
+    QStringList missing;
+#define REQUIRE(name) do { if (!a.name) missing << QStringLiteral(#name); } while (0)
+    REQUIRE(grouse_abi_version) REQUIRE(grouse_core_create) REQUIRE(grouse_core_free) REQUIRE(grouse_string_free);
+    REQUIRE(grouse_push_parse) REQUIRE(grouse_push_decide) REQUIRE(grouse_push_decide_run) REQUIRE(grouse_connect);
+    REQUIRE(grouse_connect_attach) REQUIRE(grouse_disconnect) REQUIRE(grouse_new_session) REQUIRE(grouse_new_session_with_mode);
+    REQUIRE(grouse_open_session) REQUIRE(grouse_refresh_session) REQUIRE(grouse_list_sessions) REQUIRE(grouse_load_cached_transcript);
+    REQUIRE(grouse_flush_caches) REQUIRE(grouse_send_prompt) REQUIRE(grouse_send_prompt_with_paths) REQUIRE(grouse_fetch_file);
+    REQUIRE(grouse_cancel) REQUIRE(grouse_set_config_option) REQUIRE(grouse_rename_session) REQUIRE(grouse_open_thread);
+    REQUIRE(grouse_current_thread_label) REQUIRE(grouse_archive_session) REQUIRE(grouse_unarchive_session) REQUIRE(grouse_delete_session);
+    REQUIRE(grouse_respond_permission) REQUIRE(grouse_status) REQUIRE(grouse_ready) REQUIRE(grouse_connected);
+    REQUIRE(grouse_set_run_summaries) REQUIRE(grouse_set_image_rescale) REQUIRE(grouse_image_rescale) REQUIRE(grouse_tasks_refresh);
+    REQUIRE(grouse_activity) REQUIRE(grouse_tasks_paint) REQUIRE(grouse_task_close) REQUIRE(grouse_task_snooze);
+    REQUIRE(grouse_task_react) REQUIRE(grouse_assistant_project) REQUIRE(grouse_run_summaries) REQUIRE(grouse_active_session_id);
+    REQUIRE(grouse_sessions) REQUIRE(grouse_transcript) REQUIRE(grouse_transcript_rich) REQUIRE(grouse_item);
+    REQUIRE(grouse_window) REQUIRE(grouse_load_older) REQUIRE(grouse_config) REQUIRE(grouse_turn_log);
+    REQUIRE(grouse_turn_diag) REQUIRE(grouse_roam_connect) REQUIRE(grouse_roam_disconnect) REQUIRE(grouse_roam_open_session);
+    REQUIRE(grouse_roam_new_session) REQUIRE(grouse_roam_new_session_cwd) REQUIRE(grouse_roam_new_session_with_mode) REQUIRE(grouse_identity_generate);
+    REQUIRE(grouse_identity_public_key) REQUIRE(grouse_card_fingerprint) REQUIRE(grouse_set_roam_identity) REQUIRE(grouse_unstable_steer);
+    REQUIRE(grouse_unstable_export_session) REQUIRE(grouse_unstable_session_info) REQUIRE(grouse_unstable_session_project) REQUIRE(grouse_unstable_list_tools);
+    REQUIRE(grouse_unstable_session_extensions_list) REQUIRE(grouse_unstable_session_extensions_add) REQUIRE(grouse_unstable_session_extensions_remove) REQUIRE(grouse_unstable_list_global_extensions);
+    REQUIRE(grouse_unstable_extension_catalog) REQUIRE(grouse_unstable_set_extension_enabled) REQUIRE(grouse_unstable_add_extension) REQUIRE(grouse_unstable_sources_list);
+    REQUIRE(grouse_unstable_sources_create) REQUIRE(grouse_unstable_sources_delete) REQUIRE(grouse_unstable_sources_update) REQUIRE(grouse_unstable_config_read);
+    REQUIRE(grouse_unstable_config_upsert) REQUIRE(grouse_unstable_supported_models) REQUIRE(grouse_unstable_providers_list) REQUIRE(grouse_unstable_recipes_list);
+    REQUIRE(grouse_unstable_recipes_schedule) REQUIRE(grouse_unstable_recipes_save) REQUIRE(grouse_unstable_recipes_delete) REQUIRE(grouse_unstable_schedules_list);
+    REQUIRE(grouse_unstable_schedules_pause) REQUIRE(grouse_unstable_schedules_unpause) REQUIRE(grouse_unstable_schedules_run_now) REQUIRE(grouse_unstable_schedules_delete);
+    REQUIRE(grouse_unstable_schedules_update) REQUIRE(grouse_unstable_working_dir_update) REQUIRE(grouse_unstable_tools_call) REQUIRE(grouse_unstable_tools_call_named);
+    REQUIRE(grouse_unstable_resources_read) REQUIRE(grouse_unstable_respond_recipe_params) REQUIRE(grouse_unstable_respond_elicitation) REQUIRE(grouse_unstable_context_report);
+    REQUIRE(grouse_set_advisor) REQUIRE(grouse_advisor);
+#undef REQUIRE
+    if (!missing.isEmpty()) {
+        qWarning() << "CoreBridge: core library is missing required grouse_* symbols:"
+                   << missing.join(QLatin1String(", "));
         return false;
     }
     m_api = a;
@@ -250,10 +291,17 @@ static void marshal(void *userData, QObject *kind, Fn &&fn)
 {
     Q_UNUSED(kind);
     auto *bridge = static_cast<CoreBridge *>(userData);
+    if (!bridge)
+        return;
+    // The bridge singleton outlives the Manager; the target is atomic because
+    // ~Manager calls clearTarget() while core callbacks may still be in flight.
     QObject *target = bridge->target();
     if (!target)
         return;
-    QMetaObject::invokeMethod(target, [target, captured = std::forward<Fn>(fn)]() mutable {
+    QMetaObject::invokeMethod(target, [bridge, target, captured = std::forward<Fn>(fn)]() mutable {
+        // A callback queued just before shutdown must not touch a dying Manager.
+        if (bridge->target() != target)
+            return;
         std::move(captured)(static_cast<Manager *>(target));
     }, Qt::QueuedConnection);
 }
@@ -460,9 +508,24 @@ void CoreBridge::installListener()
 
     char *err = nullptr;
     void *h = m_api.grouse_core_create(&table, this, nullptr, &err);
-    if (err)
-        m_api.grouse_string_free(err);
+    // Copy BEFORE freeing: the old qWarning read err after grouse_string_free.
+    QString errText = takeString(err);
+    if (errText.isEmpty())
+        errText = QStringLiteral("unknown");
     m_handle = h;
     if (!m_handle)
-        qWarning() << "CoreBridge: grouse_core_create failed:" << (err ? err : "unknown");
+        qWarning() << "CoreBridge: grouse_core_create failed:" << errText;
+}
+
+void CoreBridge::paintCachedTasksAsync() const
+{
+    if (!m_handle || !m_api.grouse_tasks_paint)
+        return;
+    // Copy the table and handle: the bridge outlives the Manager, but a task
+    // queued now must not read members that could change under it.
+    const AimsApi api = m_api;
+    void *h = m_handle;
+    QThreadPool::globalInstance()->start(new CoreLambdaTask([api, h] {
+        api.grouse_tasks_paint(h);
+    }));
 }

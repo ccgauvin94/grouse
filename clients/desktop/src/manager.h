@@ -53,6 +53,9 @@ class Manager : public QObject
     Q_PROPERTY(QString port READ port WRITE setPort NOTIFY settingsChanged)
     Q_PROPERTY(QString secretKey READ secretKey WRITE setSecretKey NOTIFY settingsChanged)
     Q_PROPERTY(bool useTls READ useTls WRITE setUseTls NOTIFY settingsChanged)
+    /** Trust-all TLS escape hatch for self-signed tailnet hosts. Off means WebPKI
+     *  verification; turning it on accepts any certificate for this host. */
+    Q_PROPERTY(bool acceptInvalidCerts READ acceptInvalidCerts WRITE setAcceptInvalidCerts NOTIFY settingsChanged)
     Q_PROPERTY(bool autoConnectEnabled READ autoConnectEnabled WRITE setAutoConnectEnabled NOTIFY settingsChanged)
     /** Desktop notifications for events the client already knows from its own
      *  connection (turn finished, approval needed, a session touched elsewhere). */
@@ -140,6 +143,17 @@ class Manager : public QObject
     Q_PROPERTY(QVariant pendingForm READ pendingForm NOTIFY pendingFormChanged)
 
 public:
+    /** The ONE place the TLS trust-all default lives. true keeps historical
+     *  self-signed tailnet installs working (the user can turn it off in
+     *  Settings); flip to false to make verification the default for new and
+     *  existing installs that have never touched the toggle. */
+    static constexpr bool DEFAULT_ACCEPT_INVALID_CERTS = true;
+
+    /** The peer a `roam:<label>:<id>` display id belongs to (empty for a local id). */
+    static QString roamPeerForSession(const QString &sessionId);
+    /** Only the wire that owns the turn may clear its state on a main-wire Ready. */
+    static bool mainWireOwnsTurnState(const QString &activePeerLabel) { return activePeerLabel.isEmpty(); }
+
     /// Compiled-in QtWebEngine availability (main() sets it before the QML
     /// engine loads; the UI reads it via Q_INVOKABLE inlineAppsEnabled()).
     static void setInlineAppsSupported(bool on);
@@ -151,6 +165,7 @@ public:
     QString port() const;
     QString secretKey() const;
     bool useTls() const;
+    bool acceptInvalidCerts() const;
     bool autoConnectEnabled() const;
     bool notificationsEnabled() const;
     bool configuredProvidersOnly() const;
@@ -169,6 +184,7 @@ public:
     void setPort(const QString &v);
     void setSecretKey(const QString &v);
     void setUseTls(bool v);
+    void setAcceptInvalidCerts(bool v);
     void setAutoConnectEnabled(bool v);
     void setNotificationsEnabled(bool v);
     void setConfiguredProvidersOnly(bool v);
@@ -829,6 +845,11 @@ private:
     /** Coalesce messagesChanged emissions while a turn streams (see m_updateTimer). */
     void requestMessagesUpdate();
     QString activeSessionId() const;
+    /** The MAIN wire's transport-level state (`grouse_connected`), which stays
+     *  true on an attach that bound no session — unlike `grouse_ready`. */
+    bool mainWireConnected() const;
+    /** Bind the chat already on screen after an attach (no UI reset, no new session). */
+    void bindSessionAfterAttach();
     /** Build the ServerConfig JSON `grouse_connect` consumes (consumes m_pendingRecipeId). */
     QString serverConfigJson();
     /** Build the serde Prompt JSON `grouse_send_prompt` consumes from text + ACP blocks. */
@@ -940,7 +961,6 @@ private:
     QHash<QString, QString> m_appHtml;
     /// Loopback host for apps opened in the browser (see appbridge.h).
     AppBridgeServer *m_appBridge = nullptr;
-    int m_appTokenSeq = 0;
     /// appKey -> bridge URL (stable per appKey so the inline view reloads the
     /// same document; token changes when the template refetches).
     QHash<QString, QString> m_appUrls;
@@ -958,6 +978,9 @@ private:
     bool m_roamRestored = false;   // persisted roam peers re-armed only once (at Ready)
     /// cwd of the freshly-opened chat, remembered so auto-connect can resume it.
     QString m_lastCwd;
+    /// The last connect was wire-only (attach): on Ready, bind whatever MAIN chat
+    /// is on screen rather than leaving every intent queued against no session.
+    bool m_wireOnlyConnect = false;
     /// When the last `openSession` started. Reported once per open, together with
     /// the first painted window, so "the client hangs on a chat switch" can be
     /// split into client prep vs. load-without-a-paint instead of guessed at.

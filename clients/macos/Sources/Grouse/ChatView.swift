@@ -34,6 +34,19 @@ struct ChatView: View {
         .navigationTitle(title)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
+                // `hasOlder` is the core's pagination cursor (has_older on Window).
+                // Without this action the flag was stored but older history was
+                // unreachable from the UI.
+                if chat.hasOlder {
+                    Button { bridge.loadOlder() } label: {
+                        Label(bridge.loadingOlder ? "Loading…" : "Older",
+                              systemImage: "chevron.up")
+                    }
+                    .disabled(bridge.loadingOlder)
+                    .help("Load 40 older messages")
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     bridge.cancel()
                 } label: {

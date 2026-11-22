@@ -314,11 +314,21 @@ class ConnectionManager private constructor(context: Context) {
     val dictationProviders = mutableStateOf("")
     // The core owns the socket, reconnect/backoff, the transcript, and the caches. `unstable`
     // is the _goose/unstable/* shim (recipes, schedules, skills, extensions, tools, config).
-    private val core = Core(object : CoreListener {
+    private val core: Core = Core(object : CoreListener {
         override fun onStatus(status: ConnectionStatus) { main.post { onCoreStatus(status) } }        override fun onSessions(sessions: List<SessionSummary>) { main.post { onCoreSessions(sessions) } }
         // The rich item stream (docs/TRANSCRIPT_MODEL.md): the only transcript
-        // channel.
-        override fun onItem(op: TranscriptOp) { main.post { onCoreItem(op) } }
+        // channel. Only Reset carries a session id; every other op is stamped here,
+        // on the emitting thread, with the store's owner (from the last Reset) so a
+        // queued paint for the chat we just left cannot land after the switch.
+        @Volatile private var emittedItemOwner: String? = null
+        override fun onItem(op: TranscriptOp) {
+            if (op is TranscriptOp.Reset) emittedItemOwner = op.sessionId
+            val owner = when (op) {
+                is TranscriptOp.Reset -> op.sessionId
+                else -> emittedItemOwner ?: runCatching { core.activeSessionId() }.getOrNull()
+            }
+            main.post { onCoreItem(op, owner) }
+        }
         override fun onUsage(used: Long, size: Long, cost: Double, currency: String) {
             main.post { usage.value = AcpEvent.Usage(used.toInt(), size.toInt(), cost, currency) }
         }
@@ -410,15 +420,23 @@ class ConnectionManager private constructor(context: Context) {
             main.post { advisorReport.value = sessionId to text }
         }
         override fun onFile(event: uniffi.grouse_core.FileEvent) {
+            // FileEvent carries only the server path, not the requesting chat. Pair it
+            // with the owner recorded at fetch time (queued: two peers can share a path);
+            // the core's display id is only a fallback for a fetch started elsewhere.
+            // Capture HERE — a later switch must not re-key an in-flight download.
+            val path = when (event) {
+                is uniffi.grouse_core.FileEvent.Progress -> event.path
+                is uniffi.grouse_core.FileEvent.Saved -> event.path
+                is uniffi.grouse_core.FileEvent.Failed -> event.path
+            }
+            val ownerKey = peekFileOwner(path) ?: runCatching { core.activeSessionId() }
+                .getOrNull()?.let { fileKey(it, path) } ?: fileKey(null, path)
+            if (event is uniffi.grouse_core.FileEvent.Saved ||
+                event is uniffi.grouse_core.FileEvent.Failed) finishFileOwner(path)
             main.post {
-                val path = when (event) {
-                    is uniffi.grouse_core.FileEvent.Progress -> event.path
-                    is uniffi.grouse_core.FileEvent.Saved -> event.path
-                    is uniffi.grouse_core.FileEvent.Failed -> event.path
-                }
                 when (event) {
                     is uniffi.grouse_core.FileEvent.Progress ->
-                        fileDownloads[path] =
+                        fileDownloads[ownerKey] =
                             FileDownload("downloading", event.received.toLong(), event.total.toLong(), "", "")
                     is uniffi.grouse_core.FileEvent.Saved -> {
                         // The core wrote it into app-private storage (the only
@@ -427,7 +445,7 @@ class ConnectionManager private constructor(context: Context) {
                         // and outlives the app; the private copy is then dead
                         // weight and goes.
                         val bytes = event.bytes.toLong()
-                        fileDownloads[path] =
+                        fileDownloads[ownerKey] =
                             FileDownload("saved", bytes, bytes, event.localPath, "")
                         val name = event.name
                         val mime = event.mime
@@ -442,13 +460,13 @@ class ConnectionManager private constructor(context: Context) {
                             if (exported != null) {
                                 runCatching { java.io.File(local).delete() }
                                 main.post {
-                                    fileDownloads[path] = FileDownload("saved", bytes, bytes, exported, "")
+                                    fileDownloads[ownerKey] = FileDownload("saved", bytes, bytes, exported, "")
                                 }
                             }
                         }
                     }
                     is uniffi.grouse_core.FileEvent.Failed ->
-                        fileDownloads[path] = FileDownload("failed", 0, 0, "", event.message)
+                        fileDownloads[ownerKey] = FileDownload("failed", 0, 0, "", event.message)
                 }
             }
         }
@@ -1225,7 +1243,8 @@ class ConnectionManager private constructor(context: Context) {
         val sep = appKey.indexOf('|')
         if (sep <= 0) return
         if (!appFetchInFlight.add(appKey)) return
-        io { unstable.resourcesRead(session, appKey.substring(0, sep), appKey.substring(sep + 1)) }
+        // appKey is "<extension>|<uri>" but resourcesRead takes (session, uri, extension).
+        io { unstable.resourcesRead(session, appKey.substring(sep + 1), appKey.substring(0, sep)) }
     }
 
     /** The transcript message backing a pinned appKey (its tool input + fetched template),
@@ -1653,6 +1672,9 @@ class ConnectionManager private constructor(context: Context) {
         // Roam: the session lives on the peer -- the core routes the chat to it.
         val peer = roamPeer(sessionId)
         if (peer != null) {
+            // A main open deferred while the first connect was in flight must never be
+            // consumed later over a peer screen: binding a main session DISPLAYS it.
+            pendingResumeAfterConnect = null
             currentRoamPeer = peer
             // Loading indicator: the header shows "Loading… N" while the
             // peer's transcript paints (cached snapshot) or replays (wire).
@@ -1912,7 +1934,10 @@ class ConnectionManager private constructor(context: Context) {
         // opening the drawer must never cancel the parked open. It stays in the signature so
         // the shell reports both together and no caller has to re-derive the rule.
         currentRoute = route
-        if (route != null && route != "chat" && route != "landing") dropDeferredAssistant()
+        // A roam chat uses the SAME "chat" route as a main chat: a parked Assistant
+        // open must not land over a peer's screen either.
+        if ((route != null && route != "chat" && route != "landing") ||
+            roamPeer(currentSession.value) != null) dropDeferredAssistant()
     }
 
     private fun dropDeferredAssistant() {
@@ -2336,8 +2361,26 @@ class ConnectionManager private constructor(context: Context) {
         }
     }
 
-    /** Send once connected — used by notification replies, which may arrive disconnected. */
-    fun sendWhenReady(text: String) = send(text)
+    /** Send once connected — used by notification replies, which may arrive disconnected.
+     *  Without a session id the reply belongs to the chat on screen (the historical call). */
+    fun sendWhenReady(text: String) = sendWhenReady(text, null)
+
+    /**
+     * Send a notification reply to the chat that ALERTED, not to whatever is on screen now.
+     * A reply cannot go out until the core has bound its session (dispatch rejects a send
+     * whose expected session differs from the bound one), so park it in that chat's queue
+     * and open the chat; that chat's Ready — main or peer — is the drain that sends it.
+     */
+    fun sendWhenReady(text: String, sessionId: String? = null) {
+        val target = sessionId?.takeIf { it.isNotBlank() }
+        if (target == null || target == currentSession.value) {
+            send(text)
+            return
+        }
+        noteApp("app: notification reply parked for $target (shown ${currentSession.value})")
+        enqueue(PendingSend(text, emptyList(), emptyList(), target))
+        openSession(target)
+    }
 
     /**
      * Promote one parked message into the running turn ("steer"). This REDIRECTS the reply
@@ -2716,6 +2759,16 @@ class ConnectionManager private constructor(context: Context) {
      */
     private fun releaseTurnForLostWire(lostSessionId: String) {
         if (!turnOwnerMatches(turnInFlightSession, currentSession.value, lostSessionId)) return
+        // Drop the id from the per-chat set too. Leaving it there made a switch away
+        // and back RE-DERIVE turnInFlight from inFlight in resetTurnRouting, so the
+        // dead turn's spinner came back with no wire left to end it.
+        val lostRunId = activeRunIds[lostSessionId]
+        inFlight.remove(lostSessionId)
+        activeRunIds.remove(lostSessionId)
+        if (lostRunId != null && lostRunId == activeRunId) {
+            activeRunId = null
+            activeRunIdState.value = null
+        }
         busy.value = false
         turnInFlight = false
         turnInFlightSession = null
@@ -2766,8 +2819,12 @@ class ConnectionManager private constructor(context: Context) {
                 live = false; connecting = false; online.value = false
                 replayActive.value = false
                 status.value = "not connected"
-                // The only owner of the turn on this socket is the on-screen main chat.
-                if (currentRoamPeer == null) currentSession.value?.let { releaseTurnForLostWire(it) }
+                // The turn may belong to a chat the reader already switched away from;
+                // the recorded owner wins over the screen (both are main-wire ids here).
+                if (currentRoamPeer == null) {
+                    (turnInFlightSession ?: currentSession.value)
+                        ?.takeIf { roamPeer(it) == null }?.let { releaseTurnForLostWire(it) }
+                }
                 // A drop is not the user's cue to act any more: retry it, bounded, resuming
                 // the chat on screen. (Explicit disconnects don't exist on the main wire —
                 // there is no intent for one — so every drop here is fair game.)
@@ -2777,7 +2834,10 @@ class ConnectionManager private constructor(context: Context) {
                 live = false; connecting = false; online.value = false
                 replayActive.value = false
                 status.value = friendlyConnectError(st.message)
-                if (currentRoamPeer == null) currentSession.value?.let { releaseTurnForLostWire(it) }
+                if (currentRoamPeer == null) {
+                    (turnInFlightSession ?: currentSession.value)
+                        ?.takeIf { roamPeer(it) == null }?.let { releaseTurnForLostWire(it) }
+                }
                 // A refusal (bad key, untrusted cert) is not worth a retry schedule — the
                 // dot goes straight to red so the connection settings are one tap away.
                 if (linkFailureIsTerminal(st.message)) {
@@ -2819,12 +2879,18 @@ class ConnectionManager private constructor(context: Context) {
         val deferred = pendingResumeAfterConnect
         if (deferred != null) {
             pendingResumeAfterConnect = null
-            if (pendingRecipeId != null) core.newSessionWithMode(
-                pendingRecipeId.also { pendingRecipeId = null },
-                pendingProjectId.also { pendingProjectId = null },
-                pendingMode.also { pendingMode = null })
-            else core.openSession(deferred)
-            return
+            // The user may have switched to a peer (or to a different main chat) while
+            // the connect was in flight. A deferred open BINDS, and binding DISPLAYS:
+            // consuming it now would repaint the peer screen with a main transcript.
+            if (currentRoamPeer == null && resumeTargetFor(currentSession.value) == deferred) {
+                if (pendingRecipeId != null) core.newSessionWithMode(
+                    pendingRecipeId.also { pendingRecipeId = null },
+                    pendingProjectId.also { pendingProjectId = null },
+                    pendingMode.also { pendingMode = null })
+                else core.openSession(deferred)
+                return
+            }
+            noteApp("app: dropped deferred open $deferred (peer=$currentRoamPeer shown=${currentSession.value})")
         }
         if (pendingNewSessionAfterConnect) {
             pendingNewSessionAfterConnect = false
@@ -2982,18 +3048,53 @@ class ConnectionManager private constructor(context: Context) {
     private val olderPending = mutableListOf<Pair<String, ChatMessage>>()
     private var loadingOlder = false
     /**
-     * Server-shared files being downloaded, keyed by the SERVER-side path (what
-     * the core keys `onFile` on). Absent means idle — a reopened chat starts
-     * empty on purpose, because the core's cache is the record: the first tap
-     * reports `saved` without a round trip.
+     * Server-shared files being downloaded, keyed by OWNER + server path. A path is
+     * only unique on one peer/session: two peers can share a relative path, so a
+     * path-only key showed one chat's card the other chat's progress. Absent means
+     * idle — a reopened chat starts empty on purpose, because the core's cache is
+     * the record: the first tap reports `saved` without a round trip.
      */
     val fileDownloads = androidx.compose.runtime.mutableStateMapOf<String, FileDownload>()
+
+    /** The full download key: peer namespace + display session id + server path. */
+    private fun fileKey(sessionId: String?, path: String): String {
+        val sid = sessionId.orEmpty()
+        return "${roamPeer(sid) ?: "main"}|$sid|$path"
+    }
+
+    /** UI lookup for a row in the CURRENT chat (which own the row's file). */
+    fun fileDownload(file: AttachedFile): FileDownload? =
+        currentSession.value?.let { fileDownloads[fileKey(it, file.path)] }
+
+    /** `FileEvent` carries no session id, so remember who asked, in fetch order. */
+    private val fileFetchOwners = java.util.concurrent.ConcurrentHashMap<String, ArrayDeque<String>>()
+
+    private fun noteFileFetch(sessionId: String, path: String): String {
+        val key = fileKey(sessionId, path)
+        synchronized(fileFetchOwners) {
+            fileFetchOwners.getOrPut(path) { ArrayDeque() }.addLast(key)
+        }
+        return key
+    }
+
+    private fun peekFileOwner(path: String): String? = synchronized(fileFetchOwners) {
+        fileFetchOwners[path]?.firstOrNull()
+    }
+
+    private fun finishFileOwner(path: String) {
+        synchronized(fileFetchOwners) {
+            val queue = fileFetchOwners[path] ?: return@synchronized
+            queue.removeFirst()
+            if (queue.isEmpty()) fileFetchOwners.remove(path)
+        }
+    }
 
     /** Fetch a shared file (an `ItemKind.FILE` row) into this device's cache. */
     fun fetchFile(file: AttachedFile) {
         val sid = currentSession.value ?: return
         if (file.path.isEmpty()) return
-        fileDownloads[file.path] = FileDownload("downloading", 0, file.bytes.coerceAtLeast(0), "", "")
+        val key = noteFileFetch(sid, file.path)
+        fileDownloads[key] = FileDownload("downloading", 0, file.bytes.coerceAtLeast(0), "", "")
         core.fetchFile(sid, file.path, file.name, file.mime, file.sha256)
     }
 
@@ -3037,7 +3138,16 @@ class ConnectionManager private constructor(context: Context) {
         return messages.indexOfFirst { it.id == appId }
     }
 
-    private fun onCoreItem(op: TranscriptOp) {
+    private fun onCoreItem(op: TranscriptOp, owner: String?) {
+        // The core's display gate can still name the chat we just left when an op is
+        // emitted, and by the time this main-looper lambda runs the screen may already
+        // show the new chat (or vice versa). Never paint a stale owner's rows into the
+        // new chat's bubble map. Unknown owner (no Reset yet in this process) is allowed.
+        val shown = currentSession.value
+        if (owner != null && shown != null && owner != shown) {
+            noteApp("app: dropped ${op.javaClass.simpleName} owner=$owner shown=$shown")
+            return
+        }
         when (op) {
             is TranscriptOp.Reset -> {
                 noteCoreEvent()
@@ -3387,7 +3497,9 @@ class ConnectionManager private constructor(context: Context) {
                         announcedSecsAgo = null,
                         announceAnyTurn = true))
                 if (decision.show) {
-                    notifier.postMessage(decision.summary, decision.body)
+                    // The alert names its chat: an inline Reply taps back into THIS
+                    // conversation even if the reader has moved on by then.
+                    notifier.postMessage(decision.summary, decision.body, currentSession.value)
                     noteAnnouncedTurn(currentSession.value)
                 }
             }
@@ -3526,8 +3638,10 @@ class ConnectionManager private constructor(context: Context) {
                 // for a peer that was about to come back on its own.
                 if (currentRoamPeer == label) replayActive.value = false
                 // A settled dial failure is terminal for the turn it owned: nothing will
-                // ever end it on that wire.
-                currentSession.value?.takeIf { roamPeer(it) == label }
+                // ever end it on that wire. Use the recorded turn owner first — the reader
+                // may have switched to a different chat on the same peer (or away from it).
+                listOf(turnInFlightSession, currentSession.value)
+                    .firstOrNull { it != null && roamPeer(it) == label }
                     ?.let { releaseTurnForLostWire(it) }
                 status.value = "roam: $label — ${st.removePrefix("error:")}"
                 // A terminal dial error is exactly what the user needs to read: do NOT

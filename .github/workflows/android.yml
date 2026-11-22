@@ -83,6 +83,12 @@ jobs:
             echo "::warning::No keystore secret available; this APK uses the runner's throwaway debug key and will not install over a released app."
           fi
 
+      # JVM unit tests are framework-free parsers and wire-framing checks; they
+      # need no emulator and gate a push here instead of being a local-only step.
+      - name: Run JVM unit tests
+        run: ./gradlew --no-daemon testDebugUnitTest
+        working-directory: clients/android
+
       - name: Build debug APK
         run: ./gradlew --no-daemon assembleDebug
         working-directory: clients/android

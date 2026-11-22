@@ -49,8 +49,11 @@ macro_rules! record_surface {
     };
 }
 
-use crate::attachments::UploadedFile;
-use crate::{ActiveWork, Item, ItemKind, SubagentStep, ToolCall, TranscriptOp};
+use crate::attachments::{FileEvent, UploadedFile};
+use crate::{
+    ActiveWork, ConfigChoice, ConfigOption, Item, ItemKind, PermissionOption, PermissionRequest,
+    ProjectSummary, PromptBlock, SessionSummary, SubagentStep, ToolCall, TranscriptOp,
+};
 
 /// The same for an enum whose variants all carry fields (`{ .. }` matches them).
 macro_rules! struct_enum_surface {
@@ -162,6 +165,92 @@ record_surface!(
     sha256,
 );
 
+// The sidebar, the connect/settings screens and the permission dialog read
+// these records too. They crossed the boundary from day one and were missing
+// from this inventory — which meant a field added to one of them could not
+// break the ratchet. Guard them the same way as the transcript records.
+record_surface!(
+    SessionSummary,
+    SESSION_FIELDS,
+    "session":
+    id,
+    title,
+    updated_at,
+    last_message_snippet,
+    project_id,
+    message_count,
+    model,
+    has_recipe,
+    has_new,
+    mode,
+    archived,
+);
+
+record_surface!(
+    ConfigOption,
+    CONFIG_FIELDS,
+    "config":
+    id,
+    value,
+    name,
+    choices,
+);
+
+record_surface!(
+    ConfigChoice,
+    CHOICE_FIELDS,
+    "choice":
+    value,
+    name,
+);
+
+record_surface!(
+    PermissionRequest,
+    PERMISSION_FIELDS,
+    "permission":
+    tool_call_id,
+    title,
+    detail,
+    options,
+);
+
+record_surface!(
+    PermissionOption,
+    PERMISSION_OPTION_FIELDS,
+    "permission_option":
+    option_id,
+    name,
+    kind,
+);
+
+record_surface!(
+    ProjectSummary,
+    PROJECT_FIELDS,
+    "project":
+    path,
+    name,
+    description,
+);
+
+struct_enum_surface!(
+    PromptBlock,
+    PROMPT_BLOCK_VARIANTS,
+    "prompt_block":
+    Text,
+    Image,
+    Resource,
+    Link,
+);
+
+struct_enum_surface!(
+    FileEvent,
+    FILE_EVENT_VARIANTS,
+    "file_event":
+    Progress,
+    Saved,
+    Failed,
+);
+
 struct_enum_surface!(
     TranscriptOp,
     TRANSCRIPT_OPS,
@@ -221,6 +310,40 @@ pub static LISTENER_EVENTS: &[&str] = &[
     "listener.on_advisor_report",
 ];
 
+/// The same callbacks with their parameter types, for the signature check.
+///
+/// `LISTENER_EVENTS` alone cannot see a changed parameter type: the trait
+/// still has `fn on_file`, so a C ABI trampoline built for the OLD event payload
+/// keeps passing the parity check while reading the new one with the wrong
+/// arity or shape. These signatures are hand-kept like the names; the checker
+/// parses the trait and compares NORMALIZED signatures (no `&self`, no
+/// parameter names, no whitespace) on both sides.
+pub static LISTENER_SIGNATURES: &[&str] = &[
+    "on_status(status: ConnectionStatus)",
+    "on_sessions(sessions: Vec<SessionSummary>)",
+    "on_item(op: TranscriptOp)",
+    "on_usage(used: i64, size: i64, cost: f64, currency: String)",
+    "on_run_ended(session_id: String, stop_reason: String)",
+    "on_thread_timeline(label: String, rows: Vec<TimelineRow>)",
+    "on_sensitivity(data: String)",
+    "on_speak(text: String)",
+    "on_config(options: Vec<ConfigOption>)",
+    "on_permission_request(request: PermissionRequest)",
+    "on_session_touched(session_id: String, title: String, updated_at: String)",
+    "on_projects(projects: Vec<ProjectSummary>)",
+    "on_roam_peer_status(label: String, status: String)",
+    "on_roam_sessions(label: String, sessions: Vec<SessionSummary>)",
+    "on_peer_new_session(label: String, session_id: String)",
+    "on_active_run(session_id: String, run_id: String)",
+    "on_commands(commands: Vec<String>)",
+    "on_session_open_failed(session_id: String, message: String)",
+    "on_tasks(tasks: String)",
+    "on_thread_ready(label: String, session_id: String)",
+    "on_replay_progress(session_id: String, loaded: i64, total: i64, done: bool)",
+    "on_file(event: crate::attachments::FileEvent)",
+    "on_advisor_report(session_id: String, text: String)",
+];
+
 /// Every id in the inventory, in one list. What the checker reads.
 pub fn all() -> Vec<&'static str> {
     let mut out = Vec::new();
@@ -230,6 +353,14 @@ pub fn all() -> Vec<&'static str> {
         STEP_FIELDS,
         WORK_FIELDS,
         FILE_FIELDS,
+        SESSION_FIELDS,
+        CONFIG_FIELDS,
+        CHOICE_FIELDS,
+        PERMISSION_FIELDS,
+        PERMISSION_OPTION_FIELDS,
+        PROJECT_FIELDS,
+        PROMPT_BLOCK_VARIANTS,
+        FILE_EVENT_VARIANTS,
         TRANSCRIPT_OPS,
         ITEM_KINDS,
         LISTENER_EVENTS,
@@ -254,8 +385,9 @@ mod tests {
         for id in &ids {
             assert!(!id.is_empty());
             let (prefix, rest) = id.split_once('.').expect("an id is `group.name`");
-            // i(tem) / c(all) / s(tep) / w(ork) / f(ile) / o(p) / k(ind) / l(istener).
-            assert!(['i', 'c', 's', 'w', 'f', 'o', 'k', 'l'].contains(&prefix.chars().next().unwrap()));
+            // i(tem) / c(all/hoice) / s(tep/ession) / w(ork) / f(ile) /
+            // o(p) / k(ind) / l(istener) / p(ermission/prompt/project).
+            assert!(['i', 'c', 's', 'w', 'f', 'o', 'k', 'l', 'p'].contains(&prefix.chars().next().unwrap()));
             assert!(!rest.is_empty(), "empty name in {id}");
             assert!(seen.insert(*id), "duplicate id: {id}");
         }
@@ -270,9 +402,18 @@ mod tests {
             (CALL_FIELDS, 8),
             (STEP_FIELDS, 2),
             (FILE_FIELDS, 5),
+            (SESSION_FIELDS, 11),
+            (CONFIG_FIELDS, 4),
+            (CHOICE_FIELDS, 2),
+            (PERMISSION_FIELDS, 4),
+            (PERMISSION_OPTION_FIELDS, 3),
+            (PROJECT_FIELDS, 3),
+            (PROMPT_BLOCK_VARIANTS, 4),
+            (FILE_EVENT_VARIANTS, 3),
             (TRANSCRIPT_OPS, 6),
             (ITEM_KINDS, 9),
             (LISTENER_EVENTS, 23),
+            (LISTENER_SIGNATURES, 23),
         ] {
             assert_eq!(group.len(), n, "{} changed size: {:?}", group.len(), group);
         }

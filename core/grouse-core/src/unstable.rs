@@ -231,7 +231,15 @@ impl GrouseUnstable {
     /// Enable an extension for THIS session. The add reply is the moment the session's tool
     /// set is current, so refresh tools + session extensions from here (desktop behavior).
     pub fn session_extensions_add(&self, session_id: String, extension: String) {
-        let Ok(extension) = serde_json::from_str::<Value>(&extension) else { return };
+        let Ok(extension) = serde_json::from_str::<Value>(&extension) else {
+            // The UI waits for a re-list after an add. A bad payload never
+            // reaches the server, so without an explicit error it waits forever.
+            self.listener.on_error(
+                "_goose/unstable/session/extensions/add".to_string(),
+                "invalid extension JSON".to_string(),
+            );
+            return;
+        };
         let Some(conn) = self.route(&session_id) else { return };
         if !self.require_bound_session(&*conn, &session_id, "_goose/unstable/session/extensions/add")
         {
@@ -298,7 +306,13 @@ impl GrouseUnstable {
 
     /// Add a GLOBAL extension (defaults for NEW sessions); re-lists.
     pub fn add_extension(&self, extension: String, enabled: bool) {
-        let Ok(extension) = serde_json::from_str::<Value>(&extension) else { return };
+        let Ok(extension) = serde_json::from_str::<Value>(&extension) else {
+            self.listener.on_error(
+                "_goose/unstable/config/extensions/add".to_string(),
+                "invalid extension JSON".to_string(),
+            );
+            return;
+        };
         let Some(conn) = spine::current_conn() else { return };
         self.call(
             &*conn,
@@ -407,13 +421,17 @@ impl GrouseUnstable {
     // -----------------------------------------------------------------------
 
     /// Read one global config.yaml value; surfaces as `on_config_value(key, value)`.
+    ///
+    /// Goose's `ConfigReadResponse` carries ONLY `value` — there is no `key` to
+    /// read back. The requested key is the one the UI matched against, so it is
+    /// echoed unchanged; a reply that tried to name a key is not authoritative.
     pub fn config_read(&self, key: String) {
         let Some(conn) = spine::current_conn() else { return };
-        if let Some(result) = self.call(&*conn, "_goose/unstable/config/read", json!({"key": key}))
+        if let Some(result) =
+            self.call(&*conn, "_goose/unstable/config/read", json!({"key": key.clone()}))
         {
-            let key = result.get("key").and_then(Value::as_str).unwrap_or_default();
-            let value = result.get("value").and_then(Value::as_str).unwrap_or_default();
-            self.listener.on_config_value(key.to_string(), value.to_string());
+            let value = config_value_string(result.get("value"));
+            self.listener.on_config_value(key, value);
         }
     }
 
@@ -596,22 +614,55 @@ impl GrouseUnstable {
         );
     }
 
-    /// Invoke a tool DIRECTLY — no model turn, deterministic. The concatenated text content
-    /// blocks (or the error text) arrive on `on_tool_result`.
-    pub fn tools_call(&self, session_id: String, name: String, args: String) {
-        // A malformed-args call can never get a server reply, and clients
-        // FIFO a reply to every tools_call (Android's toolCallQueue) — the
-        // caller must be answered. The no-connection path stays a SILENT
-        // no-op by contract (CONTRACT §1; grouse-unstable pins it).
+    /// DEPRECATED: use [`Self::tools_call_named`].
+    ///
+    /// Goose's `ToolsCallRequest` REQUIRES `extensionName`; this three-argument
+    /// shape has no way to supply it and every call was rejected as invalid
+    /// params. It stays on the contract so existing clients keep compiling, but
+    /// it now fails LOUDLY on `on_tool_result` instead of silently sending a
+    /// request the server throws away (which left clients' reply FIFO wedged).
+    pub fn tools_call(&self, session_id: String, _name: String, _args: String) {
+        // Disconnected is a silent no-op on the whole shim (CONTRACT §1, pinned
+        // by grouse-unstable); answer loudly only when a wire exists to call.
+        if self.route(&session_id).is_none() {
+            return;
+        }
+        self.listener.on_tool_result("extensionName is required".to_string(), true);
+    }
+
+    /// Invoke a tool DIRECTLY — no model turn, deterministic. `extension_name`
+    /// is goose's REQUIRED `extensionName` field (e.g. `shell` for
+    /// `shell__run`); the concatenated text content blocks (or the error text)
+    /// arrive on `on_tool_result`, with the reply's `isError` flag propagated.
+    pub fn tools_call_named(
+        &self,
+        session_id: String,
+        extension_name: String,
+        name: String,
+        args: String,
+    ) {
+        // The no-connection path stays a SILENT no-op by contract (CONTRACT
+        // §1, pinned by grouse-unstable), so resolve the owner before any
+        // local error emission. A malformed-args call can never get a server
+        // reply, and clients FIFO a reply to every tools_call — answer it here.
+        let Some(conn) = self.route(&session_id) else { return };
         let Ok(args) = serde_json::from_str::<Value>(&args) else {
             self.listener
                 .on_tool_result("tools/call: arguments were not valid JSON".into(), true);
             return;
         };
-        let Some(conn) = self.route(&session_id) else { return };
+        if extension_name.trim().is_empty() {
+            self.listener.on_tool_result("extensionName is required".to_string(), true);
+            return;
+        }
         match conn.rpc(
             "_goose/unstable/tools/call",
-            json!({"sessionId": session_id, "name": name, "arguments": args}),
+            json!({
+                "sessionId": session_id,
+                "extensionName": extension_name,
+                "name": name,
+                "arguments": args,
+            }),
         ) {
             Ok(result) => {
                 let mut text = String::new();
@@ -622,7 +673,10 @@ impl GrouseUnstable {
                         }
                     }
                 }
-                self.listener.on_tool_result(text, false);
+                // A tool can fail at the server without the RPC itself failing:
+                // goose reports that as `isError: true` on a successful reply.
+                let is_error = result.get("isError").and_then(Value::as_bool).unwrap_or(false);
+                self.listener.on_tool_result(text, is_error);
             }
             Err(e) => self.listener.on_tool_result(format!("{e}"), true),
         }
@@ -956,6 +1010,17 @@ impl GrouseUnstable {
             json!({"scheduleId": schedule_id}),
         );
         self.relist_schedules(&*conn);
+    }
+}
+
+/// A config value as the UI's string-shaped `on_config_value` wants it. Goose
+/// returns a JSON value (numbers and booleans are common: `GOOSE_MODE`,
+/// `max_turns`), so only JSON null becomes an empty string.
+fn config_value_string(value: Option<&Value>) -> String {
+    match value {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => v.to_string(),
     }
 }
 
@@ -1515,10 +1580,13 @@ mod tests {
     }
 
     #[test]
-    fn config_read_emits_value_and_upsert_is_silent() {        let _guard = TEST_LOCK.lock();
+    fn config_read_emits_value_and_upsert_is_silent() {
+        let _guard = TEST_LOCK.lock();
         let stub = StubConn::new();
         stub.script(vec![
-            Ok(json!({"key": "model", "value": "claude-3-7-sonnet"})),
+            // Goose's ConfigReadResponse has only `value`; any `key` it did
+            // carry is not authoritative for the UI's outstanding request.
+            Ok(json!({"key": "some-other-key", "value": "claude-3-7-sonnet"})),
             Ok(Value::Null), // upsert reply
         ]);
         let (g, rec) = harness(stub.clone());
@@ -1533,6 +1601,31 @@ mod tests {
                 ("_goose/unstable/config/read", json!({"key": "model"})),
                 ("_goose/unstable/config/upsert", json!({"key": "mode", "value": "auto"})),
             ],
+        );
+    }
+
+    #[test]
+    fn config_read_stringifies_non_string_values() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        stub.script(vec![
+            Ok(json!({"value": 42})),
+            Ok(json!({"value": true})),
+            Ok(json!({"value": null})),
+        ]);
+        let (g, rec) = harness(stub.clone());
+
+        for key in ["max_turns", "verbose", "unset"] {
+            g.config_read(key.to_string());
+        }
+
+        assert_eq!(
+            rec.events(),
+            vec![
+                Ev::ConfigValue("max_turns".to_string(), "42".to_string()),
+                Ev::ConfigValue("verbose".to_string(), "true".to_string()),
+                Ev::ConfigValue("unset".to_string(), String::new()),
+            ]
         );
     }
 
@@ -1600,6 +1693,32 @@ mod tests {
                 ("_goose/unstable/config/extensions/list", json!({})),
             ],
         );
+    }
+
+    #[test]
+    fn malformed_extension_json_reports_an_error_instead_of_waiting_for_a_re_list() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        stub.set_session("s1");
+        let (g, rec) = harness(stub.clone());
+
+        g.session_extensions_add("s1".to_string(), "not json".to_string());
+        g.add_extension("not json".to_string(), true);
+
+        assert_eq!(
+            rec.events(),
+            vec![
+                Ev::Error(
+                    "_goose/unstable/session/extensions/add".to_string(),
+                    "invalid extension JSON".to_string(),
+                ),
+                Ev::Error(
+                    "_goose/unstable/config/extensions/add".to_string(),
+                    "invalid extension JSON".to_string(),
+                ),
+            ]
+        );
+        assert_calls(&stub, &[]);
     }
 
     #[test]
@@ -1910,32 +2029,72 @@ mod tests {
     }
 
     #[test]
-    fn tools_call_emits_result_or_error() {
+    fn tools_call_named_sends_extension_name_and_propagates_is_error() {
         let _guard = TEST_LOCK.lock();
         let stub = StubConn::new();
         stub.script(vec![
             Ok(json!({"content": [{"type": "text", "text": "out1"}, {"type": "text", "text": "out2"}]})),
+            Ok(json!({"content": [{"type": "text", "text": "nope"}], "isError": true})),
             Err(err()),
         ]);
         let (g, rec) = harness(stub.clone());
 
-        g.tools_call("s1".to_string(), "shell__run".to_string(), r#"{"cmd":"echo hi"}"#.to_string());
-        g.tools_call("s1".to_string(), "shell__run".to_string(), r#"{"cmd":"boom"}"#.to_string());
+        g.tools_call_named(
+            "s1".to_string(), "shell".to_string(), "shell__run".to_string(),
+            r#"{"cmd":"echo hi"}"#.to_string(),
+        );
+        g.tools_call_named(
+            "s1".to_string(), "shell".to_string(), "shell__run".to_string(),
+            r#"{"cmd":"boom"}"#.to_string(),
+        );
+        g.tools_call_named(
+            "s1".to_string(), "shell".to_string(), "shell__run".to_string(),
+            r#"{"cmd":"lost"}"#.to_string(),
+        );
 
         assert_eq!(
             rec.events(),
             vec![
                 Ev::ToolResult("out1out2".to_string(), false),
+                Ev::ToolResult("nope".to_string(), true),
                 Ev::ToolResult("boom".to_string(), true),
             ]
         );
-        assert_calls(
-            &stub,
-            &[
-                ("_goose/unstable/tools/call", json!({"sessionId": "s1", "name": "shell__run", "arguments": {"cmd": "echo hi"}})),
-                ("_goose/unstable/tools/call", json!({"sessionId": "s1", "name": "shell__run", "arguments": {"cmd": "boom"}})),
-            ],
+        let params = json!({
+            "sessionId": "s1", "extensionName": "shell", "name": "shell__run",
+        });
+        let calls = stub.calls();
+        assert_eq!(calls.len(), 3);
+        for (method, got) in &calls {
+            assert_eq!(method, "_goose/unstable/tools/call");
+            let mut expected = params.clone();
+            let args = got.get("arguments").expect("required arguments field").clone();
+            expected["arguments"] = args;
+            assert_eq!(got, &expected);
+        }
+        assert_eq!(calls[0].1["arguments"], json!({"cmd": "echo hi"}));
+        assert_eq!(calls[1].1["arguments"], json!({"cmd": "boom"}));
+    }
+
+    #[test]
+    fn deprecated_tools_call_fails_loudly_without_sending_invalid_params() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        let (g, rec) = harness(stub.clone());
+
+        g.tools_call(
+            "s1".to_string(), "shell__run".to_string(), r#"{"cmd":"echo hi"}"#.to_string(),
         );
+        g.tools_call_named(
+            "s1".to_string(), String::new(), "shell__run".to_string(),
+            r#"{"cmd":"echo hi"}"#.to_string(),
+        );
+
+        assert_eq!(rec.events(), vec![
+            Ev::ToolResult("extensionName is required".to_string(), true),
+            Ev::ToolResult("extensionName is required".to_string(), true),
+        ]);
+        assert_calls(&stub, &[]);
     }
 
     #[test]
@@ -1947,7 +2106,9 @@ mod tests {
         // Malformed args: the caller still gets an error on_tool_result (the
         // client FIFO pairs every tools_call with a reply; a silent return
         // stalls it forever).
-        g.tools_call("s1".to_string(), "shell".to_string(), "not json".to_string());
+        g.tools_call_named(
+            "s1".to_string(), "shell".to_string(), "shell".to_string(), "not json".to_string(),
+        );
 
         assert_eq!(rec.events(), vec![Ev::ToolResult(
             "tools/call: arguments were not valid JSON".to_string(), true)]);

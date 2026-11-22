@@ -44,7 +44,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.DragInteraction
@@ -98,7 +98,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.mapSaver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.toMutableStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -126,6 +128,7 @@ import com.halilibo.richtext.markdown.Markdown
 import com.halilibo.richtext.ui.material3.RichText
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -369,12 +372,40 @@ private fun RoamSubtitle(peer: String, status: String?, onClick: () -> Unit) {
  *  the viewport is, and — when a reply is streaming — that row's id and measured height.
  *  A data class so [androidx.compose.runtime.snapshotFlow] conflates equal frames instead of
  *  emitting for every unrelated layout pass. */
-private data class EndFrame(
+internal data class EndFrame(
     val count: Int,
     val viewport: Int,
     val streamId: Long?,
     val size: Int,
 )
+
+/** Whether the follower must unpin because the streaming row has just outgrown a screen.
+ *  Pure so the crossing rule can be tested without a Compose hierarchy; the latch is on the
+ *  CROSSING, not on "is over one screen", so a reader who re-pins is not immediately
+ *  un-pinned again by the next token. */
+internal fun crossedStreamingViewport(frame: EndFrame, wasOverScreen: Boolean): Boolean {
+    if (frame.streamId == null || frame.viewport <= 0 || frame.size <= 0) return false
+    return frame.size >= frame.viewport && !wasOverScreen
+}
+
+/** A reader's place in ONE chat, encoded as a saveable string (only primitive types survive
+ *  `rememberSaveable` across process death). Index 0/offset 0 is the bottom of this reversed
+ *  list; anything else is history and must NOT be followed to the end on restore. */
+internal data class ReadingPosition(val index: Int, val offset: Int) {
+    val atBottom: Boolean get() = index == 0 && offset == 0
+
+    internal fun encode(): String = "$index:$offset"
+
+    companion object {
+        fun decode(encoded: String?): ReadingPosition? {
+            val parts = encoded?.split(':') ?: return null
+            if (parts.size != 2) return null
+            val index = parts[0].toIntOrNull() ?: return null
+            val offset = parts[1].toIntOrNull() ?: return null
+            return if (index >= 0 && offset >= 0) ReadingPosition(index, offset) else null
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -449,7 +480,22 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
             input = pending
         }
     }
-    val listState = rememberLazyListState()
+    // The reader's place is per chat AND survives rotation. rememberSaveable keeps the map;
+    // the list state itself is keyed on the session so switching chats cannot inherit the
+    // previous chat's scroll offset. Disposal writes the position just before the key (and
+    // therefore the state object) changes; rotation disposes the whole composition.
+    val savedPositions = rememberSaveable(saver = stringValuesSaver()) {
+        mutableStateMapOf<String, String>()
+    }
+    val sessionKey = cm.currentSession.value.orEmpty()
+    val restore = ReadingPosition.decode(savedPositions[sessionKey]) ?: ReadingPosition(0, 0)
+    val listState = remember(sessionKey) { LazyListState(restore.index, restore.offset) }
+    DisposableEffect(sessionKey) {
+        onDispose {
+            savedPositions[sessionKey] = ReadingPosition(
+                listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset).encode()
+        }
+    }
     // Leaving the chat closes the mic: conversation mode must not keep recording in the
     // background (or after a navigate-away).
     DisposableEffect(Unit) { onDispose { cm.stopConversation() } }
@@ -549,11 +595,15 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
     // jump-to-bottom arrow sometimes needed two presses: the first press spent the distance
     // that had appeared since the last measurement. So the list is driven from its own LAYOUT
     // (below) rather than from the arrival of messages.
-    var follow by remember(cm.currentSession.value) { mutableStateOf(true) }
+    // A returning reader starts UNPINNED: initialising to true here would let the follower's
+    // first frame scroll the restored history position away before the restore effect runs.
+    var follow by remember(sessionKey) {
+        mutableStateOf((ReadingPosition.decode(savedPositions[sessionKey]) ?: ReadingPosition(0, 0)).atBottom)
+    }
     // Follow decisions are keyed on a FINGER, not on scrolling: this code scrolls the list too
     // (the pin, and the jump-to-bottom button), and a programmatic scroll that read as "the
     // reader took over" would unpin itself and then never recover.
-    var fingerOnList by remember(cm.currentSession.value) { mutableStateOf(false) }
+    var fingerOnList by remember(sessionKey) { mutableStateOf(false) }
 
     // The FREEZE: the text a live reply is held at, while the reader is not following it.
     //
@@ -566,10 +616,10 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
     // jumping to the newest text, with the list re-pinning — the moment the reader asks for
     // it. The held text lives HERE rather than in the bubble because the bubble is disposed
     // when it scrolls out of view, and a re-created one would silently reanimate mid-read.
-    var heldStream by remember(cm.currentSession.value) {
+    var heldStream by remember(sessionKey) {
         mutableStateOf<Pair<Long, String>?>(null)
     }
-    LaunchedEffect(cm.currentSession.value, follow, cm.streamingRowId.value) {
+    LaunchedEffect(sessionKey, follow, cm.streamingRowId.value) {
         val id = cm.streamingRowId.value
         heldStream = when {
             // Back at the bottom: the row catches up and the follower re-pins.
@@ -648,7 +698,7 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                 return@collect
             }
             val nowOverScreen = f.viewport > 0 && f.size >= f.viewport
-            val crossed = nowOverScreen && !overScreen
+            val crossed = crossedStreamingViewport(f, overScreen)
             overScreen = nowOverScreen
             if (follow && crossed) {
                 follow = false   // freezes the row via heldStream, below
@@ -680,21 +730,21 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
             }
         }
     }
-    // Opening a session, or swapping in a fresh transcript after a replay, starts at the newest
-    // row and stays there while the core fills the window in. The follower does the pinning;
-    // this only arms it, so it now holds through the background backfill (600ms a page) instead
-    // of giving up after three quiet ticks. (Identical Rebuilds never touch `messages`, so a
-    // plain re-render still preserves the reading position.)
-    LaunchedEffect(cm.currentSession.value, cm.replayDoneTick.value) {
-        follow = true
-        listState.scrollToItem(0)
-    }
-
-    cm.elicitations.firstOrNull()?.let { e ->
-        ElicitationSheet(e,
-            onAccept = { values -> cm.answerElicitation(e, values) },
-            onDecline = { cm.answerElicitation(e, null) },
-            onCancel = { cm.answerElicitation(e, null, cancelled = true) })
+    // Opening a session with no saved place (or swapping in a fresh transcript after a replay)
+    // starts at the newest row. A RETURNING reader is restored BEFORE the follower is armed:
+    // arming it first would let the next layout frame pin them to the bottom of the chat they
+    // were reading halfway up. The follower still owns the pinning during backfill (600ms a
+    // page); this only decides whether it is armed at all. Identical Rebuilds never touch
+    // `messages`, so a plain re-render still preserves the reading position.
+    LaunchedEffect(sessionKey, cm.replayDoneTick.value) {
+        val saved = ReadingPosition.decode(savedPositions[sessionKey])
+        if (saved == null) {
+            listState.scrollToItem(0)
+            follow = true
+        } else {
+            listState.scrollToItem(saved.index, saved.offset)
+            follow = saved.atBottom
+        }
     }
 
     // Background RPC failures surface as a toast, not a transcript bubble — the chat is
@@ -719,10 +769,6 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
             cm.exportData.value = null
         }
     }
-    cm.permissions.firstOrNull()?.let { req ->
-        PermissionSheet(req, onChoose = { cm.answerPermission(req, it) })
-    }
-
     if (showActivity) {
         ActivitySheet(cm, onDismiss = { showActivity = false })
     }
@@ -1948,6 +1994,53 @@ fun AdvisorCard(text: String, onDismiss: () -> Unit) {
     }
 }
 
+/** mapSaver adapters for the form's two maps: only primitive values survive a Bundle, so
+ *  the state maps themselves are rebuilt on restore rather than remembered as objects. */
+private fun stringValuesSaver() = androidx.compose.runtime.saveable.Saver<
+        androidx.compose.runtime.snapshots.SnapshotStateMap<String, String>, Map<String, String>>(
+    save = { state -> state.toMap() },
+    restore = { raw -> raw.toList().toMutableStateMap() },
+)
+
+private fun booleanValuesSaver() = androidx.compose.runtime.saveable.Saver<
+        androidx.compose.runtime.snapshots.SnapshotStateMap<String, Boolean>, Map<String, Boolean>>(
+    save = { state -> state.toMap() },
+    restore = { raw -> raw.toList().toMutableStateMap() },
+)
+
+/** Required numeric fields must PARSE, not merely be non-blank: "abc" used to enable Submit
+ *  and then vanish from the answer map (toDoubleOrNull returned null), so the tool received
+ *  a missing key instead of a validation error. Pure so the rule is testable on the JVM. */
+internal fun elicitationComplete(
+    fields: List<AcpEvent.ElicitField>,
+    text: Map<String, String>,
+): Boolean = fields.filter { it.required }.all { f ->
+    when (f.type) {
+        "boolean" -> true
+        "number", "integer" -> text[f.name]?.toDoubleOrNull() != null
+        else -> !text[f.name].isNullOrBlank()
+    }
+}
+
+/** The wire values a submitted form sends, built in one place so validation and submission
+ *  cannot disagree about which fields are present. */
+internal fun elicitationValues(
+    fields: List<AcpEvent.ElicitField>,
+    text: Map<String, String>,
+    bools: Map<String, Boolean>,
+): Map<String, JsonPrimitive> = buildMap {
+    fields.forEach { f ->
+        when {
+            f.type == "boolean" -> put(f.name, JsonPrimitive(bools[f.name] ?: false))
+            f.type == "number" || f.type == "integer" -> text[f.name]?.toDoubleOrNull()?.let { n ->
+                put(f.name, if (f.type == "integer") JsonPrimitive(n.toLong()) else JsonPrimitive(n))
+            }
+            else -> text[f.name]?.takeIf { it.isNotBlank() }
+                ?.let { put(f.name, JsonPrimitive(it)) }
+        }
+    }
+}
+
 /** Form elicitation (MCP/ACP): a tool asked for structured input. Renders the requested
  *  schema as native controls — switch for booleans, choice chips for enums, keyboard-typed
  *  fields otherwise — and answers accept/decline/cancel. Dismissing the sheet cancels. */
@@ -1959,8 +2052,15 @@ fun ElicitationSheet(
     onDecline: () -> Unit,
     onCancel: () -> Unit,
 ) {
-    val text = remember(e.requestKey) { mutableStateMapOf<String, String>() }
-    val bools = remember(e.requestKey) { mutableStateMapOf<String, Boolean>() }
+    // A form is a request the server is waiting on: rotation (or dark-mode recreate) must
+    // not wipe half-filled values and leave the request parked with no way to answer it.
+    // Keyed by requestKey so a NEW request starts clean even in the same composition.
+    val text = rememberSaveable(e.requestKey, saver = stringValuesSaver()) {
+        mutableStateMapOf<String, String>()
+    }
+    val bools = rememberSaveable(e.requestKey, saver = booleanValuesSaver()) {
+        mutableStateMapOf<String, Boolean>()
+    }
     ModalBottomSheet(onDismissRequest = onCancel) {
         Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)
             .verticalScroll(rememberScrollState())) {
@@ -2003,30 +2103,12 @@ fun ElicitationSheet(
                 }
             }
             Spacer(Modifier.height(18.dp))
-            val complete = e.fields.filter { it.required }.all { f ->
-                if (f.type == "boolean") true else !text[f.name].isNullOrBlank()
-            }
+            val complete = elicitationComplete(e.fields, text)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = onDecline) { Text(stringResource(R.string.decline)) }
                 Spacer(Modifier.width(8.dp))
                 Button(enabled = complete, onClick = {
-                    val values = buildMap {
-                        e.fields.forEach { f ->
-                            when {
-                                f.type == "boolean" ->
-                                    put(f.name, kotlinx.serialization.json.JsonPrimitive(bools[f.name] ?: false))
-                                f.type == "number" || f.type == "integer" ->
-                                    text[f.name]?.toDoubleOrNull()?.let { n ->
-                                        if (f.type == "integer")
-                                            put(f.name, kotlinx.serialization.json.JsonPrimitive(n.toLong()))
-                                        else put(f.name, kotlinx.serialization.json.JsonPrimitive(n))
-                                    }
-                                else -> text[f.name]?.takeIf { it.isNotBlank() }
-                                    ?.let { put(f.name, kotlinx.serialization.json.JsonPrimitive(it)) }
-                            }
-                        }
-                    }
-                    onAccept(values)
+                    onAccept(elicitationValues(e.fields, text, bools))
                 }) { Text(stringResource(R.string.submit)) }
             }
         }
@@ -2542,7 +2624,7 @@ internal fun SharedFileRow(cm: ConnectionManager, m: ChatMessage, ctx: Context) 
         )
         return
     }
-    val state = cm.fileDownloads[file.path]
+    val state = cm.fileDownload(file)
     val phase = state?.state ?: "idle"
     val busy = phase == "downloading"
     val ready = phase == "saved"
@@ -2551,7 +2633,7 @@ internal fun SharedFileRow(cm: ConnectionManager, m: ChatMessage, ctx: Context) 
     // again, and the core answers `saved` from its own cache anyway.
     val inline = isInlineImage(file.mime, file.name, file.bytes)
     LaunchedEffect(file.path) {
-        if (inline && cm.fileDownloads[file.path] == null) cm.fetchFile(file)
+        if (inline && cm.fileDownload(file) == null) cm.fetchFile(file)
     }
     // The preview, once the bytes are here. A copy exported to Downloads is a
     // content:// URI and BitmapFactory cannot read it — inline images are NOT

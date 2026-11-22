@@ -88,7 +88,7 @@ defaulting to real verification; roam byte stream). The UI supplies only
 |---|---|---|
 | `connect(config: ServerConfig)` | — | opens the WebSocket; `initialize`; then new-or-resume per §4 |
 | `connect_resume(config, session_id)` | — | connect, and BIND `session_id` on the first handshake (no throwaway `session/new`): the cold start for a client that already knows which chat to show. Binding is also DISPLAYING — the cached transcript is painted and becomes the one the client sees |
-| `connect_attach(config)` | — | connect and bind **nothing**: no `session/new`, no `session/load`, no display change. The reconnect for a wire whose job is the CONNECTION while a chat this wire does not own is on screen (a roam peer's) or no chat is open at all — `session/list`, projects and My Day all work with no session bound, and the first `open_session` binds. Never use a resume here: resuming binds, which repaints the client's transcript with that chat (2026-11-22: a foreground reconnect naming the last MAIN chat replaced the roam chat on screen with it) |
+| `connect_attach(config)` | — | **New 2026-11-22.** connect and bind **nothing**: no `session/new`, no `session/load`, no display change. The reconnect for a wire whose job is the CONNECTION while a chat this wire does not own is on screen (a roam peer's) or no chat is open at all — `session/list`, projects and My Day all work with no session bound, and the first `open_session` binds. Never use a resume here: resuming binds, which repaints the client's transcript with that chat (2026-11-22: a foreground reconnect naming the last MAIN chat replaced the roam chat on screen with it) |
 | `disconnect()` | — | explicit close, no reconnect |
 | `new_session(recipe_id: Option<String>, project_id: Option<String>)` | — | `session/new` with `_meta.client` + cwd; `recipeId`/`projectId` when given. `projectId` is persisted by stock goose at creation, so a project chat needs no post-creation `session/project/update`. A project is written **twice**: the column, and `_meta.tags {"grouse.project": <slug>}` beside it (`session::PROJECT_TAG_KEY`). goose is retiring `project_id` in favour of client-owned tags (grouse#5 / upstream #13014 → #13173), so the tag is the half that survives; a server ≤1.58 drops unknown `_meta` keys, so the write is harmless there and the column still files the chat. The read side (`project_from_meta`) takes the column first and falls back to the tag, and blank counts as absent in both |
 | `open_session(session_id: String)` | — | `session/load` with the real cwd (core resolves it); a settled, matching cache paints authoritatively and suppresses the replay, a settled-but-stale one merges a bounded tail, an incomplete one repaints provisionally and takes a tail big enough to replace what it painted — and a session with a **turn in flight** paints NOTHING and takes a BIND-ONLY load (`_meta.replayTail: 1`), because the server cannot know the reply being streamed and a replay that replaces the store would delete it. The recent part paints first and history behind it is paged in (`load_older`, §3.5) |
@@ -109,6 +109,15 @@ defaulting to real verification; roam byte stream). The UI supplies only
 | `task_react(id, reaction)` | — | `acted` \| `dismissed` \| `wrong` \| `muted` — assistant-state's only learning signal |
 | `open_thread(label)` | — | §3.6: open that area's own conversation, creating it the first time. The label→session map lives on the SERVER (`assistant-state`'s `thread_sessions`), so two clients reach the SAME chat instead of each minting one |
 | `current_thread_label()` | → `String` | the label of the conversation on screen ("" when it is not a thread chat) — a getter, so a client needs no private copy of the map |
+
+**Which connect on reconnect (2026-11-22).** A client chooses from what is on
+screen: if the displayed session is MAIN-owned, `connect_resume(config, id)`;
+if a roam-`roam:<peer>:…` session is displayed, or NO session is displayed,
+`connect_attach(config)` — attach whenever there is no main-owned session to
+resume. `connected()` (not `ready()`) is then "may I reuse this wire?" for
+`session/list`, projects and My Day; `ready()` stays false until a session is
+bound. Resuming merely because a wire came back binds and repaints the last main
+chat, which replaced the roam chat the reader was actually looking at.
 
 ### 3.2 `CoreListener` — events (core → UI), one method per family
 
@@ -205,7 +214,7 @@ cache paint in place.
 
 - `status(): ConnectionStatus` — `Disconnected | Connecting | Ready | Syncing | Error(String)`. `Alert(String)` is the advisory variant: a one-off control-path failure (e.g. a `session/set_config_option` the peer refused, emitted when a provider/model pick never lands) delivered with the connection otherwise untouched — clients surface it as text only and must NOT treat it as the wire being down.
 - `ready(): bool`
-- `connected(): bool` — the MAIN wire's handshake completed, session or not.
+- `connected(): bool` — **New 2026-11-22.** the MAIN wire's handshake completed, session or not.
   `ready` (below) is the narrower question; a wire brought up by
   `connect_attach` is `connected` and not `ready`, and a client asking "may I
   reuse this connection instead of dialling again?" wants this one.
@@ -764,7 +773,15 @@ Separate `GrouseUnstable` interface, clearly marked for retirement. Methods
 - `config_read(key)`, `config_upsert(key, value)`, `supported_models(provider)`
 - `resources_read(session_id, uri, extension)` → app html
 - `recipes_list/schedule/save/delete`, `schedules_list/pause/unpause/run_now/delete/update`
-- `working_dir_update(session_id, dir)`, `tools_call(session_id, name, args)`
+- `working_dir_update(session_id, dir)`; `tools_call(session_id, name, args)` is
+  **deprecated** — goose's `ToolsCallRequest` requires `extensionName`, so it now
+  answers `on_tool_result` with an error instead of sending a request the server
+  silently rejects; **new 2026-11-22**:
+  `tools_call_named(session_id, extension_name, name, args)` sends that required
+  `extensionName` (e.g. `shell` for `shell__run`), propagates the reply's
+  `isError`, and answers malformed args / a blank extension name on
+  `on_tool_result` so a client's reply FIFO cannot wedge. It routes by session id
+  (roam ids to the owning peer, as the rest of the shim does)
 
 Server→client requests (both stable and unstable), answered by the CORE, with
 the UI prompted only where a human decision is needed:
@@ -825,16 +842,19 @@ by the `on_speak` stream (§3.2, `docs/TRANSCRIPT_MODEL.md`).
 
 ## 5.5 Notification policy (`grouse-core::notify`)
 
-Two namespace-level functions (no handle, no state) exported over uniffi and, as
-JSON in/JSON out, over the C ABI (`grouse_push_parse`, `grouse_push_decide`). They
-are **the** implementation of "what does this payload mean, and should it interrupt
-the user" — clients contribute only transport and rendering, so a sender's payload
-behaves identically on the phone and the desktop.
+Three namespace-level functions (no handle, no state) exported over uniffi and,
+as JSON in/JSON out, over the C ABI (`grouse_push_parse`, `grouse_push_decide`,
+`grouse_push_decide_run`). They are **the** implementation of "what does this
+payload mean, and should it interrupt the user" — clients contribute only
+transport and rendering, so a sender's payload behaves identically on the phone
+and the desktop.
 
-- `parse_push(raw: String) -> PushEnvelope` — `{kind: Turn|Briefing, session_id?,
-  text}`. Never fails: a body that is not a JSON object (or does not parse) is a
-  briefing carrying the raw text, because a sender with a broken envelope should
-  still reach the user.
+- `parse_push(raw: String) -> PushEnvelope` — `{kind: Turn|Briefing|Tasks,
+  session_id?, text, run_id?}`. Never fails: a body that is not a JSON object
+  (or does not parse) is a briefing carrying the raw text, because a sender with
+  a broken envelope should still reach the user. `run_id` is optional for older
+  senders (goose's Stop hook has none); clients that watched the turn end pass
+  it through `decide_notify_run` instead.
 - `decide_notify(envelope, ctx) -> NotifyDecision` — `{show, summary, body}`.
   `NotifyContext` is what the client knows: `app_visible` (Android: foreground;
   desktop: active window), `armed_session` (the session this device last sent to),
@@ -845,6 +865,14 @@ behaves identically on the phone and the desktop.
   end arriving twice (the live connection sees it; the operator's sender pushes for
   it) is announced once. Senders cannot disambiguate: goose's `Stop` hook payload
   carries no run id, so a bounded recency window is the available identity.
+
+- `decide_notify_run(envelope, ctx, announced_run: Option<String>) -> NotifyDecision`
+  — **new 2026-11-22**; the run-aware entry point clients should prefer. The
+  live-connection and the sender's push deliver the same turn end by two paths;
+  session-only dedupe silenced a genuine SECOND turn in the same chat. Pass the
+  run id from `on_active_run` at the moment of announcing (either
+  `PushEnvelope::run_id` or `announced_run` may be absent, in which case only a
+  short same-session burst is suppressed). Same `show/summary/body` result.
 
 Wording (`"Grouse replied"`, `"Grouse briefing"`, the empty-transcript fallback)
 lives here too: the two clients used to say different things for the same event.

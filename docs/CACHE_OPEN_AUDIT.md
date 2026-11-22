@@ -21,16 +21,23 @@ and, later the same day:
 ## 1. The invariant the code is written around
 
 `Core::open_session` → `plan_cache_paint` → **paint the cache, then ask the wire for
-history, and let the replay's rows replace what it covers.** `PaintPlan` has three
-modes (`session.rs::plan_paint`):
+history, and let the replay's rows replace what it covers.** `PaintPlan` has four
+modes (`session.rs::plan_paint` and `PaintPlan::bind_only`):
 
 | cache state | mode | `_meta.replayTail` |
 |---|---|---|
 | settled, stamp == the server's | suppress (rows discarded) | 1 |
 | settled, stamp differs | merge (cache is the anchor's base) | 100 |
-| empty stamp (saved mid-turn) or `incomplete` | provisional paint, replay replaces | `max(80, store.len() + 80)` |
+| empty stamp (saved mid-turn) or `incomplete` | provisional paint, replay replaces | bounded tail (80 by default) |
 | no cache file | nothing to paint | 80 |
 | `RefreshMode::Full` | cache file deleted, store cleared | 80 |
+| a turn in flight in THIS session | bind-only: paint nothing, keep the live store, bind the wire | 1 |
+
+The bind-only mode is the fourth, added after this audit's first findings: goose
+persists a message only when its turn FINISHES, so a `session/load` replay can
+never contain the reply being streamed, and its supersede would delete the live
+rows (see §2). It is selected by `Core::open_session` from the session's in-flight
+state, not by a cache stamp.
 
 **The whole design rests on one premise: the server's copy of a chat is a
 superset of the client's.** Every mode above is a way of reconciling toward that.
@@ -111,8 +118,10 @@ different "checkpoint" each time.
   a store holding a prompt and a partial reply, a wire that only answers
   `session/load` (a probe fails the test) → the store comes back byte-identical,
   and the tail asked for is 1.
-- The full core suite (300 unit + 23 spine + roam + unstable) and
-  `clippy -D warnings`.
+- The full core suite (300 unit + 24 spine at the time of this audit,
+  plus roam + unstable) and `clippy -D warnings`; more spine cases have landed
+  since, including the attach-only handshake and the verification-downgrade
+  replay.
 - Not verified on hardware yet: the phone-side flow needs the core rebuilt into
   `libgrouse_core.so` (Android libs + APK) and a live roam chat.
 

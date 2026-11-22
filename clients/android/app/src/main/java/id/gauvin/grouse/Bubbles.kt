@@ -367,9 +367,22 @@ private fun ChartView(spec: String) {
             factory = { ctx ->
                 android.webkit.WebView(ctx).apply {
                     settings.javaScriptEnabled = true
+                    // The page needs file:// access only to load the bundled chart.min.js.
+                    // Never give guest-origin JS a path back into our files.
+                    settings.allowFileAccessFromFileURLs = false
+                    settings.allowUniversalAccessFromFileURLs = false
                     setBackgroundColor(android.graphics.Color.TRANSPARENT)
                     isVerticalScrollBarEnabled = false
                     isHorizontalScrollBarEnabled = false
+                    // The spec is server content. Even with the CSP below, a WebView must not
+                    // navigate away from the chart: no link, redirect or script can turn this
+                    // embedded visual into a browser page inside the chat.
+                    webViewClient = object : android.webkit.WebViewClient() {
+                        override fun shouldOverrideUrlLoading(
+                            view: android.webkit.WebView?,
+                            request: android.webkit.WebResourceRequest?,
+                        ): Boolean = true
+                    }
                     loadDataWithBaseURL("file:///android_asset/", chartHtml(spec), "text/html", "utf-8", null)
                 }
             },
@@ -388,6 +401,7 @@ internal fun chartHtml(spec: String): String =
 
 private val CHART_TEMPLATE = """
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file: 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'; frame-src 'none'">
 <script src="chart.min.js"></script>
 <style>html,body{margin:0;padding:0;background:transparent}.wrap{position:relative;height:224px}</style></head>
 <body><div class="wrap"><canvas id="c"></canvas></div><script>
@@ -403,9 +417,22 @@ try {
       plugins: { title: { display: !!spec.title, text: spec.title || '' },
                  legend: { display: (spec.datasets||[]).length > 1 } } }
   });
-} catch(e) { document.body.innerHTML = '<pre style="color:#c0392b">chart error: '+e+'</pre>'; }
+} catch(e) {
+  // The exception text comes from a server-controlled spec. textContent is data, not
+  // markup: the old HTML sink here was exploitable with JS on and a file:// origin.
+  const pre = document.createElement('pre');
+  pre.style.color = '#c0392b';
+  pre.textContent = 'chart error: ' + String(e && e.message ? e.message : e);
+  document.body.appendChild(pre);
+}
 </script></body></html>
 """.trimIndent()
+
+/** Allocation-free blank-line check for the streaming scan. */
+private fun isBlankRange(text: String, start: Int, end: Int): Boolean {
+    for (i in start until end) if (!text[i].isWhitespace()) return false
+    return true
+}
 
 /** How much of a streaming reply is SETTLED: the offset just past its last blank line, or 0
  *  when it has not finished a paragraph yet.
@@ -418,16 +445,23 @@ try {
  *  token). Allocation-free on purpose — this runs for every token of a long reply.
  */
 internal fun settledParagraphEnd(text: String): Int {
-    var inFence = false
+    var fence: Fence? = null
     var cut = 0
     var pos = 0
     while (pos < text.length) {
         val nl = text.indexOf('\n', pos)
         val end = if (nl < 0) text.length else nl
-        var q = pos
-        while (q < end && (text[q] == ' ' || text[q] == '\t')) q++
-        if (end - q >= 3 && text.startsWith("```", q)) inFence = !inFence
-        else if (!inFence && q == end && nl >= 0) cut = nl + 1
+        // Same matcher as splitFencedCode: both ``` and ~~~, same indentation rule, same
+        // close rule. A scanner that only knew backticks settled inside an open tilde
+        // fence, which re-parsed the block on every following token. Inside a fence only
+        // the SAME marker closes it — a `~~~` line inside ``` is code, not a close.
+        val open = MarkdownFences.open(text, pos, end)
+        if (fence == null) {
+            if (open != null) fence = open
+            else if (nl >= 0 && isBlankRange(text, pos, end)) cut = nl + 1
+        } else if (MarkdownFences.closes(text, fence!!, pos, end)) {
+            fence = null
+        }
         pos = if (nl < 0) text.length else nl + 1
     }
     return cut

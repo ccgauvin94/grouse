@@ -8,7 +8,8 @@
 //!
 #![allow(clippy::type_complexity)] // deliberate: hook/listener closure types + side-table tuples
 //! * [`Conn::rpc`] — a synchronous request/reply (the SDK's `block_task`,
-//!   driven on the core runtime). The reply handlers live with the *caller*:
+//!   driven on the core runtime, bounded by the shared
+//!   `session::rpc_timeout` policy). The reply handlers live with the *caller*:
 //!   the SDK routes each response to its pending request, so `session/list`
 //!   replies are parsed by the intent that asked, exactly like the desktop's
 //!   `AcpClient::response()` dispatch table but with the table split across
@@ -29,7 +30,8 @@
 //! slice registered a listener), and unknown methods get a real JSON-RPC
 //! `-32601` error (desktop `serverRequest` fallback).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -41,7 +43,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{Agent, ConnectionTo, Responder, UntypedMessage};
 use serde_json::{json, Map, Value};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Notify};
 
 use crate::transcript::TranscriptStore;
 use crate::transport::WsTransport;
@@ -164,6 +166,52 @@ pub fn answer_request(kind: PendingRequest, result: Value) -> bool {
         Some(responder) => responder.respond(result).is_ok(),
         None => false,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Permission responders (keyed by tool call, not by whichever peer is active)
+// ---------------------------------------------------------------------------
+
+/// How a connection answers one parked `session/request_permission`. The
+/// closure captures its owning wire (a `Conn` here, a roam peer there), so the
+/// core can route an answer by `tool_call_id` even when the displayed chat is
+/// owned by a different connection.
+pub(crate) type PermissionAnswer =
+    Arc<dyn Fn(&str, PermissionOutcome) -> Result<(), AcpError> + Send + Sync>;
+
+static PERMISSION_OWNERS: std::sync::OnceLock<Mutex<HashMap<String, PermissionAnswer>>> =
+    std::sync::OnceLock::new();
+
+fn permission_owners() -> &'static Mutex<HashMap<String, PermissionAnswer>> {
+    PERMISSION_OWNERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register the owner of a permission prompt. Called when a connection parks a
+/// responder; the owner must also remove the entry when it answers or closes.
+pub(crate) fn register_permission_answer(tool_call_id: String, answer: PermissionAnswer) {
+    permission_owners().lock().insert(tool_call_id, answer);
+}
+
+/// Drop the owner registration (answer already sent, prompt cancelled, or wire
+/// closed). Safe to call when no entry exists.
+pub(crate) fn unregister_permission_answer(tool_call_id: &str) {
+    permission_owners().lock().remove(tool_call_id);
+}
+
+/// Answer a permission prompt no matter WHICH connection owns it.
+///
+/// `Core::respond_permission` used to route by `active_peer()`: a prompt from
+/// the main wire could not be answered while a roam chat was displayed, and the
+/// answer was silently discarded. The key is the tool call id the UI shows.
+pub(crate) fn respond_permission(
+    tool_call_id: &str,
+    outcome: PermissionOutcome,
+) -> Result<(), AcpError> {
+    let owner = permission_owners()
+        .lock()
+        .remove(tool_call_id)
+        .ok_or_else(|| AcpError::internal_error().data("no pending permission request"))?;
+    owner(tool_call_id, outcome)
 }
 
 /// A registered server-request listener (the unstable shim registers one at
@@ -348,8 +396,9 @@ struct ConnInner {
     merge_replay: AtomicBool,
     /// The handshake signals Core (bounded connect) through this channel.
     ready: Mutex<Option<oneshot::Sender<Result<(), String>>>>,
-    /// Core triggers an explicit disconnect through this channel.
-    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    /// Fired by [`Conn::shutdown`]; every handshake await races this, so a
+    /// superseded wire cannot finish a request and then bind or emit status.
+    shutdown: Notify,
     /// Set by [`Conn::shutdown`]: the end of this wire is deliberate (superseded
     /// by a newer connect, or an explicit disconnect), not a failure — no
     /// terminal `Error` status may surface from it. A "new chat" replaces the
@@ -358,8 +407,6 @@ struct ConnInner {
     /// failure of whatever was mid-round-trip (project creation rode exactly
     /// this race).
     closing: AtomicBool,
-    /// The handshake's idle select waits on this receiver.
-    shutdown_rx: Mutex<Option<oneshot::Receiver<()>>>,
     /// Status-change hook (Core mirrors + fans out to the listener).
     on_status: Mutex<Option<Arc<dyn Fn(ConnectionStatus) + Send + Sync>>>,
     /// Open/resume failure hook: `(session_id, message)`. Fired instead of
@@ -371,6 +418,9 @@ struct ConnInner {
     on_ended: Mutex<Option<Arc<dyn Fn(Result<(), String>) + Send + Sync>>>,
     /// Pending `session/request_permission` responders, keyed by tool call id.
     permission: Mutex<HashMap<String, Responder<RequestPermissionResponse>>>,
+    /// The same ids in the global owner registry, so shutdown can unregister
+    /// them all (a dead wire must never keep a prompt the UI can answer).
+    permission_ids: Mutex<HashSet<String>>,
 }
 
 /// The live connection. Owned by the core; slices reach it through
@@ -392,7 +442,7 @@ impl Conn {
         spec: ConnectSpec,
     ) -> (Arc<Self>, oneshot::Receiver<Result<(), String>>) {
         let (ready_tx, ready_rx) = oneshot::channel();
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let shutdown = Notify::new();
         let conn = Arc::new(Self {
             inner: Arc::new(ConnInner {
                 runtime: crate::roam::runtime().handle().clone(),
@@ -405,17 +455,17 @@ impl Conn {
                 connection: Mutex::new(None),
                 status: Mutex::new(ConnectionStatus::Disconnected),
                 session_id: Mutex::new(None),
-                shutdown_tx: Mutex::new(Some(shutdown_tx)),
+                shutdown,
                 closing: AtomicBool::new(false),
                 suppress_replay: AtomicBool::new(false),
                 merge_replay: AtomicBool::new(false),
                 ready: Mutex::new(Some(ready_tx)),
-                shutdown_rx: Mutex::new(Some(shutdown_rx)),
                 on_status: Mutex::new(None),
                 on_open_failed: Mutex::new(None),
                 on_config: Mutex::new(None),
                 on_ended: Mutex::new(None),
                 permission: Mutex::new(HashMap::new()),
+                permission_ids: Mutex::new(HashSet::new()),
             }),
         });
         (conn, ready_rx)
@@ -441,9 +491,65 @@ impl Conn {
     /// `on_connection_ended` surfaces no failure for it.
     pub(crate) fn shutdown(&self) {
         self.inner.closing.store(true, Ordering::SeqCst);
-        if let Some(tx) = self.inner.shutdown_tx.lock().take() {
-            let _ = tx.send(());
+        // A `connect()` still parked on this wire must wake NOW, not after the
+        // 15s wait_ready bound — and never with a success for a dead wire.
+        if let Some(tx) = self.inner.ready.lock().take() {
+            let _ = tx.send(Err("connection cancelled".to_string()));
         }
+        self.drop_permission_owners();
+        self.inner.shutdown.notify_waiters();
+    }
+
+    fn is_closing(&self) -> bool {
+        self.inner.closing.load(Ordering::SeqCst)
+    }
+
+    /// Wake when this wire is deliberately closed. The first check matters as
+    /// much as the notification: `shutdown()` sets `closing` BEFORE waking,
+    /// so a waiter registered after the wake still sees the flag.
+    async fn cancelled(&self) {
+        loop {
+            if self.is_closing() {
+                return;
+            }
+            self.inner.shutdown.notified().await;
+        }
+    }
+
+    fn cancelled_error() -> AcpError {
+        AcpError::internal_error().data("connection cancelled by shutdown")
+    }
+
+    /// Race one await against shutdown and re-check the flag after it returns.
+    /// A superseded handshake must not get as far as binding a session,
+    /// emitting config, or signalling Ready.
+    async fn race_shutdown<T, F>(&self, fut: F) -> Result<T, AcpError>
+    where
+        F: Future<Output = T>,
+    {
+        if self.is_closing() {
+            return Err(Self::cancelled_error());
+        }
+        tokio::select! {
+            _ = self.cancelled() => Err(Self::cancelled_error()),
+            out = fut => {
+                if self.is_closing() {
+                    Err(Self::cancelled_error())
+                } else {
+                    Ok(out)
+                }
+            }
+        }
+    }
+
+    /// Release every global permission owner registered by this connection.
+    fn drop_permission_owners(&self) {
+        let ids: Vec<String> = self.inner.permission_ids.lock().iter().cloned().collect();
+        for id in ids {
+            unregister_permission_answer(&id);
+        }
+        self.inner.permission_ids.lock().clear();
+        self.inner.permission.lock().clear();
     }
 
     /// Current connection status snapshot.
@@ -476,6 +582,9 @@ impl Conn {
     /// is reported to the client instead of a substitute session being bound
     /// (grouse#19).
     pub fn prebind_session(&self, session_id: &str) {
+        if self.is_closing() {
+            return;
+        }
         *self.inner.session_id.lock() = Some(session_id.to_string());
     }
 
@@ -489,6 +598,9 @@ impl Conn {
 
     /// Bind a session without touching its store (a resume paints first).
     fn bind_session(&self, session_id: &str) {
+        if self.is_closing() {
+            return;
+        }
         *self.inner.session_id.lock() = Some(session_id.to_string());
         let key = crate::session::display_id(self.inner.label.as_deref(), session_id);
         self.inner.hub.display(&key);
@@ -523,6 +635,9 @@ impl Conn {
     /// for it — a stale id must not become a fresh chat behind the client's
     /// back (grouse#19).
     fn report_open_failed(&self, session_id: impl Into<String>, message: impl Into<String>) {
+        if self.is_closing() {
+            return;
+        }
         let hook = self.inner.on_open_failed.lock().clone();
         if let Some(hook) = hook {
             hook(session_id.into(), message.into());
@@ -539,8 +654,9 @@ impl Conn {
 
     /// Synchronous request/reply. Safe from any thread: on a UI thread it
     /// parks on the core runtime until the response is dispatched; inside the
-    /// runtime it uses `block_in_place` (the internal async paths use
-    /// [`Conn::rpc_async`] directly).
+    /// runtime it uses `block_in_place`. Async callers use [`Conn::rpc_async`].
+    /// Both go through the shared `session::rpc_timeout` policy — a hung
+    /// host may pin an intent, never the calling thread.
     pub fn rpc(&self, method: &str, params: Value) -> Result<Value, AcpError> {
         let conn = self.clone();
         let method = method.to_string();
@@ -565,6 +681,17 @@ impl Conn {
     }
 
     pub(crate) async fn rpc_async(&self, method: &str, params: Value) -> Result<Value, AcpError> {
+        // `session::request` calls back through `ChatEndpoint::request`, which
+        // is the RAW send — no recursion, and exactly one timeout per RPC.
+        crate::session::request(self, method, params).await
+    }
+
+    /// The wire send itself. Only [`ChatEndpoint::request`] and the bounded
+    /// [`Conn::rpc_async`] call this; everything else gets the timeout policy.
+    async fn raw_rpc_async(&self, method: &str, params: Value) -> Result<Value, AcpError> {
+        if self.is_closing() {
+            return Err(Self::cancelled_error());
+        }
         let conn = self
             .inner
             .connection
@@ -582,6 +709,8 @@ impl Conn {
         tool_call_id: &str,
         outcome: PermissionOutcome,
     ) -> Result<(), AcpError> {
+        unregister_permission_answer(tool_call_id);
+        self.inner.permission_ids.lock().remove(tool_call_id);
         let responder = self
             .inner
             .permission
@@ -604,6 +733,7 @@ impl Conn {
     /// Signal Core that the connection ended (drop, explicit disconnect, or
     /// handshake failure). Deliberate closes surface no status — see below.
     pub(crate) fn on_connection_ended(&self, result: Result<(), AcpError>) {
+        self.drop_permission_owners();
         // A deliberate `shutdown()` (superseded by a newer connect, or an
         // explicit disconnect) is not a failure: emit no terminal Error. The
         // replacement handshake owns the status story from here (Connecting →
@@ -640,6 +770,11 @@ impl Conn {
     // -- status -------------------------------------------------------------
 
     fn set_status(&self, status: ConnectionStatus) {
+        // A superseded wire has no status story: it must not overwrite the
+        // replacement's Connecting/Ready or flash a stale Error.
+        if self.is_closing() {
+            return;
+        }
         *self.inner.status.lock() = status.clone();
         if let Some(hook) = self.inner.on_status.lock().clone() {
             hook(status);
@@ -647,12 +782,19 @@ impl Conn {
     }
 
     fn signal_ready(&self, result: Result<(), String>) {
+        if self.is_closing() && result.is_ok() {
+            return;
+        }
         if let Some(tx) = self.inner.ready.lock().take() {
             let _ = tx.send(result);
         }
     }
 
     fn on_ready(&self) {
+        // Shutdown can land between the last replay await and this call.
+        if self.is_closing() {
+            return;
+        }
         self.inner.suppress_replay.store(false, Ordering::SeqCst);
         self.inner.merge_replay.store(false, Ordering::SeqCst);
         // Still armed here => the replay produced nothing, so the server's copy
@@ -664,10 +806,16 @@ impl Conn {
             self.inner.host.end_replay(&key);
         }
         self.set_status(ConnectionStatus::Ready);
+        if self.is_closing() {
+            return;
+        }
         self.signal_ready(Ok(()));
     }
 
     fn emit_config(&self, reply: &Value) {
+        if self.is_closing() {
+            return;
+        }
         let options = parse_config_options(reply);
         if let Some(hook) = self.inner.on_config.lock().clone() {
             hook(options);
@@ -677,21 +825,32 @@ impl Conn {
     // -- handshake (runs inside `connect_with`'s foreground) -----------------
 
     async fn handshake(&self, cx: ConnectionTo<Agent>) -> Result<(), AcpError> {
+        if self.is_closing() {
+            return Err(Self::cancelled_error());
+        }
         *self.inner.connection.lock() = Some(cx.clone());
         self.set_status(ConnectionStatus::Connecting);
 
         // initialize: protocolVersion 1 + the desktop's exact client caps
         // (goosed hard-fails parameterized session/new without
-        // recipeParameterRequests).
-        let _init: Value = cx
-            .send_request(UntypedMessage::new("initialize", initialize_params())?)
-            .block_task()
+        // recipeParameterRequests). `rpc_async` applies the shared 30s control
+        // timeout; without it a server that answers pings but not initialize
+        // left `connect()` parked for the full 15s ready bound with no reason.
+        let _init: Value = self
+            .rpc_async("initialize", initialize_params())
             .await
             .map_err(|error| {
                 AcpError::internal_error().data(format!("initialize failed: {error}"))
             })?;
+        if self.is_closing() {
+            return Err(Self::cancelled_error());
+        }
 
         let spec = self.inner.spec.lock().take();
+        // Labelled so an advisory (non-timeout) load failure can skip the
+        // rest of the spec handling and still reach `on_ready` + the idle
+        // loop: the wire is usable, only the requested chat failed to load.
+        'handshake: {
         match spec {
             Some(ConnectSpec::Resume { session_id, cwd }) => {
                 let replay_key =
@@ -705,34 +864,33 @@ impl Conn {
                 // may stream replay chunks ahead of the reply (the spine's own
                 // gateway test does), and the session-membership gate must not
                 // drop them. start_new_session overwrites this if load fails.
+                if self.is_closing() {
+                    return Err(Self::cancelled_error());
+                }
                 *self.inner.session_id.lock() = Some(session_id.clone());
                 let store = self.store_for(&session_id);
                 let suppress_replay = self.inner.suppress_replay.load(Ordering::SeqCst);
                 let merge_replay = self.inner.merge_replay.load(Ordering::SeqCst);
                 // The replay itself (silent ingest → merge → one repaint) is the
                 // shared lifecycle, so this wire cannot drift from the peer's.
+                // Race it against shutdown: dropping the future lets the
+                // replay guard release its hold, and a cancelled wire must
+                // never reach bind_session or emit_config below.
                 let endpoint: &dyn crate::session::ChatEndpoint = self;
-                match crate::session::replay_session(
-                    endpoint,
-                    self.inner.host.as_ref(),
-                    &store,
-                    &replay_key,
-                    &cwd,
-                    suppress_replay,
-                    merge_replay,
-                )
-                .await
-                {
-                    Ok(reply) => {
-                        self.bind_session(&session_id);
-                        self.emit_config(&reply);
-                        if persist_stamp {
-                            // The merge fetched the overlap and tail; stamp the
-                            // result with the server's current updatedAt.
-                            self.inner.host.stamp_probe(&replay_key, true);
-                        }
-                    }
-                    Err(error) => {
+                let replay = self
+                    .race_shutdown(crate::session::replay_session(
+                        endpoint,
+                        self.inner.host.as_ref(),
+                        &store,
+                        &replay_key,
+                        &cwd,
+                        suppress_replay,
+                        merge_replay,
+                    ))
+                    .await;
+                let reply = match replay {
+                    Ok(Ok(reply)) => reply,
+                    Ok(Err(error)) => {
                         // A stale/archived session cannot be resumed. Do NOT
                         // fall back to a fresh session: the client asked for
                         // THIS one, and a silent `session/new` is what made a
@@ -746,7 +904,28 @@ impl Conn {
                             session_id,
                             format!("session/load failed: {error}"),
                         );
+                        // A load that never answered is NOT a Ready handshake:
+                        // surface the failure on the status channel and unblock
+                        // `connect()` with Err through `on_connection_ended`.
+                        // Other load failures stay advisory (the wire is fine).
+                        if handshake_timed_out(&error) {
+                            return Err(AcpError::internal_error().data(format!(
+                                "session/load failed: {error}"
+                            )));
+                        }
+                        break 'handshake;
                     }
+                    Err(cancelled) => return Err(cancelled),
+                };
+                if self.is_closing() {
+                    return Err(Self::cancelled_error());
+                }
+                self.bind_session(&session_id);
+                self.emit_config(&reply);
+                if persist_stamp {
+                    // The merge fetched the overlap and tail; stamp the
+                    // result with the server's current updatedAt.
+                    self.inner.host.stamp_probe(&replay_key, true);
                 }
             }
             Some(ConnectSpec::New {
@@ -755,8 +934,8 @@ impl Conn {
                 mode,
                 display,
             }) => {
-                self.start_new_session(&cx, recipe_id, project_id, mode, display)
-                    .await?;
+                self.race_shutdown(self.start_new_session(recipe_id, project_id, mode, display))
+                    .await??;
             }
             // Handshake only: the caller is showing something this wire does not
             // own (a peer's chat) or nothing at all, so there is no session to
@@ -765,25 +944,28 @@ impl Conn {
             // session; the first `open_session` binds.
             Some(ConnectSpec::Attach) => {}
             None => {
-                self.start_new_session(&cx, None, None, None, true).await?;
+                self.race_shutdown(self.start_new_session(None, None, None, true))
+                    .await??;
             }
         }
+        }
 
+        if self.is_closing() {
+            return Err(Self::cancelled_error());
+        }
         self.on_ready();
 
         // Keep the connection alive until Core disconnects or the transport
         // ends (either way `connect_with` returns and `on_connection_ended`
-        // fires).
-        let mut shutdown_rx = self.inner.shutdown_rx.lock().take();
+        // fires). The shutdown race covers the whole idle span too.
         tokio::select! {
-            _ = wait_optional(&mut shutdown_rx) => Ok(()),
+            _ = self.cancelled() => Err(Self::cancelled_error()),
             _ = cx.incoming_closed() => Ok(()),
         }
     }
 
     async fn start_new_session(
         &self,
-        cx: &ConnectionTo<Agent>,
         recipe_id: Option<String>,
         project_id: Option<String>,
         mode: Option<String>,
@@ -795,13 +977,15 @@ impl Conn {
             project_id.as_deref(),
             mode.as_deref(),
         );
-        let reply: Value = cx
-            .send_request(UntypedMessage::new("session/new", params)?)
-            .block_task()
+        let reply: Value = self
+            .rpc_async("session/new", params)
             .await
             .map_err(|error| {
                 AcpError::internal_error().data(format!("session/new failed: {error}"))
             })?;
+        if self.is_closing() {
+            return Err(Self::cancelled_error());
+        }
         let session_id = reply
             .get("sessionId")
             .and_then(Value::as_str)
@@ -829,6 +1013,9 @@ impl Conn {
         project_id: Option<String>,
         mode: Option<String>,
     ) -> Result<String, AcpError> {
+        if self.is_closing() {
+            return Err(Self::cancelled_error());
+        }
         let params = session_new_params(
             &self.inner.config,
             recipe_id.as_deref(),
@@ -855,6 +1042,9 @@ impl Conn {
         &self,
         project_id: Option<&str>,
     ) -> Result<String, AcpError> {
+        if self.is_closing() {
+            return Err(Self::cancelled_error());
+        }
         let params = session_new_params(&self.inner.config, None, project_id, None);
         let reply: Value = self.rpc_async("session/new", params).await?;
         Ok(reply
@@ -879,6 +1069,9 @@ impl Conn {
         merge_replay: bool,
         bind_only: bool,
     ) -> Result<(), AcpError> {
+        if self.is_closing() {
+            return Err(Self::cancelled_error());
+        }
         // NOTE: the gate/session id is ALREADY this session (`prebind_session`,
         // called by the open before the cwd round trip), so a failure cannot be
         // "restored" to the previous chat from here — see the Err arm below for
@@ -963,11 +1156,22 @@ impl Conn {
         req: RequestPermissionRequest,
         responder: Responder<RequestPermissionResponse>,
     ) {
+        if self.is_closing() {
+            let _ = responder.respond_with_error(Self::cancelled_error());
+            return;
+        }
         let request = crate::session::permission_request(&req);
-        self.inner
-            .permission
-            .lock()
-            .insert(request.tool_call_id.clone(), responder);
+        let tool_call_id = request.tool_call_id.clone();
+        self.inner.permission.lock().insert(tool_call_id.clone(), responder);
+        // `Core::respond_permission` used to route by `active_peer()`: a main
+        // wire prompt was unanswerable while a roam chat was on screen. The
+        // global registry routes by the id the UI actually shows.
+        let owner = self.clone();
+        register_permission_answer(
+            tool_call_id.clone(),
+            Arc::new(move |id, outcome| owner.respond_permission(id, outcome)),
+        );
+        self.inner.permission_ids.lock().insert(tool_call_id);
         self.inner.listener.on_permission_request(request);
     }
 
@@ -1042,11 +1246,23 @@ pub(crate) fn park_server_request(
         }
         return;
     }
-    let slot = match kind {
-        PendingRequest::RecipeParams => &mut PARKED.lock().recipe_params,
-        PendingRequest::Elicitation => &mut PARKED.lock().elicitation,
+    let previous = {
+        let mut parked = PARKED.lock();
+        let slot = match kind {
+            PendingRequest::RecipeParams => &mut parked.recipe_params,
+            PendingRequest::Elicitation => &mut parked.elicitation,
+        };
+        slot.replace(responder)
     };
-    *slot = Some(responder);
+    // The CONTRACT's respond_* intents carry no request key, so a second
+    // request of the same family used to overwrite the first responder and
+    // leave that server waiting forever. Fail the old one explicitly; the UI
+    // can re-offer its form for the request it still knows about.
+    if let Some(previous) = previous {
+        let _ = previous.respond_with_error(
+            AcpError::internal_error().data("superseded by a newer server request"),
+        );
+    }
     for f in listeners {
         f(method, params.clone());
     }
@@ -1074,7 +1290,13 @@ impl crate::session::ChatEndpoint for Conn {
     ) -> futures::future::BoxFuture<'static, Result<Value, AcpError>> {
         let conn = self.clone();
         let method = method.to_string();
-        Box::pin(async move { conn.rpc_async(&method, params).await })
+        Box::pin(async move {
+            // The policy lives in `session::request` around this seam; the raw
+            // send also races shutdown so a superseded wire cannot pin an intent.
+            conn.race_shutdown(conn.raw_rpc_async(&method, params))
+                .await
+                .and_then(|reply| reply)
+        })
     }
 
     fn notify(&self, method: &str, params: Value) -> Result<(), AcpError> {
@@ -1097,6 +1319,14 @@ impl crate::session::ChatEndpoint for Conn {
         self.inner.suppress_replay.store(false, Ordering::SeqCst);
         self.inner.merge_replay.store(false, Ordering::SeqCst);
     }
+}
+
+/// Did a handshake RPC fail because the host never answered (as opposed to
+/// answering with an error)? Only a timeout gets a terminal status and a
+/// `ready` error; a rejected `session/load` stays advisory (grouse#19).
+fn handshake_timed_out(error: &AcpError) -> bool {
+    let text = error.to_string().to_lowercase();
+    text.contains("timed out") || text.contains("gave no answer")
 }
 
 /// The core's exponential reconnect backoff curve: 500ms·2^n capped at 15s.
@@ -1138,12 +1368,6 @@ pub(crate) async fn run_connection(
         Box::pin(async move { conn.handshake(cx).await })
     };
     crate::session::connect_client(transport, handlers, foreground).await
-}
-
-async fn wait_optional(rx: &mut Option<oneshot::Receiver<()>>) {
-    if let Some(rx) = rx.as_mut() {
-        let _ = rx.await;
-    }
 }
 
 /// The transport's TLS uses rustls' `ring` provider (Cargo.toml
@@ -1190,6 +1414,50 @@ mod tests {
     /// `io.modelcontextprotocol/ui` under `_meta.goose.mcpHostCapabilities.
     /// extensions` — without it every MCP App (autovisualiser charts, custom
     /// dashboards) silently degrades to a plain tool chip (2026-09-18).
+    /// The UI answers a prompt by tool call id, not by which chat/peer is on
+    /// screen. Two prompts from two wires must reach their own owners.
+    #[test]
+    fn permission_answers_route_by_tool_call_id() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        for id in ["spine-test-perm-a", "spine-test-perm-b"] {
+            let seen = seen.clone();
+            let owned = id.to_string();
+            register_permission_answer(
+                id.to_string(),
+                Arc::new(move |id, _outcome| {
+                    seen.lock().push(format!("{owned}:{id}"));
+                    Ok(())
+                }),
+            );
+        }
+        assert!(respond_permission(
+            "spine-test-perm-b",
+            PermissionOutcome::Cancelled
+        )
+        .is_ok());
+        assert_eq!(*seen.lock(), vec!["spine-test-perm-b:spine-test-perm-b".to_string()]);
+        // The same id cannot be answered twice, and the other owner survives.
+        assert!(respond_permission(
+            "spine-test-perm-b",
+            PermissionOutcome::Cancelled
+        )
+        .is_err());
+        assert!(respond_permission(
+            "spine-test-perm-a",
+            PermissionOutcome::Cancelled
+        )
+        .is_ok());
+        assert_eq!(seen.lock().len(), 2);
+    }
+
+    #[test]
+    fn a_timeout_is_distinguished_from_a_rejected_load() {
+        let timeout = AcpError::internal_error().data("session/load gave no answer in 600s");
+        assert!(handshake_timed_out(&timeout));
+        let rejected = AcpError::internal_error().data("session/load failed: -32602 not found");
+        assert!(!handshake_timed_out(&rejected));
+    }
+
     #[test]
     fn initialize_declares_mcp_apps_host_capability() {
         let p = initialize_params();

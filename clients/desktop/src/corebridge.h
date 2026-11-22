@@ -4,6 +4,7 @@
 
 #include <QString>
 
+#include <atomic>
 #include <cstdint>
 
 class QObject;
@@ -47,7 +48,13 @@ public:
         // the phone calls, so the envelope and the show/don't-show rule cannot drift.
         char *(*grouse_push_parse)(const char *raw);
         char *(*grouse_push_decide)(const char *envelope_json, const char *context_json);
+        /// As grouse_push_decide, with the run id announced for the last
+        /// notification: JSON string, JSON null, or a plain C string / nullptr.
+        char *(*grouse_push_decide_run)(const char *envelope_json, const char *context_json,
+                                        const char *announced_run_json_or_null);
         void (*grouse_connect)(void *h, const char *config_json, char **out_err);
+        /// Bring the wire up without binding (or repainting) any session.
+        void (*grouse_connect_attach)(void *h, const char *config_json, char **out_err);
         void (*grouse_disconnect)(void *h);
         void (*grouse_new_session)(void *h, const char *recipe_id, const char *project_id, char **out_err);
         /// The same, plus a mode tag written at creation (`grouse.mode`: dev).
@@ -91,6 +98,8 @@ public:
         // stable getters
         char *(*grouse_status)(void *h);
         int (*grouse_ready)(void *h);
+        /// MAIN wire is up, even with no session bound (attach/reconnect).
+        int (*grouse_connected)(void *h);
         // model-written run labels (issue #13)
         void (*grouse_set_run_summaries)(void *h, int on);
     // Outbound image rescale (CONTRACT §8.1): core policy, UI toggle.
@@ -182,7 +191,11 @@ public:
         void (*grouse_unstable_schedules_delete)(void *h, const char *schedule_id);
         void (*grouse_unstable_schedules_update)(void *h, const char *schedule_id, const char *cron);
         void (*grouse_unstable_working_dir_update)(void *h, const char *sid, const char *dir);
+        /// Deprecated: always fails on on_tool_result (no extensionName).
         void (*grouse_unstable_tools_call)(void *h, const char *sid, const char *name, const char *args_json);
+        void (*grouse_unstable_tools_call_named)(void *h, const char *sid,
+                                                 const char *extension_name,
+                                                 const char *name, const char *args_json);
         void (*grouse_unstable_resources_read)(void *h, const char *sid, const char *uri, const char *ext);
         void (*grouse_unstable_respond_recipe_params)(void *h, const char *action, const char *values_json);
         void (*grouse_unstable_respond_elicitation)(void *h, const char *action, const char *content_json);
@@ -222,11 +235,24 @@ public:
     /// All callbacks marshal to this object's thread via queued
     /// QMetaObject::invokeMethod; the object is used as the lifetime context,
     /// so pending events are dropped if it is destroyed.
-    void setTarget(QObject *target) { m_target = target; }
-    QObject *target() const { return m_target; }
+    void setTarget(QObject *target) { m_target.store(target, std::memory_order_release); }
+
+    /// Drop the target from the Manager's destructor, BEFORE Qt destroys it.
+    /// Core callbacks run on another thread, so the pointer is atomic: without
+    /// this hook a callback arriving during shutdown queues work against a
+    /// half-destroyed Manager. marshal() drops callbacks once it sees nullptr.
+    void clearTarget() { m_target.store(nullptr, std::memory_order_release); }
+
+    QObject *target() const { return m_target.load(std::memory_order_acquire); }
 
     /// The opaque GrouseCoreListener table (reinterpret to the C struct).
     virtual void installListener();   // populates the static table and creates the core handle
+
+    /// Paint the cached My Day board off the Qt main thread. `grouse_tasks_paint`
+    /// reads a cache file and invokes on_tasks synchronously; calling it from a
+    /// QML handler stalls a frame. The on_tasks event is already marshalled by
+    /// this bridge, so the call itself belongs on a worker.
+    void paintCachedTasksAsync() const;
 
     /// Take ownership of a malloc'd C string from the core, converting to
     /// QString and freeing via grouse_string_free.
@@ -240,7 +266,7 @@ protected:
     AimsApi m_api{};
     void *m_handle = nullptr;
     const void *m_listener = nullptr;
-    QObject *m_target = nullptr;
+    std::atomic<QObject *> m_target{nullptr};
 };
 
 // ---------------------------------------------------------------------------

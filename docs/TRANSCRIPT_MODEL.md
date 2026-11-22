@@ -540,15 +540,22 @@ needs no item code of its own and the merge/dedupe rules are "Upsert by id" once
 
 ## Testing
 
-- **Core:** op-sequence tests — open emits Reset + window + Upserts; a live turn
-  emits Upsert then deltas then a final Upsert; `load_older` prepends exactly the
-  requested window and updates `has_older`; a rich cache round-trips charts,
-  MCP apps, and tool groups byte-for-byte.
+- **Core:** the inline tests in `core/grouse-core/src/transcript.rs` cover the
+  store's own op sequences and shaping — e.g.
+  `a_provisional_live_transcript_is_replaced_by_the_replay`,
+  `rich_snapshot_round_trips_through_the_store`,
+  `a_paint_emits_only_the_window_and_load_older_walks_back`,
+  `a_page_splices_older_rows_in_front_and_the_window_is_untouched` and
+  `the_server_backlog_keeps_the_cursor_open_at_the_origin`.
 - **Spine e2e (scripted server):** a stale cache asks for a bounded tail, merges
   by id, and never sends a full replay; a cache that cannot reach the start
   reports `has_older: false` and falls back to a full load.
-- **Desktop:** `tst_itemmodel` (apply ops, order, prepend, remove).
-- **Android:** an `ItemStoreTest` mirroring it.
+- **Desktop:** `tst_manager::itemStreamDrivesTheModel` pins the item→row mapping
+  (Reset, Upsert, Window, kinds and the finalizing markdown Upsert);
+  `tst_messagelistmodel` covers deferred/coalesced row updates.
+- **Android:** no `ItemStoreTest` exists — its JVM suite stays framework-free
+  (parsers and wire framing); item-store semantics are covered on the core side
+  by the `transcript.rs` tests above.
 
 ## Open questions
 

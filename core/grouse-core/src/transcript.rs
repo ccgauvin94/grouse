@@ -855,8 +855,11 @@ fn call_to_row(c: &ToolCall) -> ToolRow {
         spec: String::new(),
         file: None,
         thought: c.thought.clone(),
-        steps: Vec::new(),
-        seq: 0,
+        // A delegate's child activity and its position live on the call, not on
+        // the group: dropping them here erased both on every cache/paint
+        // round-trip (the live path was correct; only the rebuild lost them).
+        steps: c.steps.clone(),
+        seq: c.seq,
     }
 }
 
@@ -891,9 +894,11 @@ fn bubble_from_item(it: &Item) -> Option<Bubble> {
                 id,
                 uid: it.id.clone(),
                 role: role.to_string(),
-                // The flat `Message` projection predates the stamp; a row rebuilt
-                // from it simply has no clock.
-                created: 0,
+                // `created` is a first-class field of the rich item and the only
+                // clock a timeline has; `seq` orders rows within one chat. Zeros
+                // here sorted every cache-painted row to the end of a merged
+                // timeline after a reopen.
+                created: it.created,
                 text: it.text.clone(),
                 thought: matches!(it.kind, ItemKind::Thought),
                 seq: it.seq,
@@ -1111,6 +1116,11 @@ impl TranscriptStore {
         thought: bool,
         created: i64,
     ) {
+        // An explicitly empty id is "no id", not a distinct identity. Only a
+        // non-empty id may open a bubble or gate one; the accumulation branch
+        // below adopts the first such id an id-less bubble receives, so the
+        // NEXT chunk with a different id is recognized as a new message.
+        let mid = message_id.filter(|m| !m.is_empty());
         let (ops, speaks) = {
             let mut st = self.state.lock();
             st.anchor_merge(message_id.unwrap_or(""));
@@ -1125,7 +1135,7 @@ impl TranscriptStore {
             // exact text match counts, oldest first — the server names prompts
             // in the order it received them. An image-only prompt replays no
             // text chunk at all, so its empty echo text matches `None`.
-            if let Some(mid) = message_id.filter(|m| !m.is_empty()) {
+            if let Some(mid) = mid {
                 if st.stream_msg_id != mid && role == "user" {
                     // A prompt the store ALREADY holds under this server id needs
                     // no adoption: `anchor_merge` above truncated the cache at
@@ -1186,9 +1196,9 @@ impl TranscriptStore {
             }
             let fresh = st.stream_idx.is_none()
                 || st.stream_role != role
-                || (message_id.is_some()
+                || (mid.is_some()
                     && !st.stream_msg_id.is_empty()
-                    && message_id != Some(st.stream_msg_id.as_str()));
+                    && mid != Some(st.stream_msg_id.as_str()));
 
             // A whitespace-only chunk that would OPEN a bubble is goose's empty
             // assistant message between tool calls (its text is "\n\n"). It
@@ -1210,7 +1220,7 @@ impl TranscriptStore {
                         ops.push(TranscriptOp::Upsert { item: b.item() });
                     }
                 }
-                let uid = match message_id.filter(|m| !m.is_empty()) {
+                let uid = match mid {
                     Some(m) => m.to_string(),
                     None => st.new_uid(),
                 };
@@ -1224,7 +1234,7 @@ impl TranscriptStore {
                     (text.unwrap_or("").to_string(), Vec::new())
                 };
                 st.bubbles.push(Bubble::Text {
-                    id: message_id.unwrap_or("").to_string(),
+                    id: mid.unwrap_or("").to_string(),
                     uid,
                     role: role.to_string(),
                     text: opening,
@@ -1240,13 +1250,20 @@ impl TranscriptStore {
                 let idx = st.bubbles.len() - 1;
                 st.stream_idx = Some(idx);
                 st.stream_role = role.to_string();
-                st.stream_msg_id = message_id.unwrap_or("").to_string();
+                st.stream_msg_id = mid.unwrap_or("").to_string();
                 idx
             } else {
                 let idx = st
                     .stream_idx
                     .expect("non-fresh implies an open stream bubble");
+                // If this bubble was opened by an id-less chunk, the first id
+                // that arrives belongs to it: adopt it, or `fresh` can never
+                // compare against an id and every later message is appended to
+                // the same bubble. The client key (`uid`) stays as issued —
+                // changing it would duplicate a row the client already holds.
+                let adopt = mid.filter(|_| st.stream_msg_id.is_empty());
                 if let Bubble::Text {
+                    id: bid,
                     text: acc,
                     thought: t,
                     images,
@@ -1255,6 +1272,9 @@ impl TranscriptStore {
                     ..
                 } = &mut st.bubbles[idx]
                 {
+                    if let Some(m) = adopt.filter(|_| bid.is_empty()) {
+                        *bid = m.to_string();
+                    }
                     // First stamp wins: every chunk of one message repeats it, and a
                     // locally echoed prompt has 0 until its chunk arrives.
                     if *acc_created == 0 && created != 0 {
@@ -1282,6 +1302,9 @@ impl TranscriptStore {
                         }
                     }
                     *t = thought;
+                }
+                if let Some(m) = adopt {
+                    st.stream_msg_id = m.to_string();
                 }
                 idx
             };
@@ -2424,12 +2447,14 @@ impl TranscriptStore {
                     && it.text.trim().is_empty())
             })
             .collect();
+        let same;
+        let cursor_changed;
         {
             // Identical paint (the cold-start paint followed by the open's own):
             // skip the Clear, or the list empties and re-paints on every open
             // (flicker + a scroll jump). Adopt this call's mode/cursor.
             let mut st = self.state.lock();
-            let same = {
+            same = {
                 let cur = st.bubbles.iter().map(Bubble::item);
                 let mut n = 0;
                 let mut matches = true;
@@ -2442,11 +2467,36 @@ impl TranscriptStore {
                 }
                 matches && n == items.len()
             };
-            if same {
+            cursor_changed = if same {
                 st.provisional = provisional;
-                st.has_older = st.emitted_from > 0;
-                return;
-            }
+                // The server's backlog can move without any row changing (a
+                // tail-first open learns `replaySkipped` after the paint). Use
+                // the same rule as every other cursor update: `emitted_from`
+                // OR the server still owes history. Dropping the `server_more`
+                // half made a reopened chat look like its own origin.
+                let has_older = st.emitted_from > 0 || st.server_more;
+                let changed = st.has_older != has_older;
+                st.has_older = has_older;
+                changed
+            } else {
+                false
+            };
+        }
+        if cursor_changed {
+            let (oldest, has_older) = {
+                let st = self.state.lock();
+                (
+                    st.bubbles.get(st.emitted_from).map(bubble_uid).unwrap_or_default(),
+                    st.has_older,
+                )
+            };
+            self.emit_ops(vec![TranscriptOp::Window {
+                oldest_id: oldest,
+                has_older,
+            }]);
+        }
+        if same {
+            return;
         }
         let (session_id, window, oldest, has_older) = {
             let mut st = self.state.lock();
@@ -2719,6 +2769,24 @@ mod tests {
         assert_eq!(at("m2"), 1_600_000_000, "the clock is the server's, not arrival");
         assert_eq!(at("m3"), 0);
 
+        // The clock survives the cache/paint round-trip: a reopened chat rebuilds
+        // its rows from Items, and a zero here pushed them all to the end of a
+        // merged area timeline.
+        let (lp, _) = listener();
+        let painted = TranscriptStore::new(lp);
+        painted.replace_rich(items.clone(), false);
+        let after = painted.rich_transcript();
+        let painted_at = |id: &str| {
+            after
+                .iter()
+                .find(|i| i.id == id)
+                .unwrap_or_else(|| panic!("no painted item {id}"))
+                .created
+        };
+        assert_eq!(painted_at("m1"), 1_700_000_000, "a painted row keeps its clock");
+        assert_eq!(painted_at("m2"), 1_600_000_000);
+        assert_eq!(painted_at("m3"), 0);
+
         // An echoed prompt has no stamp until the server returns its own chunk; the
         // adoption path has to take the stamp then, or a reopened chat loses the clock.
         let (l2, _) = listener();
@@ -2731,6 +2799,36 @@ mod tests {
             .find(|i| i.kind == ItemKind::User)
             .expect("the prompt row");
         assert_eq!(prompt.created, 1_710_000_000, "adoption must carry the stamp");
+    }
+
+    /// An id-less first chunk must not leave the stream permanently blind to
+    /// message ids: without adoption, every later message accumulated into the
+    /// same bubble because `fresh` had no id to compare against.
+    #[test]
+    fn an_id_less_first_chunk_adopts_the_next_id() {
+        let (l, _) = listener();
+        let store = TranscriptStore::new(l);
+        store.append_chunk("agent", "first ", None, false);
+        // The server names this message on a later chunk (or its replay does).
+        // The id belongs to the open bubble, not to a second one.
+        store.append_chunk("agent", "second", Some("m2"), false);
+        // With `m2` adopted, a DIFFERENT id now opens a new bubble.
+        store.append_chunk("agent", "third", Some("m3"), false);
+        let items = store.rich_transcript();
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[0].message_id, "m2", "the id lands on the open bubble");
+        assert_eq!(items[0].text, "first second");
+        assert_eq!(items[1].message_id, "m3");
+        assert_eq!(items[1].text, "third");
+        assert!(
+            items[0].id.starts_with('@'),
+            "the client key must stay stable when the id is adopted"
+        );
+        // A subsequent id-less chunk is still part of the currently named row.
+        store.append_chunk("agent", " again", None, false);
+        let after = store.rich_transcript();
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[1].text, "third again");
     }
 
     /// A file the server SHARED is a card of its own, not a tool chip.
@@ -3263,6 +3361,33 @@ mod tests {
             .flat_map(|c| c.steps.iter().map(|s| s.name.as_str()))
             .collect();
         assert_eq!(step_names, vec!["read_file"], "{group:?}");
+
+        // The cache/paint path rebuilds each child through `call_to_row`; it used
+        // to reset steps and seq, so a reloaded delegate lost its subagent work.
+        let seqs: Vec<u32> = group.calls.iter().map(|c| c.seq).collect();
+        let rebuilt = super::bubble_from_item(group).expect("the group rebuilds");
+        let Bubble::ToolGroup(calls, _) = rebuilt else {
+            panic!("a group must rebuild as a group");
+        };
+        assert_eq!(
+            calls.iter().map(|c| c.seq).collect::<Vec<_>>(),
+            seqs,
+            "each child keeps its position"
+        );
+        assert_eq!(calls[1].steps[0].name, "read_file");
+
+        let (l2, _e2) = listener();
+        let reloaded = TranscriptStore::new(l2);
+        reloaded.replace_rich(items, false);
+        let after = reloaded.rich_transcript();
+        let group = after
+            .iter()
+            .find(|i| i.kind == ItemKind::ToolGroup)
+            .expect("the run survives the repaint");
+        assert_eq!(
+            group.calls[1].steps[0].detail, "src/lib.rs",
+            "a grouped delegate keeps its steps across a repaint"
+        );
     }
 
     #[test]
@@ -4792,6 +4917,31 @@ mod tests {
         // Once the backlog is drained the cursor closes.
         assert!(store.set_server_more(false));
         assert!(!store.window().has_older);
+    }
+
+    #[test]
+    fn an_identical_repaint_keeps_the_server_backlog_cursor() {
+        let (store, evts) = painted_store(1);
+        let items = store.rich_transcript();
+        assert!(!store.window().has_older);
+        assert!(store.set_server_more(true));
+        store.replace_rich(items.clone(), false);
+        assert!(
+            store.window().has_older,
+            "an identical paint must not clear the server's backlog"
+        );
+
+        // A cursor that went stale while the backlog was known must be refreshed
+        // on the wire too, without repainting any rows.
+        store.state.lock().has_older = false;
+        evts.lock().clear();
+        store.replace_rich(items, false);
+        assert!(store.window().has_older);
+        let seen = evts.lock().clone();
+        assert!(
+            seen.iter().any(|e| e == "window:m0:true"),
+            "the client must hear the corrected cursor: {seen:?}"
+        );
     }
 
     #[test]

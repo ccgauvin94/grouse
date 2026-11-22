@@ -37,6 +37,14 @@ pub struct PushEnvelope {
     pub kind: PushKind,
     pub session_id: Option<String>,
     pub text: String,
+    /// The run this turn ended, when the sender knows it. Goose's hook payload
+    /// has no run id, so older senders leave this empty; clients that watched
+    /// the turn end can supply it on the context side instead (see
+    /// [`decide_notify_run`]). Optional with a default so existing callers and
+    /// JSON payloads stay valid.
+    #[serde(default)]
+    #[uniffi(default)]
+    pub run_id: Option<String>,
 }
 
 /// What the client knows when a payload arrives.
@@ -55,9 +63,9 @@ pub struct NotifyContext {
         /// The session and age of the last notification THIS client showed for a finished
     /// turn. The two delivery paths overlap by design (a live connection sees the turn
     /// end; the operator's sender pushes for the same turn), so the same event would be
-    /// announced twice. Senders cannot disambiguate — goose's hook payload carries no run
-    /// id — so recency is the available identity: the same session inside the window is
-    /// the same turn.
+    /// announced twice. Session alone is NOT enough: a genuine second turn in the same
+    /// chat inside the window must still be announced. Pair it with a run id through
+    /// [`decide_notify_run`]; without a run id only a short burst is suppressed.
     pub announced_session: Option<String>,
     pub announced_secs_ago: Option<u32>,
     /// True when a finished turn the client did NOT start is still worth announcing —
@@ -105,37 +113,92 @@ pub fn parse_push(raw: &str) -> PushEnvelope {
         .and_then(serde_json::Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
+    // Accept the three shapes a sender plausibly uses. A missing/blank run id is
+    // valid: it just narrows the dedupe to a tight same-session burst.
+    let run_id = obj
+        .get("runId")
+        .or_else(|| obj.get("run_id"))
+        .or_else(|| obj.get("_meta").and_then(|m| m.get("goose")).and_then(|g| g.get("activeRunId")))
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
     match obj.get("type").and_then(serde_json::Value::as_str) {
-        Some("turn") => PushEnvelope { kind: PushKind::Turn, session_id, text },
+        Some("turn") => {
+            PushEnvelope { kind: PushKind::Turn, session_id, text, run_id }
+        }
         // Both spellings: a sender writing one item should not have to know whether the
         // type names the family or the row.
-        Some("task") | Some("tasks") => PushEnvelope { kind: PushKind::Tasks, session_id, text },
-        _ => PushEnvelope { kind: PushKind::Briefing, session_id, text },
+        Some("task") | Some("tasks") => {
+            PushEnvelope { kind: PushKind::Tasks, session_id, text, run_id }
+        }
+        _ => PushEnvelope { kind: PushKind::Briefing, session_id, text, run_id },
     }
 }
 
-/// How long after announcing a turn a push for the same session is still considered the
-/// same event. The hook fires at turn end and the connection sees the same end within
+/// How long after announcing a turn a push with a MATCHING run id is still considered
+/// the same event. The hook fires at turn end and the connection sees the same end within
 /// seconds, so this only has to absorb that skew — not a whole conversation.
 const SAME_TURN_WINDOW_SECS: u32 = 120;
 
-fn already_announced(envelope: &PushEnvelope, ctx: &NotifyContext) -> bool {
+/// Without a run id on either side, only two announcements this close together can
+/// be the same turn. A genuine second turn in the same chat is usually seconds apart
+/// too, but a 120 s blanket suppression swallowed it whenever the user replied fast.
+const SAME_TURN_BURST_SECS: u32 = 15;
+
+fn already_announced(
+    envelope: &PushEnvelope,
+    ctx: &NotifyContext,
+    announced_run: Option<&str>,
+) -> bool {
     let Some(session) = envelope.session_id.as_deref() else { return false };
-    ctx.announced_session.as_deref() == Some(session)
-        && ctx
-            .announced_secs_ago
-            .is_some_and(|secs| secs <= SAME_TURN_WINDOW_SECS)
+    if ctx.announced_session.as_deref() != Some(session) {
+        return false;
+    }
+    let Some(secs) = ctx.announced_secs_ago else { return false };
+    if secs > SAME_TURN_WINDOW_SECS {
+        return false;
+    }
+    match (envelope.run_id.as_deref(), announced_run) {
+        // Both sides know the run: identity, not recency, decides. A second run
+        // in the same session is a second notification even one second later.
+        (Some(run), Some(announced)) => run == announced,
+        // One side lacks an id (older sender, or a caller of the legacy
+        // `decide_notify`): keep only the short burst suppression.
+        _ => secs <= SAME_TURN_BURST_SECS,
+    }
 }
 
 fn briefing(text: &str) -> PushEnvelope {
-    PushEnvelope { kind: PushKind::Briefing, session_id: None, text: text.to_string() }
+    PushEnvelope {
+        kind: PushKind::Briefing,
+        session_id: None,
+        text: text.to_string(),
+        run_id: None,
+    }
 }
 
 /// The show/don't-show rule, shared by push delivery and by the in-session paths
 /// (a client that watched a turn end constructs a `Turn` envelope from what it has
 /// and asks the same question).
+///
+/// Legacy entry point: callers that can name the run should use
+/// [`decide_notify_run`], which suppresses only the SECOND delivery of that run.
 #[uniffi::export]
 pub fn decide_notify(envelope: PushEnvelope, ctx: NotifyContext) -> NotifyDecision {
+    decide_notify_run(envelope, ctx, None)
+}
+
+/// As [`decide_notify`], but with the run id the client announced last time
+/// (its live `activeRunId` at the moment it showed the notification). Pass it
+/// alongside [`PushEnvelope::run_id`] so two turns in the same chat are not
+/// mistaken for one; either id may be absent, in which case only a short
+/// same-session burst is suppressed.
+#[uniffi::export]
+pub fn decide_notify_run(
+    envelope: PushEnvelope,
+    ctx: NotifyContext,
+    announced_run: Option<String>,
+) -> NotifyDecision {
     // The user is looking at the conversation: the UI already shows this.
     if ctx.app_visible {
         return NotifyDecision::hidden();
@@ -147,7 +210,7 @@ pub fn decide_notify(envelope: PushEnvelope, ctx: NotifyContext) -> NotifyDecisi
     match envelope.kind {
         PushKind::Turn => {
             // Both paths can see the same turn end; the first one to announce wins.
-            if already_announced(&envelope, &ctx) {
+            if already_announced(&envelope, &ctx, announced_run.as_deref()) {
                 return NotifyDecision::hidden();
             }
             // Attribution: a turn can only be announced when this client can call it
@@ -377,6 +440,56 @@ mod tests {
     }
 
     #[test]
+    fn push_envelopes_carry_the_run_id_when_the_sender_knows_it() {
+        for raw in [
+            r#"{"type":"turn","session":"s","runId":"r7","text":"done"}"#,
+            r#"{"type":"turn","session":"s","run_id":"r7","text":"done"}"#,
+            r#"{"type":"turn","session":"s","_meta":{"goose":{"activeRunId":"r7"}},"text":"done"}"#,
+        ] {
+            let e = parse_push(raw);
+            assert_eq!(e.run_id.as_deref(), Some("r7"), "{raw}");
+        }
+        let e = parse_push(r#"{"type":"turn","session":"s","text":"done"}"#);
+        assert_eq!(e.run_id, None);
+    }
+
+    #[test]
+    fn a_second_turn_in_the_same_chat_is_not_the_same_announcement() {
+        // The live connection announced run r1 a second ago; the sender now pushes
+        // for the NEXT turn in the same chat. Recency alone used to swallow it.
+        let second = parse_push(r#"{"type":"turn","session":"s","runId":"r2","text":"again"}"#);
+        let mut c = ctx(false, None);
+        c.announced_session = Some("s".to_string());
+        c.announced_secs_ago = Some(1);
+        assert!(decide_notify_run(second.clone(), c, Some("r1".to_string())).show);
+
+        // The legacy entry point has no run id on the context side, so it keeps
+        // the narrow same-session burst suppression and stays quiet.
+        let mut c = ctx(false, None);
+        c.announced_session = Some("s".to_string());
+        c.announced_secs_ago = Some(1);
+        assert!(!decide_notify(second, c).show);
+    }
+
+    #[test]
+    fn matching_run_ids_suppress_the_other_delivery_path_across_the_window() {
+        let push = parse_push(r#"{"type":"turn","session":"s","runId":"r1","text":"done"}"#);
+        let mut c = ctx(false, None);
+        c.announced_session = Some("s".to_string());
+        c.announced_secs_ago = Some(SAME_TURN_WINDOW_SECS);
+        assert!(!decide_notify_run(push.clone(), c.clone(), Some("r1".to_string())).show);
+
+        let other_session =
+            parse_push(r#"{"type":"turn","session":"other","runId":"r1","text":"done"}"#);
+        assert!(decide_notify_run(other_session, c.clone(), Some("r1".to_string())).show);
+
+        let mut stale = ctx(false, None);
+        stale.announced_session = Some("s".to_string());
+        stale.announced_secs_ago = Some(SAME_TURN_WINDOW_SECS + 1);
+        assert!(decide_notify_run(push, stale, Some("r1".to_string())).show);
+    }
+
+    #[test]
     fn a_known_session_title_leads_the_notification() {
         let turn = parse_push(r#"{"type":"turn","session":"s","text":"the answer"}"#);
         let mut titled = ctx(false, None);
@@ -393,7 +506,12 @@ mod tests {
 
     #[test]
     fn empty_payloads_are_not_notifications() {
-        let e = PushEnvelope { kind: PushKind::Turn, session_id: None, text: String::new() };
+        let e = PushEnvelope {
+            kind: PushKind::Turn,
+            session_id: None,
+            text: String::new(),
+            run_id: None,
+        };
         assert!(!decide_notify(e, ctx(false, None)).show);
     }
 }

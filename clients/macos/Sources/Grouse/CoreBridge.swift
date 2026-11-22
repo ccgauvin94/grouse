@@ -23,6 +23,18 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
 
     // The conversation on screen
     let chat = ChatModel()
+    @Published var loadingOlder = false
+
+    /// An open whose outcome is not known yet. The core paints a cached transcript
+    /// BEFORE it asks the server to bind, so a Reset is not proof of success: a
+    /// later `on_session_open_failed` must still put the previous chat back.
+    private struct OpenAttempt {
+        let sessionId: String
+        let previousSessionId: String
+        let snapshot: ChatModel.Snapshot
+        var didPaint = false
+    }
+    private var openAttempt: OpenAttempt?
 
     // Turn state
     @Published var prompting = false
@@ -84,6 +96,9 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
         chat.reset()
         sessions = []
         currentSessionId = ""
+        openAttempt = nil
+        prompting = false
+        loadingOlder = false
 
         let listener = Listener(self)
         self.listener = listener
@@ -116,6 +131,9 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
         online = false
         connected = false
         status = "disconnected"
+        openAttempt = nil
+        prompting = false
+        loadingOlder = false
     }
 
     func listSessions() {
@@ -126,33 +144,94 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
     /// tag written at `session/new` and cannot be changed afterwards, which is why the
     /// choice is at creation and nowhere else.
     func newChat(mode: String? = nil) {
+        // A brand-new chat is minted by the core; the paint's Reset carries its id and
+        // is adopted in handleItem. There is no failed open to roll back here.
+        openAttempt = nil
         chat.reset()
         currentSessionId = ""
         prompting = false
+        loadingOlder = false
         advisorReport = nil
         core?.newSessionWithMode(recipeId: nil, projectId: nil, mode: mode)
     }
 
     func open(sessionId: String) {
-        chat.reset()
-        advisorReport = nil
+        guard sessionId != currentSessionId else { return }
+        // Keep the transcript on screen until the core proves the open landed. A failed
+        // `session/load` binds nothing; clearing here used to leave an empty chat with no
+        // way back to the conversation the user was reading.
+        openAttempt = OpenAttempt(sessionId: sessionId,
+                                  previousSessionId: currentSessionId,
+                                  snapshot: chat.snapshot())
         currentSessionId = sessionId
+        prompting = false          // a turn in another chat is not this chat's turn
+        loadingOlder = false
         core?.openSession(sessionId: sessionId)
+        reconcileTurnSoon(sessionId: sessionId)
     }
 
     func send(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let core else { return }
+        // If a previous turn ended without its notification, the core has already let
+        // the turn go; do not keep a dead flag that disables the honest Stop state.
+        reconcileTurn()
         // The core echoes the prompt into the transcript itself, so the UI does not add a
         // row: doing both is how a chat doubles its own messages.
         let expect = currentSessionId.isEmpty ? nil : SendExpect(sessionId: currentSessionId)
         core.sendPrompt(prompt: Prompt(blocks: [.text(text: trimmed)]), expect: expect)
         prompting = true
+        reconcileTurnSoon(sessionId: expect?.sessionId, delay: 1.0)
     }
 
     func cancel() {
         core?.cancel()
         prompting = false
+        reconcileTurnSoon()
+    }
+
+    /// Ask the core for an older page. Outcomes arrive as Upserts + a Window on
+    /// `on_item`; there is no client-side history store to duplicate here.
+    func loadOlder(count: Int = 40) {
+        guard !currentSessionId.isEmpty, !loadingOlder, let core else { return }
+        loadingOlder = true
+        core.loadOlder(count: UInt32(count))
+    }
+
+    // MARK: - Turn state
+
+    /// The core owns turn state; this flag is only the view's answer to "is Stop live?".
+    private func reconcileTurn(sessionId sid: String? = nil) {
+        let sid = sid ?? currentSessionId
+        guard !sid.isEmpty, let core else {
+            prompting = false
+            return
+        }
+        prompting = core.turnInFlight(sessionId: sid)
+    }
+
+    /// Core intents are enqueued on its runtime thread, so an immediate getter can still
+    /// see the pre-intent state. Re-check once it has had time to run.
+    private func reconcileTurnSoon(sessionId sid: String? = nil, delay: TimeInterval = 0.4) {
+        let sid = sid ?? currentSessionId
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.currentSessionId == sid else { return }
+            self.reconcileTurn(sessionId: sid)
+        }
+    }
+
+    /// A Ready (or a completed replay) after an open is the proof that the core bound
+    /// the session the user picked. A cached paint before it is not: the load can still
+    /// fail. On success the rolled-back state is simply dropped.
+    private func finishOpenIfBound(from eventSessionId: String? = nil) {
+        guard let attempt = openAttempt,
+              attempt.sessionId == currentSessionId,
+              eventSessionId == nil || eventSessionId == attempt.sessionId,
+              core?.activeSessionId() == attempt.sessionId else { return }
+        openAttempt = nil
+        advisorReport = nil
+        if !attempt.didPaint { chat.reset() }
+        reconcileTurn(sessionId: attempt.sessionId)
     }
 
     func answerPermission(_ optionId: String?) {
@@ -177,11 +256,26 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
 
     // MARK: - Listener hand-off (main queue)
 
+    func handleAlert(_ message: String) {
+        // CONTRACT §3.3: Alert is an advisory failure on a control path with the wire
+        // still up. Text only — no change to online, connected or the turn (the desktop
+        // does the same at manager.cpp's `s.contains("Alert")` branch).
+        status = message
+    }
+
     func handleStatus(_ text: String) {
         status = text
         let wasOnline = online
         online = text == "ready" || text == "syncing"
         connected = online || text == "connecting"
+        if text == "ready" || text == "syncing" {
+            // A reconnect can close a turn without an end notification; ask the core,
+            // which is the only one that knows whether the wire still carries it.
+            reconcileTurnSoon()
+            finishOpenIfBound()
+        } else if text == "disconnected" || text.hasPrefix("error:") {
+            prompting = false
+        }
         if online && !wasOnline {
             // Every fresh Ready re-lists: the sidebar is the server's view of the world,
             // and this client keeps no copy of it.
@@ -194,6 +288,26 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
     }
 
     func handleItem(_ op: TranscriptOp) {
+        switch op {
+        case .reset(let sessionId):
+            if openAttempt != nil {
+                // The core paints the displayed chat; an unrelated paint while an open
+                // is pending must not overwrite the conversation being kept for rollback.
+                guard sessionId == currentSessionId else { return }
+                openAttempt?.didPaint = true
+            } else if currentSessionId.isEmpty && !sessionId.isEmpty {
+                // session/new (and a resume) has no separate "opened" event: the paint's
+                // session id is the first thing that names the chat.
+                currentSessionId = sessionId
+                reconcileTurn(sessionId: sessionId)
+            }
+            loadingOlder = false
+        case .window:
+            // The core answers every load_older with a Window, including an empty one.
+            loadingOlder = false
+        default:
+            break
+        }
         chat.apply(op)
     }
 
@@ -203,7 +317,12 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
     }
 
     func handleRunEnded(sessionId: String, stopReason: String) {
-        guard sessionId == currentSessionId else { return }
+        guard sessionId == currentSessionId else {
+            // A background run ending says nothing about THIS chat's turn, but it is a
+            // chance to notice that a local flag was left behind by a dropped event.
+            reconcileTurn()
+            return
+        }
         prompting = false
         // The row's text is final, so the view can stop treating it as a stream and render
         // it (plain-while-streaming, rich-at-finalize).
@@ -226,11 +345,21 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
 
     func handleOpenFailed(sessionId: String, message: String) {
         status = "couldn't open that chat: \(message)"
-        if sessionId == currentSessionId { currentSessionId = "" }
+        loadingOlder = false
+        guard let attempt = openAttempt else { return }
+        openAttempt = nil
+        // The core binds NOTHING on a failed load. Restore the chat the user was in
+        // rather than leaving the id on a session with no transcript (or no session
+        // at all). A failure for a chat that is no longer current is just a status line.
+        guard sessionId == currentSessionId else { return }
+        currentSessionId = attempt.previousSessionId
+        chat.restore(attempt.snapshot)
+        reconcileTurn(sessionId: attempt.previousSessionId)
     }
 
-    func handleReplay(loaded: Int64, total: Int64, done: Bool) {
+    func handleReplay(sessionId: String, loaded: Int64, total: Int64, done: Bool) {
         replayProgress = (loaded, total, done)
+        if done { finishOpenIfBound(from: sessionId) }
     }
 
     func handleConfig(_ options: [ConfigOption]) {

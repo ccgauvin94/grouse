@@ -42,6 +42,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRandomGenerator>
 #include <QMimeDatabase>
 #include <QSaveFile>
 #include <QSet>
@@ -189,6 +190,13 @@ Manager::Manager(QObject *parent)
 
 Manager::~Manager()
 {
+    // The bridge's event marshaller uses this Manager as its invokeMethod context,
+    // but a callback already in flight can hold a raw Manager pointer. Drop the
+    // target FIRST: queued events are then discarded, and the bridge is not left
+    // pointing at a partly destroyed QObject while the worker tasks wind down.
+    if (m_bridge)
+        m_bridge->clearTarget();
+
     // A task still inside the core must finish before the bridge (and the core
     // library) can go away: it holds the handle and calls through the ABI table.
     // Bounded: a task parked in an RPC must not hang the quit. After this the
@@ -321,6 +329,10 @@ QString Manager::host() const { return m_store.value("host", "192.168.1.5").toSt
 QString Manager::port() const { return m_store.value("port", "3284").toString(); }
 QString Manager::secretKey() const { return m_store.value("secret", "").toString().trimmed(); }
 bool Manager::useTls() const { return m_store.value("wss", true).toBool(); }
+bool Manager::acceptInvalidCerts() const
+{
+    return m_store.value("accept_invalid_certs", DEFAULT_ACCEPT_INVALID_CERTS).toBool();
+}
 bool Manager::autoConnectEnabled() const { return m_store.value("auto_connect", true).toBool(); }
 bool Manager::notificationsEnabled() const { return m_store.value("notify_events", true).toBool(); }
 bool Manager::configuredProvidersOnly() const { return m_store.value("configured_providers_only", true).toBool(); }
@@ -350,6 +362,11 @@ void Manager::setHost(const QString &v) { m_store.setValue("host", v); emit sett
 void Manager::setPort(const QString &v) { m_store.setValue("port", v); emit settingsChanged(); }
 void Manager::setSecretKey(const QString &v) { m_store.setValue("secret", v.trimmed()); emit settingsChanged(); }
 void Manager::setUseTls(bool v) { m_store.setValue("wss", v); emit settingsChanged(); }
+void Manager::setAcceptInvalidCerts(bool v)
+{
+    m_store.setValue("accept_invalid_certs", v);
+    emit settingsChanged();
+}
 void Manager::setAutoConnectEnabled(bool v) { m_store.setValue("auto_connect", v); emit settingsChanged(); }
 void Manager::setNotificationsEnabled(bool v) { m_store.setValue("notify_events", v); emit settingsChanged(); }
 void Manager::setConfiguredProvidersOnly(bool v)
@@ -508,6 +525,42 @@ QString Manager::activeSessionId() const
     return m_bridge->takeString(m_bridge->api().grouse_active_session_id(m_bridge->handle()));
 }
 
+QString Manager::roamPeerForSession(const QString &sessionId)
+{
+    if (!sessionId.startsWith(QLatin1String("roam:")))
+        return {};
+    const QString rest = sessionId.mid(5);
+    const int sep = rest.indexOf(QLatin1Char(':'));
+    return sep > 0 ? rest.left(sep) : QString();
+}
+
+bool Manager::mainWireConnected() const
+{
+    if (!m_bridge || !m_bridge->isAvailable())
+        return false;
+    const CoreBridge::AimsApi &api = m_bridge->api();
+    if (api.grouse_connected)
+        return api.grouse_connected(m_bridge->handle()) != 0;
+    // A core without the attach ABI has only the bound-session notion; keep the
+    // older library usable rather than declaring every chat offline.
+    return api.grouse_ready && api.grouse_ready(m_bridge->handle()) != 0;
+}
+
+void Manager::bindSessionAfterAttach()
+{
+    if (!m_bridge || !m_bridge->isAvailable() || m_currentSessionId.isEmpty())
+        return;
+    const CoreBridge::AimsApi api = m_bridge->api();
+    void *h = m_bridge->handle();
+    const QByteArray sid = m_currentSessionId.toUtf8();
+    runOnCore([this, api, h, sid] {
+        api.grouse_open_session(h, sid.constData());
+        // A prompt parked while the wire was down must go out as soon as the
+        // bind has run, not wait for an unrelated event to call flushQueue.
+        QMetaObject::invokeMethod(this, [this] { flushQueue(); }, Qt::QueuedConnection);
+    });
+}
+
 bool Manager::sessionIsOpen() const
 {
     // The UI's idea of the current session must agree with the core's bound one.
@@ -530,7 +583,9 @@ QString Manager::serverConfigJson()
     o["port"] = port().trimmed().toInt();
     o["secret_key"] = secretKey();
     o["use_tls"] = useTls();
-    o["accept_invalid_certs"] = true; // historical self-signed-tailnet trust-all
+    // User-controlled: self-signed tailnet hosts need an explicit opt-out from
+    // WebPKI verification, but trust-all must not be a hidden constant.
+    o["accept_invalid_certs"] = acceptInvalidCerts();
     o["ca_cert_pem"] = QJsonValue::Null;
     o["cwd"] = workingDir();
     o["auto_connect"] = true;
@@ -590,20 +645,27 @@ void Manager::connectToServer()
     m_landing = false;
     emit landingChanged();
     m_lastCwd = workingDir();
-    // OFF THE UI THREAD. `grouse_connect` does not merely start a dial: the core's
-    // `connect()` BLOCKS on the handshake (`wait_ready`) and returns when the wire is
-    // Ready, so at startup this held the main thread for the length of a session/new
-    // round trip — measured 3.2s + 0.5s of stalls before any chat existed
-    // (2026-11-21). Same worker, same rule, as every other blocking intent.
+    // WIRE ONLY. This is the manual Connect, the startup auto-connect, the test
+    // probe and the offline-send retry — none of them asks for a NEW CHAT. Using
+    // `grouse_connect` here bound a throwaway `session/new` (littering the server
+    // with empty chats) and, worse, could display that chat over a roam conversation
+    // the main wire does not own. `connect_attach` brings the transport up and binds
+    // nothing; the new-chat paths call `grouse_new_session` explicitly.
+    // OFF THE UI THREAD: the attach still BLOCKS on the handshake, as `connect` did
+    // (2026-11-21: 3.2s + 0.5s of stalls at startup).
     const CoreBridge::AimsApi api = m_bridge->api();
     void *h = m_bridge->handle();
     const QByteArray cfg = serverConfigJson().toUtf8();
+    m_wireOnlyConnect = true;
     setStatus(QStringLiteral("connecting…"));
     runOnCore([this, api, h, cfg] {
         QElapsedTimer clock;
         clock.start();
         char *err = nullptr;
-        api.grouse_connect(h, cfg.constData(), &err);
+        if (api.grouse_connect_attach)
+            api.grouse_connect_attach(h, cfg.constData(), &err);
+        else
+            api.grouse_connect(h, cfg.constData(), &err);  // older core: no attach ABI
         const qint64 ms = clock.elapsed();
         QString message;
         if (err) {
@@ -643,6 +705,7 @@ void Manager::disconnect()
 {
     if (m_bridge && m_bridge->isAvailable())
         m_bridge->api().grouse_disconnect(m_bridge->handle());
+    m_wireOnlyConnect = false;
     setOnline(false);
     m_prompting = false;
     m_promptingSessionId.clear();
@@ -968,7 +1031,12 @@ void Manager::openSession(const QString &sessionId)
     const QString previous = m_currentSessionId;
     setMyDayVisible(false);   // opening a conversation takes the chat area back from My Day
     resetReloadProgress();    // a reload bar belongs to the chat that started it
-    m_activePeerLabel.clear();
+    // The `roam:` prefix is CLIENT-SIDE: the core resolves the owner from it. Keep
+    // the peer label in sync with the id — otherwise the core routes to the peer
+    // while this client still thinks the main wire owns the turn, and a main-wire
+    // Ready clears a live roam turn (Android's ConnectionManager.openSession sets
+    // the same owner from the prefixed id).
+    m_activePeerLabel = roamPeerForSession(sessionId);
     // Parking is per chat: a message queued in the chat we are leaving keeps waiting for
     // ITS turn to end (flushQueue only drains the on-screen chat's), so a switch cannot
     // silently lose input. Stop is what discards it.
@@ -979,11 +1047,17 @@ void Manager::openSession(const QString &sessionId)
     restoreTurnState(sessionId);
     emit queuedChanged();   // the queue view is per-chat: republish for the chat we opened
     m_currentSessionTitle.clear();
-    for (const auto &v : m_sessions) {
-        const QVariantMap s = v.toMap();
-        if (s.value("sessionId").toString() == sessionId) {
-            m_currentSessionTitle = s.value("title").toString();
-            break;
+    if (!m_activePeerLabel.isEmpty()) {
+        // A peer's title lives only in its own session/list, not in the main list.
+        m_currentSessionTitle = m_roamTitles.value(sessionId);
+    }
+    if (m_currentSessionTitle.isEmpty()) {
+        for (const auto &v : m_sessions) {
+            const QVariantMap s = v.toMap();
+            if (s.value("sessionId").toString() == sessionId) {
+                m_currentSessionTitle = s.value("title").toString();
+                break;
+            }
         }
     }
     m_tools.clear();
@@ -1022,15 +1096,16 @@ void Manager::openSession(const QString &sessionId)
         QElapsedTimer clock;
         clock.start();
         api.grouse_open_session(h, sid.constData());
-        const qint64 openMs = clock.elapsed();
-        api.grouse_load_cached_transcript(h, sid.constData());
-        // Reported HERE, not handed to the Window: the core emits its paint DURING the
-        // call, so a value posted after it reaches the main thread too late and the
-        // paint line read zeros (measured: "worker 0ms: open 0, cache 0").
-        timingLog(QStringLiteral("open %1 worker %2ms (open %3, cache %4)")
-                      .arg(QString::fromUtf8(sid))
-                      .arg(clock.elapsed()).arg(openMs)
-                      .arg(clock.elapsed() - openMs));
+        // NO grouse_load_cached_transcript here. `open_session` has already painted
+        // the core's live store — including a BIND-ONLY load for a chat with a turn
+        // in flight — with the correct freshness/stale-tail rules. A second cache
+        // load replaces that with stale disk rows: missing the in-flight reply and
+        // discarding a tail the wire just merged (2026-11-22).
+        // Reported HERE, not handed to the Window: the core emits its paint DURING
+        // the call, so a value posted after it reaches the main thread too late and
+        // the paint line read zeros (measured: "worker 0ms: open 0, cache 0").
+        timingLog(QStringLiteral("open %1 worker %2ms")
+                      .arg(QString::fromUtf8(sid)).arg(clock.elapsed()));
     });
 }
 
@@ -1226,7 +1301,16 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks,
 {
     const QString expectJson = m_currentSessionId.isEmpty()
         ? QString() : QStringLiteral("{\"session_id\":\"%1\"}").arg(m_currentSessionId);
-    const bool ready = m_bridge && m_bridge->isAvailable() && m_bridge->api().grouse_ready(m_bridge->handle());
+    // Two questions, not one: is the chat's OWN transport up (main wire or the
+    // peer), and — on the main wire — is a session bound to send into? After a
+    // wire-only attach `connected` is true while `ready` is false; using ready as
+    // the transport gate parked every offline send forever (and asking only
+    // `connected` would send into a main chat the core has not bound yet).
+    const bool wireUp = wireUpForCurrentChat();
+    const bool sessionBound = !m_activePeerLabel.isEmpty()
+        || (m_bridge && m_bridge->isAvailable() && m_bridge->api().grouse_ready
+            && m_bridge->api().grouse_ready(m_bridge->handle()));
+    const bool ready = wireUp && sessionBound;
     // The core echoes a PURE-TEXT prompt into the transcript itself: the live wire
     // carries NO user_message_chunk for our own send, so the core keeps its own copy
     // (otherwise the question is never recorded, and a reopen that trusts the cache
@@ -1320,7 +1404,10 @@ bool Manager::wireUpForCurrentChat() const
 {
     if (!m_activePeerLabel.isEmpty())
         return m_roamModel && m_roamModel->peerConnected(m_activePeerLabel);
-    return m_online;
+    // `online` is a cached status event; the core's `connected` is the transport
+    // truth and stays true on an attach that bound no session. The transport gate
+    // must not be `grouse_ready` here — that would be false on exactly that wire.
+    return mainWireConnected();
 }
 
 void Manager::releaseTurnForLostWire(const QString &lostSessionId)
@@ -2596,12 +2683,27 @@ void Manager::coreOnStatus(const QString &json)
     if (s == QStringLiteral("\"Ready\"") || s == QStringLiteral("Ready")) {
         setOnline(true);
         setStatus(QStringLiteral("ready"));
-        m_prompting = false;
-        m_promptingSessionId.clear();
-        // A reconnected client cannot receive the old turns' run ends.
-        m_inFlight.clear();
-        m_activeRunIds.clear();
-        emit promptingChanged();
+        // A MAIN-wire Ready may only clear turns OWNED BY THE MAIN WIRE. A peer's
+        // turn is carried by its own connection; clearing it here is the desktop
+        // twin of the Android bug fixed today — a roam chat's composer unlocks
+        // while its reply is still streaming and the next send lands in a live turn.
+        if (mainWireOwnsTurnState(m_activePeerLabel)) {
+            m_prompting = false;
+            m_promptingSessionId.clear();
+            // A reconnected client cannot receive the old turns' run ends.
+            m_inFlight.clear();
+            m_activeRunIds.clear();
+            emit promptingChanged();
+        }
+        if (m_wireOnlyConnect) {
+            m_wireOnlyConnect = false;
+            // A wire-only connect binds nothing. If the chat on screen is a MAIN
+            // chat, bind it here (without the UI reset of openSession) so the
+            // send queue can drain; a roam screen gets no main chat painted over it.
+            if (m_activePeerLabel.isEmpty() && !m_landing
+                && roamPeerForSession(m_currentSessionId).isEmpty())
+                bindSessionAfterAttach();
+        }
         // Resolve a pending testConnection() probe. The failure paths
         // (Disconnected/Error) already reported; only Ready completed silently,
         // which made a SUCCESSFUL test indistinguishable from "nothing happened".
@@ -2645,6 +2747,7 @@ void Manager::coreOnStatus(const QString &json)
             setStatus(msg);
     } else if (s == QStringLiteral("\"Disconnected\"") || s == QStringLiteral("Disconnected")) {
         setOnline(false);
+        m_wireOnlyConnect = false;
         setStatus(QStringLiteral("not connected"));
         if (m_activePeerLabel.isEmpty())
             releaseTurnForLostWire(m_currentSessionId);
@@ -2657,6 +2760,7 @@ void Manager::coreOnStatus(const QString &json)
         QJsonObject o = parseObj(s);
         QString msg = o.value(QStringLiteral("Error")).toObject().value(QStringLiteral("message")).toString();
         setOnline(false);
+        m_wireOnlyConnect = false;
         setStatus(msg.isEmpty() ? QStringLiteral("connection error") : msg);
         if (m_activePeerLabel.isEmpty())
             releaseTurnForLostWire(m_currentSessionId);
@@ -2928,15 +3032,15 @@ void Manager::coreOnRoamSessions(const QString &label, const QString &json)
 void Manager::coreOnPeerNewSession(const QString &label, const QString &sid)
 {
     refreshSessions();
-    if (label == m_activePeerLabel) {
-        if (m_currentSessionId != sid) resetContextUsage();
-        m_currentSessionId = sid;
-        restoreTurnState(sid);
-        emit queuedChanged();
-        m_currentSessionTitle.clear();
-        emit currentSessionChanged();
-    emit pinnedAppsChanged();
-    }
+    if (label != m_activePeerLabel || sid.isEmpty())
+        return;
+    // The peer reports its RAW id; the core routes a `roam:<label>:<id>` display id
+    // to the owning peer. Setting the raw id here bound NOTHING (the main wire tried
+    // to open a session it never created) and left the fresh chat's title and turn
+    // state attributed to the wrong wire. Go through the ordinary opener so core
+    // routing, the window title and the turn owner all agree (Android:3560).
+    const QString prefixed = QStringLiteral("roam:%1:%2").arg(label, sid);
+    openSession(prefixed);
 }
 
 void Manager::coreOnActiveRun(const QString &sid, const QString &runId)
@@ -2994,7 +3098,12 @@ void Manager::paintCachedTasks()
 {
     if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_tasks_paint)
         return; // an older core: nothing cached, the page behaves as it always did
-    m_bridge->api().grouse_tasks_paint(m_bridge->handle());
+    // The cache read (and the on_tasks callback it emits) is core work: on the
+    // main thread it stalls the page the user just opened. Same single worker as
+    // every other blocking intent, so ordering with refreshTasks is preserved.
+    const CoreBridge::AimsApi api = m_bridge->api();
+    void *h = m_bridge->handle();
+    runOnCore([api, h] { api.grouse_tasks_paint(h); });
 }
 
 void Manager::closeMyDay()
@@ -4214,7 +4323,14 @@ QString Manager::appViewUrl(const QString &appKey)
             break;
         }
     }
-    const QString token = QStringLiteral("t%1").arg(++m_appTokenSeq);
+    // 128 bits of OS entropy, not a counter: the token is the ONLY capability
+    // guarding this loopback HTTP surface, so a neighbouring tab must not be
+    // able to guess the URL (t1, t2, … were trivially enumerable). The same
+    // opaque string is baked into the shim and into every route it fetches.
+    QByteArray tokenBytes(16, Qt::Uninitialized);
+    for (int i = 0; i < tokenBytes.size(); ++i)
+        tokenBytes[i] = static_cast<char>(QRandomGenerator::system()->bounded(0x100));
+    const QString token = QString::fromLatin1(tokenBytes.toHex());
     const bool dark = QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
     m_appBridge->registerApp(token, m_currentSessionId, html, detail, output,
                              dark ? QStringLiteral("dark") : QStringLiteral("light"));

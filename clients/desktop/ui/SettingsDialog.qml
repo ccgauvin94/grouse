@@ -21,6 +21,7 @@ Controls.Dialog {
         hostField.text = Mgr.host
         portField.text = Mgr.port
         tlsBox.checked = Mgr.useTls
+        insecureTlsBox.checked = Mgr.acceptInvalidCerts
         keyField.text = Mgr.secretKey
         cwdField.text = Mgr.workingDir
         autoBox.checked = Mgr.autoConnectEnabled
@@ -40,6 +41,7 @@ Controls.Dialog {
         Mgr.host = hostField.text
         Mgr.port = portField.text
         Mgr.useTls = tlsBox.checked
+        Mgr.acceptInvalidCerts = insecureTlsBox.checked
         Mgr.secretKey = keyField.text
         Mgr.workingDir = cwdField.text
         Mgr.autoConnectEnabled = autoBox.checked
@@ -124,6 +126,18 @@ Controls.Dialog {
                     id: tlsBox
                     text: qsTr("Use TLS (wss)")
                     Kirigami.FormData.label: qsTr("Transport:")
+                }
+                // WebPKI verification is the default in the core. This opt-out
+                // exists only for self-signed tailnet hosts — turn it on and any
+                // certificate for this host is accepted, so a network attacker
+                // able to redirect the connection can read the secret key.
+                Controls.CheckBox {
+                    id: insecureTlsBox
+                    text: qsTr("Skip TLS certificate verification (insecure)")
+                    enabled: tlsBox.checked
+                    Kirigami.FormData.label: qsTr("Certificate:")
+                    Controls.ToolTip.visible: hovered
+                    Controls.ToolTip.text: qsTr("Only for self-signed servers on a trusted private network.")
                 }
                 Controls.TextField {
                     id: keyField

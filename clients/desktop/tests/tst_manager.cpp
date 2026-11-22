@@ -42,6 +42,9 @@ private slots:
     void runEndRendersTheLastStreamedBubble();
     void tailRendersWithoutAnySeal();
     void fencedCodeBecomesBlocksNotHtml();
+    void peerNewSessionUsesThePrefixedId();
+    void mainWireReadyOnlyClearsItsOwnTurns();
+    void tlsVerificationOptOutIsPersistedAndConfigurable();
 };
 
 /**
@@ -548,6 +551,59 @@ void TstManager::roamOpenClearsTheLoadingStatus()
     mgr.coreOnItem(QStringLiteral(R"({"Window":{"oldest_id":"m0","has_older":false}})"));
     QCOMPARE(mgr.status(), failure);
     Q_UNUSED(spy);
+}
+
+/**
+ * A peer's `on_peer_new_session` carries the RAW id. The core only routes a
+ * `roam:<label>:<id>` display id, and the client's owner label must agree with
+ * the id on screen — otherwise a main-wire Ready clears the peer's live turn.
+ * Android's ConnectionManager.onPeerNewSession does the same prefixing.
+ */
+void TstManager::peerNewSessionUsesThePrefixedId()
+{
+    Manager mgr;
+    mgr.openRoamSession(QStringLiteral("Phaethon"),
+                        QStringLiteral("roam:Phaethon:20260101_1"), QString());
+    QVERIFY(mgr.onRoamSession());
+
+    QSignalSpy spy(&mgr, &Manager::currentSessionChanged);
+    mgr.coreOnPeerNewSession(QStringLiteral("Phaethon"), QStringLiteral("20261122_7"));
+    QCOMPARE(mgr.currentSessionId(), QStringLiteral("roam:Phaethon:20261122_7"));
+    QVERIFY(mgr.onRoamSession());   // still the peer's turn, not the main wire's
+    QCOMPARE(Manager::roamPeerForSession(mgr.currentSessionId()), QStringLiteral("Phaethon"));
+    QVERIFY(spy.count() >= 1);
+
+    // A local id has no owner label — opening one hands the turn back to main.
+    mgr.openSession(QStringLiteral("s1"));
+    QCOMPARE(mgr.currentSessionId(), QStringLiteral("s1"));
+    QVERIFY(!mgr.onRoamSession());
+}
+
+/** The pure half of the main-wire Ready guard (the peer-owned turn must survive). */
+void TstManager::mainWireReadyOnlyClearsItsOwnTurns()
+{
+    QVERIFY(Manager::mainWireOwnsTurnState(QString()));
+    QVERIFY(!Manager::mainWireOwnsTurnState(QStringLiteral("Phaethon")));
+}
+
+/** TLS verification is a user decision now, with one compile-time default. */
+void TstManager::tlsVerificationOptOutIsPersistedAndConfigurable()
+{
+    Manager mgr;
+    const bool original = mgr.acceptInvalidCerts();
+    const QString config = mgr.serverConfigJson();
+    QVERIFY2(config.contains(QStringLiteral("\"accept_invalid_certs\"")), qPrintable(config));
+    QCOMPARE(config.contains(QStringLiteral("\"accept_invalid_certs\":true")), original);
+
+    mgr.setAcceptInvalidCerts(!original);
+    QCOMPARE(mgr.acceptInvalidCerts(), !original);
+    QVERIFY(mgr.serverConfigJson().contains(
+        original ? QStringLiteral("\"accept_invalid_certs\":false")
+                 : QStringLiteral("\"accept_invalid_certs\":true")));
+
+    Manager other;
+    QCOMPARE(other.acceptInvalidCerts(), !original);   // persisted in QSettings
+    mgr.setAcceptInvalidCerts(original);                // leave the user's setting alone
 }
 
 QTEST_MAIN(TstManager)
