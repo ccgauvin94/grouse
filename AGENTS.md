@@ -129,6 +129,12 @@ one-line labels for a run of tool calls), `capi.rs` (the C ABI above).
   resync debounces `session_info_update` (1.5s) → probes
   `_goose/unstable/session/info` on the session's owner → in-place
   `session/load` replay → re-probes at 8s ×3, for main and peer sessions alike.
+  **Binding a session is also displaying it** (`hub.display` + `replace_rich`), so
+  a reconnect must name a chat only when the client is actually showing one:
+  `connect_resume` binds, `connect_attach` binds NOTHING (for a screen a peer owns,
+  or none), and `connected()` — not `ready()` — is the "may I reuse this wire?"
+  question. Getting this wrong repaints a roam chat with the last main chat
+  (measured 2026-11-22).
 - **One session pipeline, two transports.** `core/grouse-core/src/session.rs`
   owns the ACP params, wire payload translation, cache paint policy, one
   `TranscriptStore` per display session id (`SessionHub`), and the single

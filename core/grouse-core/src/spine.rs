@@ -286,6 +286,19 @@ pub(crate) enum ConnectSpec {
     },
     /// `session/load` with the session's resolved cwd.
     Resume { session_id: String, cwd: String },
+    /// Handshake and bind NOTHING — no `session/new`, no `session/load`, no
+    /// display change.
+    ///
+    /// This is the reconnect for a wire whose job is the CONNECTION, not a
+    /// chat: a client showing a session another transport owns (a roam peer),
+    /// or a landing page with no chat at all, still needs `session/list`,
+    /// projects and My Day. Resuming a session here would bind it, and binding
+    /// makes it the DISPLAYED one (`hub.display` + `replace_rich`), which
+    /// repaints the client's whole transcript with a chat it never asked to
+    /// see — measured 2026-11-22: returning to the app reconnected the main
+    /// wire, resumed the last MAIN chat, and the roam chat on screen was
+    /// silently replaced by it.
+    Attach,
 }
 
 /// The `session/new` params. `_meta.client` present ⇒ `SessionType::User`, so
@@ -745,6 +758,12 @@ impl Conn {
                 self.start_new_session(&cx, recipe_id, project_id, mode, display)
                     .await?;
             }
+            // Handshake only: the caller is showing something this wire does not
+            // own (a peer's chat) or nothing at all, so there is no session to
+            // bind — and binding one would repaint the client's transcript.
+            // `session/list` and every connection-level call work without a
+            // session; the first `open_session` binds.
+            Some(ConnectSpec::Attach) => {}
             None => {
                 self.start_new_session(&cx, None, None, None, true).await?;
             }

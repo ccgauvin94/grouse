@@ -1319,6 +1319,26 @@ impl Core {
         self.wait_ready(ready_rx);
     }
 
+    /// Bring the MAIN wire up and bind NOTHING.
+    ///
+    /// The reconnect for a client whose screen the main wire does not own: a
+    /// chat carried by a roam peer, or a landing page with no chat open. The
+    /// connection is fully usable — `session/list`, projects, My Day, the
+    /// unstable shims — because none of them need a session; the first
+    /// `open_session` binds one.
+    ///
+    /// `connect_resume` is the wrong call here and that is the whole point of
+    /// this intent: resuming binds, binding makes the session the DISPLAYED one
+    /// (`hub.display` + `replace_rich`), and the client's transcript is then
+    /// repainted with a chat it never asked to see. Measured 2026-11-22 —
+    /// "when I leave the app and reopen it, it always opens the last non-roam
+    /// chat": coming back to the foreground reconnected the main wire, which
+    /// resumed the last MAIN chat and replaced the roam chat on screen with it.
+    pub fn connect_attach(&self, config: ServerConfig) {
+        let (_, ready_rx) = self.connect_impl(config, ConnectSpec::Attach, false, false);
+        self.wait_ready(ready_rx);
+    }
+
     /// Explicit close: no reconnect (CONTRACT §3.1).
     pub fn disconnect(&self) {
         {
@@ -2210,6 +2230,22 @@ impl Core {
     /// `ready` ⇔ an open session id exists (CONTRACT §4).
     pub fn ready(&self) -> bool {
         self.active_session_id().is_some()
+    }
+
+    /// The MAIN wire is up — its handshake completed — whether or not a session
+    /// is bound.
+    ///
+    /// [`Core::ready`] answers CONTRACT §4's narrower question ("is there an
+    /// open session id") and is therefore FALSE on a wire brought up by
+    /// [`Core::connect_attach`], which deliberately binds none. A client asking
+    /// "may I reuse this connection instead of dialling again?" wants this:
+    /// `session/list`, projects and My Day all work on an attached wire.
+    pub fn connected(&self) -> bool {
+        self.inner
+            .conn
+            .lock()
+            .as_ref()
+            .is_some_and(|conn| conn.is_ready())
     }
 
     /// Whether a turn is still outstanding for `session_id` — the core's

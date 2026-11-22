@@ -975,6 +975,112 @@ fn a_replay_is_ingested_silently_and_painted_once() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
+/// A reconnect that is only about the CONNECTION binds nothing, so the chat on
+/// screen survives it.
+///
+/// Reported 2026-11-22: "when I leave the app and reopen it, it always opens
+/// the last non-roam chat". The client reconnected the main wire on a foreground
+/// return and named the last MAIN chat as the resume target; `connect_resume`
+/// BINDS what it resumes, and binding is also DISPLAYING (`hub.display` +
+/// `replace_rich`), so the whole transcript was repainted with that chat while
+/// the client still thought it was showing a roam peer's. `connect_attach` is
+/// that reconnect without the binding: the wire comes up, `session/list` works,
+/// and the first explicit `open_session` binds.
+#[test]
+fn a_reconnect_that_binds_nothing_leaves_the_screen_alone() {
+    let _cache_guard = CACHE_TEST_LOCK.lock();
+    let data_dir = std::env::temp_dir().join(format!("grouse-attach-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    let (port_tx, port_rx) = mpsc::channel();
+    let server = FakeServer::spawn(port_tx);
+    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    *server.history.lock() = 3;
+
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let core = Core::new(
+        Box::new(RecordingListener::new(ev_tx)),
+        data_dir.to_string_lossy().to_string(),
+    );
+    let config = || grouse_core::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        secret_key: "test-secret".to_string(),
+        use_tls: false,
+        accept_invalid_certs: false,
+        ca_cert_pem: None,
+        cwd: "/tmp".to_string(),
+        auto_connect: false,
+        client_id: "grouse-core-test".to_string(),
+        initial_recipe_id: None,
+        initial_project_id: None,
+    };
+    core.connect(config());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "first ready");
+
+    // A chat is on screen — the thing a reconnect must not replace.
+    core.open_session("sess-hist".to_string());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "open ready");
+    assert_eq!(core.active_session_id().as_deref(), Some("sess-hist"));
+    let shown: Vec<String> = core.transcript().into_iter().map(|m| m.content).collect();
+    assert!(!shown.is_empty(), "the chat has content to lose");
+    let loads = server.frames_for("session/load").len();
+    let news = server.frames_for("session/new").len();
+
+    // The reconnect: up, and bound to nothing.
+    core.connect_attach(config());
+    assert!(core.connected(), "the attached wire is live");
+    assert!(!core.ready(), "…and it is not 'ready' in CONTRACT §4's sense: no session");
+    assert_eq!(
+        core.active_session_id(),
+        None,
+        "attach must bind no session — anything else would be displayed over the chat on screen"
+    );
+    assert_eq!(
+        core.transcript().into_iter().map(|m| m.content).collect::<Vec<_>>(),
+        shown,
+        "the displayed transcript is untouched"
+    );
+    assert_eq!(
+        server.frames_for("session/load").len(),
+        loads,
+        "attach must not send a session/load"
+    );
+    assert_eq!(
+        server.frames_for("session/new").len(),
+        news,
+        "attach must not mint a session either"
+    );
+
+    // …and the wire is fully usable: the connection-level calls work with no
+    // session bound, and the first explicit open binds again.
+    core.list_sessions();
+    core.open_session("sess-hist".to_string());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "open after attach");
+    assert_eq!(core.active_session_id().as_deref(), Some("sess-hist"));
+
+    // THE CONTRAST, which is the defect: resuming BINDS, and binding is
+    // DISPLAYING. A reconnect that names a chat replaces whatever is on screen
+    // with it — the "reopen the app and it opens the last non-roam chat" report,
+    // where the client believed it was showing a peer's chat.
+    *server.history.lock() = 0;
+    core.connect_resume(config(), "sess-other".to_string());
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "resume ready");
+    assert_eq!(
+        core.active_session_id().as_deref(),
+        Some("sess-other"),
+        "a resume binds its target…"
+    );
+    assert_ne!(
+        core.transcript().into_iter().map(|m| m.content).collect::<Vec<_>>(),
+        shown,
+        "…and binding repaints the screen with it, which is why the reconnect must attach"
+    );
+
+    core.disconnect();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
 /// The two reload strengths (grouse#18). QUICK lets freshness decide — a settled
 /// cache means a bounded tail, not a replay of the whole session — while FULL
 /// ignores the cache and always replays. Both are what the clients' "reload"

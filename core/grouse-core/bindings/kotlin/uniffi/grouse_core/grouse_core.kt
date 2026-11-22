@@ -1047,7 +1047,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_connect(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_core_connect_attach(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_core_connect_resume(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_core_connected(
     ): Int
     external fun uniffi_grouse_core_checksum_method_core_current_thread_label(
     ): Int
@@ -1378,8 +1382,12 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_connect(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_core_connect_attach(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_grouse_core_fn_method_core_connect_resume(`ptr`: Long,`config`: RustBuffer.ByValue,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_core_connected(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_grouse_core_fn_method_core_current_thread_label(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_grouse_core_fn_method_core_delete_session(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1737,7 +1745,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_connect() and 0xFFFF) != 62952) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_grouse_core_checksum_method_core_connect_attach() and 0xFFFF) != 4069) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_grouse_core_checksum_method_core_connect_resume() and 0xFFFF) != 29319) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_core_connected() and 0xFFFF) != 13675) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_current_thread_label() and 0xFFFF) != 7949) {
@@ -2729,6 +2743,25 @@ public interface CoreInterface {
     fun `connect`(`config`: ServerConfig)
     
     /**
+     * Bring the MAIN wire up and bind NOTHING.
+     *
+     * The reconnect for a client whose screen the main wire does not own: a
+     * chat carried by a roam peer, or a landing page with no chat open. The
+     * connection is fully usable — `session/list`, projects, My Day, the
+     * unstable shims — because none of them need a session; the first
+     * `open_session` binds one.
+     *
+     * `connect_resume` is the wrong call here and that is the whole point of
+     * this intent: resuming binds, binding makes the session the DISPLAYED one
+     * (`hub.display` + `replace_rich`), and the client's transcript is then
+     * repainted with a chat it never asked to see. Measured 2026-11-22 —
+     * "when I leave the app and reopen it, it always opens the last non-roam
+     * chat": coming back to the foreground reconnected the main wire, which
+     * resumed the last MAIN chat and replaced the roam chat on screen with it.
+     */
+    fun `connectAttach`(`config`: ServerConfig)
+    
+    /**
      * Connect and RESUME a specific session on the first handshake — the cold
      * start when the app already knows which chat to show. Where `connect()`
      * binds a throwaway `session/new` (which the deferred open then abandoned,
@@ -2740,6 +2773,18 @@ public interface CoreInterface {
      * skips the wire replay — identical fast path, minus the orphan.
      */
     fun `connectResume`(`config`: ServerConfig, `sessionId`: kotlin.String)
+    
+    /**
+     * The MAIN wire is up — its handshake completed — whether or not a session
+     * is bound.
+     *
+     * [`Core::ready`] answers CONTRACT §4's narrower question ("is there an
+     * open session id") and is therefore FALSE on a wire brought up by
+     * [`Core::connect_attach`], which deliberately binds none. A client asking
+     * "may I reuse this connection instead of dialling again?" wants this:
+     * `session/list`, projects and My Day all work on an attached wire.
+     */
+    fun `connected`(): kotlin.Boolean
     
     /**
      * The thread label of the conversation on screen, when it IS a thread chat.
@@ -3430,6 +3475,36 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 
     
     /**
+     * Bring the MAIN wire up and bind NOTHING.
+     *
+     * The reconnect for a client whose screen the main wire does not own: a
+     * chat carried by a roam peer, or a landing page with no chat open. The
+     * connection is fully usable — `session/list`, projects, My Day, the
+     * unstable shims — because none of them need a session; the first
+     * `open_session` binds one.
+     *
+     * `connect_resume` is the wrong call here and that is the whole point of
+     * this intent: resuming binds, binding makes the session the DISPLAYED one
+     * (`hub.display` + `replace_rich`), and the client's transcript is then
+     * repainted with a chat it never asked to see. Measured 2026-11-22 —
+     * "when I leave the app and reopen it, it always opens the last non-roam
+     * chat": coming back to the foreground reconnected the main wire, which
+     * resumed the last MAIN chat and replaced the roam chat on screen with it.
+     */override fun `connectAttach`(`config`: ServerConfig)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_connect_attach(
+        it,
+        
+        FfiConverterTypeServerConfig.lower(`config`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * Connect and RESUME a specific session on the first handshake — the cold
      * start when the app already knows which chat to show. Where `connect()`
      * binds a throwaway `session/new` (which the deferred open then abandoned,
@@ -3451,6 +3526,29 @@ open class Core: Disposable, AutoCloseable, CoreInterface
 }
     }
     
+    
+
+    
+    /**
+     * The MAIN wire is up — its handshake completed — whether or not a session
+     * is bound.
+     *
+     * [`Core::ready`] answers CONTRACT §4's narrower question ("is there an
+     * open session id") and is therefore FALSE on a wire brought up by
+     * [`Core::connect_attach`], which deliberately binds none. A client asking
+     * "may I reuse this connection instead of dialling again?" wants this:
+     * `session/list`, projects and My Day all work on an attached wire.
+     */override fun `connected`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_core_connected(
+        it,
+        _status)
+}
+    }
+    )
+    }
     
 
     

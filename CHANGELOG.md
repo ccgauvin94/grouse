@@ -6,6 +6,36 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — the app comes back to the screen you left, not to the last main chat
+
+- **A reconnect binds nothing when the screen belongs to a peer.** Reported as "when I
+  leave the app and reopen it, it always opens the last non-roam chat". The client
+  reconnected the main wire on a foreground return and named the **last MAIN chat** as its
+  resume target even while a roam chat was on screen — and resuming BINDS, which the core
+  treats as DISPLAYING (`hub.display` + `replace_rich`): the transcript on screen was
+  repainted with that chat, under the roam chat's own header. The resume target is now the
+  main chat on screen and nothing else; when a peer owns the screen (or no chat is open)
+  the reconnect uses the new `connect_attach` — the wire, bound to nothing.
+- **`Core::connect_attach` / `Connected`** (core): a connect that performs the handshake
+  and binds no session — no `session/new`, no `session/load`, no display change.
+  `session/list`, projects, My Day and the sign-in shim all work on it (`tasks_*` mints its
+  own hidden session; nothing else needs one), and the first `open_session` binds. `ready()`
+  keeps CONTRACT §4's meaning ("an open session id exists"); the new `connected()` answers
+  the transport question, which is what a client needs to decide whether to reuse a live
+  wire.
+- **A launch attaches too**, so a cold start paints no transcript at all: the landing page
+  is the startup screen, and nothing is bound behind it to be adopted later.
+- **A peer's reply is no longer frozen by a main-wire reconnect.** The main wire's open
+  path cleared the app's turn state unconditionally ("a new client cannot receive the old
+  turn's end") — but a peer's turn was never on that wire, so every main-socket drop
+  cleared the spinner and stopped the streaming row's Markdown from settling while the
+  reply was still arriving. An attach now leaves the turn state alone.
+- Pinned by `a_reconnect_that_binds_nothing_leaves_the_screen_alone` (the attached wire
+  reaches Ready with no `session/load` and no `session/new`, the displayed transcript is
+  byte-identical afterwards, `session/list` still answers, the next open binds — and, as
+  the contrast that motivates it, `connect_resume` with another chat's id does replace the
+  screen).
+
 ### Fixed — a chat with a reply in flight is never rebuilt from the server
 
 Four read-only investigations plus a re-read of the code; the full findings are in

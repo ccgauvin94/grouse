@@ -1276,18 +1276,19 @@ class ConnectionManager private constructor(context: Context) {
 
     val configured: Boolean get() = store.hasKey()
 
-    /** Connect using the already-saved host/port/key (post-unlock auto-connect).
+    /** Connect using the already-saved host/port/key (post-unlock auto-connect, and the
+     *  explicit "connect" on the connection screens).
      *
-     *  RESUMES the chat on screen. This used to pass `resume = null`, which is not a
-     *  reconnect at all: the core binds a fresh `session/new` and the user's tap landed
-     *  them on a blank chat next to the one they were reading (the app bar's
-     *  "tap to reconnect" made that the primary way to reconnect, so it was the ordinary
-     *  path, not an edge case). */
+     *  Resumes the chat on screen when THIS wire owns it. This used to pass `resume = null`,
+     *  which is not a reconnect at all: the core binds a fresh `session/new` and the user's
+     *  tap landed them on a blank chat next to the one they were reading. It no longer names
+     *  a chat when a PEER owns the screen either — that would bind a main chat and paint it
+     *  over the peer's transcript (see `resumeTarget`); it attaches instead. */
     fun connectSaved() {
         if (!store.hasKey()) return
         endRetry(MAIN_RETRY_KEY)   // an explicit connect gets the whole schedule back
         linkFailed.value = false
-        open(resume = resumeTarget())
+        reconnectMain()
     }
 
     // --- Roam (parallel iroh peers) -------------------------------------------
@@ -1502,10 +1503,11 @@ class ConnectionManager private constructor(context: Context) {
      *  onto the screen, nothing opened a minute later by a `session/list` that arrived while
      *  they were somewhere else.
      *
-     *  The connect still names the last MAIN chat as its resume target, because the
-     *  alternative is a throwaway `session/new` per launch (the empty "New Chat" rows) — not
-     *  because anything is adopted: `onCoreReady` skips the adoption for a launch (see
-     *  `launchQuiet`), so `currentSession` stays empty and the landing page stays put.
+     *  It also BINDS nothing (`attachOnly`): a resume target would be bound on the server, and
+     *  binding is the same act as DISPLAYING it (core `hub.display` + `replace_rich`), so the
+     *  launch would paint the last MAIN chat into a client that is about to show a landing
+     *  page — and, before `launchQuiet` existed, adopt it. An attached wire serves
+     *  `session/list`, projects and My Day with no session at all; the first tap opens.
      *
      *  Returns true only for the first call of this process (the launch), so the shell can put
      *  the landing page up without fighting a later re-entry from the lock screen. */
@@ -1514,14 +1516,13 @@ class ConnectionManager private constructor(context: Context) {
         if (homeOpened) return false
         homeOpened = true
         launchQuiet = true
-        // Never a roam id: a cold start dials no peers, so resuming onto one would bind a
-        // session whose wire does not exist yet.
-        open(resume = store.lastSessionId?.takeIf { !it.startsWith("roam:") })
+        open(attachOnly = true)
         return true
     }
 
-    /** Set by a launch connect: the first Ready belongs to nobody, so it must not adopt its
-     *  session as the chat on screen. Consumed once. */
+    /** Set by a launch connect: any session that turns up unasked must not be adopted as the
+     *  chat on screen. An attached launch produces none; this is the belt for a resume that
+     *  arrives from elsewhere. Consumed once. */
     @Volatile private var launchQuiet = false
 
     /** Save new credentials and connect fresh (from the Connect screen). */
@@ -2473,14 +2474,24 @@ class ConnectionManager private constructor(context: Context) {
         tick()
     }
 
-    /** The chat a reconnect must come back to: the one on screen when it belongs to the
-     *  main wire, else the last main chat. A roam-owned screen must NOT be resumed onto
-     *  the main connection — that would be "reconnected into a different chat". */
-    private fun resumeTarget(): String? {
-        val shown = currentSession.value
-        if (shown != null && roamPeer(shown) == null) return shown
-        return lastSessionId?.takeIf { roamPeer(it) == null }
-            ?: store.lastSessionId?.takeIf { roamPeer(it) == null }
+    /** The chat a reconnect must come back to: the MAIN chat on screen.
+     *
+     *  A roam-owned screen has NOTHING to resume here — the peer's own wire carries it, and
+     *  naming a main chat instead would BIND it, which the core treats as displaying it: the
+     *  transcript on screen would be replaced by that chat (measured 2026-11-22, "reopen the
+     *  app and it opens the last non-roam chat"). The fallbacks that used to live here
+     *  (`lastSessionId`, `store.lastSessionId`) were exactly that chat, chosen while a peer was
+     *  on screen. Null now means "bring the wire up and bind nothing" — see `reconnectMain`. */
+    private fun resumeTarget(): String? = resumeTargetFor(currentSession.value)
+
+    /** Reconnect the main wire, resuming only a chat it actually owns.
+     *
+     *  Two shapes: the reader is in a MAIN chat (resume it, so its cache paints and the
+     *  freshness rules apply), or the screen belongs to a peer / to no chat at all (attach —
+     *  the wire for `session/list` and My Day, bound to nothing, so nothing is displayed). */
+    private fun reconnectMain() {
+        val target = resumeTarget()
+        if (target != null) open(resume = target) else open(attachOnly = true)
     }
 
     /** The main wire is down: start (or continue) the app's retry loop. Idempotent, and a
@@ -2494,12 +2505,13 @@ class ConnectionManager private constructor(context: Context) {
         if (!store.hasKey()) return
         if (online.value || connecting) return
         if (linkFailed.value) return
-        if (resumeTarget() == null) return    // nothing to come back to: minting a session is the bug
+        // Nothing on screen is a reason to attach, not a reason to stay dark: the wire also
+        // carries `session/list`, projects and My Day.
         autoRetrying.value = true
         linkFailed.value = false
         beginRetry(
             key = MAIN_RETRY_KEY,
-            fire = { if (!online.value && !connecting) open(resume = resumeTarget()) },
+            fire = { if (!online.value && !connecting) reconnectMain() },
             giveUp = { autoRetrying.value = false; linkFailed.value = true },
         )
     }
@@ -2822,7 +2834,15 @@ class ConnectionManager private constructor(context: Context) {
             return
         }
         val sid = core.activeSessionId()
-        if (sid == null) return
+        // No session on this wire: an ATTACH (`connectHome`, and every reconnect whose screen
+        // belongs to a peer or to no chat). Nothing to adopt — the whole point — but the wire
+        // is live, so the lists behind the landing page, the drawer and My Day are readable
+        // again. Without this a reconnect on a peer's chat left the drawer stale for the rest
+        // of the process, because the only other refresh lives in the adoption block below.
+        if (sid == null) {
+            refreshSidebar()
+            return
+        }
         // A launch connects but opens nothing: the resumed session belongs to no screen, and
         // adopting it here is what made an app opened on the landing page quietly swap a
         // conversation in behind the reader. Cleared on the first Ready, so a later reconnect
@@ -3863,15 +3883,23 @@ class ConnectionManager private constructor(context: Context) {
     // ---------------------------------------------------------------------------
 
     @Synchronized
-    private fun open(resume: String?, cwd: String? = null, kind: SessionKind? = null) {
+    private fun open(
+        resume: String? = null,
+        cwd: String? = null,
+        kind: SessionKind? = null,
+        attachOnly: Boolean = false,
+    ) {
         // A fresh intent is a fresh chance to repair a superseded open (see onCoreReady).
         reopenAttemptedFor = null
         // If a reset/create-assistant is pending but THIS open isn't the one that scheduled
         // it, abandon it so a later unrelated Ready can't complete a stale rename. (Explicit
         // newSession/openSession already clear the flag; this is the belt-and-suspenders.)
         if (pendingAssistantRename && resume != null) pendingAssistantRename = false
-        // Single-flight: if already connecting, queue this open for after Ready
+        // Single-flight: if already connecting, queue this open for after Ready. An attach
+        // asks for nothing but the wire, which a connect in flight is already bringing up —
+        // queueing it as a session/new would mint one instead.
         if (connecting) {
+            if (attachOnly) return
             if (resume != null) pendingResumeAfterConnect = resume
             else pendingNewSessionAfterConnect = true
             return
@@ -3879,13 +3907,20 @@ class ConnectionManager private constructor(context: Context) {
         // A new client can't receive the old turn's RunEnded, so clear turn state here.
         // Otherwise a hung/dropped turn leaves busy=true and every new chat + reconnect
         // inherits a stuck "goose is thinking…" with nothing sent. Same logic for compacting.
-        // A new client can't receive the old turn's RunEnded: drop every turn.
-        clearTurnState()
+        //
+        // NOT for an attach: that reconnect exists because the chat on screen belongs to a
+        // PEER, whose turn this wire never carried. Wiping it here froze a peer's streaming
+        // reply mid-flight (spinner cleared, markdown settling stopped) every time the main
+        // socket dropped.
+        if (!attachOnly) clearTurnState()
         // Live reuse (core already Ready on same host/port/key) must not
         // flip to `connecting`/`Loading 0` — the wire stays up. Only a true
         // reconnect (new host/port/key or no wire) shows connecting.
         val base = currentServerConfig()
-        val canReuseLive = core.ready() && lastConfig != null && lastConfig == base
+        // `connected()` (the wire is up), not `ready()` (a session is bound): an attached
+        // wire has no session and is still perfectly reusable — dialling again for every
+        // first open would throw away the socket the attach just built.
+        val canReuseLive = core.connected() && lastConfig != null && lastConfig == base
         if (!canReuseLive) {
             live = false; connecting = true; online.value = false
             liveModelsFetchedFor = null
@@ -3925,16 +3960,27 @@ class ConnectionManager private constructor(context: Context) {
             // A recipe/project pending on a cold start rides the connect's session/new
             // (gap 4 + grouse#5 P0: the core's connect() takes initial_recipe_id /
             // initial_project_id), so the transient session IS the target — no orphan.
-            val cfg = base.copy(initialRecipeId = pendingRecipeId, initialProjectId = pendingProjectId)
-            pendingRecipeId = null
-            pendingProjectId = null
-            val target = resume
+            // An attach creates no session, so nothing is consumed.
+            val cfg = if (attachOnly) base
+                      else base.copy(initialRecipeId = pendingRecipeId, initialProjectId = pendingProjectId)
+            if (!attachOnly) {
+                pendingRecipeId = null
+                pendingProjectId = null
+            }
+            val target = resume.takeIf { !attachOnly }
             Thread({
                 // Resume the known chat directly. `connect()` would bind a
                 // throwaway `session/new` first and the deferred open then
                 // abandoned it — the empty "New Chat" the server listed on
                 // every reopen. connect_resume binds the target, no orphan.
+                //
+                // With NO target there are two different intents, and the difference is
+                // what is on screen: `newSession` wants a brand-new chat (`connect()`),
+                // while an attach wants the wire and nothing bound on it, because the chat
+                // being shown belongs to a peer or to no chat at all — resuming one would
+                // display it over that screen (`hub.display` + `replace_rich`).
                 if (target != null) core.connectResume(cfg, target)
+                else if (attachOnly) core.connectAttach(cfg)
                 else core.connect(cfg)
                 // connect() returned: either Ready arrived (fine) or the bounded wait timed
                 // out / the handshake failed (the core emits no error status for the
@@ -3955,7 +4001,8 @@ class ConnectionManager private constructor(context: Context) {
             pendingResumeAfterConnect = null
             core.openSession(resume)
         }
-        else core.newSessionWithMode(pendingRecipeId.also { pendingRecipeId = null },
+        // An attach on a live wire is already satisfied: it is up, and nothing is bound.
+        else if (!attachOnly) core.newSessionWithMode(pendingRecipeId.also { pendingRecipeId = null },
                                      pendingProjectId.also { pendingProjectId = null },
                                      pendingMode.also { pendingMode = null })
     }
@@ -4086,6 +4133,18 @@ class ConnectionManager private constructor(context: Context) {
         fun roamPeer(sessionId: String?): String? =
             sessionId?.takeIf { it.startsWith("roam:") }
                 ?.removePrefix("roam:")?.substringBefore(':')?.ifBlank { null }
+
+        /** The chat a MAIN-wire reconnect may resume: the one on screen, and only when this
+         *  wire owns it.
+         *
+         *  A `roam:` id belongs to a peer — the main wire cannot resume it — and the old
+         *  fallback (the last MAIN chat) was worse than useless: resuming BINDS, and binding
+         *  is DISPLAYING, so a reconnect made while a peer's chat was on screen repainted the
+         *  transcript with that main chat underneath the peer's header (2026-11-22: "when I
+         *  leave the app and reopen it, it always opens the last non-roam chat"). Null is not
+         *  "no reconnect": it means ATTACH — bring the wire up, bind nothing. */
+        fun resumeTargetFor(shown: String?): String? =
+            shown?.takeIf { roamPeer(it) == null }
 
         /** May the wire carrying [lostSessionId] release the in-flight turn?
          *

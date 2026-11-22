@@ -87,6 +87,8 @@ defaulting to real verification; roam byte stream). The UI supplies only
 | Method | Params | Notes |
 |---|---|---|
 | `connect(config: ServerConfig)` | — | opens the WebSocket; `initialize`; then new-or-resume per §4 |
+| `connect_resume(config, session_id)` | — | connect, and BIND `session_id` on the first handshake (no throwaway `session/new`): the cold start for a client that already knows which chat to show. Binding is also DISPLAYING — the cached transcript is painted and becomes the one the client sees |
+| `connect_attach(config)` | — | connect and bind **nothing**: no `session/new`, no `session/load`, no display change. The reconnect for a wire whose job is the CONNECTION while a chat this wire does not own is on screen (a roam peer's) or no chat is open at all — `session/list`, projects and My Day all work with no session bound, and the first `open_session` binds. Never use a resume here: resuming binds, which repaints the client's transcript with that chat (2026-11-22: a foreground reconnect naming the last MAIN chat replaced the roam chat on screen with it) |
 | `disconnect()` | — | explicit close, no reconnect |
 | `new_session(recipe_id: Option<String>, project_id: Option<String>)` | — | `session/new` with `_meta.client` + cwd; `recipeId`/`projectId` when given. `projectId` is persisted by stock goose at creation, so a project chat needs no post-creation `session/project/update`. A project is written **twice**: the column, and `_meta.tags {"grouse.project": <slug>}` beside it (`session::PROJECT_TAG_KEY`). goose is retiring `project_id` in favour of client-owned tags (grouse#5 / upstream #13014 → #13173), so the tag is the half that survives; a server ≤1.58 drops unknown `_meta` keys, so the write is harmless there and the column still files the chat. The read side (`project_from_meta`) takes the column first and falls back to the tag, and blank counts as absent in both |
 | `open_session(session_id: String)` | — | `session/load` with the real cwd (core resolves it); a settled, matching cache paints authoritatively and suppresses the replay, a settled-but-stale one merges a bounded tail, an incomplete one repaints provisionally and takes a tail big enough to replace what it painted — and a session with a **turn in flight** paints NOTHING and takes a BIND-ONLY load (`_meta.replayTail: 1`), because the server cannot know the reply being streamed and a replay that replaces the store would delete it. The recent part paints first and history behind it is paged in (`load_older`, §3.5) |
@@ -203,6 +205,10 @@ cache paint in place.
 
 - `status(): ConnectionStatus` — `Disconnected | Connecting | Ready | Syncing | Error(String)`. `Alert(String)` is the advisory variant: a one-off control-path failure (e.g. a `session/set_config_option` the peer refused, emitted when a provider/model pick never lands) delivered with the connection otherwise untouched — clients surface it as text only and must NOT treat it as the wire being down.
 - `ready(): bool`
+- `connected(): bool` — the MAIN wire's handshake completed, session or not.
+  `ready` (below) is the narrower question; a wire brought up by
+  `connect_attach` is `connected` and not `ready`, and a client asking "may I
+  reuse this connection instead of dialling again?" wants this one.
 - `active_session_id(): Option<String>`
 - `sessions(): Vec<SessionSummary>` — carries the full session metadata the
   UIs render: id, title, updated_at, last_message_snippet, project_id,
@@ -678,7 +684,9 @@ hard daily cap is not a level: it is a stop-loss, and a test pins that it never 
 ## 4. Session lifecycle (owned by the core)
 
 - `ready` ⇔ an open session id exists. `send_prompt`/`set_config_option`/tool
-  queries queue until `ready`, then flush in order.
+  queries queue until `ready`, then flush in order. `connected` is the
+  transport question and does not imply `ready`: `connect_attach` binds no
+  session, so its wire is `connected` from the first `Ready`.
 - Resume (`open_session`) resolves the session's real cwd: per-session cache →
   `_goose/unstable/session/info` probe (unstable) → the cwd carried in
   `session/list`. Never guess — this is a protocol footgun.
