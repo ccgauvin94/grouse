@@ -68,7 +68,17 @@ use crate::{
 /// — for the merged-main-and-peers session view (2026-11-23). The new slot makes
 /// the table 48 entries; both sides must bump together or every callback after
 /// it would be read with the wrong offset.
-pub const GROUSE_ABI_VERSION: u32 = 18;
+///
+/// 19: JSON record shapes only — `NotifyContext` gained `armed_owner` (the roam
+/// peer label the client armed) and `NotifyDecision` gained `reply_session` (the
+/// verified Reply target; `null` for briefings, tasks and unverifiable turns).
+/// No symbol signature or listener-table layout changed, but a desktop built for
+/// 19 must not load an old `.so` whose decisions have no `reply_session` key.
+/// COORDINATOR: bump `kExpectedAbiVersion` in `clients/desktop/src/corebridge.cpp`
+/// to 19 and make the desktop read `reply_session` instead of the envelope's
+/// `session` in the same change. Android must regenerate its uniffi bindings
+/// (`just android-libs`) for the two new record fields.
+pub const GROUSE_ABI_VERSION: u32 = 19;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
@@ -150,12 +160,19 @@ fn push_context(context_json: *const c_char) -> crate::notify::NotifyContext {
         announced_session: None,
         announced_secs_ago: None,
         announce_any_turn: false,
+        // A malformed context gets the strictest policy: no declared roam owner,
+        // so a `roam:` turn cannot become a reply destination.
+        armed_owner: None,
     })
 }
 
 /// Decide whether a decoded payload should become a notification, given what the
-/// client knows (`NotifyContext` JSON). Returns a `NotifyDecision` JSON record; a
-/// malformed context is a no-show rather than a crash.
+/// client knows (`NotifyContext` JSON: `app_visible`, `armed_session`,
+/// `session_title`, `announced_session`, `announced_secs_ago`,
+/// `announce_any_turn`, `armed_owner`). Returns a `NotifyDecision` JSON record
+/// (`show`, `summary`, `body`, `reply_session`); a malformed context is a no-show
+/// rather than a crash. CLIENTS: the notification's Reply action must use
+/// `reply_session`, never the envelope's `session` — the latter is sender-supplied.
 #[no_mangle]
 pub extern "C" fn grouse_push_decide(envelope_json: *const c_char,
                                      context_json: *const c_char) -> *mut c_char {
@@ -172,7 +189,8 @@ pub extern "C" fn grouse_push_decide(envelope_json: *const c_char,
 /// As `grouse_push_decide`, with the run id the client announced the last time
 /// it showed a notification (`Some(JSON string)`; a NULL pointer, JSON `null` or
 /// an empty string all mean "unknown"). Run ids stop a genuine second turn in
-/// the same chat from being swallowed as a duplicate delivery.
+/// the same chat from being swallowed as a duplicate delivery; they do NOT make
+/// a sender-supplied session replyable — see `reply_session` in the decision.
 #[no_mangle]
 pub extern "C" fn grouse_push_decide_run(
     envelope_json: *const c_char,

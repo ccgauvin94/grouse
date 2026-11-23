@@ -50,6 +50,10 @@ public:
         char *(*grouse_push_decide)(const char *envelope_json, const char *context_json);
         /// As grouse_push_decide, with the run id announced for the last
         /// notification: JSON string, JSON null, or a plain C string / nullptr.
+        /// The context JSON carries `armed_owner` (bare roam peer label); the
+        /// returned decision carries `reply_session`, the ONLY verified Reply
+        /// / deep-link target. Both landed in ABI 19 without changing this
+        /// signature, so the ABI gate (not this table) keeps an older .so out.
         char *(*grouse_push_decide_run)(const char *envelope_json, const char *context_json,
                                         const char *announced_run_json_or_null);
         void (*grouse_connect)(void *h, const char *config_json, char **out_err);

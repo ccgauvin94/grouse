@@ -28,6 +28,15 @@ Kirigami.Page {
         sidePanel.focusSection(0)
     }
 
+    // One choke point for links out of a chat bubble. Mgr.linkAllowed() is the
+    // SAME allowlist the markdown renderer uses to drop disallowed hrefs, so a
+    // server that smuggles file:/javascript:/custom: into a link cannot open
+    // anything — through RichText here or through the rendered HTML.
+    function openLink(link) {
+        if (Mgr.linkAllowed(link))
+            Qt.openUrlExternally(link)
+    }
+
     // A fenced code block inside a message row. A RichText TextEdit wraps
     // everything, so a long line disappeared under a scrollless bubble: the
     // chunk flicks horizontally here instead, and `pre` keeps the whitespace
@@ -193,7 +202,7 @@ Kirigami.Page {
                         selectionColor: Kirigami.Theme.highlightColor
                         selectedTextColor: Kirigami.Theme.highlightedTextColor
                         renderType: Text.NativeRendering
-                        onLinkActivated: Qt.openUrlExternally(link)
+                        onLinkActivated: page.openLink(link)
                     }
                 }
             }
@@ -1466,7 +1475,7 @@ Kirigami.Page {
                                     selectionColor: Kirigami.Theme.highlightColor
                                     selectedTextColor: Kirigami.Theme.highlightedTextColor
                                     renderType: Text.NativeRendering
-                                    onLinkActivated: Qt.openUrlExternally(link)
+                                    onLinkActivated: page.openLink(link)
                                     TapHandler {
                                         acceptedButtons: Qt.RightButton
                                         onTapped: msgMenu.popup()
@@ -1535,7 +1544,7 @@ Kirigami.Page {
                                     selectionColor: Kirigami.Theme.highlightColor
                                     selectedTextColor: Kirigami.Theme.highlightedTextColor
                                     renderType: Text.NativeRendering
-                                    onLinkActivated: Qt.openUrlExternally(link)
+                                    onLinkActivated: page.openLink(link)
                                     TapHandler {
                                         acceptedButtons: Qt.LeftButton
                                         onTapped: {
@@ -1881,7 +1890,7 @@ Kirigami.Page {
                         // ---------------- MCP-App bubble ----------------
                         // With QtWebEngine (flatpak base app / native package) the app renders
                         // inline in a WebEngineView on the loopback bridge URL. Without it the
-                        // same URL (or a temp file) opens in the system browser instead, and
+                        // same URL opens in the system browser instead, and
                         // this stays a chip. height: the view cannot size itself from content
                         // (size-changed relay is a follow-up), so a generous fixed frame with
                         // in-page scroll.
@@ -2104,7 +2113,7 @@ Kirigami.Page {
                             onOpenRequested: {
                                 const local = String(mdel.fileProgress.localPath || "")
                                 if (local.length > 0)
-                                    Qt.openUrlExternally("file://" + local)
+                                    Mgr.openLocalFile(local)
                             }
                         }
 

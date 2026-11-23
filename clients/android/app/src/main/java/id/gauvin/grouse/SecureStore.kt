@@ -10,6 +10,41 @@ import androidx.security.crypto.MasterKey
 import java.security.GeneralSecurityException
 
 /**
+ * Pure classification of an EncryptedSharedPreferences / Keystore failure.
+ *
+ * Wiping `goose_secure` throws away the X-Secret-Key AND the iroh device identity, so it is
+ * only justified when the exception positively identifies a lost keyset: a permanently
+ * invalidated/expired key, an unrecoverable entry, or a ciphertext integrity failure.
+ * A generic `GeneralSecurityException` (Keystore busy, I/O hiccup, bad state) may be
+ * transient — keep the file and surface a retryable failure instead of nuking the key.
+ * The class-name and phrase checks are deliberately narrow; a broad message match here
+ * would quietly de-pair the device on every Keystore hiccup.
+ */
+internal fun isUnrecoverableKeysetFailure(error: Throwable): Boolean {
+    val unrecoverableTypes = setOf(
+        "KeyPermanentlyInvalidatedException",
+        "KeyExpiredException",
+        "UnrecoverableKeyException",
+        "UnrecoverableEntryException",
+        "AEADBadTagException",
+    )
+    val unrecoverablePhrases = listOf(
+        "permanently invalidated", "key invalidated", "key was invalidated",
+        "key has been invalidated", "unrecoverable key",
+    )
+    val seen = java.util.Collections.newSetFromMap(
+        java.util.IdentityHashMap<Throwable, Boolean>())
+    var cause: Throwable? = error
+    while (cause != null && seen.add(cause)) {
+        if (cause.javaClass.simpleName in unrecoverableTypes) return true
+        val message = cause.message?.lowercase().orEmpty()
+        if (unrecoverablePhrases.any { message.contains(it) }) return true
+        cause = cause.cause
+    }
+    return false
+}
+
+/**
  * Persisted app state. Non-secret config lives in plain SharedPreferences; the X-Secret-Key
  * (which can drive an RCE-capable agent) lives in Keystore-backed EncryptedSharedPreferences.
  */
@@ -30,24 +65,23 @@ class SecureStore(context: Context) {
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
             )
         }
-        // Only the Keystore-wrapped keyset failing to decrypt (key invalidated or app data
-        // restored to a device with a different Keystore key) justifies wiping the store: that
-        // state is permanent and the app must re-onboard. Transient failures (disk I/O, generic
-        // storage errors) must NOT destroy the stored key and iroh identity — log and propagate
-        // so the caller can retry/surface, instead of nuking the secret on every hiccup.
+        // Only a POSITIVELY identified unrecoverable keyset justifies wiping the store: the
+        // app must then re-onboard because the Keystore key behind the encrypted prefs is gone
+        // (e.g. data restored to a different device). A generic GeneralSecurityException may be
+        // a transient Keystore error — keep the file and let the caller retry/surface it.
         return try {
             create()
         } catch (e: GeneralSecurityException) {
-            // The Keystore-wrapped keyset can't be decrypted (e.g. app data restored to a new
-            // device, or the key was invalidated). Reset the store so the app starts and can
-            // re-onboard, instead of hard-crashing on every launch. The secret must be re-entered.
-            Log.w(TAG, "goose_secure unreadable (key invalidated); resetting store", e)
+            if (!isUnrecoverableKeysetFailure(e)) {
+                Log.e(TAG, "goose_secure open failed (transient); keeping store", e)
+                throw e
+            }
+            Log.w(TAG, "goose_secure keyset unrecoverable; resetting store", e)
             app.deleteSharedPreferences("goose_secure")
             create()
         } catch (e: Exception) {
-            // Recoverable/transient failure — keep the store intact and propagate it. The value
-            // wrapped by `secure` stays unusable for this call, but the data is not destroyed.
-            Log.e(TAG, "goose_secure open failed (transient); keeping store", e)
+            // Non-Keystore failure (disk I/O, bad state) — never destroy the key here.
+            Log.e(TAG, "goose_secure open failed; keeping store", e)
             throw e
         }
     }
@@ -61,6 +95,16 @@ class SecureStore(context: Context) {
             secure.edit().putString("key", legacy).apply()
             cfg.edit().remove("key").apply()
         }
+        // The UnifiedPush endpoint is a BEARER CAPABILITY: anyone holding it can POST
+        // arbitrary pushes to this device. It used to live in the plain, cloud-backed
+        // "goose" prefs; move old installs' value into the encrypted store once and drop
+        // the plaintext copy. goose_secure.xml is already excluded from both backup rule
+        // sets, so the endpoint goes with the key and the iroh identity.
+        val legacyEndpoint = cfg.getString("push_endpoint", null)
+        if (!legacyEndpoint.isNullOrBlank() && secure.getString("push_endpoint", null) == null) {
+            secure.edit().putString("push_endpoint", legacyEndpoint).apply()
+        }
+        if (legacyEndpoint != null) cfg.edit().remove("push_endpoint").apply()
         // Move off the ACP-only server (:3285) to the full agent server (:3284) which also
         // serves ACP and exposes the extension API.
         if (cfg.getString("port", null) == "3285") cfg.edit().putString("port", "3284").apply()
@@ -292,10 +336,15 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("push_on", false)
         set(v) = cfg.edit().putBoolean("push_on", v).apply()
 
-    /** The distributor-issued endpoint URL the server POSTs to. Set by GoosePushService. */
+    /** The distributor-issued endpoint URL the server POSTs to. Set by GoosePushService.
+     *  A bearer capability, so it lives with secretKey/roamIdentity in the encrypted
+     *  (backup-excluded) store, not in the plain prefs where old builds kept it. */
     var pushEndpoint: String
-        get() = cfg.getString("push_endpoint", "") ?: ""
-        set(v) = cfg.edit().putString("push_endpoint", v).apply()
+        get() = secure.getString("push_endpoint", "") ?: ""
+        set(v) {
+            secure.edit().putString("push_endpoint", v).apply()
+            cfg.edit().remove("push_endpoint").apply()   // never leave a plaintext copy behind
+        }
 
     /** The session id this device is awaiting a finished-turn nudge for (turn-push filtering). */
     var pendingPushSessionId: String?

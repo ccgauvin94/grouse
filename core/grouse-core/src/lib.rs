@@ -162,6 +162,64 @@ pub struct SessionOwner {
     pub label: String,
 }
 
+/// Roam labels name a namespace inside `roam:<label>:<id>`. A label containing
+/// `:` swallows the separator and lets two peers address the same display id
+/// (`home` + `home:nas` + raw id `nas:s1` both produce `roam:home:nas:s1`), so
+/// reject it before anything is dialled or stored. Blank/padded labels are
+/// rejected too: they cannot be matched reliably by later intents.
+fn check_roam_label(label: &str) -> Result<(), String> {
+    if label.trim().is_empty() {
+        return Err("roam label must not be empty or whitespace".to_string());
+    }
+    if label.trim() != label {
+        return Err(format!(
+            "roam label {label:?} must not have leading or trailing whitespace"
+        ));
+    }
+    if label.contains(':') {
+        // A label that looks like `roam:...` is covered by this too: it would
+        // put a second namespace prefix inside the display id.
+        return Err(format!(
+            "roam label {label:?} contains ':' — display ids are `roam:<label>:<id>`, so ':' makes the owner ambiguous"
+        ));
+    }
+    Ok(())
+}
+
+/// Classify a display id against the labels of the peers that are KNOWN now,
+/// without touching the registry (so the rule is testable in isolation).
+///
+/// The longest matching known label wins — the same resolution `owner_for`
+/// uses, including the legacy case of a nested label that predates
+/// [`check_roam_label`]. A `roam:` id for which no peer matches is STILL roam:
+/// with no legal ':' in labels, the first component is the namespace and the
+/// remainder is a wire id that may itself contain ':'.
+fn classify_session_owner(session_id: &str, known_labels: &[String]) -> SessionOwner {
+    let Some(rest) = session_id.strip_prefix(crate::session::ROAM_PREFIX) else {
+        return SessionOwner {
+            kind: "main".to_string(),
+            label: String::new(),
+        };
+    };
+    let matched = known_labels
+        .iter()
+        .filter(|label| {
+            rest == label.as_str()
+                || (rest.len() > label.len()
+                    && rest.starts_with(label.as_str())
+                    && rest.as_bytes()[label.len()] == b':')
+        })
+        .max_by_key(|label| label.len());
+    let label = match matched {
+        Some(label) => label.to_string(),
+        None => rest.split_once(':').map_or(rest, |(label, _)| label).to_string(),
+    };
+    SessionOwner {
+        kind: "roam".to_string(),
+        label,
+    }
+}
+
 /// One accumulated transcript bubble (CONTRACT §3.3/§4.3).
 #[derive(uniffi::Record, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
@@ -2130,8 +2188,17 @@ impl Core {
     }
 
     /// Connect a roam peer in browse mode (CONTRACT §6). The peer's identity
-    /// is generated + persisted on first use.
+    /// is generated + persisted on first use. The label must be non-blank and
+    /// contain no ':'; an invalid one is rejected with an Alert before dialing.
     pub fn roam_connect(&self, card: String, label: String) {
+        // Before the registry, the identity write or any dial: an ambiguous
+        // label would give two peers the same display-id namespace. The alert
+        // is the only channel a void intent has to tell the client why nothing
+        // happened.
+        if let Err(reason) = check_roam_label(&label) {
+            self.alert(format!("roam connect rejected: {reason}"));
+            return;
+        }
         // `close()` synchronously invokes listener callbacks and `connect`
         // dials for seconds; neither may run under the registry lock (a
         // re-entrant listener would deadlock, and every other chat's routing
@@ -2267,6 +2334,10 @@ impl Core {
     /// until a Main session is opened. Uses the only known-good cwd, exactly
     /// like `roam_open_session` (the remote goose has no default working dir).
     pub fn roam_new_session(&self, label: String) {
+        if let Err(reason) = check_roam_label(&label) {
+            self.alert(format!("roam new session rejected: {reason}"));
+            return;
+        }
         let peer = self
             .inner
             .peers
@@ -2293,6 +2364,10 @@ impl Core {
     /// on a roam endpoint to supply it. Blank/whitespace falls back to the
     /// same config cwd `roam_new_session` uses.
     pub fn roam_new_session_in(&self, label: String, cwd: String) {
+        if let Err(reason) = check_roam_label(&label) {
+            self.alert(format!("roam new session rejected: {reason}"));
+            return;
+        }
         let peer = self
             .inner
             .peers
@@ -2326,6 +2401,10 @@ impl Core {
         cwd: String,
         mode: Option<String>,
     ) {
+        if let Err(reason) = check_roam_label(&label) {
+            self.alert(format!("roam new session rejected: {reason}"));
+            return;
+        }
         let peer = self
             .inner
             .peers
@@ -2709,31 +2788,20 @@ impl Core {
 
     /// The connection that owns a DISPLAY session id, as data (audit §3).
     ///
-    /// A known roam peer is resolved by the same prefix match routing uses.
-    /// For a `roam:` id whose peer is gone, the label is recovered from the id
-    /// (last colon separates label from wire id, so labels with `:` survive)
-    /// rather than reporting `main` and misrouting an intent to the main wire.
+    /// A known roam peer is resolved by the same longest-prefix match routing
+    /// uses. For a `roam:` id whose peer is gone (or whose label was nested by
+    /// an older client), the longest KNOWN label still wins; failing that, the
+    /// first component is the namespace and the rest is the wire id. Either
+    /// way a `roam:` id reports `"roam"`, never a false `"main"`.
     pub fn session_owner(&self, session_id: String) -> SessionOwner {
-        if let Some(peer) = self.peer_for_session(&session_id) {
-            return SessionOwner {
-                kind: "roam".to_string(),
-                label: peer.label().to_string(),
-            };
-        }
-        if let Some(rest) = session_id.strip_prefix(crate::session::ROAM_PREFIX) {
-            let label = rest
-                .rsplit_once(':')
-                .map(|(label, _)| label)
-                .unwrap_or(rest);
-            return SessionOwner {
-                kind: "roam".to_string(),
-                label: label.to_string(),
-            };
-        }
-        SessionOwner {
-            kind: "main".to_string(),
-            label: String::new(),
-        }
+        let labels: Vec<String> = self
+            .inner
+            .peers
+            .lock()
+            .iter()
+            .map(|peer| peer.label().to_string())
+            .collect();
+        classify_session_owner(&session_id, &labels)
     }
 
     /// Main session list plus every connected peer's list, in one snapshot.
@@ -5281,6 +5349,39 @@ impl Core {
 
     fn on_sessions_reply(&self, reply: Value) {
         let (mut sessions, cwds, updated) = crate::spine::parse_sessions(&reply);
+        // The main wire owns RAW ids only. A row that starts with the roam
+        // namespace is indistinguishable from a peer chat downstream, where it
+        // would hijack routing (and a client could open it on a peer that does
+        // not exist). Drop the row AND its cwd/stamp side tables, then say so:
+        // a server sending these is either confused or trying to steer us.
+        let rejected: Vec<String> = sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .chain(cwds.iter().map(|(sid, _)| sid.as_str()))
+            .chain(updated.iter().map(|(sid, _)| sid.as_str()))
+            .filter(|sid| sid.starts_with(crate::session::ROAM_PREFIX))
+            .map(|sid| sid.to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        sessions.retain(|session| !session.id.starts_with(crate::session::ROAM_PREFIX));
+        let cwds: Vec<_> = cwds
+            .into_iter()
+            .filter(|(sid, _)| !sid.starts_with(crate::session::ROAM_PREFIX))
+            .collect();
+        let updated: Vec<_> = updated
+            .into_iter()
+            .filter(|(sid, _)| !sid.starts_with(crate::session::ROAM_PREFIX))
+            .collect();
+        if let Some(first) = rejected.first() {
+            for sid in &rejected {
+                eprintln!("grouse-core: ignored roam-namespaced id {sid} in main session/list");
+            }
+            self.alert(format!(
+                "ignored {} roam-namespaced session id(s) from the main server (first: {first})",
+                rejected.len()
+            ));
+        }
         // Modes arrive out of band (`{"dev": [ids], "plan": [ids]}`) because a tag
         // is write-only on this server: the only read path is a filtered list per
         // known value. The first value that claims a session wins.
@@ -5832,6 +5933,27 @@ impl Core {
         // must not leave a truncated identity that would re-roll the secret.
         let _ = write_secret_file(&path, &secret);
         secret
+    }
+
+    /// The pinned card fingerprint for a roam label, if the peer was enrolled.
+    pub fn roam_card_pin(&self, label: String) -> Option<String> {
+        crate::roam::roam_card_pin(&self.inner.cache, &label)
+    }
+
+    /// All `{label: fingerprint}` pins as JSON (uniffi has no map type).
+    pub fn roam_card_pins(&self) -> String {
+        serde_json::to_string(&crate::roam::roam_card_pins(&self.inner.cache))
+            .unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Explicitly enroll/replace a pin after the user confirmed a re-shared card.
+    pub fn roam_card_pin_enroll(&self, label: String, fingerprint: String) -> Result<(), String> {
+        crate::roam::roam_card_pin_enroll(&self.inner.cache, &label, &fingerprint)
+    }
+
+    /// Forget a label's pin so the next dial re-enrolls that peer.
+    pub fn roam_card_pin_clear(&self, label: String) -> Result<(), String> {
+        crate::roam::roam_card_pin_clear(&self.inner.cache, &label)
     }
 
     /// Override the persisted roam identity so the wire dials with the SAME key
@@ -6662,6 +6784,12 @@ mod tests {
                 .filter_map(|line| line.strip_prefix("tasks ").map(|s| s.to_string()))
                 .collect()
         }
+        fn alerts(&self) -> Vec<String> {
+            self.lines()
+                .into_iter()
+                .filter_map(|line| line.strip_prefix("alert ").map(str::to_string))
+                .collect()
+        }
         fn push(&self, line: String) {
             self.0.lock().unwrap().push(line);
         }
@@ -6676,7 +6804,11 @@ mod tests {
     fn on_thread_timeline(&self, _label: String, _rows: Vec<crate::TimelineRow>) {}
         fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
     fn on_file(&self, _: crate::attachments::FileEvent) {}
-        fn on_status(&self, _: ConnectionStatus) {}
+        fn on_status(&self, status: ConnectionStatus) {
+            if let ConnectionStatus::Alert { message } = status {
+                self.push(format!("alert {message}"));
+            }
+        }
         fn on_sessions(&self, _: Vec<SessionSummary>) {}
         fn on_item(&self, _: TranscriptOp) {}
         fn on_usage(&self, _: i64, _: i64, _: f64, _: String) {}
@@ -7350,9 +7482,11 @@ mod tests {
         // name a roam owner rather than misrouting the id to the main wire.
         let roam = core.session_owner("roam:desk:s2".to_string());
         assert_eq!((roam.kind.as_str(), roam.label.as_str()), ("roam", "desk"));
-        // A label with ':' in it survives: the last colon separates the wire id.
-        let colon = core.session_owner("roam:desk:1:s2".to_string());
-        assert_eq!((colon.kind.as_str(), colon.label.as_str()), ("roam", "desk:1"));
+        // Nested-looking ids are no longer read as a label containing ':':
+        // labels are validated at connect, so the first component is the
+        // namespace and `1:s2` is the wire id. Still roam, never main.
+        let nested = core.session_owner("roam:desk:1:s2".to_string());
+        assert_eq!((nested.kind.as_str(), nested.label.as_str()), ("roam", "desk"));
 
         core.inner.state.lock().sessions = vec![summary("s1", "one"), summary("s2", "two")];
         let all = core.all_sessions();
@@ -7362,6 +7496,91 @@ mod tests {
         );
         // A connected peer would append `roam:<label>:<id>` rows here; its
         // registry is exercised in roam.rs, where peers can be constructed.
+    }
+
+    #[test]
+    fn roam_labels_with_colons_or_blank_text_are_rejected_before_a_dial() {
+        let (core, events) = core();
+        core.roam_connect("card".to_string(), "home:nas".to_string());
+        core.roam_new_session(String::new());
+        core.roam_new_session_in("roam:home".to_string(), "/tmp".to_string());
+        core.roam_new_session_with_mode(" home ".to_string(), "/tmp".to_string(), None);
+
+        assert!(core.inner.peers.lock().is_empty());
+        assert!(core.inner.active_peer_label.read().is_none());
+        assert!(!core.inner.cache.dir().join("roam_identity").exists());
+        let alerts = events.alerts();
+        assert_eq!(alerts.len(), 4, "{alerts:?}");
+        assert!(alerts[0].contains("roam connect rejected"));
+        assert!(alerts[0].contains("home:nas"));
+        assert!(alerts.iter().skip(1).all(|a| a.contains("roam new session rejected")));
+        assert!(alerts.iter().any(|a| a.contains("roam:home")));
+        assert!(alerts.iter().any(|a| a.contains("whitespace")));
+    }
+
+    #[test]
+    fn main_session_list_drops_roam_namespaced_ids_and_their_side_tables() {
+        let (core, events) = core();
+        core.on_sessions_reply(json!({
+            "sessions": [
+                {
+                    "sessionId": "roam:home:nas:s1",
+                    "title": "spoof",
+                    "cwd": "/roam",
+                    "updatedAt": "2026-11-22T11:00:00Z"
+                },
+                {
+                    "sessionId": "s1",
+                    "title": "main",
+                    "cwd": "/main",
+                    "updatedAt": "2026-11-22T10:00:00Z"
+                }
+            ],
+            "modes": { "dev": ["s1"] }
+        }));
+
+        let ids: Vec<String> = core.sessions().into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec!["s1".to_string()]);
+        let state = core.inner.state.lock();
+        assert!(!state.session_cwds.contains_key("roam:home:nas:s1"));
+        assert!(!state.session_updated_at.contains_key("roam:home:nas:s1"));
+        assert_eq!(state.session_modes.get("s1").map(String::as_str), Some("dev"));
+        drop(state);
+
+        let alerts = events.alerts();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert!(alerts[0].contains("roam:home:nas:s1"));
+        assert_eq!(core.session_owner("s1".to_string()).kind, "main");
+    }
+
+    #[test]
+    fn session_owner_resolves_nested_looking_ids_by_longest_known_label() {
+        let (core, _) = core();
+        // Two KNOWN peers, one whose label contains ':' (a legacy label, now
+        // rejected at connect): the longer one owns `roam:home:nas:s1`.
+        let labels = vec!["home".to_string(), "home:nas".to_string()];
+        for (id, expected) in [
+            ("roam:home:nas:s1", ("roam", "home:nas")),
+            ("roam:home:nas", ("roam", "home:nas")), // malformed: no wire id
+            ("roam:home:s1", ("roam", "home")),
+            ("s1", ("main", "")),
+        ] {
+            let owner = classify_session_owner(id, &labels);
+            assert_eq!((owner.kind.as_str(), owner.label.as_str()), expected, "{id}");
+        }
+        // When the nested peer is gone, the parent still wins over a label
+        // invented from the id; an unknown label is still roam, never main.
+        let parent = classify_session_owner("roam:home:nas:s1", &["home".to_string()]);
+        assert_eq!((parent.kind.as_str(), parent.label.as_str()), ("roam", "home"));
+        let unknown = classify_session_owner("roam:elsewhere:s1", &labels);
+        assert_eq!(
+            (unknown.kind.as_str(), unknown.label.as_str()),
+            ("roam", "elsewhere")
+        );
+        // No peers registered: first component is the namespace (a ':' in the
+        // remainder belongs to the raw wire id).
+        let actual = core.session_owner("roam:home:nas:s1".to_string());
+        assert_eq!((actual.kind.as_str(), actual.label.as_str()), ("roam", "home"));
     }
 
     #[test]

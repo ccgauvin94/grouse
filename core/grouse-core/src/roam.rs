@@ -20,6 +20,11 @@
 //! tokio's blocking pool; [`RoamPeer::close`] unblocks a parked reader via
 //! `RoamStream::cancel()`.
 //!
+//! The card a peer first connects with is pinned by label in the core cache
+//! (`roam-card-pins.json`, 0600): every dial — including a supervisor redial —
+//! compares the card fingerprint and refuses with a terminal status on change.
+//! Clearing that pin is the only re-enrollment path.
+//!
 //! Session notifications go through the SAME `session::dispatch` as the spine
 //! (`SessionNotification` → one `SessionHub` store per display id). Painting is
 //! gated by the hub's displayed key, never by the peer; the peer itself only
@@ -34,8 +39,13 @@
 //! resumes the session that was open. Only an explicit [`RoamPeer::close`]
 //! (or [`Core::roam_disconnect`]) ends a peer for good.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, LazyLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 
@@ -49,7 +59,7 @@ use agent_client_protocol::{
 use futures::future::{select, BoxFuture};
 use futures::pin_mut;
 use futures::stream::StreamExt;
-use grouse_roam_core::RoamStream;
+use grouse_roam_core::{RoamSecret, RoamStream};
 use serde_json::Value;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -70,6 +80,218 @@ pub(crate) fn runtime() -> &'static Runtime {
     static RT: LazyLock<Runtime> =
         LazyLock::new(|| Runtime::new().expect("grouse-core tokio runtime"));
     &RT
+}
+
+// ---------------------------------------------------------------------------
+// Connection-card pinning
+// ---------------------------------------------------------------------------
+
+/// The card a peer first connected with is the identity of its `roam:<label>:`
+/// namespace. Displaying a fingerprint without enforcing it let a changed
+/// card (a re-shared host, a MITM'd pairing paste) silently become the trust
+/// anchor for every chat under that label. The map lives in the core cache,
+/// not in a client, so all three clients enforce the same pin.
+const CARD_PIN_FILE: &str = "roam-card-pins.json";
+
+/// Serializes read-modify-write of the pin file. Reads are cheap (one small
+/// JSON file per dial); re-reading on every dial means a pin changed by
+/// another process is never masked by an in-memory copy.
+static CARD_PIN_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+#[derive(Debug)]
+pub(crate) enum CardPinError {
+    /// A malformed card: the old retry budget still applies (it is a bad
+    /// paste, not a changed trust anchor).
+    InvalidCard(String),
+    /// The card's fingerprint differs from the enrolled one. Terminal: the
+    /// user must explicitly clear the pin to re-enroll.
+    Mismatch {
+        label: String,
+        pinned: String,
+        got: String,
+    },
+    /// The pin file itself is unreadable/corrupt. Fail closed; clear repairs.
+    Store(String),
+}
+
+impl fmt::Display for CardPinError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidCard(e) => write!(f, "invalid roam card: {e}"),
+            Self::Mismatch {
+                label,
+                pinned,
+                got,
+            } => write!(
+                f,
+                "roam card for '{label}' changed: pinned {pinned}, got {got}. \
+                 Refusing to dial — clear the pin to re-enroll this peer"
+            ),
+            Self::Store(e) => write!(
+                f,
+                "roam card pin store is unusable: {e}. Clear the pin to repair it"
+            ),
+        }
+    }
+}
+
+fn pins_path(cache: &CacheStore) -> PathBuf {
+    cache.dir().join(CARD_PIN_FILE)
+}
+
+fn read_pins(path: &Path) -> Result<BTreeMap<String, String>, CardPinError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => {
+            return Err(CardPinError::Store(format!(
+                "cannot read {}: {e}",
+                path.display()
+            )))
+        }
+    };
+    serde_json::from_slice(&bytes).map_err(|e| {
+        CardPinError::Store(format!("cannot parse {}: {e}", path.display()))
+    })
+}
+
+/// 0600 from creation, unguessable temp name, same-directory rename. The
+/// fingerprint is public, but the pin file is a trust decision: a world-
+/// writable pin (or a predictable temp that another user can plant) would let
+/// anyone choose which host this client accepts for a label.
+fn write_pins(path: &Path, pins: &BTreeMap<String, String>) -> Result<(), CardPinError> {
+    let bytes = serde_json::to_vec(pins)
+        .map_err(|e| CardPinError::Store(format!("cannot encode pins: {e}")))?;
+    write_private_atomic(path, &bytes)
+        .map_err(|e| CardPinError::Store(format!("cannot write {}: {e}", path.display())))
+}
+
+fn write_private_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let leaf = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("roam-card-pins.json");
+    for attempt in 0..8 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_file_name(format!(
+            ".{leaf}.tmp-{}-{nanos}-{seq:08x}-{attempt}",
+            std::process::id()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = match options.open(&tmp) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        let written = (|| {
+            file.write_all(data)?;
+            file.flush()?;
+            file.sync_all()
+        })();
+        drop(file);
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique pin temp file",
+    ))
+}
+
+/// The pinned fingerprint for a label, if any (for a client's pin viewer).
+pub(crate) fn roam_card_pin(cache: &CacheStore, label: &str) -> Option<String> {
+    let _guard = CARD_PIN_LOCK.lock();
+    read_pins(&pins_path(cache)).ok()?.remove(label)
+}
+
+/// Every `{label: fingerprint}` pin, for a settings screen that lists them.
+pub(crate) fn roam_card_pins(cache: &CacheStore) -> BTreeMap<String, String> {
+    let _guard = CARD_PIN_LOCK.lock();
+    read_pins(&pins_path(cache)).unwrap_or_default()
+}
+
+/// Explicitly enroll/replace a pin (e.g. after a user confirms a re-shared
+/// card out of band).
+pub(crate) fn roam_card_pin_enroll(
+    cache: &CacheStore,
+    label: &str,
+    fingerprint: &str,
+) -> Result<(), String> {
+    let _guard = CARD_PIN_LOCK.lock();
+    let path = pins_path(cache);
+    let mut pins = read_pins(&path).map_err(|e| e.to_string())?;
+    pins.insert(label.to_string(), fingerprint.to_string());
+    write_pins(&path, &pins).map_err(|e| e.to_string())
+}
+
+/// Forget one label's pin so the next dial re-enrolls. A corrupt file is
+/// repaired by writing the remaining pins (or an empty map) back.
+pub(crate) fn roam_card_pin_clear(cache: &CacheStore, label: &str) -> Result<(), String> {
+    let _guard = CARD_PIN_LOCK.lock();
+    let path = pins_path(cache);
+    let mut pins = read_pins(&path).unwrap_or_default();
+    pins.remove(label);
+    write_pins(&path, &pins).map_err(|e| e.to_string())
+}
+
+/// Enroll on first use, compare on every later dial. Called by the supervisor
+/// on EVERY attempt, including reconnect redials.
+pub(crate) fn verify_card_fingerprint(
+    cache: &CacheStore,
+    label: &str,
+    fingerprint: &str,
+) -> Result<(), CardPinError> {
+    let _guard = CARD_PIN_LOCK.lock();
+    let path = pins_path(cache);
+    let mut pins = read_pins(&path)?;
+    if let Some(pinned) = pins.get(label) {
+        if pinned != fingerprint {
+            return Err(CardPinError::Mismatch {
+                label: label.to_string(),
+                pinned: pinned.clone(),
+                got: fingerprint.to_string(),
+            });
+        }
+        return Ok(());
+    }
+    pins.insert(label.to_string(), fingerprint.to_string());
+    write_pins(&path, &pins)
+}
+
+fn verify_card_pin(
+    cache: &CacheStore,
+    label: &str,
+    card: &str,
+) -> Result<(), CardPinError> {
+    let fingerprint = grouse_roam_core::card_fingerprint(card)
+        .map_err(|e| CardPinError::InvalidCard(e.to_string()))?;
+    verify_card_fingerprint(cache, label, &fingerprint)
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +505,10 @@ enum Outcome {
     Closed,
     /// The dial or handshake failed: re-dial under the backoff budget.
     Retry(String),
+    /// The card no longer matches its pin (or the pin store is unusable).
+    /// Terminal — retrying cannot fix a changed trust anchor; the user must
+    /// clear the pin. `fail()` already emitted the reason.
+    Refused,
 }
 
 /// One active roam endpoint: a direct iroh peer running its own goose (the
@@ -446,6 +672,11 @@ impl RoamPeer {
             hub,
             cache,
         });
+        // Own the identity bytes exactly once. Every retry shares this Arc;
+        // the old code cloned the base64 String per attempt, leaving copies
+        // the process could neither track nor scrub. `RoamSecret` overwrites
+        // its bytes when the last handle (including this one) drops.
+        let secret = Arc::new(RoamSecret::from_owned(secret));
         let task = peer.clone();
         runtime().spawn(async move {
             let mut attempts: u32 = 0;
@@ -457,7 +688,7 @@ impl RoamPeer {
                     return;
                 }
                 match task.attempt(&secret, &card, &label).await {
-                    Outcome::Closed => return,
+                    Outcome::Closed | Outcome::Refused => return,
                     Outcome::Retry(reason) => {
                         if task.inner.lock().closing {
                             return;
@@ -511,16 +742,34 @@ impl RoamPeer {
     /// Close/disconnect, `Retry` after any transport end or dial/handshake
     /// failure (the open session was recorded for resume by
     /// [`Self::connection_ended`]).
-    async fn attempt(self: &Arc<Self>, secret: &str, card: &str, label: &str) -> Outcome {
+    async fn attempt(
+        self: &Arc<Self>,
+        secret: &Arc<RoamSecret>,
+        card: &str,
+        label: &str,
+    ) -> Outcome {
         // Fresh readiness bookkeeping per link.
         self.inner.lock().ever_ready = false;
+        // 0. Pin check BEFORE every dial, including supervisor redials. First
+        // use enrolls; a changed card is terminal with an explicit status.
+        if let Err(error) = verify_card_pin(&self.cache, &self.label, card) {
+            return match error {
+                CardPinError::InvalidCard(reason) => {
+                    Outcome::Retry(format!("invalid roam card: {reason}"))
+                }
+                other => {
+                    self.fail(format!("roam card pin refused: {other}"));
+                    Outcome::Refused
+                }
+            };
+        }
         // 1. Dial (blocking, seconds) off the runtime.
         self.emit_status("connecting: dialing");
         let dialed = tokio::task::spawn_blocking({
-            let secret = secret.to_string();
+            let secret = secret.clone();
             let card = card.to_string();
             let label = label.to_string();
-            move || grouse_roam_core::roam_connect(&secret, &card, Some(label))
+            move || grouse_roam_core::roam_connect_with_secret(&secret, &card, Some(label))
         })
         .await;
         let stream = match dialed {
@@ -3365,5 +3614,90 @@ mod tests {
                 .any(|e| e == "touched roam:laptop:s1 named by goose 2026-08-23T11:00:00Z"),
             "title must carry the prefixed id: {events:?}"
         );
+    }
+
+    fn pin_test_cache() -> (CacheStore, PathBuf) {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "grouse-card-pin-test-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        (CacheStore::new(dir.clone()), dir)
+    }
+
+    #[test]
+    fn card_pin_round_trip_mismatch_and_clear() {
+        let (cache, dir) = pin_test_cache();
+        assert_eq!(roam_card_pin(&cache, "home"), None);
+
+        // The first dial enrolls the label; every later redial compares.
+        verify_card_fingerprint(&cache, "home", "fp-one").unwrap();
+        assert_eq!(roam_card_pin(&cache, "home").as_deref(), Some("fp-one"));
+        verify_card_fingerprint(&cache, "home", "fp-one").unwrap();
+
+        let error = verify_card_fingerprint(&cache, "home", "fp-two").unwrap_err();
+        assert!(matches!(error, CardPinError::Mismatch { .. }));
+        assert!(error.to_string().contains("changed"), "{error}");
+        assert_eq!(
+            roam_card_pin(&cache, "home").as_deref(),
+            Some("fp-one"),
+            "a refused dial must never re-pin the label"
+        );
+
+        // Disk, not an in-memory slot: a fresh CacheStore sees the same pin.
+        let reopened = CacheStore::new(dir.clone());
+        assert_eq!(
+            roam_card_pins(&reopened).get("home").map(String::as_str),
+            Some("fp-one")
+        );
+        // Labels are independent trust namespaces.
+        verify_card_fingerprint(&cache, "nas", "fp-two").unwrap();
+        assert_eq!(roam_card_pin_enroll(&cache, "nas", "fp-three"), Ok(()));
+        assert_eq!(roam_card_pin(&cache, "nas").as_deref(), Some("fp-three"));
+
+        // Explicit clear is the only way to re-enroll.
+        roam_card_pin_clear(&cache, "home").unwrap();
+        assert_eq!(roam_card_pin(&cache, "home"), None);
+        verify_card_fingerprint(&cache, "home", "fp-two").unwrap();
+        assert_eq!(roam_card_pin(&cache, "home").as_deref(), Some("fp-two"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(pins_path(&cache))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "the pin file is a trust decision");
+            let temps: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+                .collect();
+            assert!(temps.is_empty(), "an atomic-write temp survived: {temps:?}");
+        }
+
+        roam_card_pin_clear(&cache, "home").unwrap();
+        roam_card_pin_clear(&cache, "nas").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_card_pin_store_fails_closed_until_cleared() {
+        let (cache, dir) = pin_test_cache();
+        let path = pins_path(&cache);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "{not json").unwrap();
+        assert!(matches!(
+            verify_card_fingerprint(&cache, "home", "fp-one"),
+            Err(CardPinError::Store(_))
+        ));
+        roam_card_pin_clear(&cache, "home").unwrap();
+        verify_card_fingerprint(&cache, "home", "fp-one").unwrap();
+        assert_eq!(roam_card_pin(&cache, "home").as_deref(), Some("fp-one"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

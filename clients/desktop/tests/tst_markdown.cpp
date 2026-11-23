@@ -18,6 +18,10 @@ private slots:
     void codeFence();
     void tables();
     void links();
+    void allowedSchemes();
+    void disallowedLinkSchemes_data();
+    void disallowedLinkSchemes();
+    void schemePredicateRejectsTricks();
     // markdownBlocks() — the fence splitter feeding the blocks render path
     void blocksPlainTextStaysOneHtmlBlock();
     void blocksExtractsFenceWithLang();
@@ -94,6 +98,57 @@ void TstMarkdown::links()
 {
     const QString html = markdownToHtml(QStringLiteral("[site](https://example.com)"));
     QVERIFY(html.contains(QStringLiteral("href")));
+}
+
+void TstMarkdown::allowedSchemes()
+{
+    // The one shared allowlist: markdown links and Qt.openUrlExternally use it.
+    QVERIFY(markdownUrlAllowed(QStringLiteral("https://example.com/a?b=1")));
+    QVERIFY(markdownUrlAllowed(QStringLiteral("http://localhost:8080/x")));
+    QVERIFY(markdownUrlAllowed(QStringLiteral("mailto:someone@example.com")));
+    QVERIFY(markdownUrlAllowed(QStringLiteral("HTTPS://EXAMPLE.COM")));
+    for (const QString &url : {QStringLiteral("https://example.com"),
+                               QStringLiteral("http://example.com"),
+                               QStringLiteral("mailto:a@example.com")}) {
+        const QString html = markdownToHtml(QStringLiteral("[label](") + url + QStringLiteral(")"));
+        QVERIFY2(html.contains(QStringLiteral("href")), qPrintable(html));
+        QVERIFY(html.contains(QStringLiteral("label")));
+    }
+}
+
+void TstMarkdown::disallowedLinkSchemes_data()
+{
+    QTest::addColumn<QString>("url");
+    QTest::addColumn<QString>("label");
+    QTest::newRow("file") << QStringLiteral("file:///etc/passwd") << QStringLiteral("local-file");
+    QTest::newRow("javascript") << QStringLiteral("javascript:alert(1)")
+                                << QStringLiteral("js-link");
+    QTest::newRow("custom") << QStringLiteral("grouse://do/thing") << QStringLiteral("custom-link");
+    QTest::newRow("relative") << QStringLiteral("relative/path") << QStringLiteral("rel-link");
+}
+
+void TstMarkdown::disallowedLinkSchemes()
+{
+    QFETCH(QString, url);
+    QFETCH(QString, label);
+
+    QVERIFY(!markdownUrlAllowed(url));
+    const QString html = markdownToHtml(QStringLiteral("[") + label + QStringLiteral("](")
+                                        + url + QStringLiteral(")"));
+    // The label survives as selectable text; the anchor does not. A renderer
+    // that leaves href in place hands file:/javascript: to QML's link handler.
+    QVERIFY2(html.contains(label), qPrintable(html));
+    QVERIFY2(!html.contains(QStringLiteral("href="), Qt::CaseInsensitive), qPrintable(html));
+}
+
+void TstMarkdown::schemePredicateRejectsTricks()
+{
+    QVERIFY(!markdownUrlAllowed(QString()));
+    QVERIFY(!markdownUrlAllowed(QStringLiteral("//example.com")));   // scheme-relative
+    QVERIFY(!markdownUrlAllowed(QStringLiteral("java\nscript:alert(1)")));
+    QVERIFY(!markdownUrlAllowed(QStringLiteral(" javascript:alert(1)")));
+    QVERIFY(!markdownUrlAllowed(QStringLiteral("javascript\\:alert(1)")));
+    QVERIFY(!markdownUrlAllowed(QStringLiteral("data:text/html,<script>")));
 }
 
 // ---------------------------------------------------------------------------

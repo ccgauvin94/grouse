@@ -35,6 +35,11 @@ pub enum PushKind {
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PushEnvelope {
     pub kind: PushKind,
+    /// Sender-supplied and UNTRUSTED. `parse_push` keeps it for `Turn` only; a
+    /// briefing or task has no conversation to answer, so its `session` is dropped
+    /// at the boundary. Clients must NOT use this as a notification's Reply
+    /// destination — use [`NotifyDecision::reply_session`], which the core has
+    /// checked against a session this client actually armed or announced.
     pub session_id: Option<String>,
     pub text: String,
     /// The run this turn ended, when the sender knows it. Goose's hook payload
@@ -73,20 +78,44 @@ pub struct NotifyContext {
     /// phone: a push can arrive for work another client (or a scheduled run) started,
     /// and buzzing for it is noise; the phone only announces turns it armed.
     pub announce_any_turn: bool,
+    /// The owner of the roam peer this client armed, when `armed_session` is a
+    /// `roam:<label>:<id>` id. Pass the BARE label (`nas`), not the session id; a
+    /// `roam:`-prefixed value is also accepted. The id's label is written by the
+    /// sender, so a roam turn is never replyable (and on the strict gate never
+    /// shown) without this matching declaration. uniffi: `armedOwner`; C ABI JSON:
+    /// `armed_owner`. Optional/defaulted so older callers and JSON payloads stay valid.
+    #[serde(default)]
+    #[uniffi(default)]
+    pub armed_owner: Option<String>,
 }
 
-/// Whether to show anything, and with what wording. Wording lives here too: the two
-/// clients used to say different things for the same event.
+/// Whether to show anything, with what wording, and where a Reply goes. Wording
+/// lives here too: the two clients used to say different things for the same event.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NotifyDecision {
     pub show: bool,
     pub summary: String,
     pub body: String,
+    /// The ONLY valid destination for a notification's Reply action, and the
+    /// answer to the push-destination spoof in QUALITY_AUDIT §2. The core fills
+    /// this for a `Turn` whose session was verified against a session THIS client
+    /// armed or announced; it is `None` for every briefing, every task, and every
+    /// turn it cannot verify. CLIENT AGENTS: wire Reply from this field, never
+    /// from `PushEnvelope.session_id`. Over the C ABI the JSON key is
+    /// `reply_session` (`null` when not replyable); uniffi exposes `replySession`.
+    #[serde(default)]
+    #[uniffi(default)]
+    pub reply_session: Option<String>,
 }
 
 impl NotifyDecision {
     fn hidden() -> Self {
-        Self { show: false, summary: String::new(), body: String::new() }
+        Self {
+            show: false,
+            summary: String::new(),
+            body: String::new(),
+            reply_session: None,
+        }
     }
 }
 
@@ -127,11 +156,17 @@ pub fn parse_push(raw: &str) -> PushEnvelope {
             PushEnvelope { kind: PushKind::Turn, session_id, text, run_id }
         }
         // Both spellings: a sender writing one item should not have to know whether the
-        // type names the family or the row.
+        // type names the family or the row. A task is addressed to My Day, not to a
+        // conversation, so a sender-supplied `session` is dropped here as well as in
+        // `NotifyDecision::reply_session`: an old client that still reads
+        // `session_id` cannot turn it into a Reply target either.
         Some("task") | Some("tasks") => {
-            PushEnvelope { kind: PushKind::Tasks, session_id, text, run_id }
+            PushEnvelope { kind: PushKind::Tasks, session_id: None, text, run_id }
         }
-        _ => PushEnvelope { kind: PushKind::Briefing, session_id, text, run_id },
+        // A briefing goes to the assistant thread / app, never to a chat. Same reason:
+        // the `session` field of a POST to the UP endpoint is not a destination the
+        // sender is allowed to choose.
+        _ => PushEnvelope { kind: PushKind::Briefing, session_id: None, text, run_id },
     }
 }
 
@@ -168,6 +203,26 @@ fn already_announced(
     }
 }
 
+/// A `roam:<label>:<id>` id is a CLIENT-side namespace: the label is added by this
+/// app, not by the server, and the push author can write any id it likes. A reply
+/// must never be routed by such an id unless the client declared which peer it
+/// armed. Accept both a bare label (`nas`) and the prefixed form (`roam:nas`) from
+/// the caller; match by prefix so a nested label (`home:nas`) is accepted when the
+/// caller declares it, while an undeclared one is rejected.
+fn roam_owner_matches(session: &str, armed_owner: Option<&str>) -> bool {
+    let Some(rest) = session.strip_prefix("roam:") else {
+        return true;
+    };
+    let Some(owner) = armed_owner.map(str::trim).filter(|o| !o.is_empty()) else {
+        return false;
+    };
+    let owner = owner.strip_prefix("roam:").unwrap_or(owner);
+    let Some(raw_id) = rest.strip_prefix(owner).and_then(|r| r.strip_prefix(':')) else {
+        return false;
+    };
+    !raw_id.is_empty()
+}
+
 fn briefing(text: &str) -> PushEnvelope {
     PushEnvelope {
         kind: PushKind::Briefing,
@@ -192,7 +247,8 @@ pub fn decide_notify(envelope: PushEnvelope, ctx: NotifyContext) -> NotifyDecisi
 /// (its live `activeRunId` at the moment it showed the notification). Pass it
 /// alongside [`PushEnvelope::run_id`] so two turns in the same chat are not
 /// mistaken for one; either id may be absent, in which case only a short
-/// same-session burst is suppressed.
+/// same-session burst is suppressed. This is the real implementation:
+/// [`decide_notify`] is the compatibility wrapper with no announced run id.
 #[uniffi::export]
 pub fn decide_notify_run(
     envelope: PushEnvelope,
@@ -217,13 +273,31 @@ pub fn decide_notify_run(
             // its own. A client that does not announce unattributed turns (the phone)
             // needs an armed session that matches; one that does (the desktop) still
             // narrows to the armed session when it has one.
+            let session = envelope.session_id.as_deref().filter(|s| !s.is_empty());
             match (ctx.armed_session.as_deref(), ctx.announce_any_turn) {
-                (Some(armed), _) if envelope.session_id.as_deref() != Some(armed) => {
+                (Some(armed), _) if session != Some(armed) => {
                     return NotifyDecision::hidden()
                 }
                 (None, false) => return NotifyDecision::hidden(),
                 _ => {}
             }
+            // A roam id names a peer as well as a chat, and neither part came from
+            // this client. Without a declared, matching owner the push is rejected.
+            if session.is_some_and(|s| !roam_owner_matches(s, ctx.armed_owner.as_deref())) {
+                return NotifyDecision::hidden();
+            }
+            // A notification may still be worth showing on a single-client desktop
+            // that armed nothing (announce_any_turn), but the sender's session id is
+            // not evidence of anything. A Reply is only wired when the id matches a
+            // session THIS client named: armed now, or announced by its own live path.
+            let reply_session = session
+                .filter(|s| {
+                    [ctx.armed_session.as_deref(), ctx.announced_session.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .any(|known| known == *s)
+                })
+                .map(str::to_owned);
             NotifyDecision {
                 show: true,
                 summary: ctx
@@ -231,20 +305,25 @@ pub fn decide_notify_run(
                     .filter(|t| !t.is_empty())
                     .unwrap_or_else(|| "Grouse replied".to_string()),
                 body: envelope.text,
+                reply_session,
             }
         }
         PushKind::Briefing => NotifyDecision {
             show: true,
             summary: "Grouse briefing".to_string(),
             body: envelope.text,
+            reply_session: None,
         },
         // Handed-over work that stopped. It is proactive like a briefing (no armed
         // session, no attribution question) but named for what it is, because the tap
-        // goes somewhere else: the tab that carries the row and its result.
+        // goes somewhere else: the tab that carries the row and its result. Neither
+        // kind is a reply: their envelope `session` is sender-supplied and is not a
+        // destination this app will ever put on a notification.
         PushKind::Tasks => NotifyDecision {
             show: true,
             summary: "Grouse · ready for a look".to_string(),
             body: envelope.text,
+            reply_session: None,
         },
     }
 }
@@ -262,6 +341,7 @@ mod tests {
             announced_session: None,
             announced_secs_ago: None,
             announce_any_turn: true,
+            armed_owner: None,
         }
     }
 
@@ -273,6 +353,7 @@ mod tests {
             announced_session: None,
             announced_secs_ago: None,
             announce_any_turn: false,
+            armed_owner: None,
         }
     }
 
@@ -513,5 +594,102 @@ mod tests {
             run_id: None,
         };
         assert!(!decide_notify(e, ctx(false, None)).show);
+    }
+
+    #[test]
+    fn a_briefing_with_a_hostile_session_has_no_reply_destination() {
+        // Anyone holding the UP endpoint can POST a `session`. It is not a destination
+        // the sender gets to choose: the parser drops it for non-turn kinds AND the
+        // decision never publishes a reply target for them.
+        let brief =
+            parse_push(r#"{"type":"notify","session":"roam:nas:victim","text":"brief"}"#);
+        assert_eq!(brief.session_id, None);
+        let d = decide_notify(brief, ctx(false, Some("mine")));
+        assert!(d.show);
+        assert_eq!(d.reply_session, None);
+
+        let tasks = parse_push(r#"{"type":"task","session":"victim","text":"work"}"#);
+        assert_eq!(tasks.session_id, None);
+        let d = decide_notify(tasks, phone_ctx(false, None));
+        assert!(d.show);
+        assert_eq!(d.reply_session, None);
+
+        // A hand-built briefing (not through parse_push) is no more replyable: the
+        // decision is the choke point clients must use for every notification.
+        let forged = PushEnvelope {
+            kind: PushKind::Briefing,
+            session_id: Some("victim".to_string()),
+            text: "brief".to_string(),
+            run_id: None,
+        };
+        let d = decide_notify(forged, ctx(false, Some("mine")));
+        assert!(d.show);
+        assert_eq!(d.reply_session, None);
+    }
+
+    #[test]
+    fn a_turn_for_another_session_is_not_replyable() {
+        let turn = parse_push(r#"{"type":"turn","session":"theirs","text":"done"}"#);
+        let d = decide_notify(turn.clone(), ctx(false, Some("mine")));
+        assert!(!d.show);
+        assert_eq!(d.reply_session, None);
+
+        // A single-client desktop announces even a turn it did not arm — but since
+        // no client-side session matches the sender's id, it cannot offer a Reply.
+        let d = decide_notify(turn, ctx(false, None));
+        assert!(d.show);
+        assert_eq!(d.reply_session, None);
+    }
+
+    #[test]
+    fn a_roam_turn_needs_a_declared_matching_owner() {
+        let turn = parse_push(r#"{"type":"turn","session":"roam:nas:s1","text":"done"}"#);
+        let mut c = ctx(false, Some("roam:nas:s1"));
+        assert!(!decide_notify(turn.clone(), c.clone()).show);
+
+        c.armed_owner = Some("home".to_string());
+        let d = decide_notify(turn.clone(), c.clone());
+        assert!(!d.show);
+        assert_eq!(d.reply_session, None);
+
+        c.armed_owner = Some("nas".to_string());
+        let d = decide_notify(turn.clone(), c.clone());
+        assert!(d.show);
+        assert_eq!(d.reply_session.as_deref(), Some("roam:nas:s1"));
+
+        // The caller may pass the prefixed form too, but it is the bare label that
+        // has to match — not an id the push author picked.
+        c.armed_owner = Some("roam:nas".to_string());
+        assert_eq!(
+            decide_notify(turn, c).reply_session.as_deref(),
+            Some("roam:nas:s1")
+        );
+    }
+
+    #[test]
+    fn a_verified_turn_is_replyable_and_the_same_run_is_not_duplicated() {
+        let turn = parse_push(r#"{"type":"turn","session":"s1","runId":"r2","text":"done"}"#);
+        let d = decide_notify_run(turn.clone(), ctx(false, Some("s1")), Some("r1".to_string()));
+        assert!(d.show);
+        assert_eq!(d.reply_session.as_deref(), Some("s1"));
+
+        // The session this client announced from its own live path is client-side
+        // evidence too; the sender cannot supply that context.
+        let mut c = ctx(false, None);
+        c.announced_session = Some("s1".to_string());
+        assert_eq!(
+            decide_notify_run(turn.clone(), c, Some("r1".to_string()))
+                .reply_session
+                .as_deref(),
+            Some("s1")
+        );
+
+        // Same run, other delivery path: no second notification and no Reply.
+        let mut c = ctx(false, Some("s1"));
+        c.announced_session = Some("s1".to_string());
+        c.announced_secs_ago = Some(5);
+        let d = decide_notify_run(turn, c, Some("r2".to_string()));
+        assert!(!d.show);
+        assert_eq!(d.reply_session, None);
     }
 }

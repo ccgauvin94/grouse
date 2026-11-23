@@ -11,8 +11,31 @@ import org.unifiedpush.android.connector.data.PushEndpoint
 import org.unifiedpush.android.connector.data.PushMessage
 import uniffi.grouse_core.NotifyContext
 import uniffi.grouse_core.PushKind
-import uniffi.grouse_core.decideNotify
+import uniffi.grouse_core.decideNotifyRun
 import uniffi.grouse_core.parsePush
+
+/**
+ * Pure push-target policy. A push is unauthenticated input: anyone who learns the
+ * distributor's endpoint URL can POST an envelope naming an arbitrary `session`.
+ * Only a TURN is about a conversation, and even then the id must be one this device
+ * knows and — when a turn was armed here — the exact id it armed. A briefing or a
+ * task push is an announcement, never a chat target. Rejection degrades to a
+ * session-less notification (open the app; reply to the chat on screen), so no
+ * reply PendingIntent or `openSession` can be aimed at a server-chosen chat.
+ */
+internal fun validatedPushSession(
+    kind: PushKind,
+    session: String?,
+    knownSessionIds: Collection<String>,
+    armedSessionId: String?,
+): String? {
+    if (kind != PushKind.TURN) return null
+    val id = session?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    if (id !in knownSessionIds) return null
+    val armed = armedSessionId?.trim()?.takeIf { it.isNotEmpty() }
+    if (armed != null && armed != id) return null
+    return id
+}
 
 /**
  * UnifiedPush wiring. The distributor (e.g. NextPush, backed by the uppush app on the user's
@@ -57,20 +80,49 @@ class GoosePushService : PushService() {
         // session this device armed is announced.
         val envelope = parsePush(raw)
         val (announcedSession, announcedSecsAgo) = cm.announcedTurn
-        val decision = decideNotify(
+        val armedSession = cm.store.pendingPushSessionId
+        val shownSession = cm.currentSession.value
+        // A `roam:<label>:<id>` id is a CLIENT-side namespace: the sender writes
+        // the label too, so the core hides a roam turn (and never replies to it)
+        // unless we declare the bare peer label of the session we armed. Use the
+        // shown chat only when nothing is armed.
+        val armedOwner = ConnectionManager.roamPeer(armedSession)
+            ?: ConnectionManager.roamPeer(shownSession)
+        // Validate before anything can carry the id into a PendingIntent or a deep link.
+        // The manager's known set includes cached ids the filtered session list hides
+        // (the assistant thread), so a genuine turn is not stripped just because the
+        // list is a hint. An armed turn narrows the target to that one chat.
+        val targetSession = validatedPushSession(
+            envelope.kind, envelope.sessionId, cm.knownPushSessionIds(), armedSession)
+        if (targetSession == null && !envelope.sessionId.isNullOrBlank()) {
+            cm.noteApp("push ${envelope.kind}: dropped untrusted session target")
+        }
+        val decision = decideNotifyRun(
             envelope,
             NotifyContext(
                 appVisible = cm.isForeground,
-                armedSession = cm.store.pendingPushSessionId,
-                sessionTitle = cm.currentSession.value?.let {
+                armedSession = armedSession,
+                sessionTitle = shownSession?.let {
                     cm.sessions.value.firstOrNull { s -> s.sessionId == it }?.title
                 },
                 // The live path may have announced this very turn seconds ago.
                 announcedSession = announcedSession,
                 announcedSecsAgo = announcedSecsAgo?.toUInt(),
                 announceAnyTurn = false,
+                armedOwner = armedOwner,
             ),
+            // Pair the sender's run id with the run this app announced so two
+            // turns in one chat are not mistaken for one redelivery.
+            cm.announcedTurnRunId,
         )
+        // The core's replySession is the ONLY destination a Reply PendingIntent
+        // or the tap deep link may use — never the sender's envelope `session`.
+        // validatedPushSession stays as a SECOND gate: if the core names a chat
+        // this client cannot vouch for, drop the target instead of routing it.
+        val replySession = decision.replySession?.takeIf { it == targetSession }
+        if (decision.replySession != null && replySession == null) {
+            cm.noteApp("push ${envelope.kind}: dropped unverified reply target")
+        }
         // Any proactive push is news about the assistant's state, so re-read it: a
         // briefing or a task flip changes what My Day shows, and a fresh notification
         // over a stale list is the version of this that wastes a tap. Deterministic
@@ -91,7 +143,7 @@ class GoosePushService : PushService() {
         cm.noteApp("push ${envelope.kind} shown=${decision.show} ${decision.summary}")
         if (decision.show) {
             if (envelope.kind == PushKind.TURN) cm.store.pendingPushSessionId = null
-            Notifier(this).postMessage(decision.summary, decision.body, envelope.sessionId,
+            Notifier(this).postMessage(decision.summary, decision.body, replySession,
                 proactive = envelope.kind != PushKind.TURN,
                 // Handed-over work taps into My Day, where the row and its result are;
                 // a briefing has no single row to land on, so it keeps opening the app.

@@ -42,11 +42,11 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QRandomGenerator>
 #include <QMimeDatabase>
 #include <QSaveFile>
 #include <QSet>
 #include <QStandardPaths>
+#include <QStringList>
 #include <QElapsedTimer>
 #include <QMetaObject>
 #include <QRunnable>
@@ -2336,6 +2336,19 @@ QString Manager::pushDecide(const QString &envelopeJson, const QString &contextJ
     return m_bridge->takeString(m_bridge->api().grouse_push_decide(e.constData(), c.constData()));
 }
 
+QString Manager::pushDecideRun(const QString &envelopeJson, const QString &contextJson,
+                               const QString &announcedRunId) const
+{
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_push_decide_run)
+        return pushDecide(envelopeJson, contextJson);
+    const QByteArray e = envelopeJson.toUtf8();
+    const QByteArray c = contextJson.toUtf8();
+    const QByteArray r = announcedRunId.isNull() ? QByteArray() : announcedRunId.toUtf8();
+    return m_bridge->takeString(
+        m_bridge->api().grouse_push_decide_run(e.constData(), c.constData(),
+                                               announcedRunId.isNull() ? nullptr : r.constData()));
+}
+
 void Manager::setServerConfig(const QString &key, const QString &value)
 {
     if (!m_bridge || !m_bridge->isAvailable())
@@ -2952,13 +2965,15 @@ void Manager::notifyTurnFinished()
     const QJsonObject envelope{{QStringLiteral("kind"), QStringLiteral("Turn")},
                                {QStringLiteral("session_id"), m_currentSessionId},
                                {QStringLiteral("text"), lastAssistantText()}};
+    const QString peer = sessionPeerLabel(m_currentSessionId);
     const QJsonObject ctx{{QStringLiteral("app_visible"), Notifier::appVisible()},
-                          {QStringLiteral("armed_session"), QJsonValue::Null},
+                          {QStringLiteral("armed_session"), m_currentSessionId},
+                          {QStringLiteral("armed_owner"), peer.isEmpty() ? QJsonValue::Null : QJsonValue(peer)},
                           {QStringLiteral("session_title"), m_currentSessionTitle},
                           {QStringLiteral("announce_any_turn"), true}};
-    const QJsonObject d = parseObj(pushDecide(
+    const QJsonObject d = parseObj(pushDecideRun(
         QString::fromUtf8(QJsonDocument(envelope).toJson(QJsonDocument::Compact)),
-        QString::fromUtf8(QJsonDocument(ctx).toJson(QJsonDocument::Compact))));
+        QString::fromUtf8(QJsonDocument(ctx).toJson(QJsonDocument::Compact)), QString()));
     if (d.value(QStringLiteral("show")).toBool()) {
         Notifier::send(d.value(QStringLiteral("summary")).toString(),
                        d.value(QStringLiteral("body")).toString());
@@ -4392,16 +4407,39 @@ void Manager::loadOlder(int count)
 // transcript rows come from on_item now, and the on_stream handler above keeps
 // only usage + run-ended.
 
+namespace {
+// appKey lengths prefix the cache key: an id containing the separator cannot
+// make two different (app, session) pairs collide.
+QString appCachePrefix(const QString &appKey)
+{
+    return QString::number(appKey.size()) + QLatin1Char(':') + appKey;
+}
+
+QString appCacheKey(const QString &appKey, const QString &sessionId)
+{
+    return appCachePrefix(appKey) + sessionId;
+}
+} // namespace
+
 void Manager::onAppResource(const QString &appKey, const QString &html)
 {
     if (!html.isEmpty())
         m_appHtml.insert(appKey, html);
-    if (!html.isEmpty() && m_appUrls.contains(appKey)) {
-        // Re-fetched template: invalidate the served URL so the next request
-        // (an Open-in-browser click, or a new view) registers fresh content.
+    if (!html.isEmpty() && !m_appUrls.isEmpty()) {
+        // Re-fetched template: invalidate EVERY session's URL for this app and
+        // revoke their tokens, so an old tab cannot keep posting into a chat.
         // An already-rendered inline view keeps the first snapshot — reload on
         // demand, not churn under the user.
-        m_appUrls.remove(appKey);
+        const QString prefix = appCachePrefix(appKey);
+        const QStringList keys = m_appUrls.keys();
+        for (const QString &key : keys) {
+            if (!key.startsWith(prefix))
+                continue;
+            if (m_appBridge)
+                m_appBridge->revokeToken(m_appTokens.value(key));
+            m_appTokens.remove(key);
+            m_appUrls.remove(key);
+        }
     }
     for (int i = m_messageModel->count() - 1; i >= 0; --i) {
         QVariantMap m = m_messageModel->row(i);
@@ -4423,10 +4461,15 @@ QString Manager::appViewUrl(const QString &appKey)
     const QString html = m_appHtml.value(appKey);
     if (html.isEmpty())
         return {};
-    const QString existing = m_appUrls.value(appKey);
-    if (!existing.isEmpty())
-        return existing;   // stable URL per template (re-fetched templates are
-                           // re-registered: onAppResource clears the mapping)
+    const QString cacheKey = appCacheKey(appKey, m_currentSessionId);
+    const QString existing = m_appUrls.value(cacheKey);
+    if (!existing.isEmpty() && m_appBridge && m_appBridge->isTokenValid(m_appTokens.value(cacheKey)))
+        return existing;   // stable URL per (app, chat); a refetch or idle
+                           // expiry mints a fresh one instead
+    if (!existing.isEmpty()) {
+        m_appUrls.remove(cacheKey);
+        m_appTokens.remove(cacheKey);
+    }
     if (!m_appBridge) {
         m_appBridge = new AppBridgeServer(this);
         connect(m_appBridge, &AppBridgeServer::appMessage, this, &Manager::onAppMessage);
@@ -4443,20 +4486,16 @@ QString Manager::appViewUrl(const QString &appKey)
             break;
         }
     }
-    // 128 bits of OS entropy, not a counter: the token is the ONLY capability
-    // guarding this loopback HTTP surface, so a neighbouring tab must not be
-    // able to guess the URL (t1, t2, … were trivially enumerable). The same
-    // opaque string is baked into the shim and into every route it fetches.
-    QByteArray tokenBytes(16, Qt::Uninitialized);
-    for (int i = 0; i < tokenBytes.size(); ++i)
-        tokenBytes[i] = static_cast<char>(QRandomGenerator::system()->bounded(0x100));
-    const QString token = QString::fromLatin1(tokenBytes.toHex());
+    // The bridge mints the 128-bit token and binds it to (appKey, session):
+    // a second chat showing the same app gets a DIFFERENT token, so ui/message
+    // can never land in the first chat. Tokens expire and can be revoked when
+    // the template is refetched.
     const bool dark = QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
-    m_appBridge->registerApp(token, m_currentSessionId, html, detail, output,
-                             dark ? QStringLiteral("dark") : QStringLiteral("light"));
+    const QString token = m_appBridge->registerApp(appKey, m_currentSessionId, html, detail, output,
+                                                   dark ? QStringLiteral("dark") : QStringLiteral("light"));
     const QString url = m_appBridge->urlFor(token);
-    m_appTokens.insert(appKey, token);
-    m_appUrls.insert(appKey, url);
+    m_appTokens.insert(cacheKey, token);
+    m_appUrls.insert(cacheKey, url);
     return url;
 }
 
@@ -4465,26 +4504,37 @@ void Manager::openAppInHtml(const QString &appKey)
     // Serve through the loopback bridge so the tab gets a host (ui/initialize
     // answered, ui/message lands back in this chat). The flatpak shares the
     // host network namespace, so the browser reaches 127.0.0.1 fine.
+    // There is deliberately NO file:// fallback: the template is server-
+    // supplied HTML and must never be written to a predictable temp path.
     const QString url = appViewUrl(appKey);
-    if (!url.isEmpty()) {
+    if (!url.isEmpty())
         QDesktopServices::openUrl(QUrl(url));
-        return;
-    }
-    // Fallback: plain temp-file handoff (view-only — no host for the bridge).
-    const QString html = m_appHtml.value(appKey);
-    if (html.isEmpty())
-        return;
-    const QString path = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-                             .filePath(QStringLiteral("grouse-app-%1.html")
-                                           .arg(qHash(appKey)));
-    QFile f(path);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        return;
-    f.write(html.toUtf8());
-    f.close();
-    // Trust boundary either way: the document is server-supplied; the browser
-    // sandbox is the isolation.
-    QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+}
+
+int Manager::appBridgePort() const
+{
+    return m_appBridge ? m_appBridge->port() : 0;
+}
+
+bool Manager::linkAllowed(const QString &url) const
+{
+    return markdownUrlAllowed(url);
+}
+
+bool Manager::openLocalFile(const QString &localPath)
+{
+    // Only a real local file the core already downloaded may be handed to the
+    // desktop. Relative paths and symlinks are refused; QML no longer calls
+    // openUrlExternally with a file: URL built from server-supplied text.
+    if (localPath.isEmpty())
+        return false;
+    const QFileInfo info(localPath);
+    if (!info.isAbsolute() || !info.isFile() || info.isSymlink())
+        return false;
+    const QString canonical = info.canonicalFilePath();
+    if (canonical.isEmpty() || !QFileInfo(canonical).isFile())
+        return false;
+    return QDesktopServices::openUrl(QUrl::fromLocalFile(canonical));
 }
 
 bool Manager::inlineAppsEnabled() const

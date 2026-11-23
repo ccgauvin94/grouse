@@ -31,7 +31,7 @@ import uniffi.grouse_core.NotifyContext
 import uniffi.grouse_core.PushEnvelope
 import uniffi.grouse_core.PushKind
 import uniffi.grouse_core.RefreshMode
-import uniffi.grouse_core.decideNotify
+import uniffi.grouse_core.decideNotifyRun
 import uniffi.grouse_core.GrouseUnstable
 import uniffi.grouse_core.GrouseUnstableListener
 import uniffi.grouse_core.Item
@@ -136,6 +136,7 @@ class ConnectionManager private constructor(context: Context) {
     // only: a process that just started has announced nothing.
     @Volatile private var announcedTurnSession: String? = null
     @Volatile private var announcedTurnAtMs: Long = 0L
+    @Volatile private var announcedRunId: String? = null
     private var serviceRunning = false
     // Sends that must wait for (re)connect or for the running turn to end — a queue, not one
     // slot, so a second reply while still connecting can't clobber the first. The user bubble is
@@ -2717,10 +2718,14 @@ class ConnectionManager private constructor(context: Context) {
     private fun lastAssistantText(): String =
         messages.lastOrNull { it.role == "assistant" }?.text ?: "Turn finished."
 
-    /** Record the turn this app just announced (see notifiedTurn below). */
-    fun noteAnnouncedTurn(sessionId: String?) {
+    /** Record the turn this app just announced (see the live path in onCoreRunEnded).
+     *  The run id travels with it so a push for that SAME turn is deduped by run,
+     *  not by a short same-session burst — a genuine second turn in one chat must
+     *  still be announced. */
+    fun noteAnnouncedTurn(sessionId: String?, runId: String? = null) {
         announcedTurnSession = sessionId
         announcedTurnAtMs = android.os.SystemClock.elapsedRealtime()
+        announcedRunId = runId?.takeIf { it.isNotBlank() }
     }
 
     /** (session, seconds ago) of the last turn this app announced, or (null, null). */
@@ -2730,6 +2735,23 @@ class ConnectionManager private constructor(context: Context) {
             val secs = ((android.os.SystemClock.elapsedRealtime() - announcedTurnAtMs) / 1000).toInt()
             return session to secs
         }
+
+    /** Run id of that last announced turn, when the end event carried one. */
+    val announcedTurnRunId: String? get() = announcedRunId
+
+    /** Every session id this device can legitimately name, for the push-target gate.
+     *  Called from PushService's binder thread: this reads snapshot state and
+     *  SharedPreferences only — no main-looper post, no intent, no lock gate to
+     *  trip. The drawer list is a hint (paged, filtered, chatless sessions are
+     *  omitted), so the cached ids matter: a genuine turn in the assistant thread
+     *  must not be dropped just because no list ever returned it. */
+    fun knownPushSessionIds(): Set<String> = buildSet {
+        sessions.value.forEach { add(it.sessionId) }
+        currentSession.value?.let { add(it) }
+        store.assistantSessionId?.let { add(it) }
+        store.lastSessionId?.let { add(it) }
+        store.pendingPushSessionId?.let { add(it) }
+    }.filter { it.isNotBlank() }.toSet()
 
     /** Stop the running turn. The core sends the ACP cancel; the server ends the turn and the
      *  queue drains on RunEnded. Stop means stop -- for THIS chat's queued prompts, which are
@@ -3605,7 +3627,10 @@ class ConnectionManager private constructor(context: Context) {
         refreshActivity()
         noteApp("app: runEnded $sessionId stop=$stopReason shown=${sessionId == currentSession.value} current=${currentSession.value}")
         // Every completion clears ITS chat; only the chat on screen owns the
-        // busy/compacting/run-id state the UI draws.
+        // busy/compacting/run-id state the UI draws. Capture the run BEFORE the
+        // map loses it: the live notification below must give the core a run id
+        // so the operator's push for this same turn can be deduped by identity.
+        val endedRunId = activeRunIds[sessionId]
         inFlight.remove(sessionId)
         activeRunIds.remove(sessionId)
         val shown = sessionId == currentSession.value
@@ -3655,23 +3680,31 @@ class ConnectionManager private constructor(context: Context) {
                 // The live path: this app's own turn, so it is announced whenever the app is
                 // not in front (announceAnyTurn). The empty-transcript fallback and the wording
                 // come from the core, so the phone and the desktop read identically.
-                val decision = decideNotify(
-                    PushEnvelope(PushKind.TURN, currentSession.value, lastAssistantText()),
+                val shownSession = currentSession.value
+                val decision = decideNotifyRun(
+                    PushEnvelope(PushKind.TURN, shownSession, lastAssistantText(), runId = endedRunId),
                     NotifyContext(
                         appVisible = appForeground,
-                        armedSession = null,
-                        sessionTitle = sessions.value.firstOrNull { it.sessionId == currentSession.value }?.title,
+                        // The chat on screen is the one this device can vouch for.
+                        // Declaring it (and its bare roam peer label) is what makes
+                        // the decision's replySession non-null for a roam turn.
+                        armedSession = shownSession,
+                        sessionTitle = sessions.value.firstOrNull { it.sessionId == shownSession }?.title,
                         // This path IS the announcer for a turn it watched end; the dedupe
                         // fields exist to silence the *other* path (the operator's push for
                         // the same turn), never a genuine second turn of our own.
                         announcedSession = null,
                         announcedSecsAgo = null,
-                        announceAnyTurn = true))
+                        announceAnyTurn = true,
+                        armedOwner = roamPeer(shownSession)),
+                    // Nothing was announced for this run yet.
+                    null)
                 if (decision.show) {
                     // The alert names its chat: an inline Reply taps back into THIS
-                    // conversation even if the reader has moved on by then.
-                    notifier.postMessage(decision.summary, decision.body, currentSession.value)
-                    noteAnnouncedTurn(currentSession.value)
+                    // conversation even if the reader has moved on by then. Only the
+                    // decision's verified target may go into a PendingIntent.
+                    notifier.postMessage(decision.summary, decision.body, decision.replySession)
+                    noteAnnouncedTurn(shownSession, endedRunId)
                 }
             }
         }

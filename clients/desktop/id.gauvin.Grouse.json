@@ -16,8 +16,6 @@
     "--own-name=id.gauvin.Grouse",
     "--talk-name=org.freedesktop.Notifications",
     "--talk-name=org.unifiedpush.Distributor.kde",
-    "--filesystem=~/.local/lib/qt6/plugins:create",
-    "--filesystem=xdg-config/plasma-workspace/env:create",
     "--env=QTWEBENGINEPROCESS_PATH=/app/bin/QtWebEngineProcess"
   ],
   "cleanup-commands": [
@@ -49,6 +47,15 @@
           "type": "file",
           "path": "grouse-core-prebuild/libgrouse_core.so"
         }
+      ]
+    },
+    {
+      "name": "build-provenance",
+      "buildsystem": "simple",
+      "build-commands": [
+        "install -d /app/share/grouse-desktop",
+        "sha256sum /app/lib/grouserunner.so /app/lib/libgrouse_core.so > /app/share/grouse-desktop/SHA256SUMS",
+        "printf '%s\\n' 'KRunner plugin toolchain: Fedora 44 KF6/Qt6 host build' 'grouse-core toolchain: rustc 1.97.1 (core/rust-toolchain.toml)' > /app/share/grouse-desktop/TOOLCHAIN.txt"
       ]
     },
     {

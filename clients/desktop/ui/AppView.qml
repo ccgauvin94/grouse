@@ -101,11 +101,16 @@ Item {
         }
         // Server-supplied, untrusted document: block navigation to any other
         // origin (a crafted app must not browse the user out of the sandbox).
-        // The bridge is ALWAYS the loopback origin — check that, not the full
-        // URL (every registered app shares the one ephemeral port). In-page
-        // fetch/XHR to it is not a navigation and stays allowed regardless.
+        // Loopback alone is NOT an origin: any local service could bind another
+        // port. Pin the port to the bridge Manager actually started (0 before
+        // registration), so a link to 127.0.0.1:<anything else> is refused.
+        // In-page fetch/XHR to the bridge is not a navigation and stays allowed.
         onNavigationRequested: (request) => {
-            if (request.url.toString().indexOf("http://127.0.0.1:") !== 0)
+            const port = Mgr.appBridgePort()
+            const allowed = port > 0
+                ? "http://127.0.0.1:" + port + "/"
+                : ""
+            if (allowed.length === 0 || request.url.toString().indexOf(allowed) !== 0)
                 request.action = WebEngineNavigationRequest.IgnoreRequest;
         }
         onPermissionRequested: (permission) => permission.deny()

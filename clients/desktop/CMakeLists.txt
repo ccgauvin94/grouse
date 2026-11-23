@@ -25,30 +25,37 @@ find_package(Qt6 QUIET COMPONENTS WebEngineQuick)
 # KRunner integration plugin (host-side; OFF for the flatpak build).
 option(BUILD_KRUNNER "Build the KRunner session-search plugin" ON)
 
+# The app's core: every source except main.cpp. The test library consumes the
+# same list, so a file added here cannot silently disappear from the tests (or
+# vice versa). Keep it absolute: tests live in a subdirectory.
+set(GROUSE_CORE_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dbusadapter.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dbusadapter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/appbridge.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/appbridge.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/corebridge.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/corebridge.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/roamlistmodel.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/roamlistmodel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/manager.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/manager.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/messagelistmodel.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/messagelistmodel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/sessionlistmodel.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/sessionlistmodel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/markdown.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/markdown.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/myday.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/myday.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/notifier.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/notifier.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/pushclient.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/pushclient.cpp
+)
+
 qt_add_executable(grouse-desktop
-    src/main.cpp
-    src/dbusadapter.h
-    src/dbusadapter.cpp
-    src/appbridge.h
-    src/appbridge.cpp
-    src/corebridge.h
-    src/corebridge.cpp
-    src/roamlistmodel.h
-    src/roamlistmodel.cpp
-    src/manager.h
-    src/manager.cpp
-    src/messagelistmodel.h
-    src/messagelistmodel.cpp
-    src/sessionlistmodel.h
-    src/sessionlistmodel.cpp
-    src/markdown.h
-    src/markdown.cpp
-    src/myday.h
-    src/myday.cpp
-    src/notifier.h
-    src/notifier.cpp
-    src/pushclient.h
-    src/pushclient.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
+    ${GROUSE_CORE_SOURCES}
 )
 
 target_include_directories(grouse-desktop PRIVATE src)
@@ -124,6 +131,13 @@ install(FILES
 
 if(BUILD_TESTING)
     add_subdirectory(tests)
+    # tests/CMakeLists still carries its historical literal list; make the
+    # canonical list above authoritative for grouse_core too. When that file is
+    # next touched, replace its add_library() source list with
+    # ${GROUSE_CORE_SOURCES} and drop this override.
+    if(TARGET grouse_core)
+        set_property(TARGET grouse_core PROPERTY SOURCES ${GROUSE_CORE_SOURCES})
+    endif()
 endif()
 
 if(BUILD_KRUNNER)

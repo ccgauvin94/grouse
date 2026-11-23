@@ -20,10 +20,14 @@ class ReplyReceiver : BroadcastReceiver() {
                     // The alert's chat travels in the PendingIntent: the current screen may
                     // have changed since the notification was posted (or the app may have
                     // been killed), so it is not the reply's destination.
+                    // Only a validated turn alert can carry EXTRA_SESSION_ID: Push drops
+                    // unknown/foreign ids and Notifier never plants one on a proactive push.
+                    // Blank still means "the chat on screen" (old session-less senders).
                     // No lock policy here: sendWhenReady is the same path the chat composer
                     // uses, and ConnectionManager's single gate rejects it while locked.
-                    ConnectionManager.get(context)
-                        .sendWhenReady(text, intent.getStringExtra(Notifier.EXTRA_SESSION_ID))
+                    val target = intent.getStringExtra(Notifier.EXTRA_SESSION_ID)
+                        ?.takeIf { it.isNotBlank() }
+                    ConnectionManager.get(context).sendWhenReady(text, target)
                 }
                 if (id >= 0) context.getSystemService(NotificationManager::class.java).cancel(id)
             }

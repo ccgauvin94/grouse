@@ -294,9 +294,10 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
     private static func peerLabel(from sessionId: String) -> String {
         guard sessionId.hasPrefix("roam:") else { return "" }
         let rest = String(sessionId.dropFirst("roam:".count))
-        // The LAST colon separates the label from the wire id: connection-card labels
-        // are free-form and may contain ':' (CONTRACT §6).
-        if let colon = rest.lastIndex(of: ":") {
+        // The FIRST colon separates the label from the wire id: the core rejects
+        // ':' in roam labels and resolves the LONGEST known label prefix, so a
+        // wire id may itself contain ':' (CONTRACT §3.3/§6).
+        if let colon = rest.firstIndex(of: ":") {
             return String(rest[..<colon])
         }
         return rest

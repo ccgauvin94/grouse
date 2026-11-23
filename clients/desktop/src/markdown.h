@@ -11,6 +11,13 @@
  *  keep up with goose's output (tables, task lists, fenced languages, ...). */
 QString markdownToHtml(const QString &md);
 
+/** The ONE URL-scheme allowlist for everything a chat can open. Used by the
+ *  markdown renderer (disallowed links become inert text) and exposed to QML
+ *  through Manager::linkAllowed() for every Text.onLinkActivated. Only http,
+ *  https and mailto are safe to hand to the desktop: file/javascript/custom
+ *  schemes from server text must never reach Qt.openUrlExternally. */
+bool markdownUrlAllowed(const QString &url);
+
 /**
  * Split a transcript message into render blocks: HTML prose chunks (from
  * markdownToHtml, exactly the old single-document output) interleaved with

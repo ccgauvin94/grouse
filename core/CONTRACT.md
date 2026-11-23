@@ -191,9 +191,10 @@ pub trait CoreListener {
 ```
 
 The desktop C ABI mirrors this table field-for-field as `GrouseCoreListener`.
-`on_session_opened` was appended at the END and bumped the ABI to **18**; the
-desktop refuses a library whose `grouse_abi_version()` differs, because a slot
-inserted anywhere else would call every later callback with the wrong arity.
+`on_session_opened` was appended at the END and bumped the ABI to **18** (the
+current version is **19**, a record-shape-only bump — §5.5); the desktop refuses
+a library whose `grouse_abi_version()` differs, because a slot inserted anywhere
+else would call every later callback with the wrong arity.
 
 **A reload invalidates; a refresh merely asks.** `RefreshMode::Quick` trusts a
 settled cache and merges a bounded tail, which is right for an open and useless
@@ -257,6 +258,14 @@ cache paint in place.
   `roam:<label>:<id>` to decide where a session-bound intent goes. An unknown
   or vanished peer still reports `kind: "roam"` with the label recovered from
   the id, never a false `"main"`. C ABI: `grouse_session_owner`.
+  A roam label is client-chosen but **cannot contain `:`**: `roam_connect`,
+  `roam_new_session*` and `roam_new_session_in` reject blank, padded or colon-bearing
+  labels, because display ids are `roam:<label>:<id>` and a colon in the label
+  would let two peers address the same id. Owner resolution uses the **longest
+  KNOWN label prefix** (which still covers legacy nested labels); with no peer
+  known, the first component is the label and the remainder — colons included —
+  is the wire id. Splitting on the LAST colon, or assuming labels may contain
+  `:` (§6), misroutes an intent to a peer that does not exist.
 - `all_sessions(): Vec<SessionSummary>` — **New 2026-11-23.** one snapshot of
   every known session, main wire plus every connected roam peer, with the
   client-side `roam:<label>:` ids already applied and duplicates resolved in
@@ -893,17 +902,20 @@ and the desktop.
   (or does not parse) is a briefing carrying the raw text, because a sender with
   a broken envelope should still reach the user. `run_id` is optional for older
   senders (goose's Stop hook has none); clients that watched the turn end pass
-  it through `decide_notify_run` instead.
-- `decide_notify(envelope, ctx) -> NotifyDecision` — `{show, summary, body}`.
-  `NotifyContext` is what the client knows: `app_visible` (Android: foreground;
-  desktop: active window), `armed_session` (the session this device last sent to),
-  `session_title` (where known — the desktop's sidebar has it, a push to a sleeping
-  phone does not), `announce_any_turn` (true for a single-client desktop, false for
-  the phone, which suppresses turns it did not arm), and `announced_session` /
-  `announced_secs_ago` — the last turn the client announced itself, so the same turn
-  end arriving twice (the live connection sees it; the operator's sender pushes for
-  it) is announced once. Senders cannot disambiguate: goose's `Stop` hook payload
-  carries no run id, so a bounded recency window is the available identity.
+  it through `decide_notify_run` instead. **`session_id` is sender-supplied and
+  untrusted**: it says what a push claims to be about, never where a Reply goes.
+- `decide_notify(envelope, ctx) -> NotifyDecision` —
+  `{show, summary, body, reply_session}`. `NotifyContext` is what the client
+  knows: `app_visible` (Android: foreground; desktop: active window),
+  `armed_session` (the session this device last sent to), `session_title` (where
+  known — the desktop's sidebar has it, a push to a sleeping phone does not),
+  `announce_any_turn` (true for a single-client desktop, false for the phone,
+  which suppresses turns it did not arm), `announced_session` /
+  `announced_secs_ago` — the last turn the client announced itself, so the same
+  turn end arriving twice (the live connection sees it; the operator's sender
+  pushes for it) is announced once — and `armed_owner` (see the rule below).
+  Senders cannot disambiguate: goose's `Stop` hook payload carries no run id,
+  so a bounded recency window is the available identity.
 
 - `decide_notify_run(envelope, ctx, announced_run: Option<String>) -> NotifyDecision`
   — **new 2026-11-22**; the run-aware entry point clients should prefer. The
@@ -912,6 +924,23 @@ and the desktop.
   run id from `on_active_run` at the moment of announcing (either
   `PushEnvelope::run_id` or `announced_run` may be absent, in which case only a
   short same-session burst is suppressed). Same `show/summary/body` result.
+
+**Reply targets and roam owners are normative (ABI 19).** The envelope's
+`session` comes from the push sender, not from this client: a turn notification's
+Reply action (and its conversation tap target, when there is one) MUST come from
+`NotifyDecision.reply_session`, never from `PushEnvelope.session_id`; when it is
+`null`, open the app instead of guessing a chat. The core sets `reply_session`
+only for a `Turn` whose id matches a session this client armed or announced; `Briefing`,
+`Tasks` and unverifiable turns return `null`. A `roam:<label>:<id>` id names a peer
+as well as a chat, and the sender supplied both: such a turn is hidden unless
+`NotifyContext.armed_owner` declares the bare label of the peer this client armed
+(`nas`; a `roam:nas` value is also accepted), and even a matching, announce-any-turn
+desktop gets no reply target unless that declaration is present. Roam labels cannot
+contain `:` (§3.3), so the namespace is unambiguous. ABI **19** is these two JSON
+record fields only — the symbol signatures and listener table are unchanged — but
+a desktop built for 19 must refuse an older `.so` whose decisions lack
+`reply_session`, and Android must regenerate uniffi bindings for `armedOwner` /
+`replySession`.
 
 Wording (`"Grouse replied"`, `"Grouse briefing"`, the empty-transcript fallback)
 lives here too: the two clients used to say different things for the same event.
@@ -955,10 +984,11 @@ sets the drawer's green dot via `SessionHub::mark_new` instead of painting.
   `roam_open_session(label, session_id)`
 - events: `on_roam_peer_status(label, status)`, `on_roam_sessions(label, Vec<SessionSummary>)`
 - the peer's session id namespace uses the `roam:<peer>:<id>` prefix for
-  sidebar grouping, exactly as today. `session_owner(id)` (§3.3) is the single
-  answer to "which wire owns this id?", and `all_sessions()` is the merged
-  snapshot for the drawer — clients no longer keep a separate roam model or
-  re-split the prefix on every main refresh.
+  sidebar grouping, exactly as today. The label cannot contain `:` and owner
+  resolution takes the longest known label prefix, not the last colon (§3.3).
+  `session_owner(id)` (§3.3) is the single answer to "which wire owns this id?",
+  and `all_sessions()` is the merged snapshot for the drawer — clients no longer
+  keep a separate roam model or re-split the prefix on every main refresh.
 - every successful open, including `roam_open_session`, reports
   `on_session_opened(display_id)`; the failure counterpart is unchanged.
 - session-bound unstable RPCs (tools list/call, session extensions, project,

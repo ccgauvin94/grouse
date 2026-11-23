@@ -104,6 +104,68 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 
 
+/** A roam label is BOTH the user's endpoint name and the core's routing key: it is passed to
+ *  `roam_connect(card, label)` and becomes the `roam:<label>:<id>` session-id prefix. The core
+ *  boundary rejects ':' in that argument, so the check belongs here, before any dial — a label
+ *  that gets stored on this screen must not be able to reach the core and fail mid-handshake.
+ *  Pure so the rule can be pinned by a JVM test without Compose or Android classes. */
+internal const val ROAM_LABEL_MAX_CHARS = 64
+private const val ROAM_CARD_SCHEME = "goose+roam://"
+
+internal fun validRoamLabel(label: String): Boolean {
+    val value = label.trim()
+    return value.isNotEmpty()
+        && label == value // the core rejects padded labels too; store/dial the exact string
+        && value.length <= ROAM_LABEL_MAX_CHARS
+        && ':' !in value
+        && value.none { it.isISOControl() }
+        && value.any { !it.isWhitespace() }
+}
+
+/** The inline error text for an invalid label, or null when it may be stored / dialled.
+ *  Kept next to the predicate so a message can never drift from the rule it explains. */
+internal fun roamLabelError(label: String): String? = when {
+    label.trim().isEmpty() -> "Give the host a name."
+    label != label.trim() -> "Remove the spaces at the start or end of the host name."
+    ':' in label -> "A host name can't contain ':'. Use a name without colons."
+    label.trim().length > ROAM_LABEL_MAX_CHARS ->
+        "Keep the host name to $ROAM_LABEL_MAX_CHARS characters or fewer."
+    label.any { it.isISOControl() } -> "A host name can't contain line breaks or control characters."
+    else -> null
+}
+
+/** A bare card starts with `goose+roam://`. Some pairing flows paste/scan a card with a human
+ *  label in front of it ("desk: goose+roam://…"); that prefix is a roam label too and must pass
+ *  the SAME rule, never be handed to the core as part of the card. */
+internal fun roamCardEmbeddedLabel(card: String): String? {
+    val at = card.indexOf(ROAM_CARD_SCHEME)
+    if (at <= 0) return null
+    return card.substring(0, at).trim()
+        .trimEnd(':', '=', '-', ',', ';', '\u2013', '\u2014').trim()
+        .takeIf { it.isNotEmpty() }
+}
+
+/** Strip a scanned/pasted label prefix, leaving only the card the core can decode. */
+internal fun roamCardWithoutLabel(card: String): String {
+    val at = card.indexOf(ROAM_CARD_SCHEME)
+    return if (at > 0) card.substring(at).trim() else card.trim()
+}
+
+/** The name actually stored for a card: what the user typed, else a valid label carried by
+ *  the card itself. Never a label with ':' — the caller checks [roamCardLabelError] first. */
+internal fun roamPeerName(card: String, typedName: String): String =
+    typedName.trim().ifBlank { roamCardEmbeddedLabel(card)?.trim().orEmpty() }
+
+/** One gate for BOTH pairing paths (typed name + QR/paste card). A card-supplied label with
+ *  ':' is rejected with a clear message rather than silently stripped and dialled. */
+internal fun roamCardLabelError(card: String, typedName: String): String? {
+    val embedded = roamCardEmbeddedLabel(card)
+    if (embedded != null && !validRoamLabel(embedded))
+        return "The card's label '$embedded' can't contain ':' — paste the card alone or use a name without colons."
+    return roamLabelError(roamPeerName(card, typedName))
+}
+
+
 /** Browse view (DEFAULT): saved endpoints as collapsible groups like projects, each
  *  listing its sessions. Live status shown inline; only ready peers carry sessions. */
 @OptIn(ExperimentalFoundationApi::class)
@@ -111,6 +173,9 @@ import kotlinx.serialization.json.contentOrNull
 fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit,
     query: String = "", onClearQuery: () -> Unit = {}) {
     var expanded by rememberSaveable { mutableStateOf(listOf<String>()) }
+    // An invalid stored label is rejected here, on the Retry tap, with the reason inline;
+    // never pass it to connectRoam (and through it core.roamConnect).
+    var badLabelPeer by remember { mutableStateOf<Pair<String, String>?>(null) }
     var roamActionsFor by remember { mutableStateOf<SessionInfo?>(null) }
     // Long-press the peer "new chat" + to choose a working dir for that chat.
     var cwdFor by remember { mutableStateOf<String?>(null) }
@@ -219,11 +284,17 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit,
                             if (ready) {
                                 Box(Modifier.size(24.dp).combinedClickable(
                                     onClick = {
-                                        cm.newRoamSession(peer.name)
-                                        // Leave the browse slide: the chat opens on the
-                                        // peer's on_peer_new_session, and this state change
-                                        // (currentSession.next) drives the ChatScreen.
-                                        onOpen()
+                                        // The core checks the label for roam_new_session too.
+                                        val problem = roamLabelError(peer.name)
+                                        if (problem != null) {
+                                            badLabelPeer = peer.name to "Can't start a chat: $problem"
+                                        } else {
+                                            cm.newRoamSession(peer.name)
+                                            // Leave the browse slide: the chat opens on the
+                                            // peer's on_peer_new_session, and this state change
+                                            // (currentSession.next) drives the ChatScreen.
+                                            onOpen()
+                                        }
                                     },
                                     onLongClick = { cwdFor = peer.name }
                                 ), contentAlignment = Alignment.Center) {
@@ -255,10 +326,19 @@ fun RoamBrowse(cm: ConnectionManager, nav: NavController, onOpen: () -> Unit,
                                         else -> MaterialTheme.colorScheme.outline
                                     },
                                     modifier = Modifier.weight(1f))
-                                if (error) TextButton(onClick = { cm.connectRoam(peer.name) }) {
+                                if (error) TextButton(onClick = {
+                                    val problem = roamLabelError(peer.name)
+                                    if (problem != null) badLabelPeer = peer.name to problem
+                                    else { badLabelPeer = null; cm.connectRoam(peer.name) }
+                                }) {
                                     Text("Retry")
                                 }
                             }
+                        }
+                        if (badLabelPeer?.first == peer.name) {
+                            Text(badLabelPeer!!.second, color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.padding(start = 44.dp, end = 8.dp, bottom = 6.dp))
                         }
                         // Sessions live INSIDE the expanded card, with a separator
                         // under the header. Stable per-session keys + deterministic
@@ -312,6 +392,9 @@ fun RoamAddConnectionScreen(cm: ConnectionManager, nav: NavController) {
     var name by remember { mutableStateOf("") }
     var card by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+    // Connect on an OLD saved card (or one saved by a build that did not validate) must fail
+    // visibly too, not hand a ':' label to core.roamConnect.
+    var connectError by remember { mutableStateOf<Pair<String, String>?>(null) }
     // Long-press the header "New chat" to pick a working dir for that chat.
     var roamCwdFor by remember { mutableStateOf<String?>(null) }
     val peers = cm.roamPeers
@@ -323,7 +406,18 @@ fun RoamAddConnectionScreen(cm: ConnectionManager, nav: NavController) {
         nav.currentBackStackEntry?.savedStateHandle
             ?.getStateFlow<String?>("qr_card", null)?.collect { value ->
                 if (value != null) {
-                    card = value
+                    val scanned = value.trim()
+                    val embedded = roamCardEmbeddedLabel(scanned)
+                    // A QR that carries its own label is only accepted when that label obeys
+                    // the same rule as a typed one. Reject it with the reason on screen;
+                    // never strip a bad label and silently dial the rest.
+                    if (embedded != null && !validRoamLabel(embedded)) {
+                        error = roamCardLabelError(scanned, "")
+                    } else {
+                        error = null
+                        card = roamCardWithoutLabel(scanned)
+                        if (name.isBlank()) name = embedded?.trim().orEmpty()
+                    }
                     nav.currentBackStackEntry?.savedStateHandle?.set("qr_card", null)
                 }
             }
@@ -384,9 +478,18 @@ fun RoamAddConnectionScreen(cm: ConnectionManager, nav: NavController) {
                         nav.navigate("qrscan") { launchSingleTop = true }
                     }) { Text(stringResource(R.string.scan_qr)) }
                     Button(onClick = {
-                        error = if (name.isBlank()) "Give the host a name."
-                                else cm.addRoamPeer(name.trim(), card.trim())
-                        if (error == null) { name = ""; card = "" }
+                        // Both halves of the pair are validated BEFORE anything is stored:
+                        // the typed label and any label carried by a pasted card. The bare
+                        // card is what the core decodes, so a prefix label is stripped here.
+                        val candidate = roamPeerName(card, name)
+                        val problem = roamCardLabelError(card, candidate)
+                        if (problem != null) {
+                            error = problem
+                        } else {
+                            val saveError = cm.addRoamPeer(candidate, roamCardWithoutLabel(card))
+                            error = saveError
+                            if (saveError == null) { name = ""; card = "" }
+                        }
                     }) { Text(stringResource(R.string.save_host)) }
                 }
             }
@@ -394,6 +497,11 @@ fun RoamAddConnectionScreen(cm: ConnectionManager, nav: NavController) {
                 if (peers.isEmpty())
                     SettingCaption("No hosts yet — paste a connection card from a " +
                         "`goose serve --roam` or `roam share` host.")
+                connectError?.let { (who, msg) ->
+                    Text("$who: $msg", color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(vertical = 4.dp))
+                }
                 peers.forEach { peer ->
                     val st = status[peer.name]
                     val ready = st == "ready"
@@ -423,12 +531,17 @@ fun RoamAddConnectionScreen(cm: ConnectionManager, nav: NavController) {
                             // Long-press = choose a working dir for the new chat.
                             Box(Modifier.clip(RoundedCornerShape(20.dp)).combinedClickable(
                                 onClick = {
-                                    cm.newRoamSession(peer.name)
-                                    // Jump to the chat surface: the session opens on
-                                    // the peer's on_peer_new_session once created.
-                                    nav.navigate("chat") {
-                                        launchSingleTop = true
-                                        popUpTo("chat") { inclusive = true }
+                                    val problem = roamLabelError(peer.name)
+                                    if (problem != null) {
+                                        connectError = peer.name to "Can't start a chat: $problem"
+                                    } else {
+                                        cm.newRoamSession(peer.name)
+                                        // Jump to the chat surface: the session opens on
+                                        // the peer's on_peer_new_session once created.
+                                        nav.navigate("chat") {
+                                            launchSingleTop = true
+                                            popUpTo("chat") { inclusive = true }
+                                        }
                                     }
                                 },
                                 onLongClick = { roamCwdFor = peer.name }
@@ -438,7 +551,11 @@ fun RoamAddConnectionScreen(cm: ConnectionManager, nav: NavController) {
                                     color = MaterialTheme.colorScheme.primary)
                             }
                         } else {
-                            Button(onClick = { cm.connectRoam(peer.name) }) { Text(stringResource(R.string.connect)) }
+                            Button(onClick = {
+                                val problem = roamLabelError(peer.name)
+                                if (problem != null) connectError = peer.name to problem
+                                else { connectError = null; cm.connectRoam(peer.name) }
+                            }) { Text(stringResource(R.string.connect)) }
                         }
                         IconButton(onClick = { cm.removeRoamPeer(peer.name) }) {
                             Icon(Icons.Filled.Delete, contentDescription = "remove ${peer.name}")
@@ -459,6 +576,7 @@ fun RoamAddConnectionScreen(cm: ConnectionManager, nav: NavController) {
 fun RoamEndpointScreen(cm: ConnectionManager, nav: NavController, label: String) {
     var actionsFor by remember { mutableStateOf<SessionInfo?>(null) }
     var confirmRemove by remember { mutableStateOf(false) }
+    var badLabel by remember { mutableStateOf<String?>(null) }
     actionsFor?.let { s -> SessionActionsDialog(cm, s) { actionsFor = null } }
     if (confirmRemove) AlertDialog(
         onDismissRequest = { confirmRemove = false },
@@ -506,11 +624,20 @@ fun RoamEndpointScreen(cm: ConnectionManager, nav: NavController, label: String)
                         if (ready) {
                             TextButton(onClick = { cm.disconnectRoam(label) }) { Text(stringResource(R.string.disconnect)) }
                         } else {
-                            Button(onClick = { cm.connectRoam(label) }) { Text(stringResource(R.string.connect)) }
+                            Button(onClick = {
+                                val problem = roamLabelError(label)
+                                if (problem != null) badLabel = problem
+                                else { badLabel = null; cm.connectRoam(label) }
+                            }) { Text(stringResource(R.string.connect)) }
                         }
                         IconButton(onClick = { confirmRemove = true }) {
                             Icon(Icons.Filled.Delete, contentDescription = "remove $label")
                         }
+                    }
+                    badLabel?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(vertical = 4.dp))
                     }
                 }
             }
@@ -559,6 +686,7 @@ fun RoamEndpointScreen(cm: ConnectionManager, nav: NavController, label: String)
 @Composable
 private fun RoamNewChatDialog(cm: ConnectionManager, peerName: String, onDone: () -> Unit) {
     var cwd by rememberSaveable { mutableStateOf(cm.workingDir()) }
+    var labelProblem by remember { mutableStateOf<String?>(null) }
     AlertDialog(
         onDismissRequest = onDone,
         title = { Text(stringResource(R.string.new_chat_on_peer)) },
@@ -570,12 +698,21 @@ private fun RoamNewChatDialog(cm: ConnectionManager, peerName: String, onDone: (
                 OutlinedTextField(cwd, { cwd = it }, singleLine = true,
                     placeholder = { Text(stringResource(R.string.cwd_placeholder)) },
                     modifier = Modifier.fillMaxWidth())
+                labelProblem?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 6.dp))
+                }
             }
         },
         confirmButton = {
             TextButton(onClick = {
-                cm.newRoamSessionIn(peerName, cwd.trim())
-                onDone()
+                val problem = roamLabelError(peerName)
+                if (problem != null) labelProblem = problem
+                else {
+                    cm.newRoamSessionIn(peerName, cwd.trim())
+                    onDone()
+                }
             }) { Text(stringResource(R.string.create)) }
         },
         dismissButton = { TextButton(onClick = onDone) { Text(stringResource(R.string.cancel)) } },

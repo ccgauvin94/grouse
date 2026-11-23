@@ -5,6 +5,93 @@
 #include <QSet>
 #include <QStringList>
 #include <QTextDocument>
+#include <QUrl>
+
+bool markdownUrlAllowed(const QString &url)
+{
+    if (url.isEmpty())
+        return false;
+    // No embedded whitespace/controls (a "java\nscript:" trick must not parse
+    // as javascript:) and no backslash separator tricks either.
+    for (const QChar &c : url) {
+        if (c.isSpace() || c.isControl() || c == u'\\')
+            return false;
+    }
+    const QUrl parsed(url);
+    if (!parsed.isValid() || parsed.scheme().isEmpty())
+        return false;
+    const QString scheme = parsed.scheme().toLower();
+    return scheme == QLatin1String("http") || scheme == QLatin1String("https")
+           || scheme == QLatin1String("mailto");
+}
+
+namespace {
+
+/** Attribute values in QTextDocument::toHtml() are HTML-escaped. Decode ONE
+ *  layer before checking the scheme: &amp;#x66;ile: is a literal label, not a
+ *  file: URL, so a blanket double-decode would misclassify it. */
+QString decodeHtmlAttribute(const QString &in)
+{
+    static const QRegularExpression entity(
+        QStringLiteral("&(amp|quot|apos|#39|#[xX][0-9a-fA-F]+|#[0-9]+);"));
+    QString out;
+    out.reserve(in.size());
+    int last = 0;
+    auto it = entity.globalMatch(in);
+    while (it.hasNext()) {
+        const auto m = it.next();
+        const QString name = m.captured(1);
+        QString value;
+        if (name == QLatin1String("amp"))
+            value = QLatin1Char('&');
+        else if (name == QLatin1String("quot"))
+            value = QLatin1Char('"');
+        else if (name == QLatin1String("apos") || name == QLatin1String("#39"))
+            value = QLatin1Char('\'');
+        else {
+            const bool hex = name.at(1) == QLatin1Char('x') || name.at(1) == QLatin1Char('X');
+            bool ok = false;
+            const uint code = name.mid(2).toUInt(&ok, hex ? 16 : 10);
+            if (ok && code != 0 && code <= 0x10ffff) {
+                const char32_t cp = static_cast<char32_t>(code);
+                value = QString::fromUcs4(&cp, 1);
+            }
+        }
+        out += in.mid(last, m.capturedStart() - last) + value;
+        last = m.capturedEnd();
+    }
+    out += in.mid(last);
+    return out;
+}
+
+/** Strip anchors whose href fails markdownUrlAllowed(). Qt's importer happily
+ *  turns [label](file:///etc/passwd) into a live link; QML's RichText delegate
+ *  would then call openUrlExternally with it. Keeping the inner markup but
+ *  dropping the <a> makes the label selectable text with no link to activate. */
+QString sanitizeLinks(QString html)
+{
+    static const QRegularExpression anchor(
+        QStringLiteral("<a\\b[^>]*?href\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))[^>]*>(.*?)</a\\s*>"),
+        QRegularExpression::CaseInsensitiveOption | QRegularExpression::DotMatchesEverythingOption);
+    QString out;
+    out.reserve(html.size());
+    int last = 0;
+    auto it = anchor.globalMatch(html);
+    while (it.hasNext()) {
+        const auto m = it.next();
+        const int group = m.capturedStart(1) >= 0 ? 1 : (m.capturedStart(2) >= 0 ? 2 : 3);
+        if (markdownUrlAllowed(decodeHtmlAttribute(m.captured(group))))
+            continue;                       // keep the whole anchor verbatim
+        out += html.mid(last, m.capturedStart() - last) + m.captured(4);
+        last = m.capturedEnd();
+    }
+    if (last == 0)
+        return html;
+    out += html.mid(last);
+    return out;
+}
+
+} // namespace
 
 QString markdownToHtml(const QString &md)
 {
@@ -14,7 +101,7 @@ QString markdownToHtml(const QString &md)
     // We render into a throwaway document and ship the HTML to the QML delegate.
     QTextDocument doc;
     doc.setMarkdown(md);
-    return doc.toHtml();
+    return sanitizeLinks(doc.toHtml());
 }
 
 // ---------------------------------------------------------------------------

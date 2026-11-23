@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# Build and install the Grouse KRunner plugin for the HOST's KRunner.
+# Build (and optionally INSTALL) the Grouse KRunner plugin for the HOST's
+# KRunner. The runner is a host component: it lives outside the flatpak
+# sandbox and is loaded by the host KRunner, so it is never part of the app's
+# own startup path.
 #
-# The runner is a host component: it lives outside the flatpak sandbox and is
-# loaded by the host KRunner, so it is never part of the flatpak. It is built
-# with CMake and installed with `cmake --install` (proper install rules, no
-# copying .so files by hand).
+# Building is NOT an installation. With no arguments this script only compiles
+# the plugin and leaves the host untouched (this is what build-flatpak.sh uses
+# to stage the bundle's copy). Installing into ~/.local and writing the Plasma
+# env snippet requires an explicit, user-run `./build-krunner.sh --install`.
+# Nothing here is ever done on the user's behalf by the sandboxed app or by a
+# build step.
 #
-# Install location: user-local by default, into ~/.local/lib/qt6/plugins —
-# Qt6's per-user plugin dir. This is the right choice on atomic Fedora
-# (Bazzite/rpm-ostree): /usr is read-only and system layering is discouraged,
-# while $HOME persists across upgrades and KRunner scans it.
+# Install location: user-local, into ~/.local/lib/qt6/plugins — Qt6's per-user
+# plugin dir. This is the right choice on atomic Fedora (Bazzite/rpm-ostree):
+# /usr is read-only and system layering is discouraged, while $HOME persists
+# across upgrades and KRunner scans it.
 #
 # Build environment: if the host has the KF6/Qt6 dev stack (pkg-config finds
 # KF6Runner etc.) it builds directly; otherwise it builds inside the
@@ -27,13 +32,21 @@ BUILD_DIR="${BUILD_DIR:-build-krunner-host}"
 PREFIX="${HOME}/.local"
 LIBDIR=lib   # Qt6 scans ~/.local/lib/qt6/plugins for user plugins
 
-# --build-only: stop after building (used by build-flatpak.sh to stage the
-# plugin binary into the flatpak image).
-BUILD_ONLY=0
-if [[ "${1:-}" == "--build-only" ]]; then
-    BUILD_ONLY=1
-    shift
-fi
+# Default: build only. --build-only is kept as an explicit spelling for older
+# callers; --install is the ONLY way this script touches the host.
+INSTALL=0
+ASSUME_YES=0
+for arg in "$@"; do
+    case "$arg" in
+        --build-only) ;;                       # the default, accepted for compatibility
+        --install) INSTALL=1 ;;
+        --yes) ASSUME_YES=1 ;;
+        -h|--help)
+            echo "usage: $0 [--build-only | --install [--yes]]" >&2
+            exit 0 ;;
+        *) echo "error: unknown option: $arg" >&2; exit 2 ;;
+    esac
+done
 
 build_env=host
 for pc in Qt6Core Qt6DBus KF6Runner KF6Service KF6I18n KF6CoreAddons; do
@@ -52,7 +65,6 @@ echo "== Building in: ${build_env} =="
 if [[ "${build_env}" == "host" ]]; then
     "${configure[@]}"
     cmake --build "${BUILD_DIR}" -j"$(nproc)"
-    cmake --install "${BUILD_DIR}"
 else
     # The container shares $HOME, so --prefix ~/.local lands on the host.
     distrobox enter kde-build -- bash -lc '
@@ -61,25 +73,41 @@ else
         cmake -S krunner -B "$2" -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$HOME/.local" -DCMAKE_INSTALL_LIBDIR=lib
         cmake --build "$2" -j"$(nproc)"
-        cmake --install "$2"
     ' _ "$(pwd)" "${BUILD_DIR}"
 fi
 
-if (( BUILD_ONLY )); then
-    echo "Built: ${BUILD_DIR}/krunner/kf6/krunner/grouserunner.so"
+PLUGIN="${BUILD_DIR}/krunner/kf6/krunner/grouserunner.so"
+if (( ! INSTALL )); then
+    echo "Built: ${PLUGIN}"
+    echo "Host plugin dir NOT modified. To install it for your user, run:"
+    echo "  ./build-krunner.sh --install"
     exit 0
 fi
 
-echo "== Ensuring Plasma scans the user plugin dir on next login =="
+if (( ! ASSUME_YES )) && [[ -t 0 ]]; then
+    read -r -p "Install the KRunner plugin into ${PREFIX} and enable it for this user? [y/N] " reply
+    [[ "$reply" == [yY] || "$reply" == [yY][eE][sS] ]] || { echo "Aborted; host untouched."; exit 1; }
+fi
+
+echo "== Installing KRunner plugin for this user =="
+if [[ "${build_env}" == "host" ]]; then
+    cmake --install "${BUILD_DIR}"
+else
+    distrobox enter kde-build -- bash -lc 'cmake --install "$1"' _ "${BUILD_DIR}"
+fi
+
+# The plugin lives in Qt's user dir; Plasma needs to be told to scan it. This
+# writes only the user's own plasma-workspace/env, and only after the explicit
+# --install consent above — never from a build or from the sandboxed app.
 ENV_DIR="${HOME}/.config/plasma-workspace/env"
 mkdir -p "${ENV_DIR}"
 cat > "${ENV_DIR}/grouse-krunner.sh" <<EOF
-# Installed by build-krunner.sh — makes KRunner scan the user plugin dir.
+# Installed by build-krunner.sh --install — makes KRunner scan the user plugin dir.
 export QT_PLUGIN_PATH="\${HOME}/.local/lib/qt6/plugins\${QT_PLUGIN_PATH:+:\${QT_PLUGIN_PATH}}"
 EOF
 chmod +x "${ENV_DIR}/grouse-krunner.sh"
-# Also set it in the user manager env so newly-started user services (e.g.
-# a freshly spawned krunner) pick it up without waiting for the next login.
+# New user services started in this session (a freshly spawned krunner) pick the
+# path up without waiting for the next login.
 systemctl --user set-environment QT_PLUGIN_PATH="${PREFIX}/${LIBDIR}/qt6/plugins" 2>/dev/null || true
 
 echo "== Restarting krunner so it picks up the plugin =="

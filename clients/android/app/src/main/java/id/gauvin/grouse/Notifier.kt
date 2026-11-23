@@ -70,9 +70,12 @@ class Notifier(context: Context) {
         // The reply must go to the chat the notification is ABOUT, not whichever chat
         // happens to be on screen when the user taps Reply. Same extra key as the content
         // intent so there is one vocabulary for "which session did this alert come from".
+        // Only a validated turn target reaches here; never plant an extra at all for a
+        // session-less alert, so no spoofed id can ride a proactive reply action.
+        val sid = sessionId?.takeIf { it.isNotBlank() }
         val replyIntent = Intent(app, ReplyReceiver::class.java).setAction(ACTION_REPLY)
             .putExtra(EXTRA_NOTIF_ID, id)
-            .putExtra(EXTRA_SESSION_ID, sessionId)
+        if (sid != null) replyIntent.putExtra(EXTRA_SESSION_ID, sid)
         val replyPi = PendingIntent.getBroadcast(app, requestCode, replyIntent, flags(mutable = true))
         val replyAction = NotificationCompat.Action.Builder(R.drawable.ic_reply, "Reply", replyPi)
             .addRemoteInput(remote)
@@ -93,7 +96,7 @@ class Notifier(context: Context) {
             .setSmallIcon(R.drawable.ic_stat_goose)
             .setStyle(style)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setContentIntent(openApp(sessionId, myDay = myDay))
+            .setContentIntent(openApp(sid, myDay = myDay))
             .setAutoCancel(true)
             .addAction(replyAction)
             .addInvisibleAction(markReadAction)
@@ -103,13 +106,21 @@ class Notifier(context: Context) {
 
     /** A decision the core already made (notify.rs), rendered. The core supplies the
      *  summary and body so the phone and the desktop say the same thing for the same
-     *  event; this only chooses the notification identity and the deep link. */
+     *  event; this only chooses the notification identity and the deep link.
+     *
+     *  [sessionId] must be the decision's `replySession` (or null) — the core has
+     *  checked it against a session this device armed/announced. Never pass a
+     *  sender-supplied envelope `session`: it would ride both the Reply
+     *  PendingIntent and the tap deep link below. */
     fun postMessage(summary: String, body: String, sessionId: String? = null,
                     proactive: Boolean = false, myDay: Boolean = false) =
         postReplyable(summary, body,
             if (proactive) 2 else 1,
             if (proactive) ID_PROACTIVE else ID_ALERT,
-            sessionId, myDay)
+            // Belt and braces: a briefing/tasks alert is an announcement, never a chat
+            // target, even if a caller hands us a session id.
+            if (proactive) null else sessionId,
+            myDay)
 
     /** goose is blocked on a tool approval while backgrounded. */
     fun postApprovalNeeded(tool: String) {

@@ -78,7 +78,12 @@ Anchors are `file#token`; `+` joins more than one (all must resolve). Roots:
 android root = clients/android/app/src/main/java/id/gauvin/grouse
 desktop root = clients/desktop
 
-excluded = 21
+Some core-backed behaviour is outside `surface.rs`'s compile-guarded inventory —
+the notification records and the roam card-pin getters are not macro-enumerated
+fields. It is still user-visible, so it is ratcheted here as free-form `ui.*` rows
+with the same evidence and exclusion rules as any other row.
+
+excluded = 26
 
 | surface | android | desktop |
 |---|---|---|
@@ -213,3 +218,6 @@ excluded = 21
 | `ui.tools-sheet-catalog` | yes: ConnectionManager.kt#fun onExtensionCatalog | yes: src/manager.cpp#void Manager::coreOnExtensionCatalog |
 | `ui.dev-mode` | yes: Drawer.kt#ic_dev_mode+ConnectionManager.kt#fun newRoamSession | yes: ui/main.qml#newChatInMode+ui/main.qml#dev-mode-symbolic |
 | `ui.advisor` | yes: ChatScreen.kt#fun AdvisorCard+SettingsScreens.kt#Review each dev turn | yes: ui/ChatPage.qml#advisorCard+ui/SettingsDialog.qml#advisorBox |
+| `ui.push-reply-target` | yes: Push.kt#validatedPushSession | excluded: desktop notifications are show-only — Notifier::send has no Reply action — so no push id is ever routed into a chat |
+| `ui.push-armed-owner` | excluded: the phone accepts a turn target only when it is a known session and the exact id it armed (validatedPushSession), so no sender-chosen roam label can become a destination | excluded: a single-client desktop announces live turns and never routes a push id to a wire, so no roam owner declaration is used |
+| `ui.roam-card-pin` | excluded: the core pins the saved card on every dial; the phone shows the computed fingerprint but has no pin-view or re-enroll UI, so the getter/enroll/clear calls have no consumer | excluded: the pin getter/enroll/clear calls are uniffi-only with no `grouse_*` C ABI symbol; the desktop relies on the core's dial-time check and has no management UI |

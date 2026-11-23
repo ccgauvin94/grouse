@@ -8,7 +8,9 @@
 //! client needs, through uniffi-generated Kotlin bindings:
 //!
 //!   * identity — generate/derive the iroh secret key. The app owns the bytes
-//!     (SecureStore on Android); the core never persists anything.
+//!     (SecureStore on Android); the core never persists them. While a dial is
+//!     live the caller's key is held in a zeroizing `RoamSecret`; the shared
+//!     endpoint is keyed by the derived PUBLIC node id, never by the secret.
 //!   * connect — dial a host from its `ConnectionCard`, do the roam
 //!     handshake, and hand back a blocking byte-stream handle.
 //!   * stream — blocking read/write/close over the authenticated duplex. The
@@ -18,6 +20,10 @@
 //! Everything is synchronous on the uniffi boundary: calls run on uniffi's
 //! worker threads, and the internal tokio runtime drives iroh underneath.
 
+use std::fmt;
+use std::sync::atomic::Ordering;
+#[cfg(test)]
+use std::cell::Cell;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
@@ -58,13 +64,81 @@ fn runtime() -> &'static Runtime {
     RT.get_or_init(|| Runtime::new().expect("tokio runtime"))
 }
 
+/// A base64 iroh identity whose bytes are overwritten when the last handle
+/// drops. `Arc`-backed so a supervisor can hand the SAME secret to every retry
+/// without copying the string; nothing here is `Debug` or loggable.
+///
+/// The crate has no direct `zeroize` dependency (it is only transitive), so
+/// the scrub is local: volatile stores plus a compiler fence are enough to
+/// keep the optimizer from deleting the overwrite.
+#[derive(Clone)]
+pub struct RoamSecret(Arc<SecretBytes>);
+
+struct SecretBytes(Vec<u8>);
+
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        scrub(&mut self.0);
+        #[cfg(test)]
+        SCRUB_CALLS.with(|count| count.set(count.get() + 1));
+    }
+}
+
+// Thread-local so parallel tests cannot perturb each other's count.
+#[cfg(test)]
+thread_local! {
+    static SCRUB_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn scrub(bytes: &mut [u8]) {
+    for byte in bytes.iter_mut() {
+        unsafe { std::ptr::write_volatile(byte as *mut u8, 0) };
+    }
+    std::sync::atomic::compiler_fence(Ordering::SeqCst);
+}
+
+impl RoamSecret {
+    /// Take ownership of a base64 identity string (e.g. one read from the
+    /// platform's secure store). The string's allocation becomes the secret's
+    /// owned buffer and is scrubbed on drop — no second copy is made.
+    pub fn from_owned(value: String) -> Self {
+        Self(Arc::new(SecretBytes(value.into_bytes())))
+    }
+
+    /// Decode and validate an identity supplied by a caller at the FFI edge.
+    pub fn from_b64(value: &str) -> Result<Self, RoamError> {
+        decode_bytes(value)?;
+        Ok(Self::from_owned(value.to_string()))
+    }
+
+    fn as_str(&self) -> &str {
+        // The bytes came from a Rust `String` (or were validated as base64),
+        // so they are UTF-8 by construction.
+        std::str::from_utf8(&self.0.0).expect("roam identity is UTF-8")
+    }
+
+    /// The decoded 32-byte key, itself zeroized on drop.
+    fn key_bytes(&self) -> Result<SecretBytes, RoamError> {
+        decode_bytes(self.as_str())
+    }
+}
+
+impl fmt::Debug for RoamSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RoamSecret([redacted])")
+    }
+}
+
 /// Generate a fresh iroh secret key, base64-encoded. The app persists this in
 /// its secure store and hands it back on every connect — the core keeps no
 /// state.
 #[uniffi::export]
 pub fn identity_generate() -> String {
     let secret = SecretKey::generate();
-    base64::engine::general_purpose::STANDARD.encode(secret.to_bytes())
+    let mut raw = secret.to_bytes();
+    let bytes = SecretBytes(raw.to_vec());
+    scrub(&mut raw);
+    base64::engine::general_purpose::STANDARD.encode(&bytes.0)
 }
 
 /// The public key (hex) for a secret key — the identity a host sees in
@@ -98,22 +172,29 @@ pub fn card_fingerprint(card: &str) -> Result<String, RoamError> {
 /// `RoamingNode::connect` takes `&self` precisely so one node can carry many
 /// connections; each dial still gets its own QUIC connection and its own stream.
 ///
-/// Keyed by the secret so a rotated identity rebinds rather than dialing under
-/// the old key. Streams already handed out keep their own `Arc`, so replacing
-/// the shared node never cuts a live connection.
-fn shared_node(secret_b64: &str) -> Result<Arc<RoamingNode>, RoamError> {
-    /// The bound endpoint and the secret it was bound from.
+/// Keyed by the PUBLIC node id derived from the secret, never by the secret
+/// itself: a rotated identity rebinds rather than dialing under the old key,
+/// and the process-global slot holds no key material to zeroize (the caller's
+/// `RoamSecret` does that when the last retry handle drops). Streams already
+/// handed out keep their own `Arc`, so replacing the shared node never cuts a
+/// live connection.
+fn shared_node(secret: &RoamSecret) -> Result<Arc<RoamingNode>, RoamError> {
+    /// The bound endpoint and the public id it was bound under.
     type BoundNode = parking_lot::Mutex<Option<(String, Arc<RoamingNode>)>>;
     static NODE: OnceLock<BoundNode> = OnceLock::new();
+    let bytes = secret.key_bytes()?;
+    let mut key: [u8; 32] = bytes.0.as_slice().try_into()
+        .map_err(|_| RoamError::Message("identity must be 32 bytes".into()))?;
+    let identity = RoamingIdentity::from_secret(SecretKey::from_bytes(&key));
+    scrub(&mut key);
+    let node_id = identity.public_key().to_string();
     let slot = NODE.get_or_init(|| parking_lot::Mutex::new(None));
     let mut held = slot.lock();
-    if let Some((secret, node)) = held.as_ref() {
-        if secret == secret_b64 {
+    if let Some((bound_id, node)) = held.as_ref() {
+        if bound_id == &node_id {
             return Ok(node.clone());
         }
     }
-    let secret = decode_secret(secret_b64)?;
-    let identity = RoamingIdentity::from_secret(secret);
     // Bind with defaults: public relays, no inbound trust (this is the client
     // side; `goose serve --roam` is what accepts connections).
     let node = runtime().block_on(async {
@@ -121,7 +202,7 @@ fn shared_node(secret_b64: &str) -> Result<Arc<RoamingNode>, RoamError> {
             .await
             .map_err(|e| RoamError::Message(format!("bind: {e}")))
     })?;
-    *held = Some((secret_b64.to_string(), node.clone()));
+    *held = Some((node_id, node.clone()));
     Ok(node)
 }
 
@@ -141,6 +222,18 @@ pub fn roam_connect(
     card: &str,
     label: Option<String>,
 ) -> Result<Arc<RoamStream>, RoamError> {
+    let secret = RoamSecret::from_b64(secret_b64)?;
+    roam_connect_with_secret(&secret, card, label)
+}
+
+/// Same dial as [`roam_connect`], for callers that already own a zeroizing
+/// `RoamSecret` (the core's peer supervisor keeps one `Arc` across all of its
+/// retries instead of cloning the base64 string per attempt).
+pub fn roam_connect_with_secret(
+    secret: &RoamSecret,
+    card: &str,
+    label: Option<String>,
+) -> Result<Arc<RoamStream>, RoamError> {
     let card = ConnectionCard::decode(card)
         .map_err(|e| RoamError::Message(format!("invalid card: {e}")))?;
 
@@ -150,7 +243,7 @@ pub fn roam_connect(
     // Endpoint drops, and holding only the `Connection` is not enough (the Endpoint runs
     // the IO actor). Dropping the node was what made connect succeed and then the very
     // first read return "stream closed".
-    let node = shared_node(secret_b64)?;
+    let node = shared_node(secret)?;
     // iroh's connect future waits for relay address discovery and the QUIC
     // handshake; without a bound, an unreachable peer or relay parks the caller
     // forever (and with it the core's supervised retry, which then never emits
@@ -266,14 +359,32 @@ impl RoamStream {
     }
 }
 
-fn decode_secret(secret_b64: &str) -> Result<SecretKey, RoamError> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(secret_b64.trim())
-        .map_err(|e| RoamError::Message(format!("invalid identity: {e}")))?;
-    let arr: [u8; 32] = bytes
+/// Decode and size-check a base64 identity. Every intermediate buffer that
+/// holds key bytes is scrubbed on drop (and the stack array explicitly), so a
+/// decode leaves no unscrubbed copy behind.
+fn decode_bytes(secret_b64: &str) -> Result<SecretBytes, RoamError> {
+    let decoded = SecretBytes(
+        base64::engine::general_purpose::STANDARD
+            .decode(secret_b64.trim())
+            .map_err(|e| RoamError::Message(format!("invalid identity: {e}")))?,
+    );
+    let mut array: [u8; 32] = decoded
+        .0
+        .as_slice()
         .try_into()
         .map_err(|_| RoamError::Message("identity must be 32 bytes".into()))?;
-    Ok(SecretKey::from_bytes(&arr))
+    let bytes = SecretBytes(array.to_vec());
+    scrub(&mut array);
+    Ok(bytes)
+}
+
+fn decode_secret(secret_b64: &str) -> Result<SecretKey, RoamError> {
+    let bytes = decode_bytes(secret_b64)?;
+    let mut key: [u8; 32] = bytes.0.as_slice().try_into()
+        .map_err(|_| RoamError::Message("identity must be 32 bytes".into()))?;
+    let result = SecretKey::from_bytes(&key);
+    scrub(&mut key);
+    Ok(result)
 }
 
 #[derive(Debug, uniffi::Error)]
@@ -292,7 +403,7 @@ impl std::error::Error for RoamError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{identity_generate, shared_node};
+    use super::{RoamSecret, SCRUB_CALLS, SecretBytes, identity_generate, scrub, shared_node};
 
     /// The >1-peer bug in one assertion: every dial must reuse ONE endpoint.
     /// Binding per dial gave each peer its own node under the SAME NodeId, and
@@ -300,7 +411,7 @@ mod tests {
     /// id it already has — so peer two silently killed peer one's relay path.
     #[test]
     fn dials_share_one_endpoint_per_identity() {
-        let secret = identity_generate();
+        let secret = RoamSecret::from_b64(&identity_generate()).expect("valid identity");
         let a = shared_node(&secret).expect("bind");
         let b = shared_node(&secret).expect("second dial reuses the node");
         assert!(
@@ -311,11 +422,49 @@ mod tests {
 
         // A rotated identity is a different device key, so it must rebind
         // rather than keep dialing under the old one.
-        let other = identity_generate();
+        let other = RoamSecret::from_b64(&identity_generate()).expect("valid identity");
         let c = shared_node(&other).expect("rebind on a new identity");
         assert!(!std::sync::Arc::ptr_eq(&a, &c));
         assert_ne!(a.endpoint_id(), c.endpoint_id());
         // The earlier node stays alive for streams already handed out.
         assert_eq!(a.endpoint_id(), a.endpoint_id());
+    }
+
+    #[test]
+    fn scrub_overwrites_every_byte() {
+        let mut bytes = vec![0xa5u8; 32];
+        scrub(&mut bytes);
+        assert!(bytes.iter().all(|b| *b == 0), "scrubbing the key failed");
+    }
+
+    #[test]
+    fn zeroizing_drop_fires_once_per_shared_secret() {
+        let before = SCRUB_CALLS.with(|count| count.get());
+        let secret = RoamSecret::from_owned("not-a-real-key-but-never-logged".to_string());
+        let clone = secret.clone();
+        drop(clone);
+        assert_eq!(
+            SCRUB_CALLS.with(|count| count.get()),
+            before,
+            "Arc clone scrubbed early"
+        );
+        drop(secret);
+        assert_eq!(
+            SCRUB_CALLS.with(|count| count.get()),
+            before + 1,
+            "last Arc handle must scrub exactly once"
+        );
+
+        // An owned decoded key is scrubbed too, not just the base64 wrapper.
+        let mut bytes = SecretBytes(vec![7u8; 32]);
+        scrub(&mut bytes.0);
+        assert!(bytes.0.iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn secret_debug_never_prints_the_value() {
+        let secret = RoamSecret::from_owned("TOP-SECRET-MATERIAL".to_string());
+        let shown = format!("{secret:?}");
+        assert!(!shown.contains("TOP-SECRET"), "{shown}");
     }
 }

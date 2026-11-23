@@ -5,6 +5,8 @@
 #include <QTemporaryDir>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QDir>
+#include <QUrl>
 
 #include "corebridge.h"
 #include "manager.h"
@@ -51,6 +53,9 @@ private slots:
     void peerNewSessionUsesThePrefixedId();
     void mainWireReadyOnlyClearsItsOwnTurns();
     void tlsVerificationOptOutIsPersistedAndConfigurable();
+    void linkAllowlistMatchesQmlRule();
+    void localFileOpensAreValidated();
+    void appUrlsAreSessionScopedAndRevokedOnRefetch();
 };
 
 /**
@@ -690,6 +695,67 @@ void TstManager::tlsVerificationOptOutIsPersistedAndConfigurable()
         QVERIFY(other.acceptInvalidCerts());   // persisted in QSettings
         QVERIFY(other.serverConfigJson().contains(QStringLiteral("\"accept_invalid_certs\":true")));
     }
+}
+
+/** ChatPage.qml calls Mgr.linkAllowed() at every Text.onLinkActivated; the
+ *  markdown renderer uses the same predicate to strip disallowed hrefs. */
+void TstManager::linkAllowlistMatchesQmlRule()
+{
+    Manager mgr;
+    const QMetaObject *mo = mgr.metaObject();
+    QVERIFY2(mo->indexOfMethod("linkAllowed(QString)") >= 0, "QML must see linkAllowed");
+    QVERIFY(mgr.linkAllowed(QStringLiteral("https://example.com")));
+    QVERIFY(mgr.linkAllowed(QStringLiteral("http://example.com")));
+    QVERIFY(mgr.linkAllowed(QStringLiteral("mailto:someone@example.com")));
+    QVERIFY(!mgr.linkAllowed(QStringLiteral("file:///etc/passwd")));
+    QVERIFY(!mgr.linkAllowed(QStringLiteral("javascript:alert(1)")));
+    QVERIFY(!mgr.linkAllowed(QStringLiteral("grouse://open")));
+    QVERIFY(!mgr.linkAllowed(QStringLiteral("//example.com")));
+}
+
+/** The local-file handoff is no longer Qt.openUrlExternally("file://"+text):
+ *  it goes through Manager, which only opens an existing local regular file. */
+void TstManager::localFileOpensAreValidated()
+{
+    Manager mgr;
+    QVERIFY(mgr.metaObject()->indexOfMethod("openLocalFile(QString)") >= 0);
+    QVERIFY(!mgr.openLocalFile(QString()));
+    QVERIFY(!mgr.openLocalFile(QStringLiteral("relative/path.png")));
+    QVERIFY(!mgr.openLocalFile(QDir::tempPath()));          // a directory
+    QVERIFY(!mgr.openLocalFile(QStringLiteral("/definitely/not/here.png")));
+}
+
+/** A chat never reuses another chat's bridge token: the same (appKey) served
+ *  in two sessions must yield two URLs/tokens, switching back is stable, and a
+ *  template refetch revokes BOTH cached URLs so no stale tab keeps a live
+ *  capability. The port in the URL is the one AppView.qml pins navigation to. */
+void TstManager::appUrlsAreSessionScopedAndRevokedOnRefetch()
+{
+    Manager mgr;
+    QVERIFY(mgr.metaObject()->indexOfMethod("appBridgePort()") >= 0);
+    const QString appKey = QStringLiteral("ext|uri");
+    mgr.coreOnAppResource(appKey, QStringLiteral("<html><head></head></html>"));
+
+    mgr.openSession(QStringLiteral("s1"));
+    const QString first = mgr.appViewUrl(appKey);
+    QVERIFY2(!first.isEmpty(), "app view URL must be served over the loopback bridge");
+    QVERIFY2(QUrl(first).port() == mgr.appBridgePort(), "guard must see the bridge port");
+    QVERIFY(mgr.appBridgePort() > 0);
+
+    mgr.openSession(QStringLiteral("s2"));
+    const QString second = mgr.appViewUrl(appKey);
+    QVERIFY(!second.isEmpty());
+    QVERIFY2(first != second, "two chats must not share a token");
+
+    mgr.openSession(QStringLiteral("s1"));
+    QCOMPARE(mgr.appViewUrl(appKey), first);   // stable while the template is
+
+    mgr.coreOnAppResource(appKey, QStringLiteral("<html><head></head><body>new</body></html>"));
+    const QString refreshed = mgr.appViewUrl(appKey);
+    QVERIFY(!refreshed.isEmpty());
+    QVERIFY(refreshed != first);
+    QVERIFY(refreshed != second);
+    QCOMPARE(mgr.appViewUrl(appKey), refreshed);
 }
 
 QTEST_MAIN(TstManager)

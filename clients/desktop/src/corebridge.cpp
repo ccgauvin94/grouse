@@ -204,7 +204,11 @@ bool CoreBridge::resolve()
     // The listener table's layout and the symbol signatures are the contract.
     // An older core (or a stale GROUSE_CORE) is refused before any callback can
     // be invoked with the wrong arity.
-    static constexpr unsigned kExpectedAbiVersion = 18;
+    // ABI 19 changed only the JSON record shapes (`armed_owner` in NotifyContext,
+    // `reply_session` in NotifyDecision) — no symbol signature or listener-table
+    // layout moved — but a desktop built for 19 must refuse an older .so: its
+    // decisions have no verified Reply target. PushClient reads `reply_session`.
+    static constexpr unsigned kExpectedAbiVersion = 19;
     if (!a.grouse_abi_version) {
         qWarning() << "CoreBridge: core library predates the ABI version symbol; refusing it";
         return false;
@@ -214,7 +218,7 @@ bool CoreBridge::resolve()
                    << kExpectedAbiVersion << "; refusing it";
         return false;
     }
-    // EVERY symbol in AimsApi is required by ABI 18. Checking only a handful
+    // EVERY symbol in AimsApi is required by ABI 19. Checking only a handful
     // left an otherwise accepted .so one NULL call away from a crash (the first
     // user of an unchecked Q_INVOKABLE). The size assertion makes a future
     // member without a REQUIRE line a build error instead of a runtime gap.

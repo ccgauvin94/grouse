@@ -6,8 +6,11 @@
 #include <QJsonObject>
 #include <QHostAddress>
 #include <QLocale>
+#include <QRandomGenerator>
+#include <QStringList>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTimer>
 #include <QUrl>
 
 namespace {
@@ -144,6 +147,14 @@ bool isLoopbackOrigin(const QString &raw, quint16 port)
     return u.port() == -1 || quint16(u.port()) == port;
 }
 
+/// Length-prefixing the session makes the scope unambiguous even if an app key
+/// itself contains a separator. The session is the security boundary: a token
+/// minted for one chat must never answer another chat's ui/message.
+QString scopeKey(const QString &sessionId, const QString &appKey)
+{
+    return QString::number(sessionId.size()) + QLatin1Char(':') + sessionId + appKey;
+}
+
 } // namespace
 
 AppBridgeServer::AppBridgeServer(QObject *parent)
@@ -177,11 +188,74 @@ quint16 AppBridgeServer::port() const
     return m_server ? m_server->serverPort() : 0;
 }
 
-void AppBridgeServer::registerApp(const QString &token, const QString &sessionId,
-                                  const QString &html, const QString &toolInput,
-                                  const QString &toolResult, const QString &theme)
+QString AppBridgeServer::registerApp(const QString &appKey, const QString &sessionId,
+                                     const QString &html, const QString &toolInput,
+                                     const QString &toolResult, const QString &theme)
 {
-    m_apps.insert(token, Ctx{sessionId, html, toolInput, toolResult, theme});
+    pruneExpired();
+    const QString scope = scopeKey(sessionId, appKey);
+    // A refetched template must invalidate the URL handed to the browser: the
+    // old page would otherwise keep a live capability into this chat forever.
+    if (m_scopeTokens.contains(scope))
+        revokeToken(m_scopeTokens.value(scope));
+
+    // 128 bits of OS entropy, not a counter: the token is a capability on this
+    // loopback HTTP surface, so a neighbouring tab must not guess the URL. The
+    // same opaque string is baked into the shim and into every route it fetches.
+    QByteArray tokenBytes(16, Qt::Uninitialized);
+    for (int i = 0; i < tokenBytes.size(); ++i)
+        tokenBytes[i] = static_cast<char>(QRandomGenerator::system()->bounded(0x100));
+    const QString token = QString::fromLatin1(tokenBytes.toHex());
+
+    Ctx ctx;
+    ctx.sessionId = sessionId;
+    ctx.html = html;
+    ctx.toolInput = toolInput;
+    ctx.toolResult = toolResult;
+    ctx.theme = theme;
+    ctx.lastSeen.start();
+    m_apps.insert(token, ctx);
+    m_scopeTokens.insert(scope, token);
+    return token;
+}
+
+void AppBridgeServer::revokeToken(const QString &token)
+{
+    if (!m_apps.remove(token))
+        return;
+    for (auto it = m_scopeTokens.begin(); it != m_scopeTokens.end();) {
+        if (it.value() == token)
+            it = m_scopeTokens.erase(it);
+        else
+            ++it;
+    }
+}
+
+bool AppBridgeServer::isTokenValid(const QString &token) const
+{
+    auto it = m_apps.constFind(token);
+    return it != m_apps.cend() && it->lastSeen.elapsed() <= m_tokenTtlMs;
+}
+
+void AppBridgeServer::setTokenTtlMs(qint64 ms)
+{
+    m_tokenTtlMs = qMax<qint64>(1, ms);
+}
+
+int AppBridgeServer::activeTokenCount() const
+{
+    return m_apps.size();
+}
+
+void AppBridgeServer::pruneExpired()
+{
+    QStringList stale;
+    for (auto it = m_apps.constBegin(); it != m_apps.constEnd(); ++it) {
+        if (it->lastSeen.elapsed() > m_tokenTtlMs)
+            stale << it.key();
+    }
+    for (const QString &token : stale)
+        revokeToken(token);
 }
 
 QString AppBridgeServer::urlFor(const QString &token) const
@@ -229,14 +303,22 @@ void AppBridgeServer::respond(QTcpSocket *sock, int code, const QByteArray &type
         + "Content-Length: " + QByteArray::number(body.size()) + "\r\n"
         + "Cache-Control: no-store\r\n"
         + "Connection: close\r\n\r\n";
-    sock->write(head);
-    sock->write(body);
+    sock->write(head + body);
     sock->flush();
-    // Give the client a chance to read before closing, or the response can be
-    // lost in the FIN race (observed: empty reads under waitForReadyRead).
-    sock->waitForBytesWritten(3000);
-    sock->disconnectFromHost();
-    sock->deleteLater();
+    // close only AFTER Qt reports the bytes written. waitForBytesWritten(3000)
+    // blocked the GUI thread for up to 3 s on a browser that stopped reading;
+    // bytesWritten is the same FIN-race fix without ever waiting synchronously.
+    if (sock->bytesToWrite() == 0) {
+        QTimer::singleShot(0, sock, [sock] { sock->disconnectFromHost(); });
+        return;
+    }
+    QObject::connect(sock, &QTcpSocket::bytesWritten, sock, [sock] {
+        if (sock->bytesToWrite() == 0)
+            sock->disconnectFromHost();
+    });
+    // A browser that never drains the socket must not pin a connection (or a
+    // socket object) forever. Still asynchronous: the GUI thread never waits.
+    QTimer::singleShot(5000, sock, [sock] { sock->disconnectFromHost(); });
 }
 
 void AppBridgeServer::handleRequest(QTcpSocket *sock, const QByteArray &all)
@@ -292,14 +374,18 @@ void AppBridgeServer::handleRequest(QTcpSocket *sock, const QByteArray &all)
         }
     }
 
-    // token = last path segment
+    // token = last path segment. Checked only AFTER the request-level origin
+    // checks: a rejected probe must not slide a stolen token's TTL.
     const int slash = path.lastIndexOf('/');
     const QString token = QString::fromUtf8(path.mid(slash + 1));
     auto it = m_apps.find(token);
-    if (it == m_apps.end()) {
+    if (it == m_apps.end() || it->lastSeen.elapsed() > m_tokenTtlMs) {
+        if (it != m_apps.end())
+            revokeToken(token);
         respond(sock, 404, "text/plain", "no such app");
         return;
     }
+    it->lastSeen.restart();
 
     if (path.startsWith("/page/") && method == "GET") {
         QByteArray html = injectShim(it->html, token);

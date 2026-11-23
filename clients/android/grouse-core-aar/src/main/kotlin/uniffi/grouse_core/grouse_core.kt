@@ -1742,7 +1742,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_func_decide_notify() and 0xFFFF) != 17117) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_func_decide_notify_run() and 0xFFFF) != 13040) {
+    if ((lib.uniffi_grouse_core_checksum_func_decide_notify_run() and 0xFFFF) != 10388) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_func_parse_push() and 0xFFFF) != 24581) {
@@ -1847,7 +1847,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_rich_transcript() and 0xFFFF) != 55967) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_roam_connect() and 0xFFFF) != 53647) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_roam_connect() and 0xFFFF) != 29452) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_roam_disconnect() and 0xFFFF) != 23631) {
@@ -1883,7 +1883,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_sensitivity() and 0xFFFF) != 45624) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_session_owner() and 0xFFFF) != 11364) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_session_owner() and 0xFFFF) != 10279) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_sessions() and 0xFFFF) != 51807) {
@@ -3043,7 +3043,8 @@ public interface CoreInterface {
     
     /**
      * Connect a roam peer in browse mode (CONTRACT §6). The peer's identity
-     * is generated + persisted on first use.
+     * is generated + persisted on first use. The label must be non-blank and
+     * contain no ':'; an invalid one is rejected with an Alert before dialing.
      */
     fun `roamConnect`(`card`: kotlin.String, `label`: kotlin.String)
     
@@ -3131,10 +3132,11 @@ public interface CoreInterface {
     /**
      * The connection that owns a DISPLAY session id, as data (audit §3).
      *
-     * A known roam peer is resolved by the same prefix match routing uses.
-     * For a `roam:` id whose peer is gone, the label is recovered from the id
-     * (last colon separates label from wire id, so labels with `:` survive)
-     * rather than reporting `main` and misrouting an intent to the main wire.
+     * A known roam peer is resolved by the same longest-prefix match routing
+     * uses. For a `roam:` id whose peer is gone (or whose label was nested by
+     * an older client), the longest KNOWN label still wins; failing that, the
+     * first component is the namespace and the rest is the wire id. Either
+     * way a `roam:` id reports `"roam"`, never a false `"main"`.
      */
     fun `sessionOwner`(`sessionId`: kotlin.String): SessionOwner
     
@@ -4085,7 +4087,8 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     
     /**
      * Connect a roam peer in browse mode (CONTRACT §6). The peer's identity
-     * is generated + persisted on first use.
+     * is generated + persisted on first use. The label must be non-blank and
+     * contain no ':'; an invalid one is rejected with an Alert before dialing.
      */override fun `roamConnect`(`card`: kotlin.String, `label`: kotlin.String)
         = 
     callWithHandle {
@@ -4317,10 +4320,11 @@ open class Core: Disposable, AutoCloseable, CoreInterface
     /**
      * The connection that owns a DISPLAY session id, as data (audit §3).
      *
-     * A known roam peer is resolved by the same prefix match routing uses.
-     * For a `roam:` id whose peer is gone, the label is recovered from the id
-     * (last colon separates label from wire id, so labels with `:` survive)
-     * rather than reporting `main` and misrouting an intent to the main wire.
+     * A known roam peer is resolved by the same longest-prefix match routing
+     * uses. For a `roam:` id whose peer is gone (or whose label was nested by
+     * an older client), the longest KNOWN label still wins; failing that, the
+     * first component is the namespace and the rest is the wire id. Either
+     * way a `roam:` id reports `"roam"`, never a false `"main"`.
      */override fun `sessionOwner`(`sessionId`: kotlin.String): SessionOwner {
             return FfiConverterTypeSessionOwner.lift(
     callWithHandle {
@@ -6948,6 +6952,16 @@ data class NotifyContext (
      * and buzzing for it is noise; the phone only announces turns it armed.
      */
     var `announceAnyTurn`: kotlin.Boolean
+    , 
+    /**
+     * The owner of the roam peer this client armed, when `armed_session` is a
+     * `roam:<label>:<id>` id. Pass the BARE label (`nas`), not the session id; a
+     * `roam:`-prefixed value is also accepted. The id's label is written by the
+     * sender, so a roam turn is never replyable (and on the strict gate never
+     * shown) without this matching declaration. uniffi: `armedOwner`; C ABI JSON:
+     * `armed_owner`. Optional/defaulted so older callers and JSON payloads stay valid.
+     */
+    var `armedOwner`: kotlin.String? = null 
     
 ){
     
@@ -6970,6 +6984,7 @@ public object FfiConverterTypeNotifyContext: FfiConverterRustBuffer<NotifyContex
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalUInt.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -6979,7 +6994,8 @@ public object FfiConverterTypeNotifyContext: FfiConverterRustBuffer<NotifyContex
             FfiConverterOptionalString.allocationSize(value.`sessionTitle`) +
             FfiConverterOptionalString.allocationSize(value.`announcedSession`) +
             FfiConverterOptionalUInt.allocationSize(value.`announcedSecsAgo`) +
-            FfiConverterBoolean.allocationSize(value.`announceAnyTurn`)
+            FfiConverterBoolean.allocationSize(value.`announceAnyTurn`) +
+            FfiConverterOptionalString.allocationSize(value.`armedOwner`)
     )
 
     override fun write(value: NotifyContext, buf: ByteBuffer) {
@@ -6989,14 +7005,15 @@ public object FfiConverterTypeNotifyContext: FfiConverterRustBuffer<NotifyContex
             FfiConverterOptionalString.write(value.`announcedSession`, buf)
             FfiConverterOptionalUInt.write(value.`announcedSecsAgo`, buf)
             FfiConverterBoolean.write(value.`announceAnyTurn`, buf)
+            FfiConverterOptionalString.write(value.`armedOwner`, buf)
     }
 }
 
 
 
 /**
- * Whether to show anything, and with what wording. Wording lives here too: the two
- * clients used to say different things for the same event.
+ * Whether to show anything, with what wording, and where a Reply goes. Wording
+ * lives here too: the two clients used to say different things for the same event.
  */
 data class NotifyDecision (
     var `show`: kotlin.Boolean
@@ -7004,6 +7021,17 @@ data class NotifyDecision (
     var `summary`: kotlin.String
     , 
     var `body`: kotlin.String
+    , 
+    /**
+     * The ONLY valid destination for a notification's Reply action, and the
+     * answer to the push-destination spoof in QUALITY_AUDIT §2. The core fills
+     * this for a `Turn` whose session was verified against a session THIS client
+     * armed or announced; it is `None` for every briefing, every task, and every
+     * turn it cannot verify. CLIENT AGENTS: wire Reply from this field, never
+     * from `PushEnvelope.session_id`. Over the C ABI the JSON key is
+     * `reply_session` (`null` when not replyable); uniffi exposes `replySession`.
+     */
+    var `replySession`: kotlin.String? = null 
     
 ){
     
@@ -7023,19 +7051,22 @@ public object FfiConverterTypeNotifyDecision: FfiConverterRustBuffer<NotifyDecis
             FfiConverterBoolean.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: NotifyDecision) = (
             FfiConverterBoolean.allocationSize(value.`show`) +
             FfiConverterString.allocationSize(value.`summary`) +
-            FfiConverterString.allocationSize(value.`body`)
+            FfiConverterString.allocationSize(value.`body`) +
+            FfiConverterOptionalString.allocationSize(value.`replySession`)
     )
 
     override fun write(value: NotifyDecision, buf: ByteBuffer) {
             FfiConverterBoolean.write(value.`show`, buf)
             FfiConverterString.write(value.`summary`, buf)
             FfiConverterString.write(value.`body`, buf)
+            FfiConverterOptionalString.write(value.`replySession`, buf)
     }
 }
 
@@ -7228,6 +7259,13 @@ public object FfiConverterTypePrompt: FfiConverterRustBuffer<Prompt> {
 data class PushEnvelope (
     var `kind`: PushKind
     , 
+    /**
+     * Sender-supplied and UNTRUSTED. `parse_push` keeps it for `Turn` only; a
+     * briefing or task has no conversation to answer, so its `session` is dropped
+     * at the boundary. Clients must NOT use this as a notification's Reply
+     * destination — use [`NotifyDecision::reply_session`], which the core has
+     * checked against a session this client actually armed or announced.
+     */
     var `sessionId`: kotlin.String?
     , 
     var `text`: kotlin.String
@@ -10822,7 +10860,8 @@ public object FfiConverterSequenceTypePromptBlock: FfiConverterRustBuffer<List<P
          * (its live `activeRunId` at the moment it showed the notification). Pass it
          * alongside [`PushEnvelope::run_id`] so two turns in the same chat are not
          * mistaken for one; either id may be absent, in which case only a short
-         * same-session burst is suppressed.
+         * same-session burst is suppressed. This is the real implementation:
+         * [`decide_notify`] is the compatibility wrapper with no announced run id.
          */ fun `decideNotifyRun`(`envelope`: PushEnvelope, `ctx`: NotifyContext, `announcedRun`: kotlin.String?): NotifyDecision {
             return FfiConverterTypeNotifyDecision.lift(
     uniffiRustCall() { _status ->

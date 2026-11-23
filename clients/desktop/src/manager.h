@@ -430,6 +430,19 @@ public:
     Q_INVOKABLE void openAppInHtml(const QString &appKey);
     Q_INVOKABLE QString appViewUrl(const QString &appKey);
     Q_INVOKABLE bool inlineAppsEnabled() const;
+    /// Loopback port of the app bridge, or 0 when no app has registered yet.
+    /// AppView.qml uses it to pin navigation to the ACTUAL bridge origin: any
+    /// other 127.0.0.1 port is a different service and must be refused.
+    Q_INVOKABLE int appBridgePort() const;
+
+    /// The shared http/https/mailto allowlist, exposed so every
+    /// Text.onLinkActivated in ChatPage.qml uses the same rule as the markdown
+    /// renderer (which removes disallowed hrefs from the rendered HTML).
+    Q_INVOKABLE bool linkAllowed(const QString &url) const;
+    /// Open a file the CORE downloaded to disk. Validated as an existing local
+    /// regular file; server-supplied URLs never take this path. Returns false
+    /// when the path is relative, a directory or a symlink.
+    Q_INVOKABLE bool openLocalFile(const QString &localPath);
 
     /// Per-session MCP-App dock for the CURRENT chat: a map with keys
     /// "top"/"bottom" (appKey, empty when the slot is free) and
@@ -981,8 +994,10 @@ private:
     QHash<QString, QString> m_appHtml;
     /// Loopback host for apps opened in the browser (see appbridge.h).
     AppBridgeServer *m_appBridge = nullptr;
-    /// appKey -> bridge URL (stable per appKey so the inline view reloads the
-    /// same document; token changes when the template refetches).
+    /// (appKey, session) -> bridge URL/token. The session is part of the key:
+    /// the same app open in two chats gets two tokens, so a ui/message from one
+    /// cannot be posted into the other. A template refetch revokes every token
+    /// for that app and clears the cached URLs.
     QHash<QString, QString> m_appUrls;
     QHash<QString, QString> m_appTokens;
 

@@ -1,5 +1,6 @@
 #include "pushclient.h"
 
+#include "corebridge.h"
 #include "manager.h"
 #include "notifier.h"
 
@@ -21,6 +22,15 @@ const char *kBusName = "id.gauvin.Grouse";
 const char *kConnectorPath = "/org/unifiedpush/Connector";
 const char *kDistributorPath = "/org/unifiedpush/Distributor";
 const char *kDistributorIface = "org.unifiedpush.Distributor2";
+
+/// Run id of the last turn this PROCESS announced from a push. The desktop's
+/// live path remembers only the announced session and its age
+/// (`Manager::announcedTurnSession`), so a cold process has no run id to pass;
+/// remembering the sender's run id after we show a turn stops a duplicate
+/// delivery of THAT turn from being announced twice without swallowing a
+/// genuine second turn in the same chat. D-Bus callbacks are on the Qt main
+/// thread, so this needs no atomics.
+QString s_announcedRunId;
 
 } // namespace
 
@@ -241,25 +251,65 @@ void PushClient::handlePush(const QString &raw)
     if (envelope.isEmpty())
         return;
     qInfo("Grouse push: received %s", qUtf8Printable(raw.left(200)));
+    const QJsonObject env = QJsonDocument::fromJson(envelope.toUtf8()).object();
+    // The chat on screen is the one this client can vouch for: it is what we arm
+    // as `armed_session`, so the core's decision can verify a Reply target. For a
+    // roam chat the label in `roam:<label>:<id>` is CLIENT-side and written by the
+    // sender too, so we also declare the bare peer label (`armed_owner`); ask the
+    // core which peer owns the id, with the namespace only as its own fallback.
+    const QString shownSession = m_manager->currentSessionId();
+    const QString armedOwner = m_manager->sessionPeerLabel(shownSession);
     // The live path may have announced this very turn seconds ago; the core decides
     // whether this second sighting is a new event.
     const QString announced = m_manager->announcedTurnSession();
     const int announcedAgo = m_manager->announcedTurnSecsAgo();
     const QJsonObject ctx{
         {QStringLiteral("app_visible"), Notifier::appVisible()},
-        {QStringLiteral("armed_session"), QJsonValue::Null},
-        {QStringLiteral("session_title"), QJsonValue::Null},
+        {QStringLiteral("armed_session"),
+         shownSession.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(shownSession)},
+        {QStringLiteral("session_title"),
+         m_manager->currentSessionTitle().isEmpty()
+             ? QJsonValue(QJsonValue::Null) : QJsonValue(m_manager->currentSessionTitle())},
         {QStringLiteral("announced_session"),
          announced.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(announced)},
         {QStringLiteral("announced_secs_ago"),
          announcedAgo < 0 ? QJsonValue(QJsonValue::Null) : QJsonValue(announcedAgo)},
-        {QStringLiteral("announce_any_turn"), true}};
-    const QJsonObject d = QJsonDocument::fromJson(
-        m_manager->pushDecide(envelope,
-            QString::fromUtf8(QJsonDocument(ctx).toJson(QJsonDocument::Compact))).toUtf8()).object();
-    if (d.value(QStringLiteral("show")).toBool())
+        {QStringLiteral("announce_any_turn"), true},
+        {QStringLiteral("armed_owner"),
+         armedOwner.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(armedOwner)}};
+    const QByteArray eb = envelope.toUtf8();
+    const QByteArray cb = QJsonDocument(ctx).toJson(QJsonDocument::Compact);
+    const QByteArray run = s_announcedRunId.toUtf8();
+    CoreBridge *bridge = CoreBridge::instance();
+    QString decision;
+    if (bridge && bridge->isAvailable() && bridge->api().grouse_push_decide_run) {
+        // The C ABI accepts a plain C string or JSON null here; an empty run id
+        // means "this process announced nothing yet" and keeps burst dedupe only.
+        decision = bridge->takeString(bridge->api().grouse_push_decide_run(
+            eb.constData(), cb.constData(), run.isEmpty() ? nullptr : run.constData()));
+    }
+    if (decision.isEmpty()) {
+        // Legacy fallback for an in-process test bridge (or a Manager still
+        // wired to an older core): the ABI-19 gate refuses a real old .so, so
+        // this cannot ship a decision without `reply_session`. It only loses
+        // run-id dedupe — the show rule itself is the same core function.
+        decision = m_manager->pushDecide(envelope, QString::fromUtf8(cb));
+    }
+    const QJsonObject d = QJsonDocument::fromJson(decision.toUtf8()).object();
+    // The ONLY verified destination. The envelope's `session` is sender-supplied
+    // and is never a Reply target or a deep link. This client's freedesktop
+    // notification has no per-action target yet (it just raises the window), but
+    // keep the decision's value as the single candidate for one — no fallback.
+    const QString replySession = d.value(QStringLiteral("reply_session")).toString();
+    if (!replySession.isEmpty())
+        qInfo("Grouse push: verified reply target %s", qUtf8Printable(replySession));
+    if (d.value(QStringLiteral("show")).toBool()) {
         Notifier::send(d.value(QStringLiteral("summary")).toString(),
                        d.value(QStringLiteral("body")).toString());
+        if (env.value(QStringLiteral("kind")).toString().compare(QLatin1String("Turn"),
+                                                                 Qt::CaseInsensitive) == 0)
+            s_announcedRunId = env.value(QStringLiteral("run_id")).toString();
+    }
 
     // Handed-over work belongs on My Day, not in a chat: the phone deep-links a
     // `task` push there, and a freedesktop notification has no per-action target, so
@@ -267,7 +317,6 @@ void PushClient::handlePush(const QString &raw)
     // INACTIVE — that is exactly when a notification is shown (the core's policy), so
     // there is nothing to race with a conversation the user is reading; a push that
     // lands while they are looking at the app just refreshes the lists behind it.
-    const QJsonObject env = QJsonDocument::fromJson(envelope.toUtf8()).object();
     if (env.value(QStringLiteral("kind")).toString().compare(QLatin1String("Tasks"),
                                                              Qt::CaseInsensitive) == 0) {
         if (Notifier::appVisible())
