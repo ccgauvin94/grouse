@@ -19,16 +19,6 @@
 #include <QCryptographicHash>
 #include <QScopeGuard>
 
-// A main-thread phase that runs long enough to be felt. The stall detector reports
-// THAT the window froze; these say during what, which is the difference between
-// "the sidebar rebuilt" and "the transcript laid out". 20ms floor so a healthy
-// switch stays silent.
-#define GROUSE_PHASE(name) \
-    QElapsedTimer _phaseTimer; _phaseTimer.start(); \
-    const auto _phaseGuard = qScopeGuard([this, _phaseTimer]() { \
-        const qint64 _ms = _phaseTimer.elapsed(); \
-        if (_ms >= 20) timingLog(QStringLiteral(name " %1ms").arg(_ms)); \
-    })
 #include <QDir>
 #include <QDesktopServices>
 #include <QFile>
@@ -56,117 +46,7 @@
 #include <QTimer>
 #include <QUrl>
 
-namespace {
-// ABI 20 moved the request id to the FRONT of every respond intent and added
-// the roam pin getters. The if-constexpr shims keep this translation unit
-// compilable while the C ABI header lands in the same wave; an ABI-20 .so is
-// required at runtime, so the legacy branch is never reached in production.
-template <typename Fn>
-void respondRecipeIntent(Fn fn, void *h, const QByteArray &rid,
-                         const QByteArray &action, const QByteArray &payload)
-{
-    if constexpr (std::is_invocable_v<Fn, void *, const char *, const char *, const char *>)
-        fn(h, rid.constData(), action.constData(), payload.constData());
-    else
-        fn(h, action.constData(), payload.constData());
-}
 
-template <typename Fn>
-void respondElicitationIntent(Fn fn, void *h, const QByteArray &rid,
-                              const QByteArray &action, const QByteArray &payload)
-{
-    if constexpr (std::is_invocable_v<Fn, void *, const char *, const char *, const char *>)
-        fn(h, rid.constData(), action.constData(), payload.constData());
-    else
-        fn(h, action.constData(), payload.constData());
-}
-
-// A getter returning a MALLOC'd JSON string. Optional label for the singular
-// pin getter; the plural one takes no label.
-template <typename Fn>
-QString pinGetter(CoreBridge *bridge, Fn fn, void *h, const QByteArray *label)
-{
-    if constexpr (std::is_invocable_v<Fn, void *, const char *, char **>) {
-        if (!label)
-            return QString();
-        char *err = nullptr;
-        const QString out = bridge->takeString(fn(h, label->constData(), &err));
-        if (err) {
-            bridge->takeString(err);
-            return QString();
-        }
-        return out;
-    } else if constexpr (std::is_invocable_v<Fn, void *, const char *>) {
-        if (!label)
-            return QString();
-        return bridge->takeString(fn(h, label->constData()));
-    } else if constexpr (std::is_invocable_v<Fn, void *, char **>) {
-        Q_UNUSED(label);
-        char *err = nullptr;
-        const QString out = bridge->takeString(fn(h, &err));
-        if (err) {
-            bridge->takeString(err);
-            return QString();
-        }
-        return out;
-    } else {
-        Q_UNUSED(label);
-        return bridge->takeString(fn(h));
-    }
-}
-
-template <typename Fn>
-bool pinClearIntent(CoreBridge *bridge, Fn fn, void *h, const QByteArray &label,
-                    QString *error)
-{
-    if constexpr (std::is_invocable_v<Fn, void *, const char *, char **>) {
-        char *err = nullptr;
-        using R = std::invoke_result_t<Fn, void *, const char *, char **>;
-        if constexpr (std::is_same_v<R, char *>)
-            bridge->takeString(fn(h, label.constData(), &err));
-        else
-            fn(h, label.constData(), &err);
-        if (err) {
-            if (error)
-                *error = bridge->takeString(err);
-            return false;
-        }
-        return true;
-    } else if constexpr (std::is_invocable_v<Fn, void *, const char *>) {
-        using R = std::invoke_result_t<Fn, void *, const char *>;
-        if constexpr (std::is_same_v<R, char *>)
-            bridge->takeString(fn(h, label.constData()));
-        else
-            fn(h, label.constData());
-        return true;
-    } else {
-        return false;
-    }
-}
-
-QVariantMap pinMapFromJson(const QString &raw)
-{
-    if (raw.trimmed().isEmpty())
-        return {};
-    const QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8());
-    if (doc.isObject())
-        return doc.object().toVariant().toMap();
-    // lib.rs's roam_card_pins() already returns a JSON string; some C ABI
-    // spellings hand that string back as a JSON string value rather than an
-    // object. Unwrap once, never parse a peer-supplied value.
-    if (doc.isString())
-        return pinMapFromJson(doc.string());
-    return {};
-}
-
-QString pinStringFromJson(const QString &raw)
-{
-    if (raw.trimmed().isEmpty() || raw.trimmed() == QLatin1String("null"))
-        return QString();
-    const QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8());
-    return doc.isString() ? doc.string() : (doc.isObject() ? QString() : raw.trimmed());
-}
-} // namespace
 
 // ---------------------------------------------------------------------------
 // Implementation notes
@@ -185,7 +65,10 @@ QString pinStringFromJson(const QString &raw)
 
 Manager::Manager(QObject *parent)
     : QObject(parent)
-    , m_store(QSettings::UserScope, QStringLiteral("grouse"), QStringLiteral("grouse-desktop"))
+    , m_settings(*this)
+    , m_transcript(*this)
+    , m_catalog(*this)
+    , m_chat(*this)
 {
     m_sessionsModel = new SessionListModel(this);
     m_messageModel = new MessageListModel(this);
@@ -219,9 +102,9 @@ Manager::Manager(QObject *parent)
     // The sidebar's collapsed groups are the user's own state, not a per-launch
     // default: restore what was last chosen and persist every toggle. Without
     // this the tree resets to "everything expanded" on each start.
-    m_sessionsModel->setCollapsedSections(m_store.value("sidebar_collapsed").toStringList());
+    m_sessionsModel->setCollapsedSections(m_settings.sidebarCollapsed());
     connect(m_sessionsModel, &SessionListModel::collapsedChanged, this, [this] {
-        m_store.setValue("sidebar_collapsed", m_sessionsModel->collapsedSections());
+        m_settings.setSidebarCollapsed(m_sessionsModel->collapsedSections());
     });
 
     // Coalesce transcript updates while a turn streams (same rate-limit as the
@@ -316,197 +199,133 @@ Manager::~Manager()
     // Bounded: a task parked in an RPC must not hang the quit. After this the
     // queued work is dropped, and any task still running finishes against a handle
     // that is still alive until the bridge goes (it outlives this object).
-    if (m_io) {
-        m_io->waitForDone(5000);
-        m_io->clear();
-    }
+    m_chat.waitForCore();
 }
 
-namespace {
-/// A plain QRunnable, not `QThreadPool::start(callable)` (Qt 6.7+ only): the flatpak
-/// SDK and the dev distrobox do not have to agree on a version for this to build.
-class CoreTask : public QRunnable
-{
-public:
-    explicit CoreTask(std::function<void()> fn) : m_fn(std::move(fn)) { setAutoDelete(true); }
-    void run() override
-    {
-        if (m_fn)
-            m_fn();
-    }
 
-private:
-    std::function<void()> m_fn;
-};
-} // namespace
 
 void Manager::runOnCore(std::function<void()> work)
 {
-    if (!m_io) {
-        work();
-        return;
-    }
-    m_io->start(new CoreTask(std::move(work)));
+    m_chat.runOnCore(work);
 }
-
 QString Manager::timingLogPath()
 {
-    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    if (dir.isEmpty())
-        return {};
-    QDir().mkpath(dir);
-    return dir + QStringLiteral("/open-timings.log");
+    return CoreApi::timingLogPath();
 }
-
 void Manager::timingLog(const QString &line)
 {
-    qInfo().noquote() << line;
-    const QString path = timingLogPath();
-    if (path.isEmpty())
-        return;
-    // Bounded, and rewritten rather than grown without limit: this file exists to be
-    // read after a slow click, not to be an archive.
-    QFile f(path);
-    if (f.exists() && f.size() > 256 * 1024) {
-        f.remove();
-    }
-    if (!f.open(QIODevice::Append | QIODevice::Text))
-        return;
-    f.write(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz")).toUtf8());
-    f.write(" ");
-    f.write(line.toUtf8());
-    f.write("\n");
+    CoreApi::timingLog(line);
 }
 
-namespace {
-/// Whether a paint would change what is already on screen.
-///
-/// The core ends a MERGE with a repaint on purpose — a client that appended the replayed
-/// tail keeps a stale suffix the anchor dropped store-side, so one Reset is how it
-/// reconciles. But when the replay re-supplies exactly the rows the client already has
-/// (the usual case for a chat that has not moved since it was last opened), the Reset
-/// rebuilds every delegate and re-pins the view to show the SAME transcript: the "it
-/// redraws while loading even when nothing changed" report (2026-11-21).
-///
-/// Compared on the fields that decide a row's identity and size, not the whole
-/// QVariantMap: `seq` is re-stamped by a wholesale paint and carries no visible meaning.
-bool samePaintedRows(const QList<QVariantMap> &a, const QList<QVariantMap> &b)
-{
-    if (a.size() != b.size())
-        return false;
-    for (int i = 0; i < a.size(); ++i) {
-        const QVariantMap &x = a.at(i);
-        const QVariantMap &y = b.at(i);
-        if (x.value("id") != y.value("id")
-            || x.value("text") != y.value("text")
-            || x.value("output") != y.value("output")
-            || x.value("status") != y.value("status")
-            || x.value("title") != y.value("title")
-            || x.value("calls") != y.value("calls"))
-            return false;
-    }
-    return true;
-}
-} // namespace
 
 void Manager::flushPaint()
 {
-    if (!m_painting)
-        return;
-    m_painting = false;
-    m_paintTimer->stop();
-    // A paint that matches what the model already holds is not a paint. Skipping it keeps
-    // the delegates, the content height and the scroll position exactly where they are.
-    if (!m_paintRows.isEmpty() && samePaintedRows(m_messageModel->rows(), m_paintRows)) {
-        timingLog(QStringLiteral("paint skipped: %1 rows, the window already matches")
-                      .arg(m_paintRows.size()));
-        m_paintRows.clear();
-        m_currentIndex = -1;
-        return;
-    }
-    {
-        GROUSE_PHASE("phase replaceAll");
-        m_messageModel->replaceAll(m_paintRows);
-    }
-    m_paintRows.clear();
-    m_currentIndex = -1;
-    requestMessagesUpdate();
+    m_transcript.flushPaint();
 }
-
 void Manager::requestMessagesUpdate()
 {
-    if (!m_updateTimer->isActive())
-        m_updateTimer->start();
+    m_transcript.requestMessagesUpdate();
 }
-
-QString Manager::host() const { return m_store.value("host", "192.168.1.5").toString(); }
-QString Manager::port() const { return m_store.value("port", "3284").toString(); }
-QString Manager::secretKey() const { return m_store.value("secret", "").toString().trimmed(); }
-bool Manager::useTls() const { return m_store.value("wss", true).toBool(); }
+QString Manager::host() const
+{
+    return m_settings.host();
+}
+QString Manager::port() const
+{
+    return m_settings.port();
+}
+QString Manager::secretKey() const
+{
+    return m_settings.secretKey();
+}
+bool Manager::useTls() const
+{
+    return m_settings.useTls();
+}
 bool Manager::acceptInvalidCerts() const
 {
-    // A missing key used to mean trust-all; it now means WebPKI verification.
-    // Self-signed hosts need the explicit opt-in from Settings once.
-    return m_store.value("accept_invalid_certs", DEFAULT_ACCEPT_INVALID_CERTS).toBool();
+    return m_settings.acceptInvalidCerts();
 }
-bool Manager::autoConnectEnabled() const { return m_store.value("auto_connect", true).toBool(); }
-bool Manager::notificationsEnabled() const { return m_store.value("notify_events", true).toBool(); }
-bool Manager::configuredProvidersOnly() const { return m_store.value("configured_providers_only", true).toBool(); }
-bool Manager::runSummaries() const { return m_store.value("run_summaries", true).toBool(); }
-bool Manager::rescaleImages() const { return m_store.value("image_rescale", true).toBool(); }
-bool Manager::advisor() const { return m_store.value("advisor", false).toBool(); }
-bool Manager::debugTools() const { return m_store.value("debug_tools", false).toBool(); }
-QString Manager::workingDir() const { return m_store.value("cwd", "").toString(); }
-bool Manager::roamEnabled() const { return m_store.value("roam_enabled", false).toBool(); }
-
+bool Manager::autoConnectEnabled() const
+{
+    return m_settings.autoConnectEnabled();
+}
+bool Manager::notificationsEnabled() const
+{
+    return m_settings.notificationsEnabled();
+}
+bool Manager::configuredProvidersOnly() const
+{
+    return m_settings.configuredProvidersOnly();
+}
+bool Manager::runSummaries() const
+{
+    return m_settings.runSummaries();
+}
+bool Manager::rescaleImages() const
+{
+    return m_settings.rescaleImages();
+}
+bool Manager::advisor() const
+{
+    return m_settings.advisor();
+}
+bool Manager::debugTools() const
+{
+    return m_settings.debugTools();
+}
+QString Manager::workingDir() const
+{
+    return m_settings.workingDir();
+}
+bool Manager::roamEnabled() const
+{
+    return m_settings.roamEnabled();
+}
 void Manager::setRoamEnabled(bool v)
 {
-    if (roamEnabled() == v)
-        return;
-    m_store.setValue("roam_enabled", v);
-    emit settingsChanged();
-    // Enabling mid-session must bring stored peers up without a restart: the
-    // Ready hook below only re-arms them once per launch.
-    if (v && m_online && !m_roamRestored) {
-        m_roamRestored = true;
-        syncRoamIdentityToCore();
-        restoreRoamPeers();
-    }
+    m_settings.setRoamEnabled(v);
 }
-
-void Manager::setHost(const QString &v) { m_store.setValue("host", v); emit settingsChanged(); }
-void Manager::setPort(const QString &v) { m_store.setValue("port", v); emit settingsChanged(); }
-void Manager::setSecretKey(const QString &v) { m_store.setValue("secret", v.trimmed()); emit settingsChanged(); }
-void Manager::setUseTls(bool v) { m_store.setValue("wss", v); emit settingsChanged(); }
+void Manager::setHost(const QString &v)
+{
+    m_settings.setHost(v);
+}
+void Manager::setPort(const QString &v)
+{
+    m_settings.setPort(v);
+}
+void Manager::setSecretKey(const QString &v)
+{
+    m_settings.setSecretKey(v);
+}
+void Manager::setUseTls(bool v)
+{
+    m_settings.setUseTls(v);
+}
 void Manager::setAcceptInvalidCerts(bool v)
 {
-    m_store.setValue("accept_invalid_certs", v);
-    emit settingsChanged();
+    m_settings.setAcceptInvalidCerts(v);
 }
-void Manager::setAutoConnectEnabled(bool v) { m_store.setValue("auto_connect", v); emit settingsChanged(); }
-void Manager::setNotificationsEnabled(bool v) { m_store.setValue("notify_events", v); emit settingsChanged(); }
+void Manager::setAutoConnectEnabled(bool v)
+{
+    m_settings.setAutoConnectEnabled(v);
+}
+void Manager::setNotificationsEnabled(bool v)
+{
+    m_settings.setNotificationsEnabled(v);
+}
 void Manager::setConfiguredProvidersOnly(bool v)
 {
-    m_store.setValue("configured_providers_only", v);
-    emit settingsChanged();
-    emit providersChanged();   // the pickers filter on this
+    m_settings.setConfiguredProvidersOnly(v);
 }
 void Manager::setRunSummaries(bool v)
 {
-    m_store.setValue("run_summaries", v);
-    emit settingsChanged();
-    syncRunSummariesToCore();
+    m_settings.setRunSummaries(v);
 }
-
 void Manager::setRescaleImages(bool v)
 {
-    if (rescaleImages() == v)
-        return;
-    m_store.setValue("image_rescale", v);
-    emit settingsChanged();
-    syncRescaleToCore();
+    m_settings.setRescaleImages(v);
 }
-
 void Manager::syncRescaleToCore()
 {
     if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_set_image_rescale)
@@ -516,10 +335,8 @@ void Manager::syncRescaleToCore()
 
 void Manager::setDebugTools(bool v)
 {
-    m_store.setValue("debug_tools", v);
-    emit settingsChanged();
+    m_settings.setDebugTools(v);
 }
-
 QString Manager::turnLog() const
 {
     if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_turn_log)
@@ -538,13 +355,8 @@ QString Manager::turnDiag(const QString &sessionId) const
 
 void Manager::setAdvisor(bool v)
 {
-    if (advisor() == v)
-        return;
-    m_store.setValue("advisor", v);
-    emit settingsChanged();
-    syncAdvisorToCore();
+    m_settings.setAdvisor(v);
 }
-
 void Manager::dismissAdvisorReport()
 {
     if (m_advisorReport.isEmpty() && m_advisorSession.isEmpty())
@@ -569,10 +381,8 @@ void Manager::syncRunSummariesToCore()
 }
 void Manager::setWorkingDir(const QString &v)
 {
-    m_store.setValue("cwd", v.trimmed().remove(QRegularExpression(QStringLiteral("/+$"))));
-    emit settingsChanged();
+    m_settings.setWorkingDir(v);
 }
-
 QString Manager::wsUrl() const
 {
     // Kept for the Connect dialog; the core builds its own WebSocket from the
@@ -687,29 +497,12 @@ QString Manager::sessionPeerLabel(const QString &sessionId) const
 
 bool Manager::mainWireConnected() const
 {
-    if (!m_bridge || !m_bridge->isAvailable())
-        return false;
-    const CoreBridge::AimsApi &api = m_bridge->api();
-    if (api.grouse_connected)
-        return api.grouse_connected(m_bridge->handle()) != 0;
-    // A core without the attach ABI has only the bound-session notion; keep the
-    // older library usable rather than declaring every chat offline.
-    return api.grouse_ready && api.grouse_ready(m_bridge->handle()) != 0;
+    return m_chat.mainWireConnected();
 }
 
 void Manager::bindSessionAfterAttach()
 {
-    if (!m_bridge || !m_bridge->isAvailable() || m_currentSessionId.isEmpty())
-        return;
-    const CoreBridge::AimsApi api = m_bridge->api();
-    void *h = m_bridge->handle();
-    const QByteArray sid = m_currentSessionId.toUtf8();
-    runOnCore([this, api, h, sid] {
-        api.grouse_open_session(h, sid.constData());
-        // A prompt parked while the wire was down must go out as soon as the
-        // bind has run, not wait for an unrelated event to call flushQueue.
-        QMetaObject::invokeMethod(this, [this] { flushQueue(); }, Qt::QueuedConnection);
-    });
+    m_chat.bindSessionAfterAttach();
 }
 
 bool Manager::sessionIsOpen() const
@@ -729,316 +522,76 @@ bool Manager::sessionIsOpen() const
 
 QString Manager::serverConfigJson()
 {
-    QJsonObject o;
-    o["host"] = host().trimmed();
-    o["port"] = port().trimmed().toInt();
-    o["secret_key"] = secretKey();
-    o["use_tls"] = useTls();
-    // User-controlled: self-signed tailnet hosts need an explicit opt-out from
-    // WebPKI verification, but trust-all must not be a hidden constant.
-    o["accept_invalid_certs"] = acceptInvalidCerts();
-    o["ca_cert_pem"] = QJsonValue::Null;
-    o["cwd"] = workingDir();
-    o["auto_connect"] = true;
-    o["client_id"] = QStringLiteral("grouse-desktop");
-    o["initial_recipe_id"] = m_pendingRecipeId.isEmpty()
-        ? QJsonValue::Null : QJsonValue(m_pendingRecipeId);
-    m_pendingRecipeId.clear();
-    return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
+    return CoreApi::serverConfigJson(*this);
 }
-
 // ---------------------------------------------------------------------------
 // Prompt JSON (input to grouse_send_prompt): serde Prompt { blocks: [...] }
 // ---------------------------------------------------------------------------
 
 QString Manager::promptJson(const QString &text, const QVariantList &blocks) const
 {
-    QJsonArray arr;
-    if (!text.trimmed().isEmpty()) {
-        arr.append(QJsonObject{{"Text", QJsonObject{{"text", text}}}});
-    }
-    for (const auto &b : blocks) {
-        const QVariantMap m = b.toMap();
-        const QString type = m.value("type").toString();
-        if (type == QLatin1String("image")) {
-            arr.append(QJsonObject{{"Image", QJsonObject{
-                {"mime_type", m.value("mimeType").toString()},
-                {"data", m.value("data").toString()}}}});
-        } else if (type == QLatin1String("resource")) {
-            const QVariantMap r = m.value("resource").toMap();
-            QJsonObject res{{"uri", r.value("uri").toString()},
-                            {"mime_type", r.value("mimeType").toString()}};
-            if (r.contains("text"))
-                res["text"] = r.value("text").toString();
-            else
-                res["text"] = QJsonValue::Null;
-            res["blob"] = r.contains("blob") ? QJsonValue(r.value("blob").toString())
-                                             : QJsonValue::Null;
-            arr.append(QJsonObject{{"Resource", res}});
-        }
-    }
-    return QString::fromUtf8(QJsonDocument(QJsonObject{{"blocks", arr}})
-                                 .toJson(QJsonDocument::Compact));
+    return CoreApi::promptJson(text, blocks);
 }
-
 // ---------------------------------------------------------------------------
 // Intents (UI -> core)
 // ---------------------------------------------------------------------------
 
 void Manager::connectToServer()
 {
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    if (secretKey().isEmpty()) {
-        setStatus(QStringLiteral("no secret key"));
-        return;
-    }
-    m_landing = false;
-    emit landingChanged();
-    m_lastCwd = workingDir();
-    // WIRE ONLY. This is the manual Connect, the startup auto-connect, the test
-    // probe and the offline-send retry — none of them asks for a NEW CHAT. Using
-    // `grouse_connect` here bound a throwaway `session/new` (littering the server
-    // with empty chats) and, worse, could display that chat over a roam conversation
-    // the main wire does not own. `connect_attach` brings the transport up and binds
-    // nothing; the new-chat paths call `grouse_new_session` explicitly.
-    // OFF THE UI THREAD: the attach still BLOCKS on the handshake, as `connect` did
-    // (2026-11-21: 3.2s + 0.5s of stalls at startup).
-    const CoreBridge::AimsApi api = m_bridge->api();
-    void *h = m_bridge->handle();
-    const QByteArray cfg = serverConfigJson().toUtf8();
-    m_wireOnlyConnect = true;
-    setStatus(QStringLiteral("connecting…"));
-    runOnCore([this, api, h, cfg] {
-        QElapsedTimer clock;
-        clock.start();
-        char *err = nullptr;
-        if (api.grouse_connect_attach)
-            api.grouse_connect_attach(h, cfg.constData(), &err);
-        else
-            api.grouse_connect(h, cfg.constData(), &err);  // older core: no attach ABI
-        const qint64 ms = clock.elapsed();
-        QString message;
-        if (err) {
-            message = QString::fromUtf8(err);
-            api.grouse_string_free(err);
-        }
-        timingLog(QStringLiteral("connect %1ms%2")
-                      .arg(ms)
-                      .arg(message.isEmpty() ? QString() : QStringLiteral(" FAILED: ") + message));
-        if (!message.isEmpty()) {
-            QMetaObject::invokeMethod(this, [this, message] {
-                setStatus(QStringLiteral("connect failed: ") + message);
-            }, Qt::QueuedConnection);
-        }
-    });
+    m_chat.connectToServer();
 }
-
 void Manager::autoConnect()
 {
-    if (!autoConnectEnabled())
-        return;
-    if (host().trimmed().isEmpty() || secretKey().isEmpty()) {
-        setStatus(QStringLiteral("not configured — press Connect"));
-        return;
-    }
-    m_landing = true;
-    connectToServer();
-    // A launch OPENS NOTHING: it connects, then stays on the landing page until a chat is
-    // picked — the same rule the phone follows. `connectToServer` clears the flag (it is the
-    // manual "connect and go to the chat" path), so re-assert it here rather than making the
-    // two callers disagree about what pressing Connect means.
-    m_landing = true;
-    emit landingChanged();
+    m_chat.autoConnect();
 }
-
 void Manager::disconnect()
 {
-    if (m_bridge && m_bridge->isAvailable())
-        m_bridge->api().grouse_disconnect(m_bridge->handle());
-    m_wireOnlyConnect = false;
-    setOnline(false);
-    m_prompting = false;
-    m_promptingSessionId.clear();
-    m_inFlight.clear();
-    m_activeRunIds.clear();
-    emit promptingChanged();
-    m_compacting = false;
-    emit compactingChanged();
-    m_landing = true;
-    emit landingChanged();
-    setStatus(QStringLiteral("disconnected"));
+    m_chat.disconnect();
 }
-
 void Manager::connectRoam(const QString &card, const QString &label)
 {
-    syncRoamIdentityToCore();
-    if (m_bridge && m_bridge->isAvailable()) {
-        const QByteArray c = card.toUtf8();
-        const QByteArray l = label.toUtf8();
-        m_bridge->api().grouse_roam_connect(m_bridge->handle(), c.constData(), l.constData());
-        m_roamModel->addPeer(label);
-        persistRoamCard(label, card);
-    }
+    m_chat.connectRoam(card, label);
 }
-
-/// Push the identity this app advertises (QSettings) into the core so the wire
-/// dials with the SAME key the host was asked to accept. The core otherwise
-/// keeps a separately-generated secret and every dial lands "not_allowlisted".
 void Manager::syncRoamIdentityToCore()
 {
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    const QString secret = m_store.value("roam_identity").toString().trimmed();
-    if (secret.isEmpty())
-        return;
-    const QByteArray s = secret.toUtf8();
-    m_bridge->api().grouse_set_roam_identity(m_bridge->handle(), s.constData());
+    m_chat.syncRoamIdentityToCore();
 }
-
 void Manager::disconnectRoam(const QString &label)
 {
-    if (m_activePeerLabel == label)
-        m_activePeerLabel.clear();
-    if (m_bridge && m_bridge->isAvailable()) {
-        const QByteArray l = label.toUtf8();
-        m_bridge->api().grouse_roam_disconnect(m_bridge->handle(), l.constData());
-    }
-    m_roamModel->removePeer(label);
-    forgetRoamCard(label);
+    m_chat.disconnectRoam(label);
 }
-
 void Manager::persistRoamCard(const QString &label, const QString &card)
 {
-    QVariantMap cards = m_store.value(QStringLiteral("roam_cards")).toMap();
-    cards.insert(label, card);
-    m_store.setValue(QStringLiteral("roam_cards"), cards);
+    m_chat.persistRoamCard(label, card);
 }
-
 void Manager::forgetRoamCard(const QString &label)
 {
-    QVariantMap cards = m_store.value(QStringLiteral("roam_cards")).toMap();
-    if (cards.remove(label))
-        m_store.setValue(QStringLiteral("roam_cards"), cards);
+    m_chat.forgetRoamCard(label);
 }
-
-/// Re-dial + re-list every persisted roam peer so stored connections survive a
-/// restart (the wires are the core's; this only re-arms them).
 void Manager::restoreRoamPeers()
 {
-    const QVariantMap cards = m_store.value(QStringLiteral("roam_cards")).toMap();
-    if (cards.isEmpty())
-        return;
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    for (auto it = cards.constBegin(); it != cards.constEnd(); ++it) {
-        const QString card = it.value().toString();
-        if (card.isEmpty())
-            continue;
-        m_roamModel->addPeer(it.key());
-        const QByteArray c = card.toUtf8();
-        const QByteArray l = it.key().toUtf8();
-        m_bridge->api().grouse_roam_connect(m_bridge->handle(), c.constData(), l.constData());
-    }
+    m_chat.restoreRoamPeers();
 }
-
 QVariantList Manager::formatCardPins(const QVariantMap &pins)
 {
-    QVariantList rows;
-    for (auto it = pins.constBegin(); it != pins.constEnd(); ++it) {
-        const QString peer = it.key().trimmed();
-        const QString fingerprint = it.value().toString().trimmed();
-        if (peer.isEmpty() || fingerprint.isEmpty())
-            continue;
-        const QString shortFp = fingerprint.length() > 16
-            ? fingerprint.left(12) + QStringLiteral("…") + fingerprint.right(4)
-            : fingerprint;
-        rows << QVariantMap{{"peer", peer},
-                            {"fingerprint", fingerprint},
-                            {"short", shortFp}};
-    }
-    return rows;
+    return CoreApi::formatCardPins(pins);
 }
-
 QVariantMap Manager::parseCardPinRefusal(const QString &status, const QString &peerLabel)
 {
-    const int at = status.indexOf(QLatin1String("roam card pin refused"), Qt::CaseInsensitive);
-    if (at < 0)
-        return {};
-    const QString message = status.mid(at).trimmed();
-    // Core wording: "roam card for '<label>' changed: pinned <fp>, got <fp>.
-    // Refusing to dial — clear the pin to re-enroll this peer".
-    const QRegularExpression re(QStringLiteral(
-        "roam card for '([^']+)' changed: pinned ([^,]+), got ([^.]+)"));
-    const QRegularExpressionMatch m = re.match(message);
-    QString peer = peerLabel.trimmed();
-    if (peer.isEmpty())
-        peer = m.captured(1).trimmed();
-    QVariantMap out{{"message", message},
-                    {"peer", peer},
-                    {"pinned", m.captured(2).trimmed()},
-                    {"got", m.captured(3).trimmed()}};
-    return out;
+    return CoreApi::parseCardPinRefusal(status, peerLabel);
 }
-
 QVariantList Manager::roamCardPins()
 {
-    QVariantMap pins;
-    if (m_bridge && m_bridge->isAvailable()) {
-        const QString all = pinGetter(m_bridge, m_bridge->api().grouse_roam_card_pins,
-                                      m_bridge->handle(), nullptr);
-        pins = pinMapFromJson(all);
-        if (pins.isEmpty()) {
-            // Older ABI-20 spellings expose only the singular getter: ask it for
-            // every locally known peer. The PINS themselves still come from the
-            // core, never from the saved card (which may be the wrong one).
-            const QVariantMap cards = m_store.value(QStringLiteral("roam_cards")).toMap();
-            for (auto it = cards.constBegin(); it != cards.constEnd(); ++it) {
-                const QByteArray label = it.key().toUtf8();
-                const QString fp = pinStringFromJson(pinGetter(
-                    m_bridge, m_bridge->api().grouse_roam_card_pin,
-                    m_bridge->handle(), &label));
-                if (!fp.isEmpty())
-                    pins.insert(it.key(), fp);
-            }
-        }
-    }
-    return formatCardPins(pins);
+    return m_chat.roamCardPins();
 }
-
 bool Manager::clearRoamCardPin(const QString &peer, const QString &confirmation)
 {
-    const QString label = peer.trimmed();
-    if (label.isEmpty() || confirmation.trimmed() != label)
-        return false;               // out-of-band confirmation is a hard gate
-    if (!m_bridge || !m_bridge->isAvailable())
-        return false;
-    const QByteArray l = label.toUtf8();
-    QString error;
-    if (!pinClearIntent(m_bridge, m_bridge->api().grouse_roam_card_pin_clear,
-                        m_bridge->handle(), l, &error)) {
-        setStatus(error.isEmpty()
-                  ? QStringLiteral("Could not clear the pin for %1").arg(label)
-                  : error);
-        return false;
-    }
-    emit roamCardPinsChanged();
-    dismissRoamPinRefusal();
-    setStatus(QStringLiteral("Pin cleared for %1 — the next dial re-enrolls this peer; "
-                             "verify its card out of band first.").arg(label));
-    return true;
+    return m_chat.clearRoamCardPin(peer, confirmation);
 }
-
 bool Manager::redialRoamPeer(const QString &label)
 {
-    const QString card = m_store.value(QStringLiteral("roam_cards")).toMap()
-                             .value(label.trimmed()).toString();
-    if (card.isEmpty())
-        return false;
-    connectRoam(card, label.trimmed());
-    return true;
+    return m_chat.redialRoamPeer(label);
 }
-
 void Manager::dismissRoamPinRefusal()
 {
     if (m_roamPinRefusal.isEmpty())
@@ -1058,142 +611,21 @@ void Manager::maybeShowCardPinRefusal(const QString &status, const QString &peer
 
 void Manager::openRoamSession(const QString &label, const QString &sessionId, const QString &cwd)
 {
-    setMyDayVisible(false);   // opening a conversation takes the chat area back from My Day
-    resetReloadProgress();    // a reload bar belongs to the chat that started it
-    m_activePeerLabel = label;
-    // A parked message belongs to the chat it was typed in, so opening another chat must
-    // not discard it — the same per-chat queue Android keeps. Only Stop drops one.
-    m_landing = false;
-    emit landingChanged();
-    resetContextUsage();
-    m_currentSessionId = sessionId;
-    restoreTurnState(sessionId);
-    emit queuedChanged();   // the queue view is per-chat: republish for the chat we opened
-    // A peer's chat carries its human title only in the peer's session list, so
-    // the window shows that instead of the transport handle it opened by.
-    m_currentSessionTitle = m_roamTitles.value(sessionId);
-    m_tools.clear();
-    m_extDefs.clear();
-    m_catalogDefs.clear();
-    m_sessionExts.clear();
-    m_sessionRestricted.clear();
-    m_peekQueue.clear();
-    m_peekFailed.clear();
-    loadToolCache(sessionId);   // best-effort memory of last run's catalogues
-    publishToolGroups();
-    emit currentSessionChanged();
-    emit pinnedAppsChanged();
-    emit toolsChanged();
-    setStatus(QStringLiteral("loading…"));
-    m_lastCwd = cwd.isEmpty() ? workingDir() : cwd;
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    // OFF THE UI THREAD, exactly like the local open: a peer open asks the peer, and
-    // the peer's cached transcript is read and parsed on this side. This path was
-    // missed when the local one moved (2026-11-20) — which is why a ROAM chat was the
-    // one that still froze the window, and the one that logged nothing.
-    m_openClock.start();
-    m_openFor = sessionId;
-    timingLog(QStringLiteral("roam open start %1 on %2").arg(sessionId, label));
-    const CoreBridge::AimsApi api = m_bridge->api();
-    void *h = m_bridge->handle();
-    const QByteArray l = label.toUtf8();
-    const QByteArray sid = sessionId.toUtf8();
-    runOnCore([api, h, l, sid] {
-        QElapsedTimer clock;
-        clock.start();
-        api.grouse_roam_open_session(h, l.constData(), sid.constData());
-        timingLog(QStringLiteral("roam open %1 worker %2ms")
-                      .arg(QString::fromUtf8(sid)).arg(clock.elapsed()));
-    });
+    m_chat.openRoamSession(label, sessionId, cwd);
 }
-
 void Manager::newRoamSession(const QString &label)
 {
-    m_activePeerLabel = label;
-    emit queuedChanged();
-    m_landing = false;
-    emit landingChanged();
-    resetContextUsage();
-    m_currentSessionId.clear();
-    m_currentSessionTitle.clear();
-    m_tools.clear();
-    m_extDefs.clear();
-    m_catalogDefs.clear();
-    m_sessionExts.clear();
-    m_sessionRestricted.clear();
-    m_peekQueue.clear();
-    m_peekFailed.clear();
-    publishToolGroups();
-    m_messageModel->clear();
-    m_currentIndex = -1;
-    emit currentSessionChanged();
-    emit pinnedAppsChanged();
-    emit toolsChanged();
-    emit messagesChanged();
-    setStatus(QStringLiteral("connecting…"));
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    // `session/new` on the peer is a handshake: same worker, same reason.
-    const CoreBridge::AimsApi api = m_bridge->api();
-    void *h = m_bridge->handle();
-    const QByteArray l = label.toUtf8();
-    runOnCore([api, h, l] { api.grouse_roam_new_session(h, l.constData()); });
+    m_chat.newRoamSession(label);
 }
-
 void Manager::newRoamSessionIn(const QString &label, const QString &cwd)
 {
-    newRoamSessionWithMode(label, cwd, QString());
+    m_chat.newRoamSessionIn(label, cwd);
 }
-
-/// A roam peer's new chat in a mode. The tag is written by THAT peer's goose, so a
-/// roam chat carries a mode exactly like a local one.
 void Manager::newRoamSessionWithMode(const QString &label, const QString &cwd,
                                      const QString &mode)
 {
-    m_activePeerLabel = label;
-    emit queuedChanged();
-    m_landing = false;
-    emit landingChanged();
-    resetContextUsage();
-    m_currentSessionId.clear();
-    m_currentSessionTitle.clear();
-    m_tools.clear();
-    m_extDefs.clear();
-    m_catalogDefs.clear();
-    m_sessionExts.clear();
-    m_sessionRestricted.clear();
-    m_peekQueue.clear();
-    m_peekFailed.clear();
-    publishToolGroups();
-    m_messageModel->clear();
-    m_currentIndex = -1;
-    emit currentSessionChanged();
-    emit pinnedAppsChanged();
-    emit toolsChanged();
-    emit messagesChanged();
-    setStatus(QStringLiteral("connecting…"));
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    const CoreBridge::AimsApi api = m_bridge->api();
-    void *h = m_bridge->handle();
-    const QByteArray l = label.toUtf8();
-    const QString t = cwd.trimmed();
-    const bool hasCwd = !t.isEmpty();
-    const QByteArray c = t.toUtf8();
-    const QByteArray md = mode.toUtf8();
-    const bool plain = mode.isEmpty() || !api.grouse_roam_new_session_with_mode;
-    runOnCore([api, h, l, c, md, hasCwd, plain] {
-        if (plain) {
-            api.grouse_roam_new_session_cwd(h, l.constData(), hasCwd ? c.constData() : nullptr);
-        } else {
-            api.grouse_roam_new_session_with_mode(h, l.constData(),
-                                                  hasCwd ? c.constData() : nullptr,
-                                                  md.constData());
-        }
-    });
+    m_chat.newRoamSessionWithMode(label, cwd, mode);
 }
-
 void Manager::toggleRoamPeer(const QString &label)
 {
     m_roamModel->togglePeer(label);
@@ -1201,63 +633,20 @@ void Manager::toggleRoamPeer(const QString &label)
 
 void Manager::setActiveTab(const QString &tab)
 {
-    if (tab != QLatin1String("main") || m_activePeerLabel.isEmpty())
-        return;
-    // A roam chat owns the ACTIVE SESSION, not the sidebar's grouping. Clearing the
-    // label is what stops later local lists from inheriting it (coreOnSessions no
-    // longer stamps them at all), and the re-list is what repairs rows already on
-    // screen: a list fetched while the peer was set stays grouped under it until the
-    // next refresh, which is exactly the "Projects vanished after visiting Roam"
-    // report. One round trip on the switch back, not on every tab click.
-    m_activePeerLabel.clear();
-    refreshSessions();
+    m_chat.setActiveTab(tab);
 }
-
 QString Manager::roamIdentity()
 {
-    QString secret = m_store.value("roam_identity").toString();
-    if (secret.isEmpty() && m_bridge && m_bridge->isAvailable()) {
-        secret = m_bridge->takeString(m_bridge->api().grouse_identity_generate());
-        if (!secret.isEmpty())
-            m_store.setValue("roam_identity", secret);
-    }
-    return secret;
+    return m_chat.roamIdentity();
 }
-
 QString Manager::roamPublicKey() const
 {
-    const QString secret = m_store.value("roam_identity").toString();
-    if (secret.isEmpty() || !m_bridge || !m_bridge->isAvailable())
-        return QString();
-    char *err = nullptr;
-    const QByteArray s = secret.toUtf8();
-    QString key = m_bridge->takeString(
-        m_bridge->api().grouse_identity_public_key(s.constData(), &err));
-    if (err) {
-        m_bridge->api().grouse_string_free(err);
-        return QString();
-    }
-    return key;
+    return m_chat.roamPublicKey();
 }
-
 QString Manager::roamCard() const
 {
-    // Matches the Android client's card exactly: base64url (no padding) of
-    // {"version":1,"endpoint_id":"<hex key>","relay_urls":[]}. The card decoder
-    // accepts empty relay URLs (LAN-direct); the host reaches this device by its
-    // public endpoint_id, so only the key goes in.
-    const QString key = roamPublicKey();
-    if (key.isEmpty())
-        return QString();
-    const QByteArray json =
-        QStringLiteral("{\"version\":1,\"endpoint_id\":\"%1\",\"relay_urls\":[]}")
-            .arg(key)
-            .toUtf8();
-    const QByteArray b64 = json.toBase64(
-        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
-    return QStringLiteral("goose+roam://") + QString::fromLatin1(b64);
+    return m_chat.roamCard();
 }
-
 void Manager::copyToClipboard(const QString &s)
 {
     QGuiApplication::clipboard()->setText(s);
@@ -1277,141 +666,24 @@ QObject *Manager::roamModel() const { return m_roamModel; }
 
 void Manager::testConnection()
 {
-    if (!m_bridge || !m_bridge->isAvailable()) {
-        emit connectionTested(false, QStringLiteral("grouse-core not loaded."));
-        return;
-    }
-    if (secretKey().isEmpty()) {
-        emit connectionTested(false, QStringLiteral("No secret key set — fill it in above."));
-        return;
-    }
-    // Drive a real connect; the resulting on_status (Ready/Error) resolves the
-    // probe via coreOnStatus. The core owns the connection.
-    m_testPending = true;
-    connectToServer();
+    m_chat.testConnection();
 }
-
 void Manager::openSession(const QString &sessionId)
 {
-    const QString previous = m_currentSessionId;
-    setMyDayVisible(false);   // opening a conversation takes the chat area back from My Day
-    resetReloadProgress();    // a reload bar belongs to the chat that started it
-    // Ask the CORE which wire owns this display id (grouse_session_owner), not the
-    // `roam:` text: the core is the one routing the open. Keep the label in sync
-    // with that answer — otherwise the core routes to the peer while this client
-    // still thinks the main wire owns the turn, and a main-wire Ready clears a
-    // live roam turn. The namespace is only the fallback when the core cannot answer.
-    m_activePeerLabel = sessionPeerLabel(sessionId);
-    // Parking is per chat: a message queued in the chat we are leaving keeps waiting for
-    // ITS turn to end (flushQueue only drains the on-screen chat's), so a switch cannot
-    // silently lose input. Stop is what discards it.
-    m_landing = false;
-    emit landingChanged();
-    resetContextUsage();
-    m_currentSessionId = sessionId;
-    restoreTurnState(sessionId);
-    emit queuedChanged();   // the queue view is per-chat: republish for the chat we opened
-    m_currentSessionTitle.clear();
-    if (!m_activePeerLabel.isEmpty()) {
-        // A peer's title lives only in its own session/list, not in the main list.
-        m_currentSessionTitle = m_roamTitles.value(sessionId);
-    }
-    if (m_currentSessionTitle.isEmpty()) {
-        for (const auto &v : m_sessions) {
-            const QVariantMap s = v.toMap();
-            if (s.value("sessionId").toString() == sessionId) {
-                m_currentSessionTitle = s.value("title").toString();
-                break;
-            }
-        }
-    }
-    m_tools.clear();
-    m_extDefs.clear();
-    m_catalogDefs.clear();
-    m_sessionExts.clear();
-    m_sessionRestricted.clear();
-    m_peekQueue.clear();
-    m_peekFailed.clear();
-    loadToolCache(sessionId);
-    publishToolGroups();
-    m_messageModel->clear();
-    m_currentIndex = -1;
-    emit currentSessionChanged();
-    emit pinnedAppsChanged();
-    emit toolsChanged();
-    emit messagesChanged();
-    setStatus(QStringLiteral("loading…"));
-    m_lastCwd = workingDir();
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    m_openClock.start();
-    m_openFor = sessionId;
-    timingLog(QStringLiteral("open start %1 (was %2)").arg(sessionId, previous));
-    // OFF THE UI THREAD. Everything here can block: reading and parsing the cached
-    // transcript, and — for a session `session/list` has never returned, i.e. a
-    // thread chat — a `session/info` round trip just to learn its cwd. Both ran on
-    // the main thread, which is why a chat switch froze the window before the new
-    // chat appeared. The core is built for this (Android has always called it from
-    // a background executor) and CoreBridge marshals every event it emits back onto
-    // the main thread, so nothing below touches UI state off-main.
-    const CoreBridge::AimsApi api = m_bridge->api();
-    void *h = m_bridge->handle();
-    const QByteArray sid = sessionId.toUtf8();
-    runOnCore([api, h, sid] {
-        QElapsedTimer clock;
-        clock.start();
-        api.grouse_open_session(h, sid.constData());
-        // NO grouse_load_cached_transcript here. `open_session` has already painted
-        // the core's live store — including a BIND-ONLY load for a chat with a turn
-        // in flight — with the correct freshness/stale-tail rules. A second cache
-        // load replaces that with stale disk rows: missing the in-flight reply and
-        // discarding a tail the wire just merged (2026-11-22).
-        // Reported HERE, not handed to the Window: the core emits its paint DURING
-        // the call, so a value posted after it reaches the main thread too late and
-        // the paint line read zeros (measured: "worker 0ms: open 0, cache 0").
-        timingLog(QStringLiteral("open %1 worker %2ms")
-                      .arg(QString::fromUtf8(sid)).arg(clock.elapsed()));
-    });
+    m_chat.openSession(sessionId);
 }
-
 QString Manager::sessionStamp(const QString &sessionId) const
 {
-    for (const auto &v : m_sessions) {
-        const QVariantMap row = v.toMap();
-        if (row.value("sessionId").toString() != sessionId)
-            continue;
-        const QString stamp = row.value("lastMessageAt").toString();
-        return stamp.isEmpty() ? row.value("updatedAt").toString() : stamp;
-    }
-    return {};
+    return m_chat.sessionStamp(sessionId);
 }
-
 void Manager::refreshSession()
 {
-    // QUICK (grouse#18): freshness decides — a current cache suppresses the
-    // replay, a stale one merges a bounded tail, an incomplete store still
-    // replays in full. Either way it is ingested silently and painted once, so
-    // the chat lands on its newest messages instead of re-rendering from the
-    // top.
-    refreshSessionWith(0);
+    m_chat.refreshSession();
 }
-
 void Manager::reloadSessionFromStart()
 {
-    // FULL: throw the cached transcript away and rebuild the chat from the
-    // server — the escape hatch for a view known to have drifted, and the only
-    // path that is allowed to ignore what is on disk. It is the slower, heavier
-    // of the two, so it stays behind an explicit gesture.
-    //
-    // ONE at a time: a second press while the replay is in flight would clear
-    // the transcript again mid-rebuild and restart the bar. The core refuses the
-    // repeat as well; refusing here keeps the button honest.
-    if (m_reloading)
-        return;
-    setStatus(QStringLiteral("reloading from the start…"));
-    refreshSessionWith(1);
+    m_chat.reloadSessionFromStart();
 }
-
 void Manager::resetReloadProgress()
 {
     if (!m_reloading && m_replayLoaded == 0 && m_replayTotal == 0)
@@ -1445,689 +717,107 @@ void Manager::coreOnReplayProgress(const QString &sessionId, int loaded, int tot
 
 void Manager::refreshSessionWith(int full)
 {
-    if (!m_bridge || !m_bridge->isAvailable() || m_currentSessionId.isEmpty())
-        return;
-    if (full == 0)
-        setStatus(QStringLiteral("reloading…"));
-    const QByteArray sid = m_currentSessionId.toUtf8();
-    m_bridge->api().grouse_refresh_session(m_bridge->handle(), sid.constData(), full);
+    m_chat.refreshSessionWith(full);
 }
 
 void Manager::newChat()
 {
-    newChatInMode(QString());
+    m_chat.newChat();
 }
-
-/// A new chat in a mode (`grouse.mode`: `dev`). Empty = an ordinary chat.
-///
-/// The mode rides `session/new` as a tag: the server stores it, filters on it and
-/// never returns it, so a mode can only be chosen when the chat is made. That is
-/// why creation — not a control in the chat — is where the choice lives.
 void Manager::newChatInMode(const QString &mode)
 {
-    setMyDayVisible(false);   // a new conversation also takes the chat area back
-    resetReloadProgress();
-    m_activePeerLabel.clear();
-    emit queuedChanged();
-    m_landing = false;
-    emit landingChanged();
-    resetContextUsage();
-    m_currentSessionId.clear();
-    m_currentSessionTitle.clear();
-    m_tools.clear();
-    m_extDefs.clear();
-    m_catalogDefs.clear();
-    m_sessionExts.clear();
-    m_sessionRestricted.clear();
-    m_peekQueue.clear();
-    m_peekFailed.clear();
-    m_messageModel->clear();
-    m_currentIndex = -1;
-    publishToolGroups();
-    emit currentSessionChanged();
-    emit pinnedAppsChanged();
-    emit toolsChanged();
-    emit messagesChanged();
-    // The composer is a surviving QML object, so a draft typed for the previous
-    // conversation would otherwise follow the user into the new one (and, in a
-    // thread chat, into a prefill it does not belong to).
-    emit draftRequested(QString());
-    setStatus(QStringLiteral("connecting…"));
-    // The recipe id and project id ride session/new directly. `grouse_new_session`
-    // already took a recipe id; passing it here (rather than letting
-    // serverConfigJson consume it) is what actually starts a recipe run.
-    const QString recipeId = m_pendingRecipeId;
-    m_pendingRecipeId.clear();
-    const QString projectId = m_pendingProjectFiling;
-    m_pendingProjectFiling.clear();
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    // Also off the UI thread: `session/new` is a handshake, and it blocked the
-    // window for its duration ("New chat" sat on the old screen until the server
-    // answered). The window has already moved to the new chat here — the id arrives
-    // through the usual events.
-    const CoreBridge::AimsApi api = m_bridge->api();
-    void *h = m_bridge->handle();
-    const QByteArray rid = recipeId.toUtf8();
-    const QByteArray pid = projectId.toUtf8();
-    const QByteArray md = mode.toUtf8();
-    const bool plain = mode.isEmpty() || !api.grouse_new_session_with_mode;
-    const bool hasRecipe = !recipeId.isEmpty();
-    const bool hasProject = !projectId.isEmpty();
-    runOnCore([this, api, h, rid, pid, md, plain, hasRecipe, hasProject] {
-        char *err = nullptr;
-        if (plain) {
-            api.grouse_new_session(h, hasRecipe ? rid.constData() : nullptr,
-                                   hasProject ? pid.constData() : nullptr, &err);
-        } else {
-            api.grouse_new_session_with_mode(h, hasRecipe ? rid.constData() : nullptr,
-                                             hasProject ? pid.constData() : nullptr,
-                                             md.constData(), &err);
-        }
-        if (!err)
-            return;
-        const QString message = QString::fromUtf8(err);
-        api.grouse_string_free(err);
-        QMetaObject::invokeMethod(this, [this, message] {
-            setStatus(QStringLiteral("new session failed: ") + message);
-        }, Qt::QueuedConnection);
-    });
+    m_chat.newChatInMode(mode);
 }
-
 void Manager::beginChat()
 {
-    if (!m_landing)
-        return;
-    m_landing = false;
-    emit landingChanged();
+    m_chat.beginChat();
 }
-
 void Manager::sendPrompt(const QString &text, const QVariantList &images)
 {
-    if (!m_bridge || !m_bridge->isAvailable() || (text.trimmed().isEmpty() && images.isEmpty()))
-        return;
-    m_landing = false;
-    emit landingChanged();
-    // A review is about the turn that is over: starting the next one retires it.
-    dismissAdvisorReport();
-
-    const QString expectJson = m_currentSessionId.isEmpty()
-        ? QString() : QStringLiteral("{\"session_id\":\"%1\"}").arg(m_currentSessionId);
-
-    // Images still ride inline (goose renders those); everything else is a
-    // PATH the core uploads, because goose DROPS a `resource` block whose
-    // contents are a base64 blob -- which is what an attached PDF used to be.
-    dispatchSend(text.trimmed(), buildAttachmentBlocks(images),
-                 attachmentPaths(images));
+    m_chat.sendPrompt(text, images);
 }
-
 void Manager::dispatchSend(const QString &text, const QVariantList &blocks,
                            const QStringList &files)
 {
-    const QString expectJson = m_currentSessionId.isEmpty()
-        ? QString() : QStringLiteral("{\"session_id\":\"%1\"}").arg(m_currentSessionId);
-    // Two questions, not one: is the chat's OWN transport up (main wire or the
-    // peer), and — on the main wire — is a session bound to send into? After a
-    // wire-only attach `connected` is true while `ready` is false; using ready as
-    // the transport gate parked every offline send forever (and asking only
-    // `connected` would send into a main chat the core has not bound yet).
-    const bool wireUp = wireUpForCurrentChat();
-    const bool sessionBound = !m_activePeerLabel.isEmpty()
-        || (m_bridge && m_bridge->isAvailable() && m_bridge->api().grouse_ready
-            && m_bridge->api().grouse_ready(m_bridge->handle()));
-    const bool ready = wireUp && sessionBound;
-    // The core echoes a PURE-TEXT prompt into the transcript itself: the live wire
-    // carries NO user_message_chunk for our own send, so the core keeps its own copy
-    // (otherwise the question is never recorded, and a reopen that trusts the cache
-    // shows the replies with the questions missing — see grouse-core's
-    // `spawn_prompt`). Attachments are the exception: the item model has no image
-    // field, so the client keeps its own row for those — which is also what renders
-    // the thumbnails (a replayed session reconstructs text only).
-    QVariantList shown;
-    for (const auto &v : blocks) {
-        const QVariantMap b = v.toMap();
-        if (b.value("type").toString() == QLatin1String("image"))
-            shown << QVariantMap{{"image", true},
-                                 {"url", QStringLiteral("data:%1;base64,%2")
-                                            .arg(b.value("mimeType").toString(),
-                                                 b.value("data").toString())}};
-        else if (b.value("type").toString() == QLatin1String("resource"))
-            shown << QVariantMap{{"image", false},
-                                 {"url", b.value("resource").toMap().value("uri").toString()},
-                                 {"name", QFileInfo(b.value("resource").toMap()
-                                                    .value("uri").toString()).fileName()}};
-    }
-    // A file by PATH: this is only the fallback (an older core library that
-    // reports a count but no records) — the row's cards normally come from the
-    // core's own `files`, which is what a replayed transcript still has.
-    for (const QString &path : files) {
-        const QFileInfo info(path);
-        shown << QVariantMap{{"image", false},
-                             {"url", path},
-                             {"name", info.fileName()},
-                             {"mime", QMimeDatabase().mimeTypeForFile(path).name()},
-                             {"bytes", info.size()}};
-    }
-    const bool sameChatBusy = m_prompting && m_promptingSessionId == m_currentSessionId;
-    if (ready && !sameChatBusy) {
-        // Thumbnails are matched back onto the row the core echoes, so they are queued
-        // only at the moment the prompt actually goes out — queueing them earlier put a
-        // second copy in the map every time a parked send was drained. `files` counts
-        // too: a prompt with ONLY a non-image attachment produces no blocks, and the
-        // blocks-only guard is why an attached PDF showed up in the transcript as
-        // nothing at all on this client.
-        if ((!blocks.isEmpty() || !files.isEmpty()) && !shown.isEmpty())
-            m_pendingAttachments[scopedKey(m_currentSessionId, text)].append(shown);
-        m_prompting = true;
-        m_promptingSessionId = m_currentSessionId;
-        if (!m_currentSessionId.isEmpty())
-            m_inFlight.insert(m_currentSessionId);
-        emit promptingChanged();
-        char *err = nullptr;
-        const QByteArray prompt = promptJson(text, blocks).toUtf8();
-        const QByteArray expect = expectJson.toUtf8();
-        if (files.isEmpty()) {
-            m_bridge->api().grouse_send_prompt(
-                m_bridge->handle(), prompt.constData(),
-                expectJson.isEmpty() ? nullptr : expect.constData(), &err);
-        } else if (m_bridge->api().grouse_send_prompt_with_paths) {
-            QJsonArray arr;
-            for (const QString &path : files)
-                arr.append(path);
-            const QByteArray paths =
-                QJsonDocument(arr).toJson(QJsonDocument::Compact);
-            m_bridge->api().grouse_send_prompt_with_paths(
-                m_bridge->handle(), prompt.constData(), paths.constData(),
-                expectJson.isEmpty() ? nullptr : expect.constData(), &err);
-        } else {
-            // An older libgrouse_core: say so rather than silently dropping the
-            // attachment, which is the bug this whole path exists to remove.
-            m_bridge->api().grouse_send_prompt(
-                m_bridge->handle(), prompt.constData(),
-                expectJson.isEmpty() ? nullptr : expect.constData(), &err);
-            if (!err)
-                onError(QStringLiteral("this core cannot attach files "
-                                       "(grouse_send_prompt_with_paths missing)"), false);
-        }
-        if (err) {
-            onError(QString::fromUtf8(err), false);
-            m_bridge->api().grouse_string_free(err);
-        }
-    } else {
-        // A turn is running on THIS chat (or there is no session bound yet): the message
-        // is PARKED, never steered. A steer REDIRECTS the reply being written, so it has
-        // to be the user's explicit choice — the Steer button on the queued card
-        // (steerQueued) — and not a side effect of pressing send while a reply streams
-        // (Android parity). flushQueue sends it when the turn ends.
-        enqueue({text, blocks, files, m_currentSessionId, 0});
-        if (!ready && !secretKey().isEmpty())
-            connectToServer();
-    }
+    m_chat.dispatchSend(text, blocks, files);
 }
-
 bool Manager::wireUpForCurrentChat() const
 {
-    if (!m_activePeerLabel.isEmpty())
-        return m_roamModel && m_roamModel->peerConnected(m_activePeerLabel);
-    // `online` is a cached status event; the core's `connected` is the transport
-    // truth and stays true on an attach that bound no session. The transport gate
-    // must not be `grouse_ready` here — that would be false on exactly that wire.
-    return mainWireConnected();
+    return m_chat.wireUpForCurrentChat();
 }
-
 void Manager::releaseTurnForLostWire(const QString &lostSessionId)
 {
-    // Only the wire that OWNS the turn may release it: a drop in another chat, or on
-    // the main socket while a peer owns the turn, must leave it alone (Android parity).
-    if (!turnOwnerMatches(m_promptingSessionId, m_currentSessionId, lostSessionId))
-        return;
-    m_inFlight.remove(lostSessionId);
-    m_activeRunIds.remove(lostSessionId);
-    // A dead host emits neither RunEnded nor a cleared run id, so without this
-    // m_prompting stays true forever: "N queued — will send when this turn finishes"
-    // is a promise that can never be kept and the queue never drains.
-    m_promptingSessionId.clear();
-    if (m_prompting) {
-        m_prompting = false;
-        emit promptingChanged();
-    }
-    if (m_compacting) {
-        m_compacting = false;
-        emit compactingChanged();
-    }
-    setActiveRunId(QString());
-    // The queue itself survives (the core flushes on the next Ready); releasing the
-    // latch is what lets it move at all.
-    flushQueue();
+    m_chat.releaseTurnForLostWire(lostSessionId);
 }
-
 void Manager::setActiveRunId(const QString &runId)
 {
-    if (m_activeRunId == runId)
-        return;
-    m_activeRunId = runId;
-    emit activeRunIdChanged();
+    m_chat.setActiveRunId(runId);
 }
-
 void Manager::enqueue(const PendingSend &p)
 {
-    PendingSend q = p;
-    q.id = ++m_sendSeq;
-    q.sessionId = m_currentSessionId;   // the chat it was TYPED in
-    m_pendingQueue << q;
-    emit queuedChanged();
+    m_chat.enqueue(p);
 }
 
 int Manager::queuedCount() const
 {
-    int n = 0;
-    for (const PendingSend &p : m_pendingQueue) {
-        if (p.sessionId.isEmpty() || p.sessionId == m_currentSessionId)
-            ++n;
-    }
-    return n;
+    return m_chat.queuedCount();
 }
-
 QVariant Manager::queuedSends() const
 {
-    QVariantList out;
-    for (const PendingSend &p : m_pendingQueue) {
-        // An empty sessionId is a send typed before any chat was bound; it belongs to
-        // whichever chat is on screen (flushQueue adopts it), so show it here.
-        if (!p.sessionId.isEmpty() && p.sessionId != m_currentSessionId)
-            continue;
-        out << QVariantMap{{"id", p.id},
-                           {"text", p.text},
-                           {"attachments", p.images.size()}};
-    }
-    return out;
+    return m_chat.queuedSends();
 }
-
 void Manager::steerQueued(int id)
 {
-    if (!m_bridge || !m_bridge->isAvailable() || m_activeRunId.isEmpty())
-        return;
-    for (int i = 0; i < m_pendingQueue.size(); ++i) {
-        const PendingSend &p = m_pendingQueue.at(i);
-        if (p.id != id || (!p.sessionId.isEmpty() && p.sessionId != m_currentSessionId))
-            continue;
-        // A steer carries text only. Sending the text and dropping the images would lose
-        // input silently, so an attachment-carrying message keeps waiting instead.
-        if (p.text.trimmed().isEmpty() || !p.images.isEmpty())
-            return;
-        const QString text = p.text;
-        m_pendingQueue.removeAt(i);
-        emit queuedChanged();
-        m_prompting = true;
-        m_promptingSessionId = m_currentSessionId;
-        if (!m_currentSessionId.isEmpty())
-            m_inFlight.insert(m_currentSessionId);
-        emit promptingChanged();
-        const QByteArray t = text.toUtf8();
-        const QByteArray r = m_activeRunId.toUtf8();
-        m_bridge->api().grouse_unstable_steer(m_bridge->handle(), t.constData(), r.constData());
-        return;
-    }
+    m_chat.steerQueued(id);
 }
-
 void Manager::cancelQueued(int id)
 {
-    for (int i = 0; i < m_pendingQueue.size(); ++i) {
-        if (m_pendingQueue.at(i).id != id)
-            continue;
-        m_pendingQueue.removeAt(i);
-        emit queuedChanged();
-        return;
-    }
+    m_chat.cancelQueued(id);
 }
-
 void Manager::restoreTurnState(const QString &sessionId)
 {
-    const bool busy = m_inFlight.contains(sessionId);
-    m_prompting = busy;
-    m_promptingSessionId = busy ? sessionId : QString();
-    m_compacting = false;
-    setActiveRunId(busy ? m_activeRunIds.value(sessionId) : QString());
-    emit promptingChanged();
-    emit compactingChanged();
+    m_chat.restoreTurnState(sessionId);
 }
-
 void Manager::flushQueue()
 {
-    if (m_pendingQueue.isEmpty()
-        || (m_prompting && m_promptingSessionId == m_currentSessionId))
-        return;
-    // Drain only a message meant for the chat ON SCREEN. Taking the head regardless sent a
-    // prompt parked in chat A into chat B after a switch (Android fixed this the same way);
-    // an entry with no session yet adopts this one, which is where it goes anyway.
-    int idx = -1;
-    for (int i = 0; i < m_pendingQueue.size(); ++i) {
-        const QString &sid = m_pendingQueue.at(i).sessionId;
-        if (sid.isEmpty() || sid == m_currentSessionId) {
-            idx = i;
-            break;
-        }
-    }
-    if (idx < 0)
-        return;
-    const PendingSend p = m_pendingQueue.takeAt(idx);
-    emit queuedChanged();
-    dispatchSend(p.text, p.images, p.files);
+    m_chat.flushQueue();
 }
 
-namespace {
-
-/// A prompt's image reaches the row as a `data:` URI: the core hands the client the
-/// PIXELS, not a path, so the row can show what was sent without the file still being
-/// there. QML's Image does accept those, but a 2-4 MB base64 string is parsed on every
-/// repaint and — measured on the first desktop build that carried user images — painted
-/// nothing at all. Every other picture this client draws comes from a FILE (an agent's
-/// shared image is downloaded first), so decode once here and hand QML a file URL: the
-/// user's own image then takes exactly the path that is known to work.
-QString materialiseChatImage(const QString &uri)
-{
-    if (!uri.startsWith(QLatin1String("data:")))
-        return uri;
-    const int comma = uri.indexOf(QLatin1Char(','));
-    if (comma < 0)
-        return uri;
-    const QString header = uri.mid(5, comma - 5);   // "image/png;base64"
-    if (!header.endsWith(QLatin1String(";base64")))
-        return uri;
-    const QString mime = header.left(header.size() - 7);
-    const QByteArray bytes = QByteArray::fromBase64(uri.mid(comma + 1).toLatin1());
-    if (bytes.isEmpty())
-        return uri;
-    // Content-addressed, so the same picture sent twice (or replayed) is written once.
-    const QString digest = QString::fromLatin1(
-        QCryptographicHash::hash(bytes, QCryptographicHash::Sha1).toHex().left(16));
-    QString suffix = QMimeDatabase().mimeTypeForName(mime).preferredSuffix();
-    if (suffix.isEmpty())
-        suffix = QStringLiteral("img");
-    QDir dir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
-             + QStringLiteral("/chat-images"));
-    if (!dir.exists() && !dir.mkpath(QStringLiteral(".")))
-        return uri;
-    const QString path = dir.filePath(digest + QLatin1Char('.') + suffix);
-    if (!QFileInfo::exists(path)) {
-        QSaveFile out(path);
-        if (!out.open(QIODevice::WriteOnly) || out.write(bytes) != bytes.size() || !out.commit())
-            return uri;   // fall back to the URI: a broken cache must not hide the picture
-    }
-    return QUrl::fromLocalFile(path).toString();
-}
-
-// True for mime types that are really text even though they live under
-// application/* (code, config, data). Everything else that isn't an image is
-// sent as a binary blob.
-bool isTextishMime(const QString &mime)
-{
-    if (mime.startsWith(QLatin1String("text/")))
-        return true;
-    static const QStringList textish = {
-        QStringLiteral("application/json"), QStringLiteral("application/xml"),
-        QStringLiteral("application/x-yaml"), QStringLiteral("application/yaml"),
-        QStringLiteral("application/toml"), QStringLiteral("application/javascript"),
-        QStringLiteral("application/x-javascript"), QStringLiteral("application/x-shellscript"),
-        QStringLiteral("application/x-sh"), QStringLiteral("application/x-python"),
-        QStringLiteral("application/x-tex"), QStringLiteral("application/sql"),
-        QStringLiteral("application/x-diff"), QStringLiteral("application/graphql"),
-    };
-    return textish.contains(mime);
-}
-} // namespace
 
 QStringList Manager::pickAttachmentFiles()
 {
-    const QString dir = m_store.value(QStringLiteral("last_attach_dir"), QDir::homePath()).toString();
-    const QStringList files = QFileDialog::getOpenFileNames(
-        nullptr, QStringLiteral("Attach files"), dir);
-    if (!files.isEmpty()) {
-        const QFileInfo info(files.first());
-        m_store.setValue(QStringLiteral("last_attach_dir"), info.absolutePath());
-    }
-    return files;
+    return m_chat.pickAttachmentFiles();
 }
-
 QStringList Manager::clipboardAttachmentFiles()
 {
-    const QMimeData *mime = QGuiApplication::clipboard()->mimeData();
-    if (!mime)
-        return {};
-    // A file copied from a file manager (Dolphin, Spectacle's "copy to clipboard"):
-    // attach the files themselves. Their bytes must not go through an image
-    // round-trip, and non-image files are attachable too.
-    QStringList files;
-    if (mime->hasUrls()) {
-        for (const QUrl &u : mime->urls()) {
-            if (!u.isLocalFile())
-                continue;
-            const QString path = u.toLocalFile();
-            if (!path.isEmpty() && QFileInfo::exists(path))
-                files << path;
-        }
-        if (!files.isEmpty())
-            return files;
-    }
-    // Raw image data with no file behind it (a screenshot copied out of a browser).
-    // An attachment is a file path end to end, so park it under a name that carries
-    // a real image extension — the transcript picks its thumbnail renderer from it.
-    if (!mime->hasImage())
-        return {};
-    const QImage image = qvariant_cast<QImage>(mime->imageData());
-    if (image.isNull())
-        return {};
-    const QString dir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
-    if (dir.isEmpty())
-        return {};
-    const QString path = QStringLiteral("%1/grouse-paste-%2.png")
-                             .arg(dir, QString::number(QDateTime::currentMSecsSinceEpoch()));
-    if (!image.save(path, "PNG"))
-        return {};
-    return {path};
+    return m_chat.clipboardAttachmentFiles();
 }
-
 QVariantList Manager::buildAttachmentBlocks(const QVariantList &paths)
 {
-    // Same ACP content-block shapes as before; promptJson() converts them to the
-    // core's serde Prompt JSON at the wire boundary.
-    QVariantList out;
-    QMimeDatabase mimeDb;
-    for (const auto &v : paths) {
-        const QString path = v.toString();
-        if (path.isEmpty())
-            continue;
-        const QString mime = mimeDb.mimeTypeForFile(path).name();
-        if (!mime.startsWith(QLatin1String("image/")))
-            continue;   // uploaded by path -- see attachmentPaths()
-        QFile f(path);
-        if (!f.open(QIODevice::ReadOnly))
-            continue;
-        const QByteArray data = f.readAll();
-        f.close();
-        QString b64 = QString::fromLatin1(data.toBase64());
-        b64.remove(QLatin1Char('\n')).remove(QLatin1Char('\r'));
-        out << QVariantMap{{"type", "image"}, {"mimeType", mime}, {"data", b64}};
-        // NOTHING else becomes a block. A `resource` block carrying a base64
-        // `blob` is DROPPED by goose with no placeholder and no error, so the
-        // file goes through attachmentPaths() and is uploaded instead; the core
-        // then appends a `resource_link` that the server resolves itself.
-    }
-    return out;
+    return m_chat.buildAttachmentBlocks(paths);
 }
-
 QStringList Manager::attachmentPaths(const QVariantList &paths)
 {
-    // Everything that is not an image: the core opens these itself (it shares
-    // this machine's filesystem), uploads them chunked, and appends a
-    // `resource_link` per file. The alternative -- inlining the bytes as a
-    // `resource` block -- is silently dropped by goose.
-    QStringList out;
-    QMimeDatabase mimeDb;
-    for (const auto &v : paths) {
-        const QString path = v.toString();
-        if (path.isEmpty() || !QFileInfo::exists(path))
-            continue;
-        if (mimeDb.mimeTypeForFile(path).name().startsWith(QLatin1String("image/")))
-            continue;
-        out << path;
-    }
-    return out;
+    return m_chat.attachmentPaths(paths);
 }
 
-/// The kind of a file, for the second line of an attachment card. MIME first
-/// (authoritative), the name's suffix second — the stub recovered from a replay
-/// carries a name only. Must agree with the Android client's mapping, which is
-/// why it is a table rather than a per-call decision.
-namespace {
-QString attachmentKind(const QString &mime, const QString &name)
-{
-    const QString m = mime.toLower();
-    const QString ext = name.section(QLatin1Char('.'), -1).toLower();
-    if (m == QLatin1String("application/pdf") || ext == QLatin1String("pdf"))
-        return QStringLiteral("PDF");
-    if (m.contains(QLatin1String("wordprocessingml")) || m == QLatin1String("application/msword")
-        || m.contains(QLatin1String("opendocument.text"))
-        || QStringList{"doc", "docx", "odt", "rtf", "pages"}.contains(ext))
-        return QStringLiteral("Document");
-    if (m.contains(QLatin1String("spreadsheetml")) || m == QLatin1String("application/vnd.ms-excel")
-        || m.contains(QLatin1String("opendocument.spreadsheet")) || m == QLatin1String("text/csv")
-        || QStringList{"xls", "xlsx", "ods", "csv", "numbers"}.contains(ext))
-        return QStringLiteral("Spreadsheet");
-    if (m.contains(QLatin1String("presentationml")) || m == QLatin1String("application/vnd.ms-powerpoint")
-        || m.contains(QLatin1String("opendocument.presentation"))
-        || QStringList{"ppt", "pptx", "odp", "key"}.contains(ext))
-        return QStringLiteral("Presentation");
-    if (m.startsWith(QLatin1String("image/")))
-        return QStringLiteral("Image");
-    if (m.startsWith(QLatin1String("audio/")))
-        return QStringLiteral("Audio");
-    if (m.startsWith(QLatin1String("video/")))
-        return QStringLiteral("Video");
-    if (m.contains(QLatin1String("zip")) || m.contains(QLatin1String("gzip"))
-        || m.contains(QLatin1String("tar"))
-        || QStringList{"zip", "gz", "tar", "7z", "rar", "bz2", "xz"}.contains(ext))
-        return QStringLiteral("Archive");
-    if (m.contains(QLatin1String("json")) || m.contains(QLatin1String("javascript"))
-        || m.contains(QLatin1String("xml")) || m.contains(QLatin1String("html"))
-        || QStringList{"json", "js", "ts", "xml", "html", "css", "py", "rs", "cpp", "sh", "yaml", "yml"}.contains(ext))
-        return QStringLiteral("Code");
-    if (m.startsWith(QLatin1String("text/")) || QStringList{"txt", "md", "log"}.contains(ext))
-        return QStringLiteral("Text");
-    return QStringLiteral("File");
-}
-
-/// The Freedesktop icon for the same classification (Kirigami.Icon takes theme names).
-QString attachmentIcon(const QString &mime, const QString &name)
-{
-    const QString kind = attachmentKind(mime, name);
-    if (kind == QLatin1String("PDF"))
-        return QStringLiteral("application-pdf");
-    if (kind == QLatin1String("Document"))
-        return QStringLiteral("x-office-document");
-    if (kind == QLatin1String("Spreadsheet"))
-        return QStringLiteral("x-office-spreadsheet");
-    if (kind == QLatin1String("Presentation"))
-        return QStringLiteral("x-office-presentation");
-    if (kind == QLatin1String("Image"))
-        return QStringLiteral("image-x-generic");
-    if (kind == QLatin1String("Audio"))
-        return QStringLiteral("audio-x-generic");
-    if (kind == QLatin1String("Video"))
-        return QStringLiteral("video-x-generic");
-    if (kind == QLatin1String("Archive"))
-        return QStringLiteral("application-x-archive");
-    if (kind == QLatin1String("Code"))
-        return QStringLiteral("text-x-script");
-    if (kind == QLatin1String("Text"))
-        return QStringLiteral("text-x-generic");
-    return QStringLiteral("application-octet-stream");
-}
-
-/// "812 B" / "106 KB" / "25.3 MB", rounding the way the phone does: one decimal
-/// only while it says something. `<= 0` is "unknown" — a replayed stub knows no
-/// size, and a card that prints 0 B for a 26 MB deck is worse than one that
-/// prints nothing.
-QString humanBytes(qint64 bytes)
-{
-    if (bytes <= 0)
-        return QString();
-    if (bytes < 1024)
-        return QStringLiteral("%1 B").arg(bytes);
-    static const char *units[] = {"KB", "MB", "GB", "TB"};
-    double value = bytes / 1024.0;
-    int unit = 0;
-    while (value >= 1024.0 && unit < 3) {
-        value /= 1024.0;
-        unit++;
-    }
-    const bool whole = qFuzzyCompare(value, std::floor(value));
-    const QString number = (value >= 100.0 || whole) ? QString::number(value, 'f', 0)
-                                                     : QString::number(value, 'f', 1);
-    return QStringLiteral("%1 %2").arg(number, QString::fromLatin1(units[unit]));
-}
-
-/// One file as the card needs it: name, kind, icon and size label.
-QVariantMap fileCard(const QString &name, const QString &mime, qint64 bytes)
-{
-    const QString kind = attachmentKind(mime, name);
-    const QString size = humanBytes(bytes);
-    return QVariantMap{{"name", name},
-                       {"kind", kind},
-                       {"icon", attachmentIcon(mime, name)},
-                       {"size", size},
-                       // "PDF · 106 KB", or the kind alone when the size is unknown
-                       {"subtitle", size.isEmpty() ? kind : QStringLiteral("%1 · %2").arg(kind, size)}};
-}
-
-} // namespace
 
 QVariantMap Manager::attachmentCard(const QString &path) const
 {
-    const QFileInfo info(path);
-    if (!info.exists())
-        return QVariantMap{{"name", info.fileName()},
-                           {"kind", QStringLiteral("File")},
-                           {"icon", QStringLiteral("application-octet-stream")},
-                           {"size", QString()},
-                           {"subtitle", QStringLiteral("File")}};
-    return fileCard(info.fileName(), QMimeDatabase().mimeTypeForFile(path).name(), info.size());
+    return m_transcript.attachmentCard(path);
 }
-
 QVariantMap Manager::serverFileCard(const QString &name, const QString &mime, qint64 bytes) const
 {
-    return fileCard(name, mime, bytes);
+    return m_transcript.serverFileCard(name, mime, bytes);
 }
-
 void Manager::cancelTurn()
 {
-    // Stop means stop HERE: discarding another chat's parked message because you stopped
-    // this one throws away input the user never cancelled (Android parity).
-    const int before = m_pendingQueue.size();
-    for (int i = m_pendingQueue.size() - 1; i >= 0; --i) {
-        if (m_pendingQueue.at(i).sessionId == m_currentSessionId)
-            m_pendingQueue.removeAt(i);
-    }
-    if (m_pendingQueue.size() != before)
-        emit queuedChanged();
-    if (m_bridge && m_bridge->isAvailable())
-        m_bridge->api().grouse_cancel(m_bridge->handle());
+    m_chat.cancelTurn();
 }
-
 void Manager::compactConversation()
 {
-    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_ready(m_bridge->handle())
-        || (m_prompting && m_promptingSessionId == m_currentSessionId))
-        return;
-    m_compacting = true;
-    emit compactingChanged();
-    const QByteArray prompt = promptJson(QStringLiteral("/compact"), {}).toUtf8();
-    char *err = nullptr;
-    m_bridge->api().grouse_send_prompt(m_bridge->handle(), prompt.constData(), nullptr, &err);
-    if (err)
-        m_bridge->api().grouse_string_free(err);
+    m_chat.compactConversation();
 }
-
 void Manager::exportSessionTo(const QString &sessionId, const QString &filePath)
 {
     if (!m_bridge || !m_bridge->isAvailable() || filePath.isEmpty())
@@ -2396,67 +1086,32 @@ void Manager::setDraft(const QString &text)
 
 void Manager::refreshRecipes()
 {
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    m_bridge->api().grouse_unstable_recipes_list(m_bridge->handle());
-    m_bridge->api().grouse_unstable_schedules_list(m_bridge->handle());
+    m_catalog.refreshRecipes();
 }
-
 void Manager::runRecipe(const QString &id)
 {
-    m_pendingRecipeId = id;
-    m_pendingProjectFiling.clear();
-    newChat();
+    m_catalog.runRecipe(id);
 }
-
 void Manager::scheduleRecipe(const QString &id, const QString &cron)
 {
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    const QByteArray rid = id.toUtf8();
-    const QByteArray c = cron.isEmpty() ? QByteArray() : cron.toUtf8();
-    m_bridge->api().grouse_unstable_recipes_schedule(m_bridge->handle(), rid.constData(),
-                                                     cron.isEmpty() ? nullptr : c.constData());
+    m_catalog.scheduleRecipe(id, cron);
 }
-
 void Manager::deleteRecipe(const QString &id)
 {
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    const QByteArray rid = id.toUtf8();
-    m_bridge->api().grouse_unstable_recipes_delete(m_bridge->handle(), rid.constData());
+    m_catalog.deleteRecipe(id);
 }
-
-// recipes/save replaces the WHOLE recipe: the DTO must be the complete listed
-// object with only the edited keys changed (mirrors Android's recipeWith).
 void Manager::saveRecipe(const QString &id, const QString &recipeJson)
 {
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    const QByteArray rid = id.toUtf8();
-    const QByteArray rj = recipeJson.toUtf8();
-    m_bridge->api().grouse_unstable_recipes_save(m_bridge->handle(), rid.constData(),
-                                                 rj.constData());
+    m_catalog.saveRecipe(id, recipeJson);
 }
-
 void Manager::setSchedulePaused(const QString &scheduleId, bool paused)
 {
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    const QByteArray s = scheduleId.toUtf8();
-    auto f = paused ? m_bridge->api().grouse_unstable_schedules_pause
-                    : m_bridge->api().grouse_unstable_schedules_unpause;
-    f(m_bridge->handle(), s.constData());
+    m_catalog.setSchedulePaused(scheduleId, paused);
 }
-
 void Manager::runScheduleNow(const QString &scheduleId)
 {
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    const QByteArray s = scheduleId.toUtf8();
-    m_bridge->api().grouse_unstable_schedules_run_now(m_bridge->handle(), s.constData());
+    m_catalog.runScheduleNow(scheduleId);
 }
-
 void Manager::renameSession(const QString &sessionId, const QString &title)
 {
     if (!m_bridge || !m_bridge->isAvailable())
@@ -2500,27 +1155,13 @@ void Manager::deleteSession(const QString &sessionId)
 
 void Manager::refreshSkills()
 {
-    if (m_bridge && m_bridge->isAvailable())
-        m_bridge->api().grouse_unstable_sources_list(m_bridge->handle(), "skill");
+    m_catalog.refreshSkills();
 }
-
 void Manager::saveSkill(const QString &path, const QString &name,
                         const QString &description, const QString &content)
 {
-    if (!m_bridge || !m_bridge->isAvailable() || path.isEmpty())
-        return;
-    const QByteArray type = QByteArrayLiteral("skill");
-    const QByteArray p = path.toUtf8();
-    const QByteArray nm = name.toUtf8();
-    const QByteArray d = description.toUtf8();
-    const QByteArray c = content.toUtf8();
-    m_bridge->api().grouse_unstable_sources_update(m_bridge->handle(), type.constData(),
-                                                  p.constData(), nm.constData(), d.constData(), c.constData());
+    m_catalog.saveSkill(path, name, description, content);
 }
-
-// The project's whole source is replaced (the same sources/update the skills
-// use, type "project"); the core re-lists projects on the reply, so open
-// views refresh on their own.
 void Manager::saveProject(const QString &path, const QString &name,
                           const QString &description, const QString &content)
 {
@@ -2537,15 +1178,8 @@ void Manager::saveProject(const QString &path, const QString &name,
 
 void Manager::deleteSkill(const QString &path)
 {
-    if (!m_bridge || !m_bridge->isAvailable() || path.isEmpty())
-        return;
-    const QByteArray type = QByteArrayLiteral("skill");
-    const QByteArray p = path.toUtf8();
-    m_bridge->api().grouse_unstable_sources_delete(m_bridge->handle(), type.constData(), p.constData());
+    m_catalog.deleteSkill(path);
 }
-
-// ---- server config (providers) ---------------------------------------------
-
 void Manager::publishPushEndpoint(const QString &url)
 {
     if (url.isEmpty())
@@ -2588,374 +1222,72 @@ QString Manager::pushDecideRun(const QString &envelopeJson, const QString &conte
 
 void Manager::setServerConfig(const QString &key, const QString &value)
 {
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    const QByteArray k = key.toUtf8();
-    const QByteArray v = value.toUtf8();
-    m_bridge->api().grouse_unstable_config_upsert(m_bridge->handle(), k.constData(), v.constData());
-    m_bridge->api().grouse_unstable_config_read(m_bridge->handle(), k.constData());
+    m_catalog.setServerConfig(key, value);
 }
-
 void Manager::readServerConfig(const QString &key)
 {
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    const QByteArray k = key.toUtf8();
-    m_bridge->api().grouse_unstable_config_read(m_bridge->handle(), k.constData());
+    m_catalog.readServerConfig(key);
 }
-
 void Manager::refreshSupportedModels(const QString &providerId)
 {
-    if (m_bridge && m_bridge->isAvailable() && !providerId.isEmpty()) {
-        const QByteArray p = providerId.toUtf8();
-        m_bridge->api().grouse_unstable_supported_models(m_bridge->handle(), p.constData());
-    }
+    m_catalog.refreshSupportedModels(providerId);
 }
-
-// ---- per-session tool management ------------------------------------------
-
 void Manager::refreshToolGroups()
 {
-    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_ready(m_bridge->handle()))
-        return;
-    // The row catalog is the GLOBAL extension list; the switches are the CURRENT
-    // session's attached set; the tool checkboxes are the session's active tools.
-    // All three, every time — the switches used to refresh only as a side effect
-    // of an add's re-list, so opening a chat showed everything OFF until the user
-    // toggled one thing (which "fixed" the rest).
-    const QByteArray sid = m_currentSessionId.toUtf8();
-    if (sid.isEmpty()) {
-        // No chat open: the rows still have to come from somewhere, and with no session
-        // to route on that is the main server's config.yaml.
-        m_bridge->api().grouse_unstable_list_global_extensions(m_bridge->handle());
-        return;
-    }
-    // The CATALOG for this chat (its own server — the peer's, for a roam chat). Asking
-    // the main connection instead is what made a peer chat's sheet list the local
-    // server's rows while offering nothing the chat actually lacked.
-    m_bridge->api().grouse_unstable_extension_catalog(m_bridge->handle(), sid.constData());
-    m_bridge->api().grouse_unstable_list_tools(m_bridge->handle(), sid.constData());
-    m_bridge->api().grouse_unstable_session_extensions_list(m_bridge->handle(), sid.constData());
+    m_catalog.refreshToolGroups();
 }
-
 void Manager::discoverToolGroup(const QString &extName)
 {
-    const ExtDef *d = extDef(extName);
-    if (!d || m_toolCatalog.contains(extName) || !m_bridge || !m_bridge->isAvailable()
-        || m_currentSessionId.isEmpty())   // a peek without an open session can never be confirmed
-        return;
-    QJsonObject unfiltered = d->raw;
-    unfiltered.insert("available_tools", QJsonArray());
-    m_discoveringExt = extName;
-    // Peek works for DETACHED rows too (that's the point: read the tool list
-    // without paying its context cost). goose only enumerates tools of a
-    // RUNNING extension, so the peek attaches it for one list round-trip —
-    // and detaches it again unless it was already in the session. A leading
-    // remove is only sent for an attached row (remove of a never-attached one
-    // is a server-side "not found" error).
-    m_discoveringAttached = m_sessionExts.contains(extName);
-    const QByteArray sid = m_currentSessionId.toUtf8();
-    const QByteArray ext = QJsonDocument(unfiltered).toJson(QJsonDocument::Compact);
-    if (m_discoveringAttached)
-        m_bridge->api().grouse_unstable_session_extensions_remove(m_bridge->handle(), sid.constData(),
-                                                                  d->key.toUtf8().constData());
-    m_bridge->api().grouse_unstable_session_extensions_add(m_bridge->handle(), sid.constData(),
-                                                           ext.constData());
+    m_catalog.discoverToolGroup(extName);
 }
-
 void Manager::setSessionExtensionEnabled(const QString &extName, bool enabled)
 {
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    const ExtDef *d = extDef(extName);
-    if (!d)
-        return;
-    const QByteArray sid = m_currentSessionId.toUtf8();
-    if (enabled) {
-        if (!m_sessionExts.contains(extName))
-            m_sessionExts << extName;
-        // The optimistic attach carries whatever allowlist the global profile
-        // has, so the restriction set must match until the server re-lists.
-        if (d->raw.value(QStringLiteral("available_tools")).toArray().isEmpty())
-            m_sessionRestricted.remove(extName);
-        else
-            m_sessionRestricted.insert(extName);
-        m_bridge->api().grouse_unstable_session_extensions_add(
-            m_bridge->handle(), sid.constData(),
-            QJsonDocument(d->raw).toJson(QJsonDocument::Compact).constData());
-    } else {
-        m_sessionExts.removeAll(extName);
-        m_sessionRestricted.remove(extName);
-        m_bridge->api().grouse_unstable_session_extensions_remove(
-            m_bridge->handle(), sid.constData(), d->key.toUtf8().constData());
-    }
-    publishToolGroups();
-    saveToolCache(m_currentSessionId);
+    m_catalog.setSessionExtensionEnabled(extName, enabled);
 }
-
 void Manager::setSessionToolEnabled(const QString &extName, const QString &toolName, bool on)
 {
-    const ExtDef *d = extDef(extName);
-    if (!d)
-        return;
-    // Acting on a session needs one open: these RPCs carry the session id, and
-    // goose answers every one it cannot resolve with its own error — three of
-    // them for one toggle, on a chat whose transcript is still on screen from
-    // the cache (grouse#20). Browsing the catalog stays fine; only acting needs
-    // a chat. Android has guarded all of these with `activeSessionId() ?: return`
-    // from the start.
-    if (!sessionIsOpen())
-        return;
-    const QString prefix = d->key + QStringLiteral("__");
-    if (!m_sessionExts.contains(extName)) {
-        // Ticking a tool on a DETACHED row attaches the extension restricted
-        // to exactly that tool — the whole point of letting you browse lists
-        // without attaching: you enable one tool, not all of them.
-        if (!on || !m_bridge || !m_bridge->isAvailable())
-            return;
-        QJsonObject scoped = d->raw;
-        scoped.insert("available_tools", QJsonArray{toolName});   // BARE name
-        const QByteArray sid = m_currentSessionId.toUtf8();
-        m_bridge->api().grouse_unstable_session_extensions_add(
-            m_bridge->handle(), sid.constData(),
-            QJsonDocument(scoped).toJson(QJsonDocument::Compact).constData());
-        m_sessionExts << extName;
-        m_sessionRestricted.insert(extName);   // restricted to that one tool
-        publishToolGroups();
-        saveToolCache(m_currentSessionId);
-        return;
-    }
-    QSet<QString> current;
-    for (const auto &t : m_tools)
-        if (t.startsWith(prefix))
-            current << t;
-    if (on == current.contains(prefix + toolName))
-        return;
-    if (on) current << (prefix + toolName);
-    else current.remove(prefix + toolName);
-    setSessionTools(extName, current.values());
+    m_catalog.setSessionToolEnabled(extName, toolName, on);
 }
-
-// ---- global (config.yaml) extensions ----------------------------------------
-
 QVariant Manager::globalExtensions() const
 {
-    QVariantList out;
-    for (const auto &d : m_extDefs) {
-        QVariantMap group;
-        group["name"] = d.name;   // display
-        group["key"] = d.key;     // identity: toggles + tool prefixes are keyed by configKey
-        group["type"] = d.type;
-        group["attrib"] = d.attrib;
-        group["enabled"] = d.enabled;
-        QVariantList tools;
-        const QString prefix = d.key + QStringLiteral("__");
-        const QSet<QString> allowed(d.availableTools.constBegin(), d.availableTools.constEnd());
-        if (allowed.isEmpty()) {
-            const QStringList full = m_toolCatalog.value(d.key);
-            for (const auto &t : full)
-                tools << QVariantMap{{"name", t.mid(prefix.length())}, {"on", true}};
-        } else {
-            // available_tools entries are BARE tool names (verified live: a prefixed
-            // allowlist matches nothing and silently disables the whole extension).
-            for (const auto &t : d.availableTools)
-                tools << QVariantMap{{"name", t}, {"on", true}};
-        }
-        group["tools"] = tools;
-        out << group;
-    }
-    return out;
+    return m_catalog.globalExtensions();
 }
-
 void Manager::refreshGlobalExtensions()
 {
-    if (m_bridge && m_bridge->isAvailable())
-        m_bridge->api().grouse_unstable_list_global_extensions(m_bridge->handle());
+    m_catalog.refreshGlobalExtensions();
 }
-
 void Manager::setGlobalExtensionEnabled(const QString &extKey, bool enabled)
 {
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    // GLOBAL means the main server's config.yaml: a row that exists only in the chat's
-    // catalog (a peer's extension) must not be written here, or a peer-only key would
-    // land in this box's config as a phantom.
-    const ExtDef *d = globalExtDef(extKey);
-    if (!d)
-        return;
-    m_bridge->api().grouse_unstable_set_extension_enabled(
-        m_bridge->handle(), d->key.toUtf8().constData(), enabled ? 1 : 0);
+    m_catalog.setGlobalExtensionEnabled(extKey, enabled);
 }
-
 void Manager::setGlobalToolEnabled(const QString &extName, const QString &toolName, bool on)
 {
-    const ExtDef *d = globalExtDef(extName);
-    if (!d)
-        return;
-    QSet<QString> current(d->availableTools.constBegin(), d->availableTools.constEnd());
-    // available_tools is a list of BARE tool names (server-verified), both read and written.
-    if (on == current.contains(toolName))
-        return;
-    if (on) current << toolName;
-    else current.remove(toolName);
-    QJsonObject scoped = d->raw;
-    QJsonArray arr;
-    for (const auto &t : std::as_const(current))
-        arr.append(t);
-    scoped.insert("available_tools", arr);
-    m_bridge->api().grouse_unstable_add_extension(
-        m_bridge->handle(),
-        QJsonDocument(scoped).toJson(QJsonDocument::Compact).constData(), d->enabled ? 1 : 0);
+    m_catalog.setGlobalToolEnabled(extName, toolName, on);
 }
-
-// ---- tool-group plumbing ---------------------------------------------------
-
 const Manager::ExtDef *Manager::extDef(const QString &key) const
 {
-    // The CHAT's server first: for a roam chat that is the peer's definition, and it is
-    // the one its session/extensions/add accepts. A key only the main server knows still
-    // resolves for the tool grouping and for the settings screen's rows.
-    for (const auto &d : m_catalogDefs)
-        if (d.key == key)
-            return &d;
-    return globalExtDef(key);
+    return m_catalog.extDef(key);
 }
-
 const Manager::ExtDef *Manager::globalExtDef(const QString &key) const
 {
-    for (const auto &d : m_extDefs)
-        if (d.key == key)
-            return &d;
-    return nullptr;
+    return m_catalog.globalExtDef(key);
 }
-
 void Manager::setSessionTools(const QString &extName, const QStringList &allowed)
 {
-    const ExtDef *d = extDef(extName);
-    if (!d)
-        return;
-    if (!sessionIsOpen())
-        return;
-    const QStringList full = m_toolCatalog.value(extName);
-    const QStringList list =
-        (!full.isEmpty() && allowed.size() >= full.size()) ? QStringList() : allowed;
-    QJsonObject scoped = d->raw;
-    QJsonArray arr;
-    // The caller passes fully-qualified `key__tool` names (they come from the session's
-    // tool list); the server's available_tools matches on BARE names — a prefixed entry
-    // silently filters out every tool (verified live). Strip on the way out.
-    const QString strip = d->key + QStringLiteral("__");
-    for (const auto &t : list)
-        arr.append(t.startsWith(strip) ? t.mid(strip.length()) : t);
-    scoped.insert("available_tools", arr);
-    if (arr.isEmpty())
-        m_sessionRestricted.remove(extName);   // empty allowlist = unfiltered
-    else
-        m_sessionRestricted.insert(extName);
-    m_discoveringExt.clear();
-    const QByteArray sid = m_currentSessionId.toUtf8();
-    m_bridge->api().grouse_unstable_session_extensions_remove(
-        m_bridge->handle(), sid.constData(), d->key.toUtf8().constData());
-    m_bridge->api().grouse_unstable_session_extensions_add(
-        m_bridge->handle(), sid.constData(),
-        QJsonDocument(scoped).toJson(QJsonDocument::Compact).constData());
+    m_catalog.setSessionTools(extName, allowed);
 }
-
 void Manager::publishToolGroups()
 {
-    emit toolGroupsChanged();
+    m_catalog.publishToolGroups();
 }
-
 void Manager::loadToolCache(const QString &sessionId)
 {
-    // The catalogue is extension knowledge, not session state: reading it back
-    // is what lets "does this row have >=2 sub-tools?" survive a restart
-    // instead of re-arrowing every row on first open. Only keys not already
-    // learned this run are merged (live truth wins over memory).
-    // Global memory first: one server-wide sweep result shared by every chat.
-    const QByteArray persisted =
-        m_store.value(QStringLiteral("tool_catalogs")).toString().toUtf8();
-    if (!persisted.isEmpty()) {
-        const QJsonObject cats = QJsonDocument::fromJson(persisted).object();
-        for (auto it = cats.constBegin(); it != cats.constEnd(); ++it) {
-            if (m_toolCatalog.contains(it.key()))
-                continue;
-            QStringList tools;
-            for (const auto &v : it.value().toArray())
-                tools << v.toString();
-            m_toolCatalog.insert(it.key(), tools);
-        }
-    }
-    if (sessionId.isEmpty())
-        return;
-    QString safe = sessionId;
-    safe.replace(QLatin1Char('/'), QLatin1Char('_'));
-    const QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-    QFile f(base + QStringLiteral("/") + safe + QStringLiteral("-tools.json"));
-    if (!f.open(QIODevice::ReadOnly))
-        return;
-    const QJsonObject catalogs = QJsonDocument::fromJson(f.readAll()).object()
-                                   .value(QStringLiteral("catalog")).toObject();
-    for (auto it = catalogs.constBegin(); it != catalogs.constEnd(); ++it) {
-        if (m_toolCatalog.contains(it.key()))
-            continue;
-        QStringList tools;
-        for (const auto &v : it.value().toArray())
-            tools << v.toString();
-        m_toolCatalog.insert(it.key(), tools);   // an empty list is real knowledge too
-    }
+    m_catalog.loadToolCache(sessionId);
 }
-
 void Manager::saveToolCache(const QString &sessionId) const
 {
-    if (sessionId.isEmpty())
-        return;
-    QJsonObject root;
-    QJsonArray tools;
-    for (const auto &tool : m_tools)
-        tools.append(tool);
-    root.insert("tools", tools);
-
-    QJsonArray sessionExtensions;
-    for (const auto &name : m_sessionExts)
-        sessionExtensions.append(name);
-    root.insert("sessionExtensions", sessionExtensions);
-
-    QJsonArray extensions;
-    for (const auto &d : m_extDefs) {
-        QJsonArray availableTools;
-        for (const auto &tool : d.availableTools)
-            availableTools.append(tool);
-        extensions.append(QJsonObject{
-            {"name", d.name},
-            {"type", d.type},
-            {"attrib", d.attrib},
-            {"availableTools", availableTools},
-            {"raw", d.raw},
-        });
-    }
-    root.insert("extensions", extensions);
-
-    QJsonObject catalogs;
-    for (auto it = m_toolCatalog.constBegin(); it != m_toolCatalog.constEnd(); ++it) {
-        QJsonArray toolsForExtension;
-        for (const auto &tool : it.value())
-            toolsForExtension.append(tool);
-        catalogs.insert(it.key(), toolsForExtension);
-    }
-    root.insert("catalog", catalogs);
-
-    QString safe = sessionId;
-    safe.replace(QLatin1Char('/'), QLatin1Char('_'));
-    const QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-    QDir().mkpath(base);
-    QFile f(base + QStringLiteral("/") + safe + QStringLiteral("-tools.json"));
-    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        f.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
-        f.close();
-    }
+    m_catalog.saveToolCache(sessionId);
 }
-
 // ---------------------------------------------------------------------------
 // CoreBridge event handlers (main-thread entry points — see corebridge.cpp)
 //
@@ -2980,119 +1312,8 @@ static QJsonArray parseArr(const QString &json)
 
 void Manager::coreOnStatus(const QString &json)
 {
-    const QString s = json;
-    // The card-pin check is a dial-time refusal. It arrives as an Error/Alert
-    // envelope (or a plain string); surface the actionable text even when the
-    // generic status branch below only paints the line.
-    const QJsonObject statusObj = parseObj(s);
-    QString statusText = s;
-    for (const char *key : {"Error", "Alert"}) {
-        const QJsonValue v = statusObj.value(QLatin1String(key));
-        if (v.isObject() && v.toObject().contains(QStringLiteral("message"))) {
-            statusText = v.toObject().value(QStringLiteral("message")).toString();
-            break;
-        }
-    }
-    maybeShowCardPinRefusal(statusText, QString());
-    // Ready is a CONNECTION phase, never an open result. An open emits its own
-    // on_session_opened (a paint / a Window is not one either: background fills
-    // send those). Leave a chat's loading line alone until that answer arrives.
-    const bool openingChat = m_status == QStringLiteral("loading…")
-                             || m_status == QStringLiteral("reloading…")
-                             || m_status == QStringLiteral("reloading from the start…");
-    if (s == QStringLiteral("\"Ready\"") || s == QStringLiteral("Ready")) {
-        setOnline(true);
-        if (!openingChat)
-            setStatus(QStringLiteral("ready"));
-        // A MAIN-wire Ready may only clear turns OWNED BY THE MAIN WIRE. A peer's
-        // turn is carried by its own connection; clearing it here is the desktop
-        // twin of the Android bug fixed today — a roam chat's composer unlocks
-        // while its reply is still streaming and the next send lands in a live turn.
-        // Ownership comes from the core, not from text parsing of the session id.
-        const bool currentIsRoam = !sessionPeerLabel(m_currentSessionId).isEmpty();
-        if (!currentIsRoam && mainWireOwnsTurnState(m_activePeerLabel)) {
-            m_prompting = false;
-            m_promptingSessionId.clear();
-            // A reconnected client cannot receive the old turns' run ends.
-            m_inFlight.clear();
-            m_activeRunIds.clear();
-            emit promptingChanged();
-        }
-        if (m_wireOnlyConnect) {
-            m_wireOnlyConnect = false;
-            // A wire-only connect binds nothing. If the chat on screen is a MAIN
-            // chat, bind it here (without the UI reset of openSession) so the
-            // send queue can drain; a roam screen gets no main chat painted over it.
-            if (m_activePeerLabel.isEmpty() && !m_landing && !currentIsRoam)
-                bindSessionAfterAttach();
-        }
-        // Resolve a pending testConnection() probe. The failure paths
-        // (Disconnected/Error) already reported; only Ready completed silently,
-        // which made a SUCCESSFUL test indistinguishable from "nothing happened".
-        if (m_testPending) {
-            m_testPending = false;
-            emit connectionTested(true,
-                QStringLiteral("Connection OK — %1:%2, handshake complete.")
-                    .arg(useTls() ? QStringLiteral("wss://") : QStringLiteral("ws://"),
-                         host().trimmed(), port().trimmed()));
-        }
-        // The core bridge resolves lazily; by Ready it is definitely live, so this
-        // is the safe point to re-arm dials for persisted roam peers (once). Roam
-        // is opt-in, so stay dormant (and leave m_roamRestored false) when off.
-        if (roamEnabled() && !m_roamRestored) {
-            m_roamRestored = true;
-            syncRoamIdentityToCore();
-            restoreRoamPeers();
-        }
-        syncRunSummariesToCore();
-        syncAdvisorToCore();
-        syncRescaleToCore();
-        flushQueue();
-        refreshSessions();
-        refreshProjects();
-        refreshRecipes();
-        refreshProviders();
-        // Tool state must land WITH the session, not on the next toggle: global
-        // extension catalog + this session's active tools + attached extensions.
-        refreshToolGroups();
-    } else if (s == QStringLiteral("\"Connecting\"") || s == QStringLiteral("Connecting")) {
-        setOnline(false);
-        setStatus(QStringLiteral("connecting…"));
-    } else if (s == QStringLiteral("\"Syncing\"") || s == QStringLiteral("Syncing")) {
-        setStatus(QStringLiteral("syncing…"));
-    } else if (s.contains(QLatin1String("Alert"))) {
-        // Advisory failure on a control path (e.g. a set_config_option the
-        // peer refused): text in the status bar only — the connection did not
-        // go down, so the online state and turn wiring are untouched.
-        QString msg = parseObj(s).value(QLatin1String("Alert")).toObject().value(QStringLiteral("message")).toString();
-        if (!msg.isEmpty())
-            setStatus(msg);
-    } else if (s == QStringLiteral("\"Disconnected\"") || s == QStringLiteral("Disconnected")) {
-        setOnline(false);
-        m_wireOnlyConnect = false;
-        setStatus(QStringLiteral("not connected"));
-        if (m_activePeerLabel.isEmpty())
-            releaseTurnForLostWire(m_currentSessionId);
-        if (m_testPending) {
-            m_testPending = false;
-            emit connectionTested(false, QStringLiteral("Connection failed — disconnected."));
-        }
-    } else {
-        // Error { "message": ... }
-        QJsonObject o = parseObj(s);
-        QString msg = o.value(QStringLiteral("Error")).toObject().value(QStringLiteral("message")).toString();
-        setOnline(false);
-        m_wireOnlyConnect = false;
-        setStatus(msg.isEmpty() ? QStringLiteral("connection error") : msg);
-        if (m_activePeerLabel.isEmpty())
-            releaseTurnForLostWire(m_currentSessionId);
-        if (m_testPending) {
-            m_testPending = false;
-            emit connectionTested(false, msg.isEmpty() ? QStringLiteral("Connection failed.") : msg);
-        }
-    }
+    m_chat.onStatus(json);
 }
-
 namespace {
 // The project key as the server holds it: the short name ("hacking"). Android's
 // ProjectSummary.toInfo() derives exactly this from the <name>.md basename of
@@ -3186,85 +1407,16 @@ void Manager::coreOnAdvisorReport(const QString &sid, const QString &text)
 
 QVariantMap Manager::parsePermissionRequest(const QString &json)
 {
-    const QJsonObject root = parseObj(json);
-    const QJsonObject req = root.value(QStringLiteral("PermissionRequest")).isObject()
-        ? root.value(QStringLiteral("PermissionRequest")).toObject() : root;
-    const QString toolCallId = req.value("tool_call_id").toString(req.value("toolCallId").toString());
-    const QString requestId = req.value("request_id").toString(
-        req.value("requestId").toString(toolCallId));
-    const QString sessionId = req.value("session_id").toString(req.value("sessionId").toString());
-    QVariant owner = req.value("owner").toVariant();
-    // Some C ABI spellings pass SessionOwner as a JSON *string*, not an object.
-    if (owner.userType() == QMetaType::QString && owner.toString().trimmed().startsWith(QLatin1Char('{')))
-        owner = QJsonDocument::fromJson(owner.toString().trimmed().toUtf8()).object().toVariant();
-
-    QVariantList options;
-    for (const auto &opt : req.value("options").toArray()) {
-        const QJsonObject oo = opt.toObject();
-        options << QVariantMap{{"option_id", oo.value("option_id").toString()},
-                               {"name", oo.value("name").toString()},
-                               {"kind", oo.value("kind").toString()}};
-    }
-    return {{"requestId", requestId},
-            {"toolCallId", toolCallId},
-            {"sessionId", sessionId},
-            {"owner", owner},
-            {"ownerLabel", requestOwnerLabel(owner, sessionId)},
-            {"title", req.value("title").toString()},
-            {"detail", req.value("detail").toString()},
-            {"options", options}};
+    return CoreApi::parsePermissionRequest(json);
 }
-
 int Manager::requestQueueIndex(const QVariantList &queue, const QString &requestId)
 {
-    if (requestId.isEmpty())
-        return -1;                 // never answer an ambiguous id
-    for (int i = 0; i < queue.size(); ++i) {
-        const QVariantMap entry = queue.at(i).toMap();
-        QString id = entry.value("requestId").toString();
-        if (id.isEmpty())
-            id = entry.value("toolCallId").toString();
-        if (id == requestId)
-            return i;
-    }
-    return -1;
+    return CoreApi::requestQueueIndex(queue, requestId);
 }
-
 QString Manager::requestOwnerLabel(const QVariant &owner, const QString &sessionId)
 {
-    QString label;
-    QString kind;
-    if (owner.userType() == QMetaType::QVariantMap) {
-        const QVariantMap o = owner.toMap();
-        label = o.value("label").toString();
-        kind = o.value("kind").toString();
-    } else if (owner.isValid() && !owner.isNull()) {
-        label = owner.toString();
-    }
-    if (!label.isEmpty()) {
-        if (label.startsWith(QLatin1String("roam:")))
-            return label;
-        if (kind == QLatin1String("roam"))
-            return QStringLiteral("roam:") + label;
-        // The core sends a BARE roam label in PermissionRequest::owner. Pair it
-        // with the display id so the dialog names both the wire and the chat.
-        if (sessionId.startsWith(QLatin1String("roam:"))) {
-            const QString peer = roamPeerForSession(sessionId);
-            if (!peer.isEmpty() && label == peer)
-                return QStringLiteral("roam:") + peer;
-        }
-        return sessionId.startsWith(label + QLatin1Char(':'))
-            ? QStringLiteral("roam:") + label : label;
-    }
-    if (sessionId.isEmpty())
-        return QString();
-    if (sessionId.startsWith(QLatin1String("roam:"))) {
-        const QString peer = roamPeerForSession(sessionId);
-        return peer.isEmpty() ? sessionId : QStringLiteral("roam:") + peer;
-    }
-    return sessionId;
+    return CoreApi::requestOwnerLabel(owner, sessionId);
 }
-
 void Manager::syncPermissionFront(bool notify)
 {
     if (m_permissionQueue.isEmpty()) {
@@ -3516,9 +1668,8 @@ void Manager::coreOnPeerNewSession(const QString &label, const QString &sid)
 
 void Manager::coreOnActiveRun(const QString &sid, const QString &runId)
 {
-    onActiveRunChanged(sid, runId);
+    m_chat.onActiveRunChanged(sid, runId);
 }
-
 void Manager::coreOnCommands(const QString &json)
 {
     QStringList commands;
@@ -3529,41 +1680,12 @@ void Manager::coreOnCommands(const QString &json)
 
 void Manager::coreOnSessionOpened(const QString &sessionId)
 {
-    if (sessionId.isEmpty() || sessionId != m_currentSessionId)
-        return;   // a background bind or another peer's open is not THIS chat's answer
-    // The core emits this only after the store is painted and the session is bound
-    // (a rejected load and a bind-only load stay silent). It is the one honest end
-    // of the "loading…" line we set locally on open — Ready and Window are not.
-    if (m_status == QStringLiteral("loading…")
-        || m_status == QStringLiteral("reloading…")
-        || m_status == QStringLiteral("reloading from the start…"))
-        setStatus(QStringLiteral("ready"));
-    // Same for the replay bar: a suppressed replay emits no progress at all, and
-    // a paint whose ReplayProgress was lost used to leave the bar spinning after
-    // the chat was already settled. A completed open owns both bars' finish.
-    resetReloadProgress();
-    if (m_openFor == sessionId) {
-        timingLog(QStringLiteral("open %1 settled in %2ms (%3 rows)")
-                      .arg(sessionId)
-                      .arg(m_openClock.elapsed())
-                      .arg(m_messageModel->rowCount()));
-    }
+    m_chat.onSessionOpened(sessionId);
 }
-
 void Manager::coreOnSessionOpenFailed(const QString &sessionId, const QString &message)
 {
-    // The core bound NOTHING for a failed open (grouse#19): the chat keeps
-    // whatever the cache painted and the wire has no session. Surface the
-    // failure where "reloading…" was, so an open that never loaded is visible
-    // instead of looking like an empty conversation.
-    setStatus(QStringLiteral("couldn't open that chat — %1").arg(message));
-    // A failed open cannot finish a replay either; drop the bar with the status.
-    resetReloadProgress();
-    // A dead thread link is dropped by the CORE, which owns the map: a failed open is
-    // the one signal a session invisible to every list can produce (grouse#19).
-    emit currentThreadLabelChanged();
+    m_chat.onSessionOpenFailed(sessionId, message);
 }
-
 // ---------------------------------------------------------------------------
 // My Day + thread chats (CONTRACT §3.6)
 // ---------------------------------------------------------------------------
@@ -3815,65 +1937,14 @@ void Manager::reactTask(const QString &id, const QString &reaction)
 
 void Manager::coreOnFile(const QString &json)
 {
-    const QJsonObject root = parseObj(json);
-    // FileEvent is an externally-tagged enum; the fields live inside the variant.
-    // Every variant now carries the DISPLAY session id (roam ids included), so key
-    // the card by owner + path, never by a bare path two chats can share.
-    QJsonObject fields;
-    for (const auto &variant : {QStringLiteral("Progress"), QStringLiteral("Saved"),
-                                QStringLiteral("Failed")}) {
-        if (root.contains(variant)) {
-            fields = root.value(variant).toObject();
-            break;
-        }
-    }
-    const QString path = fields.value(QStringLiteral("path")).toString();
-    QString sessionId = fields.value(QStringLiteral("session_id")).toString();
-    if (sessionId.isEmpty())
-        sessionId = root.value(QStringLiteral("session_id")).toString();
-    if (sessionId.isEmpty()) {
-        // An older core has no session in the event: the fetch was started from
-        // the chat on screen, which is the only honest fallback we have.
-        sessionId = m_currentSessionId;
-    } else if (!sessionId.startsWith(QLatin1String("roam:"))
-               && m_currentSessionId.endsWith(QStringLiteral(":") + sessionId)
-               && !sessionPeerLabel(m_currentSessionId).isEmpty()) {
-        // A peer's raw wire id in an older event: normalize to the display id the
-        // row is keyed by (the core's DISPLAY id already matches and skips this).
-        sessionId = m_currentSessionId;
-    }
-    QJsonObject out = root;
-    out.insert(QStringLiteral("session_id"), sessionId);
-    out.insert(QStringLiteral("key"), fileCardKey(sessionId, path));
-    emit fileEvent(QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
+    m_transcript.applyFile(json);
 }
-
 void Manager::fetchFile(const QString &sessionId, const QString &path,
                         const QString &name, const QString &mime,
                         const QString &sha256)
 {
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    if (path.isEmpty()) {
-        onError(QStringLiteral("this file has no server path to fetch"), false);
-        return;
-    }
-    const QByteArray sid = sessionId.toUtf8();
-    const QByteArray p = path.toUtf8();
-    const QByteArray n = name.toUtf8();
-    const QByteArray mt = mime.toUtf8();
-    const QByteArray sha = sha256.toUtf8();
-    char *err = nullptr;
-    m_bridge->api().grouse_fetch_file(m_bridge->handle(), sid.constData(), p.constData(),
-                                      n.constData(), mt.constData(), sha.constData(), &err);
-    if (err) {
-        const QString message = QString::fromUtf8(err);
-        m_bridge->api().grouse_string_free(err);
-        // Not a background failure: the user just tapped this card.
-        onError(message, false);
-    }
+    m_transcript.fetchFile(sessionId, path, name, mime, sha256);
 }
-
 void Manager::coreOnThreadReady(const QString &label, const QString &sessionId)
 {
     Q_UNUSED(label);
@@ -4100,7 +2171,7 @@ void Manager::answerFormFor(const QString &requestId, const QVariantMap &values,
                 vals.insert(it.key(), it.value().toString());
         const QByteArray js = QJsonDocument(vals).toJson(QJsonDocument::Compact);
         const QByteArray act = (accepted ? QStringLiteral("submit") : QStringLiteral("cancel")).toUtf8();
-        respondRecipeIntent(m_bridge->api().grouse_unstable_respond_recipe_params,
+        CoreApi::respondRecipeIntent(m_bridge->api().grouse_unstable_respond_recipe_params,
                             m_bridge->handle(), rid, act, js);
         return;
     }
@@ -4124,15 +2195,14 @@ void Manager::answerFormFor(const QString &requestId, const QVariantMap &values,
     const QString act = accepted ? QStringLiteral("accept")
         : action == QLatin1String("cancel") ? QStringLiteral("cancel")
                                             : QStringLiteral("decline");
-    respondElicitationIntent(m_bridge->api().grouse_unstable_respond_elicitation,
+    CoreApi::respondElicitationIntent(m_bridge->api().grouse_unstable_respond_elicitation,
                              m_bridge->handle(), rid, act.toUtf8(), js);
 }
 
 void Manager::coreOnCompactionStatus(const QString &message)
 {
-    onCompactionStatus(message);
+    m_chat.onCompactionStatus(message);
 }
-
 void Manager::coreOnMessageUsage(std::uint64_t outTok, std::uint64_t elapsedMs,
                                  std::uint64_t ttftMs, double cost)
 {
@@ -4255,99 +2325,25 @@ void Manager::coreOnSupportedModels(const QString &provider, const QString &json
 
 QStringList Manager::configuredProvidersFromJson(const QString &json)
 {
-    // goose's inventory of providers. `configured` alone is too broad: goose also marks
-    // local endpoints and detected CLIs usable with nothing set. `hasCredentials` (the
-    // core's stricter signal — a provider config field is actually set) keeps only the
-    // providers the user actually set up. When the core doesn't send it (older .so) fall
-    // back to `configured` so nothing regresses.
-    QStringList configured;
-    for (const auto &el : parseArr(json)) {
-        const QJsonObject o = el.toObject();
-        const QString id = o.value("providerId").toString();
-        if (id.isEmpty() || !o.value("configured").toBool())
-            continue;
-        const bool hasCredentials = o.contains("hasCredentials")
-                                        ? o.value("hasCredentials").toBool()
-                                        : true;
-        if (hasCredentials)
-            configured << id;
-    }
-    return configured;
+    return CatalogController::configuredProvidersFromJson(json);
 }
-
 void Manager::coreOnProviders(const QString &json)
 {
-    const QStringList configured = configuredProvidersFromJson(json);
-    // An empty parse must not empty the pickers: a server that doesn't answer this
-    // leaves the previous list (and configured-providers-only degrades to "show all").
-    if (configured.isEmpty() && !m_configuredProviders.isEmpty())
-        return;
-    m_configuredProviders = configured;
-    emit providersChanged();
+    m_catalog.onProviders(json);
 }
-
 void Manager::refreshProviders()
 {
-    if (m_bridge && m_bridge->isAvailable())
-        m_bridge->api().grouse_unstable_providers_list(m_bridge->handle());
+    m_catalog.refreshProviders();
 }
-
 QVariantList Manager::filterProviders(const QVariantList &choices, const QStringList &configured,
                                       bool configuredOnly, const QString &current)
 {
-    QVariantList keep;
-    if (!configuredOnly || configured.isEmpty()) {
-        keep = choices;
-    } else {
-        for (const QVariant &choice : choices) {
-            const QString value = choice.toMap().value(QStringLiteral("value")).toString();
-            // `current` is kept unconditionally: a disabled/off-catalog pick still has to
-            // show in its own combo, or it looks like the app switched provider by itself.
-            if (value == current || configured.contains(value))
-                keep.append(choice);
-        }
-        // Never hand back an empty model: a stale inventory that matches nothing (or an
-        // all-unconfigured server) degrades to the full list instead of a blank combo.
-        if (keep.isEmpty())
-            keep = choices;
-    }
-    // Two choices can carry the SAME display label. An exact (name, value) pair is
-    // nothing but a duplicate — it picks the same provider twice — so it is dropped;
-    // a shared label with DIFFERENT values (a CLI-detected entry beside its API
-    // twin) keeps both, because dropping either would make one unreachable, and the
-    // later ones carry their id so they can be told apart.
-    QVariantList unique;
-    QHash<QString, int> labelAt;
-    for (const QVariant &choice : keep) {
-        QVariantMap entry = choice.toMap();
-        const QString label = entry.value(QStringLiteral("name")).toString();
-        if (label.isEmpty()) {
-            unique.append(entry);
-            continue;
-        }
-        const QString value = entry.value(QStringLiteral("value")).toString();
-        const QString exactKey = label + QLatin1Char('\n') + value;
-        if (labelAt.contains(exactKey))
-            continue;   // same label AND same value: a true duplicate
-        if (labelAt.contains(label)) {
-            entry[QStringLiteral("name")] = value.isEmpty()
-                                                ? label
-                                                : label + QStringLiteral(" (") + value + QLatin1Char(')');
-            labelAt.insert(label + QLatin1Char('\n') + value, unique.size());
-        } else {
-            labelAt.insert(label, unique.size());
-            labelAt.insert(exactKey, unique.size());
-        }
-        unique.append(entry);
-    }
-    return unique;
+    return CatalogController::filterProviders(choices, configured, configuredOnly, current);
 }
-
 QVariantList Manager::filterConfiguredProviders(const QVariantList &choices, const QString &current) const
 {
-    return filterProviders(choices, m_configuredProviders, configuredProvidersOnly(), current);
+    return m_catalog.filterConfiguredProviders(choices, current);
 }
-
 void Manager::coreOnSessionProbe(const QString &sid, const QString &u, qint64 n)
 {
     Q_UNUSED(sid); Q_UNUSED(u); Q_UNUSED(n);
@@ -4369,38 +2365,7 @@ void Manager::coreOnError(const QString &method, const QString &message)
     onError(message, false);
 }
 
-namespace {
-/// Fill a text row's `html` from its `text`. The core finalizes each streamed
-/// row with an authoritative Upsert, so this runs once per completed message —
-/// not per chunk (the deltas deliberately leave `html` empty).
-void ensureRowHtml(QVariantMap &row)
-{
-    const QString role = row.value("role").toString();
-    if (role != QLatin1String("user") && role != QLatin1String("agent")
-        && role != QLatin1String("error"))
-        return;
-    if (!row.value("html").toString().isEmpty())
-        return;
-    const QString text = row.value("text").toString();
-    if (role == QLatin1String("error"))
-        row["html"] = QStringLiteral("<div>") + text + QStringLiteral("</div>");
-    else {
-        // Fenced code becomes blocks: the bubble delegate renders each code
-        // chunk in its own horizontal scroller (RichText wraps everything, so
-        // a long line squeezed the whole bubble into a third of its width).
-        // Plain messages keep the single-document html path unchanged.
-        const QVariantList blocks = markdownBlocks(text);
-        bool hasCode = false;
-        for (const QVariant &b : blocks)
-            if (b.toMap().value("type").toString() == QLatin1String("code"))
-                hasCode = true;
-        if (hasCode)
-            row["blocks"] = blocks;
-        else
-            row["html"] = markdownToHtml(text);
-    }
-}
-} // namespace
+
 
 // ---------------------------------------------------------------------------
 // The item stream (on_item): the core's single transcript channel
@@ -4411,325 +2376,16 @@ void ensureRowHtml(QVariantMap &row)
 
 QVariantList Manager::attachmentsForItem(const QString &id, const QString &text, int count)
 {
-    if (count <= 0)
-        return {};
-    if (m_attachmentsByRow.contains(id))
-        return m_attachmentsByRow.value(id);
-    // The queue is scoped to the chat that SENT the prompt: two chats can type the
-    // identical line, and a path/text-only key let one chat consume the other's
-    // thumbnails. The row is being painted for the chat on screen.
-    auto it = m_pendingAttachments.find(scopedKey(m_currentSessionId, text));
-    if (it == m_pendingAttachments.end() || it->isEmpty())
-        return {};
-    const QVariantList images = it->takeFirst();
-    if (it->isEmpty())
-        m_pendingAttachments.erase(it);
-    m_attachmentsByRow.insert(id, images);
-    if (m_attachmentsByRow.size() > 512)
-        m_attachmentsByRow.erase(m_attachmentsByRow.begin());
-    return images;
+    return m_transcript.attachmentsForItem(id, text, count);
 }
-
 QVariantMap Manager::rowFromItem(const QJsonObject &item)
 {
-    const QString kind = item.value(QStringLiteral("kind")).toString();
-    const QString id = item.value(QStringLiteral("id")).toString();
-    const QString text = item.value(QStringLiteral("text")).toString();
-    const QString detail = item.value(QStringLiteral("detail")).toString();
-    const QString output = item.value(QStringLiteral("output")).toString();
-    const QString status = item.value(QStringLiteral("status")).toString();
-    // The core's transcript position: the model inserts by it, not by arrival
-    // (docs/TRANSCRIPT_MODEL.md). Every row carries its own.
-    const int seq = item.value(QStringLiteral("seq")).toInt();
-    // A delegate row carries what its SUBAGENT actually did — goose keeps child
-    // sessions off ACP and forwards their tool calls onto this row instead.
-    auto stepsOf = [](const QJsonArray &arr) {
-        QVariantList out;
-        for (const QJsonValue &sv : arr) {
-            const QJsonObject s = sv.toObject();
-            out << QVariantMap{{"name", s.value(QStringLiteral("name")).toString()},
-                               {"detail", s.value(QStringLiteral("detail")).toString()}};
-        }
-        return out;
-    };
-    // A tool run carries the model's own framing of it (issue #13): the thinking
-    // that preceded the run, absorbed by the core, and the one-line label drawn
-    // from it. Both are empty for a run with nothing to draw on, and the chip
-    // then falls back to the call titles. Each call also carries the thinking
-    // that preceded IT, which is what puts the loop back in order when expanded.
-    const QString summary = item.value(QStringLiteral("summary")).toString();
-    const QString stepThought = item.value(QStringLiteral("thought")).toString();
-    if (kind == QLatin1String("Tool")) {
-        return QVariantMap{{"id", id}, {"role", "tool"}, {"text", ""}, {"html", ""},
-                           {"title", text}, {"detail", detail}, {"output", output},
-                           {"status", status}, {"toolCallId", id},
-                           {"summary", summary}, {"stepThought", stepThought},
-                           {"steps", stepsOf(item.value(QStringLiteral("steps")).toArray())},
-                           {"seq", seq}};
-    }
-    if (kind == QLatin1String("ToolGroup")) {
-        QVariantList calls;
-        for (const QJsonValue &cv : item.value(QStringLiteral("calls")).toArray()) {
-            const QJsonObject c = cv.toObject();
-            calls << QVariantMap{{"title", c.value("title").toString()},
-                                 {"detail", c.value("detail").toString()},
-                                 {"output", c.value("output").toString()},
-                                 {"status", c.value("status").toString()},
-                                 {"thought", c.value("thought").toString()},
-                                 {"toolCallId", c.value("id").toString()},
-                                 {"steps", stepsOf(c.value("steps").toArray())}};
-        }
-        return QVariantMap{{"id", id}, {"role", "toolgroup"}, {"text", ""},
-                           {"html", ""}, {"calls", calls}, {"status", status},
-                           {"summary", summary}, {"stepThought", stepThought},
-                           {"seq", seq}};
-    }
-    if (kind == QLatin1String("File")) {
-        // A file the SERVER shared: a reference (name, mime, size, path, digest)
-        // and never the bytes — the card fetches them on tap (`fetchFile`), so the
-        // transcript, the cache and every replay stay small.
-        QVariantList files;
-        for (const QJsonValue &fv : item.value(QStringLiteral("files")).toArray()) {
-            const QJsonObject f = fv.toObject();
-            files << QVariantMap{
-                {"name", f.value(QStringLiteral("name")).toString()},
-                {"mime", f.value(QStringLiteral("mime")).toString()},
-                {"kind", "file"},
-                // qreal on purpose: a byte count must not be abbreviated by the
-                // delegate, and a QVariantMap round-trip keeps it exact to 2^53.
-                {"size", f.value(QStringLiteral("bytes")).toDouble()},
-                {"path", f.value(QStringLiteral("path")).toString()},
-                {"sha256", f.value(QStringLiteral("sha256")).toString()}};
-        }
-        return QVariantMap{{"id", id}, {"role", "file"}, {"text", text},
-                           {"html", ""}, {"detail", detail}, {"files", files},
-                           {"status", status}, {"seq", seq}};
-    }
-    if (kind == QLatin1String("Chart")) {
-        return QVariantMap{{"id", id}, {"role", "chart"}, {"text", ""},
-                           {"title", text}, {"chartData", detail},
-                           {"toolCallId", id}, {"status", status}, {"seq", seq}};
-    }
-    if (kind == QLatin1String("McpApp")) {
-        const QString appKey = item.value(QStringLiteral("app_key")).toString();
-        // The app's html is fetched once and cached in memory; a re-delivered
-        // item (replay, reopen) reuses it.
-        if (!appKey.isEmpty() && !m_appHtml.contains(appKey) && m_bridge) {
-            const int bar = appKey.indexOf(QLatin1Char('|'));
-            if (bar > 0) {
-                const QByteArray ext = appKey.left(bar).toUtf8();
-                const QByteArray uri = appKey.mid(bar + 1).toUtf8();
-                const QByteArray sid = m_currentSessionId.toUtf8();
-                m_bridge->api().grouse_unstable_resources_read(m_bridge->handle(),
-                                                               sid.constData(),
-                                                               uri.constData(), ext.constData());
-            }
-        }
-        return QVariantMap{{"id", id}, {"role", "mcpapp"}, {"text", ""},
-                           {"title", text}, {"detail", detail}, {"appKey", appKey},
-                           {"appHtml", m_appHtml.value(appKey)},
-                           {"toolCallId", id}, {"status", status}, {"seq", seq}};
-    }
-    const QString role = kind == QLatin1String("User")     ? QStringLiteral("user")
-                         : kind == QLatin1String("Thought") ? QStringLiteral("thought")
-                         : kind == QLatin1String("Error")   ? QStringLiteral("error")
-                                                            : QStringLiteral("agent");
-    // The plan sentinel is a SIGNAL, not content: it tells the client a plan is ready to
-    // approve, and showing it would read as debris in the reply.
-    const QString shown = text;
-    QVariantMap row{{"id", id}, {"role", role}, {"text", shown}, {"output", output},
-                    {"html", QString()}, {"seq", seq}};
-    if (role == QLatin1String("thought"))
-        row["thought"] = true;
-    // The core carries the pixels now (Item::images, data URIs): the row
-    // itself is authoritative. The text-matching pixel queue
-    // (attachmentsForItem) is only the fallback for an older core library —
-    // gated on the count, because a later text-only prompt can repeat an
-    // earlier attachment prompt's text and must not inherit its thumbnails.
-    if (role == QLatin1String("user")) {
-        // ONE consumption of the send-time queue per row (it is keyed by prompt
-        // text and consumed in order, so asking twice would starve the next
-        // row): used only for what the core did not record.
-        const auto queued = attachmentsForItem(
-            id, text, item.value(QStringLiteral("attachments")).toInt());
-
-        const auto uris = item.value(QStringLiteral("images")).toArray();
-        QVariantList images;
-        if (!uris.isEmpty()) {
-            for (const auto &uri : uris)
-                images << QVariantMap{{"image", true},
-                                      {"url", materialiseChatImage(uri.toString())}};
-        } else {
-            // The older-core fallback carries the same `data:` URIs, so it takes the
-            // same decode: one shape reaches QML, whichever path produced it.
-            for (const auto &v : queued) {
-                const QVariantMap q = v.toMap();
-                if (!q.value("image").toBool())
-                    continue;
-                images << QVariantMap{{"image", true},
-                                      {"url", materialiseChatImage(q.value("url").toString())}};
-            }
-        }
-        if (!images.isEmpty())
-            row["images"] = images;
-
-        // The files that rode this prompt, from the CORE's record (name, MIME,
-        // bytes) — not from the send-time queue, which is per-session state a
-        // reload does not have. The queue is the fallback for an older core
-        // library and for a row that predates the record.
-        QVariantList cards;
-        const auto recorded = item.value(QStringLiteral("files")).toArray();
-        for (const auto &f : recorded) {
-            const QJsonObject o = f.toObject();
-            cards << fileCard(o.value(QStringLiteral("name")).toString(),
-                              o.value(QStringLiteral("mime")).toString(),
-                              static_cast<qint64>(o.value(QStringLiteral("bytes")).toDouble()));
-        }
-        if (cards.isEmpty()) {
-            for (const auto &v : queued) {
-                const QVariantMap m = v.toMap();
-                if (m.value("image").toBool() || !m.contains("mime"))
-                    continue;
-                cards << fileCard(m.value("name").toString(), m.value("mime").toString(),
-                                  m.value("bytes").toLongLong());
-            }
-        }
-        if (!cards.isEmpty())
-            row["files"] = cards;
-    }
-    ensureRowHtml(row);
-    return row;
+    return m_transcript.rowFromItem(item);
 }
-
 void Manager::coreOnItem(const QString &json)
 {
-    const QJsonObject root = parseObj(json);
-    if (root.contains(QStringLiteral("Reset"))) {
-        // NOT `m_messageModel->clear()`: a paint is Reset + rows + Window, and the
-        // blank-then-rebuild was the jump. Buffer; flushPaint lands it in one reset.
-        // A second Reset (the merge's end-of-replay repaint) simply supersedes the
-        // buffer, which is right — the newer paint is the one that describes the
-        // store.
-        m_painting = true;
-        m_paintRows.clear();
-        m_paintTimer->start();
-        m_olderPending.clear();
-        m_loadingOlder = false;
-        m_currentIndex = -1;
-        m_tailTimer->stop();
-        m_tailRendered.clear();
-        if (!m_itemOldestId.isEmpty() || m_itemHasOlder) {
-            m_itemOldestId.clear();
-            m_itemHasOlder = false;
-            emit itemWindowChanged();
-        }
-        requestMessagesUpdate();
-        refreshActivity();   // the transcript was replaced: the lanes with it
-        return;
-    }
-    if (root.contains(QStringLiteral("Window"))) {
-        // End of a paint: land it as one model reset (see flushPaint).
-        flushPaint();
-        const QJsonObject w = root.value(QStringLiteral("Window")).toObject();
-        const QString oldest = w.value(QStringLiteral("oldest_id")).toString();
-        const bool hasOlder = w.value(QStringLiteral("has_older")).toBool();
-        if (m_loadingOlder) {
-            // The core emits the older items oldest-first, then this Window: one
-            // model insert for the whole batch keeps the viewport stable.
-            const int n = m_olderPending.size();
-            {
-                GROUSE_PHASE("phase prependOlder");
-                m_messageModel->prepend(m_olderPending);
-            }
-            m_olderPending.clear();
-            m_loadingOlder = false;
-            emit olderRowsPrepended(n);
-            requestMessagesUpdate();
-        }
-        if (oldest != m_itemOldestId || hasOlder != m_itemHasOlder) {
-            m_itemOldestId = oldest;
-            m_itemHasOlder = hasOlder;
-            emit itemWindowChanged();
-        }
-        // A paint that lands long after the previous one is the background fill, not
-        // the open: the core keeps paging the older history in after the newest window
-        // is on screen. Naming it takes one line of log and settles whether the residual
-        // 2.5s stall belongs to the fill or to something else (2026-11-21).
-        if (m_paintGap.isValid() && m_paintGap.elapsed() > 1000) {
-            timingLog(QStringLiteral("late paint %1ms after the previous one (%2 rows, older=%3)")
-                          .arg(m_paintGap.elapsed())
-                          .arg(m_messageModel->rowCount())
-                          .arg(hasOlder ? QStringLiteral("yes") : QStringLiteral("no")));
-        }
-        m_paintGap.restart();
-        // A Window means "these rows were painted", NOT "the open succeeded": the
-        // background history fill and load-older both send one. The positive answer
-        // is coreOnSessionOpened; a rejected load is coreOnSessionOpenFailed. Using
-        // the Window here also mistimed a roam open (no main-wire Ready ever came)
-        // and could declare success for a paint that still had a turn in flight.
-        // The first window after an open is the moment the chat is PAINTED. One line
-        // per switch: the synchronous cost (cache parse + any core probe) against the
-        // wait for a paint, which is the split that decides where a "hang" lives.
-        if (!m_openFor.isEmpty() && m_openFor == m_currentSessionId) {
-            timingLog(QStringLiteral("open %1 painted in %2ms (%3 rows)")
-                                     .arg(m_openFor)
-                                     .arg(m_openClock.elapsed())
-                                     .arg(m_messageModel->rowCount()));
-            m_openFor.clear();
-        }
-        refreshActivity();   // the chat is painted: its lanes are what the panel shows
-        return;
-    }
-    if (root.contains(QStringLiteral("Upsert"))) {
-        const QJsonObject item = root.value(QStringLiteral("Upsert")).toObject()
-                                     .value(QStringLiteral("item")).toObject();
-        const QVariantMap row = rowFromItem(item);
-        if (m_painting) {
-            m_paintRows << row;
-            return;
-        }
-        if (m_loadingOlder) {
-            m_olderPending << row;
-            return;
-        }
-        m_messageModel->upsert(item.value(QStringLiteral("id")).toString(), row);
-        m_currentIndex = -1;
-        requestMessagesUpdate();
-        // A tool row changed: its status or its sub-agent steps are what the activity
-        // panel draws, and there is no separate event for either (CONTRACT §3.7). A
-        // no-op refresh is dropped inside refreshActivity.
-        const QString itemKind = item.value(QStringLiteral("kind")).toString();
-        if (itemKind == QLatin1String("Tool") || itemKind == QLatin1String("ToolGroup"))
-            refreshActivity();
-        return;
-    }
-    if (root.contains(QStringLiteral("AppendText"))) {
-        // A delta belongs to rows the paint has not landed yet: land it first.
-        flushPaint();
-        const QJsonObject o = root.value(QStringLiteral("AppendText")).toObject();
-        m_messageModel->appendText(o.value(QStringLiteral("id")).toString(),
-                                   o.value(QStringLiteral("chunk")).toString());
-        m_tailTimer->start();   // restart: fires only once the reply goes quiet
-        requestMessagesUpdate();
-        return;
-    }
-    if (root.contains(QStringLiteral("AppendOutput"))) {
-        flushPaint();
-        const QJsonObject o = root.value(QStringLiteral("AppendOutput")).toObject();
-        m_messageModel->appendOutput(o.value(QStringLiteral("id")).toString(),
-                                     o.value(QStringLiteral("chunk")).toString());
-        m_tailTimer->start();
-        requestMessagesUpdate();
-        return;
-    }
-    if (root.contains(QStringLiteral("Remove"))) {
-        flushPaint();
-        const QJsonObject o = root.value(QStringLiteral("Remove")).toObject();
-        m_messageModel->removeById(o.value(QStringLiteral("id")).toString());
-        requestMessagesUpdate();
-    }
+    m_transcript.applyItem(json);
 }
-
 // ---------------------------------------------------------------------------
 // The two non-item families: context-window usage and turn end. Every
 // transcript row arrives on on_item (docs/TRANSCRIPT_MODEL.md).
@@ -4742,112 +2398,24 @@ void Manager::coreOnUsage(qint64 used, qint64 size, double cost, const QString &
 
 void Manager::coreOnRunEnded(const QString &sessionId, const QString &stopReason)
 {
-    Q_UNUSED(stopReason);
-    // Every completion clears ITS chat; only the chat on screen owns the UI state.
-    m_inFlight.remove(sessionId);
-    m_activeRunIds.remove(sessionId);
-    if (!sessionId.isEmpty() && sessionId != m_currentSessionId)
-        return;
-    m_prompting = false;
-    m_promptingSessionId.clear();
-    m_compacting = false;
-    m_compactionStatus.clear();
-    setActiveRunId(QString());
-    emit promptingChanged();
-    emit compactingChanged();
-    flushQueue();
-    // Before the turn-over side effects: the last bubble is final now, so any
-    // markdown the seal missed gets rendered while the row is still the last
-    // thing the user is looking at.
-    finishTail();
-    notifyTurnFinished();
-    // A delegate that ended is a lane whose status just changed, and the panel must not
-    // keep saying "running" after the turn is over.
-    refreshActivity();
+    m_chat.onRunEnded(sessionId, stopReason);
 }
-
 // ---------------------------------------------------------------------------
 // Model-update handlers (called by the coreOn* entry points above)
 // ---------------------------------------------------------------------------
 
 void Manager::finishTail(int lookback)
 {
-    const int n = m_messageModel->count();
-    bool touched = false;
-    for (int i = n - 1; i >= 0 && i >= n - lookback; --i) {
-        QVariantMap row = m_messageModel->row(i);
-        const QString role = row.value("role").toString();
-        if (role != QLatin1String("user") && role != QLatin1String("agent")
-            && role != QLatin1String("error"))
-            continue;
-        if (!row.value("html").toString().isEmpty())
-            continue;
-        if (!row.value("blocks").toList().isEmpty())
-            continue;
-        if (row.value("text").toString().trimmed().isEmpty())
-            continue;
-        ensureRowHtml(row);
-        // update() (not updateDeferred): this row is final, so the last frame
-        // paints immediately instead of waiting on the coalescing timer.
-        m_messageModel->update(i, row);
-        touched = true;
-    }
-    if (touched)
-        requestMessagesUpdate();
+    m_transcript.finishTail(lookback);
 }
-
 void Manager::renderTail()
 {
-    const int n = m_messageModel->count();
-    if (n <= 0)
-        return;
-    // Only the tail can be waiting on a seal: every row above it was sealed when
-    // the stream moved on to the next one.
-    const int i = n - 1;
-    QVariantMap row = m_messageModel->row(i);
-    const QString role = row.value("role").toString();
-    if (role != QLatin1String("user") && role != QLatin1String("agent")
-        && role != QLatin1String("error"))
-        return;
-    if (!row.value("html").toString().isEmpty())
-        return;
-    if (!row.value("blocks").toList().isEmpty())
-        return;
-    const QString text = row.value("text").toString();
-    if (text.trimmed().isEmpty())
-        return;
-    // One parse per quiet period: a stall in the middle of a long reply must not
-    // re-parse the same prefix on every pause. `appendText` clears html, so text
-    // that keeps growing earns a fresh render at the next quiet period.
-    const QString sig = row.value("id").toString() + QLatin1Char(':')
-        + QString::number(text.size());
-    if (sig == m_tailRendered)
-        return;
-    m_tailRendered = sig;
-    ensureRowHtml(row);
-    m_messageModel->update(i, row);
-    requestMessagesUpdate();
+    m_transcript.renderTail();
 }
-
 void Manager::loadOlder(int count)
 {
-    // The core owns the window (docs/TRANSCRIPT_MODEL.md): it emits the older
-    // items as Upserts and a refreshed Window, which coreOnItem then prepends in
-    // one batch. Nothing is buffered client-side.
-    if (!m_bridge || !m_bridge->isAvailable())
-        return;
-    if (!m_itemHasOlder || m_loadingOlder)
-        return;
-    m_loadingOlder = true;
-    m_bridge->api().grouse_load_older(m_bridge->handle(),
-                                      count <= 0 ? 40u : static_cast<unsigned>(count));
+    m_transcript.loadOlder(count);
 }
-
-// The legacy model-update handlers (appendChunk / onAgentChunk / onUserChunk /
-// onThoughtChunk / onToolCall* / onChartToolCall / onMcpAppToolCall) are gone:
-// transcript rows come from on_item now, and the on_stream handler above keeps
-// only usage + run-ended.
-
 namespace {
 // appKey lengths prefix the cache key: an id containing the separator cannot
 // make two different (app, session) pairs collide.
@@ -5002,7 +2570,7 @@ QVariant Manager::pinnedApps() const
 {
     if (m_currentSessionId.isEmpty())
         return QVariantMap{};
-    return m_store.value(kPinsKey).toMap().value(m_currentSessionId).toMap();
+    return m_settings.cardPinsFor(m_currentSessionId);
 }
 
 void Manager::pinApp(const QString &appKey, const QString &slot)
@@ -5013,9 +2581,9 @@ void Manager::pinApp(const QString &appKey, const QString &slot)
                                                         : QStringLiteral("top");
     QVariantMap pins = pinnedApps().toMap();
     pins[key] = appKey;
-    QVariantMap all = m_store.value(kPinsKey).toMap();
+    QVariantMap all = m_settings.cardPinsFor(m_currentSessionId);
     all[m_currentSessionId] = pins;
-    m_store.setValue(kPinsKey, all);
+    m_settings.setCardPinsFor(m_currentSessionId, all);
     emit pinnedAppsChanged();
     // The docked pane is a live view; make sure its template is on hand (a pin
     // restored on a cold start has no transcript row that fetched it).
@@ -5039,9 +2607,9 @@ void Manager::unpinApp(const QString &slot)
                                                         : QStringLiteral("top");
     QVariantMap pins = pinnedApps().toMap();
     pins[key] = QString();
-    QVariantMap all = m_store.value(kPinsKey).toMap();
+    QVariantMap all = m_settings.cardPinsFor(m_currentSessionId);
     all[m_currentSessionId] = pins;
-    m_store.setValue(kPinsKey, all);
+    m_settings.setCardPinsFor(m_currentSessionId, all);
     emit pinnedAppsChanged();
 }
 
@@ -5053,9 +2621,9 @@ void Manager::setPinRatio(const QString &slot, qreal ratio)
                                                         : QStringLiteral("topRatio");
     QVariantMap pins = pinnedApps().toMap();
     pins[key] = qBound(0.15, ratio, 0.85);
-    QVariantMap all = m_store.value(kPinsKey).toMap();
+    QVariantMap all = m_settings.cardPinsFor(m_currentSessionId);
     all[m_currentSessionId] = pins;
-    m_store.setValue(kPinsKey, all);
+    m_settings.setCardPinsFor(m_currentSessionId, all);
     emit pinnedAppsChanged();
 }
 
@@ -5085,33 +2653,6 @@ void Manager::onAppMessage(const QString &sessionId, const QString &text)
         openSession(sessionId);
     sendPrompt(text);
 }
-void Manager::onCompactionStatus(const QString &message)
-{
-    // Substring matching was far too greedy: ANY status line merely containing
-    // "compact" (a "Compaction complete" notice, or text that names another
-    // session's background run) armed the spinner, and the clear depended on
-    // the exact "complete"/"error" strings ever arriving. Only arm on the
-    // phrases goose actually uses for the RUNNING compaction — every one of
-    // them describes the act of compacting in the progressive — and clear on
-    // its terminators. Turn-end (coreOnRunEnded) clears it as the backstop.
-    const QString m = message.toLower();
-    const bool arming = m.contains(QLatin1String("compacting"))
-        || (m.contains(QLatin1String("compaction"))
-            && (m.endsWith(QLatin1String("...")) || m.endsWith(QLatin1String("…"))));
-    const bool done = m.contains(QLatin1String("complete"))
-        || m.contains(QLatin1String("error"))
-        || m.contains(QLatin1String("failed"))
-        || m.contains(QLatin1String("cleared"));
-    if (arming && !done) {
-        m_compacting = true;
-        m_compactionStatus = message;
-    } else if (done) {
-        m_compacting = false;
-        m_compactionStatus.clear();
-    }
-    emit compactingChanged();
-}
-
 void Manager::onMessageUsage(const QVariantMap &usage)
 {
     const QString label = formatUsage(usage);
@@ -5170,19 +2711,11 @@ void Manager::onModeChanged(const QString &modeId)
 
 void Manager::onActiveRunChanged(const QString &sessionId, const QString &runId)
 {
-    // Run ids are per session: a background chat's run must not replace the
-    // steer key of the chat on screen, and its end must not clear it.
-    if (runId.isEmpty()) {
-        m_activeRunIds.remove(sessionId);
-        m_inFlight.remove(sessionId);
-        if (sessionId == m_currentSessionId || sessionId.isEmpty())
-            setActiveRunId(QString());
-        return;
-    }
-    m_activeRunIds.insert(sessionId, runId);
-    m_inFlight.insert(sessionId);
-    if (sessionId == m_currentSessionId)
-        setActiveRunId(runId);
+    m_chat.onActiveRunChanged(sessionId, runId);
+}
+void Manager::onCompactionStatus(const QString &message)
+{
+    m_chat.onCompactionStatus(message);
 }
 
 void Manager::onUsage(int used, int size, double cost, const QString &currency)
@@ -5211,16 +2744,12 @@ void Manager::onProjects(const QVariantList &projects)
 
 void Manager::onRecipes(const QVariantList &recipes)
 {
-    m_recipes = recipes;
-    emit recipesChanged();
+    m_catalog.onRecipes(recipes);
 }
-
 void Manager::onSchedules(const QVariantList &schedules)
 {
-    m_schedules = schedules;
-    emit schedulesChanged();
+    m_catalog.onSchedules(schedules);
 }
-
 void Manager::onConfig(const QVariantList &config)
 {
     m_config = config;
@@ -5229,234 +2758,37 @@ void Manager::onConfig(const QVariantList &config)
 
 void Manager::onTools(const QVariantList &tools)
 {
-    QStringList names;
-    for (const auto &v : tools)
-        names << v.toString();
-    m_tools = names;
-    if (!m_discoveringExt.isEmpty()) {
-        // Stash only. The catalog commit + the restore/detach happen when the
-        // session-extensions re-list (which the core always sends after the
-        // peek's add, and always second) confirms whether the peeked extension
-        // is REALLY attached — a transient add that failed to start the
-        // extension lists nothing, indistinguishable from a genuinely
-        // tool-less/bare-named one except by the attach state.
-        const QString prefix = m_discoveringExt + QStringLiteral("__");
-        for (const auto &n : std::as_const(names))
-            if (n.startsWith(prefix))
-                m_discoveringFull << n;
-    } else {
-        publishToolGroups();
-    }
-    saveToolCache(m_currentSessionId);
-    emit toolsChanged();
+    m_catalog.onTools(tools);
 }
-
-/// Parse a `config/extensions/list` payload (`session/extensions/list` carries the same
-/// extension objects, keyed `extensionKey` instead of `configKey`). One parser for both
-/// lists: the settings screen's defaults and the chat's own server catalog are answered
-/// by the same method on different connections, and they must read identically.
 QList<Manager::ExtDef> Manager::parseExtDefs(const QString &json)
 {
-    QList<ExtDef> out;
-    for (const auto &el : parseArr(json)) {
-        const QVariantMap m = el.toObject().toVariantMap();
-        // The server nests the definition: {"extension": {...}, "enabled": bool,
-        // "configKey": "..."}. Read the nested object (with a flat fallback) so
-        // names/types aren't blank — the old code read the top level, where
-        // those fields don't exist, producing empty-named groups that all
-        // shared one enabled state.
-        QVariantMap e = m.value("extension").toMap();
-        if (e.isEmpty())
-            e = m;
-        // Server-backed/custom extensions (mcp, bundled:false) carry their
-        // identifier in configKey / server.name, not extension.name — only
-        // bundled platform/builtin ones expose `name`. Resolve in that order so
-        // the panel isn't full of empty-named groups that share one state.
-        QString extName = e.value("name").toString();
-        if (extName.isEmpty())
-            extName = m.value("configKey").toString();
-        if (extName.isEmpty())
-            extName = e.value("server").toMap().value("name").toString();
-        ExtDef d;
-        d.name = extName;
-        // Identity is the KEY (session list calls it extensionKey, global list
-        // configKey). The display name can differ: "Extension Manager" is keyed
-        // "extensionmanager", and remove/toggles only accept the key.
-        d.key = m.value("configKey").toString().isEmpty() ? extName
-                                                         : m.value("configKey").toString();
-        d.type = e.value("type").toString();
-        // mcp-backed extensions namespace their tools; mark them addable so the
-        // panel offers the per-tool toggle the server's add/remove expects.
-        d.attrib = e.value("attrib").toBool() || d.type == QLatin1String("mcp");
-        d.enabled = m.contains("enabled")
-            ? m.value("enabled").toBool()
-            : e.value("enabled").toBool();
-        d.raw = QJsonObject::fromVariantMap(e);
-        // session/extensions/add needs a top-level `name` to identify the
-        // extension; server-backed (mcp) defs carry it only in server.name, so
-        // inject the resolved id — otherwise the server silently ignores the
-        // add and the session-extensions re-list reverts the toggle.
-        if (d.raw.value("name").toString().isEmpty() && !d.name.isEmpty())
-            d.raw.insert(QStringLiteral("name"), d.name);
-        const QVariantList at = m.value("availableTools").toList();
-        for (const auto &a : at)
-            d.availableTools << a.toString();
-        out << d;
-    }
-    return out;
+    return m_catalog.parseExtDefs(json);
 }
-
 void Manager::onExtensions(const QVariantList &extensions)
 {
-    QJsonArray arr;
-    for (const auto &v : extensions)
-        arr.append(QJsonValue::fromVariant(v));
-    m_extDefs = parseExtDefs(QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
-    publishToolGroups();
-    saveToolCache(m_currentSessionId);
-    emit globalExtensionsChanged();
-    emit toolsChanged();
+    m_catalog.onExtensions(extensions);
 }
-
 void Manager::coreOnExtensionCatalog(const QString &sid, const QString &json)
 {
-    // Stale replies from a chat the user already left must not become this
-    // sheet's rows (same guard as the session list).
-    if (!m_currentSessionId.isEmpty() && sid != m_currentSessionId)
-        return;
-    m_catalogDefs = parseExtDefs(json);
-    buildPeekQueue();
-    publishToolGroups();
+    m_catalog.onExtensionCatalog(sid, json);
 }
 
 void Manager::onSessionExtensions(const QStringList &names, const QSet<QString> &restricted)
 {
-    m_sessionExts = names;
-    m_sessionRestricted = restricted;
-    // Deferred peek commit (see onTools): the re-list that always follows a
-    // session/extensions/add decides whether the peeked row really attached.
-    if (!m_discoveringExt.isEmpty()) {
-        const QString target = m_discoveringExt;
-        const bool attachedNow = names.contains(target);
-        const bool wasAttached = m_discoveringAttached;
-        m_discoveringExt.clear();
-        m_peekQueue.removeAll(target);       // this row is handled (or was repaired)
-        if (!m_peekQueue.isEmpty())
-            m_peekTimer->start(400);
-        if (attachedNow) {
-            m_toolCatalog[target] = m_discoveringFull;
-            if (wasAttached) {
-                // Put the session's real restriction back (empty allowlist = all).
-                const ExtDef *d = extDef(target);
-                const QStringList allowed = d ? d->availableTools : QStringList();
-                setSessionTools(target, allowed.isEmpty() ? m_discoveringFull : allowed);
-            } else {
-                // It was detached before the peek — detach it again; its tool
-                // list is now known without having paid the context cost.
-                m_sessionExts.removeAll(target);
-                m_sessionRestricted.remove(target);
-                if (m_bridge && m_bridge->isAvailable()) {
-                    const QByteArray sid = m_currentSessionId.toUtf8();
-                    m_bridge->api().grouse_unstable_session_extensions_remove(
-                        m_bridge->handle(), sid.constData(), target.toUtf8().constData());
-                    // The peek's tools reply left the unfiltered set in m_tools
-                    // and remove re-lists nothing — re-pull the truth.
-                    m_bridge->api().grouse_unstable_list_tools(m_bridge->handle(), sid.constData());
-                }
-            }
-        } else if (wasAttached) {
-            // The peek's add failed (extension won't start here) but the peek
-            // had to remove it first — repair by re-adding the real profile.
-            const ExtDef *d = extDef(target);
-            if (d && m_bridge && m_bridge->isAvailable()) {
-                const QByteArray sid = m_currentSessionId.toUtf8();
-                m_bridge->api().grouse_unstable_session_extensions_add(
-                    m_bridge->handle(), sid.constData(),
-                    QJsonDocument(d->raw).toJson(QJsonDocument::Compact).constData());
-            }
-        }
-        if (!attachedNow) {
-            // A peek that never attached means the extension would not start —
-            // stop THIS session's sweep from re-dialing a dead endpoint every
-            // pass (one failed client-init per chat was the error-bubble bug).
-            // Manual clicks bypass the memo; a fresh chat gets one retry.
-            m_peekFailed.insert(target);
-        }
-        m_discoveringFull.clear();
-        m_discoveringAttached = false;
-        persistCatalogs();
-    }
-    buildPeekQueue();
-    publishToolGroups();
-    saveToolCache(m_currentSessionId);
+    m_catalog.onSessionExtensions(names, restricted);
 }
-
-// The background sweep: learn every extension's tool list once, opportunistically,
-// while the chat is doing nothing. Each step is the same transient attach→list→
-// detach the manual peek arrow performs (a detached row never stays attached), so
-// the drawer can print "# tools" on EVERY row — including rows nobody expanded —
-// without permanently inflating the session's context. Persisted to QSettings, so
-// a server with N extensions costs N one-off peeks per install, not per session.
 void Manager::buildPeekQueue()
 {
-    if (!m_peekQueue.isEmpty() || !m_discoveringExt.isEmpty())
-        return;                              // a sweep or a manual peek is running
-    if (m_currentSessionId.isEmpty() || !m_activePeerLabel.isEmpty())
-        return;                              // only the local chat can host a peek
-    for (const auto &d : (m_catalogDefs.isEmpty() ? m_extDefs : m_catalogDefs))
-        // Only rows the server actually runs: a peek is a real session attach, so a
-        // GLOBALLY DISABLED extension (kwin's dead tailnet URI, say) must never be
-        // dialed just to learn its tool count — the server's failed client-init
-        // surfaces as an error bubble in the live chat (every chat, once per
-        // unknown disabled row). Manual arrow clicks still peek anything: that is
-        // an explicit request, and its failure is the user's to see.
-        if (d.enabled && !m_toolCatalog.contains(d.key) && !m_sessionExts.contains(d.key)
-            && !m_peekFailed.contains(d.key))
-            m_peekQueue << d.key;
-    if (!m_peekQueue.isEmpty())
-        m_peekTimer->start(1500);
+    m_catalog.buildPeekQueue();
 }
-
 void Manager::doPeekStep()
 {
-    GROUSE_PHASE("phase peek");
-    if (m_peekQueue.isEmpty())
-        return;
-    // Never interfere with an active turn — INCLUDING one started elsewhere
-    // (m_activeRunId is the server's own echo, so scheduled runs steering into
-    // this chat gate the sweep too), compaction, a manual peek, or a lost wire.
-    if (m_prompting || m_compacting || !m_activeRunId.isEmpty()
-        || !m_discoveringExt.isEmpty()
-        || !m_bridge || !m_bridge->isAvailable()
-        || !m_bridge->api().grouse_ready(m_bridge->handle())
-        || m_currentSessionId.isEmpty() || !m_activePeerLabel.isEmpty()) {
-        m_peekTimer->start(2500);            // retry when the chat goes quiet
-        return;
-    }
-    while (!m_peekQueue.isEmpty()) {
-        const QString key = m_peekQueue.takeFirst();
-        if (m_toolCatalog.contains(key) || m_sessionExts.contains(key) || !extDef(key))
-            continue;                        // state moved on; skip stale queue item
-        discoverToolGroup(key);
-        break;                               // the commit in onSessionExtensions re-arms
-    }
-    if (!m_peekQueue.isEmpty() && m_discoveringExt.isEmpty())
-        m_peekTimer->start(700);             // safety re-arm if the peek never lands
+    m_catalog.doPeekStep();
 }
-
 void Manager::persistCatalogs()
 {
-    QJsonObject o;
-    for (auto it = m_toolCatalog.constBegin(); it != m_toolCatalog.constEnd(); ++it) {
-        QJsonArray a;
-        for (const auto &t : it.value())
-            a.append(t);
-        o.insert(it.key(), a);
-    }
-    m_store.setValue(QStringLiteral("tool_catalogs"),
-                     QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)));
+    m_catalog.persistCatalogs();
 }
-
 void Manager::onPermission(const QString &toolCallId, const QString &title,
                            const QString &detail, const QVariantList &options)
 {
@@ -5499,25 +2831,16 @@ void Manager::onError(const QString &text, bool background)
 
 void Manager::onSkills(const QVariantList &skills)
 {
-    m_skills = skills;
-    emit skillsChanged();
+    m_catalog.onSkills(skills);
 }
-
 void Manager::onServerConfigValue(const QString &key, const QString &value)
 {
-    m_serverConfig[key] = value;
-    emit serverConfigChanged();
+    m_catalog.onServerConfigValue(key, value);
 }
-
 void Manager::onSupportedModels(const QString &providerId, const QStringList &models)
 {
-    Q_UNUSED(providerId);
-    m_supportedModels.clear();
-    for (const auto &m : models)
-        m_supportedModels << m;
-    emit supportedModelsChanged();
+    m_catalog.onSupportedModels(providerId, models);
 }
-
 void Manager::onExportResult(const QString &data)
 {
     if (m_pendingExportPath.isEmpty())
@@ -5551,84 +2874,5 @@ void Manager::onReady(const QString &sessionId)
 
 QVariant Manager::toolGroups() const
 {
-    QVariantList out;
-    const QSet<QString> active(m_tools.constBegin(), m_tools.constEnd());
-    const QSet<QString> enabled(m_sessionExts.constBegin(), m_sessionExts.constEnd());
-    // Every identity here is the extension KEY; `name` is carried per group for display.
-    QStringList allKeys;
-    for (const auto &d : (m_catalogDefs.isEmpty() ? m_extDefs : m_catalogDefs))
-        allKeys << d.key;
-    for (const auto &n : m_sessionExts)
-        if (!allKeys.contains(n))
-            allKeys << n;
-
-    // Some goose versions expose tools before extension profiles: group the
-    // active names directly so the panel stays useful.
-    if (allKeys.isEmpty() && !m_tools.isEmpty()) {
-        QHash<QString, QVariantList> grouped;
-        QStringList groupNames;
-        for (const auto &tool : m_tools) {
-            const int sep = tool.indexOf(QStringLiteral("__"));
-            const QString group = sep > 0 ? tool.left(sep) : QStringLiteral("Built-in");
-            const QString child = sep > 0 ? tool.mid(sep + 2) : tool;
-            if (!grouped.contains(group))
-                groupNames << group;
-            grouped[group] << QVariantMap{{"name", child}, {"on", true}};
-        }
-        for (const auto &groupName : std::as_const(groupNames)) {
-            out << QVariantMap{{"name", groupName},
-                               {"key", groupName},
-                               {"attrib", groupName != QStringLiteral("Built-in")},
-                               {"enabled", true},
-                               {"known", true},
-                               {"expandable", grouped.value(groupName).size() >= 2},
-                               {"tools", grouped.value(groupName)}};
-        }
-        return out;
-    }
-
-    for (const auto &key : std::as_const(allKeys)) {
-        QVariantMap group;
-        const ExtDef *d = extDef(key);
-        group["name"] = d ? d->name : key;
-        group["key"] = key;
-        const bool attrib = d && d->attrib;
-        group["attrib"] = attrib;
-        const bool attached = enabled.contains(key);
-        group["enabled"] = attached;
-        const QString prefix = key + QStringLiteral("__");
-        QVariantList tools;
-        const bool cached = m_toolCatalog.contains(key);
-        QStringList pool = cached ? m_toolCatalog.value(key) : QStringList();
-        if (pool.isEmpty()) {
-            for (const auto &t : m_tools)
-                if (t.startsWith(prefix))
-                    pool << t;
-        }
-        // Is the sub-tool LIST fully known without a peek? Either yes (cached
-        // from a discovery this run — the catalog is kept across chats) or by
-        // derivation: an attached row with NO session allowlist runs
-        // unfiltered, so its active namespaced tools are the whole list. A
-        // zero-active derivation is only trusted for non-mcp rows — an mcp
-        // that has not finished starting also lists zero, and demoting it to
-        // "no sub-tools" would hide a real arrow.
-        const bool derivedComplete =
-            attached && !m_sessionRestricted.contains(key);
-        const bool derivedZeroUntrusted =
-            pool.isEmpty() && d && d->type == QLatin1String("mcp");
-        const bool known = cached || (derivedComplete && !derivedZeroUntrusted);
-        group["known"] = known;
-        // The expander is about SUB-TOOLS, not attachment: unknown rows get the
-        // arrow as a PEEK (list without keeping it attached); known rows keep it
-        // only at >=2 sub-tools — one-tool and bare-named rows have nothing to
-        // expand.
-        group["expandable"] = known ? (pool.size() >= 2) : true;
-        for (const auto &t : pool) {
-            tools << QVariantMap{{"name", t.mid(prefix.length())},
-                                 {"on", active.contains(t)}};
-        }
-        group["tools"] = tools;
-        out << group;
-    }
-    return out;
+    return m_catalog.toolGroups();
 }

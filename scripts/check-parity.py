@@ -497,7 +497,8 @@ def check_unstable_listener_signatures(groups: dict, lib_text: str) -> list:
         normalized = {normalize_signature(sig) for sig in declared}
     except SystemExit as exc:
         return [str(exc)]
-    trait = set(parse_listener_trait(lib_text, "GrouseUnstableListener"))
+    unstable_trait_text = (ROOT / "core/grouse-unstable/src/lib.rs").read_text()
+    trait = set(parse_listener_trait(unstable_trait_text, "GrouseUnstableListener"))
     errors = []
     for sig in sorted(trait - normalized):
         errors.append(

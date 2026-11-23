@@ -15,42 +15,31 @@
 //!     with `grc_string_free`); left NULL on success.
 //!   * The stream handle is an opaque pointer valid until `grc_stream_close`.
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use crate::{RoamError, RoamStream, card_fingerprint, identity_generate, identity_public_key, roam_connect};
 
-/// malloc-allocated copy of `s` (UTF-8), or NULL when empty input is invalid.
-fn c_str(s: &str) -> *mut c_char {
-    CString::new(s)
-        .map(CString::into_raw)
-        .unwrap_or(std::ptr::null_mut())
-}
+// The canonical implementation lives in grouse-core's src/cabi_helpers.rs and
+// is compiled into this crate from one source. A crate dependency cannot run
+// this way (grouse-core depends on THIS crate), and this module is private, so
+// an in-crate `#[path]` include is the only way to keep one implementation.
+#[path = "../../grouse-core/src/cabi_helpers.rs"]
+mod cabi_helpers;
+use cabi_helpers::{c_param, c_str, set_err as set_c_str_err, string_free};
 
-fn err_str(e: &RoamError) -> *mut c_char {
-    c_str(&e.to_string())
-}
-
-unsafe fn c_param<'a>(p: *const c_char) -> Option<&'a str> {
-    if p.is_null() {
-        return None;
-    }
-    CStr::from_ptr(p).to_str().ok()
-}
-
+/// `RoamError`-typed adapter over the shared `set_err` (whose message argument
+/// is a plain `&str`). The error text goes through the shared, NUL-sanitizing
+/// `c_str`, so an error from a peer can no longer turn `out_err` into NULL.
 fn set_err(out_err: *mut *mut c_char, e: &RoamError) {
-    if !out_err.is_null() {
-        unsafe { *out_err = err_str(e) };
-    }
+    set_c_str_err(out_err, &e.to_string());
 }
 
 /// Free a string returned by any other grc_* function.
 #[no_mangle]
 pub extern "C" fn grc_string_free(s: *mut c_char) {
-    if !s.is_null() {
-        unsafe { drop(CString::from_raw(s)) };
-    }
+    unsafe { string_free(s) };
 }
 
 /// Generate a fresh iroh secret key, base64. Caller frees with grc_string_free.
@@ -223,4 +212,20 @@ pub extern "C" fn grc_stream_free(h: *mut c_void) {
         return;
     }
     unsafe { drop(Arc::from_raw(h as *const RoamStream)) };
+}
+
+#[cfg(test)]
+mod capi_tests {
+    use super::*;
+
+    /// Peer-supplied text (an error message, a card label) is untrusted. The
+    /// old roam-local `c_str` returned NULL for an embedded NUL, silently
+    /// dropping the error; the shared one replaces it with U+FFFD instead.
+    #[test]
+    fn c_str_sanitizes_interior_nul() {
+        let s = c_str("peer\0text");
+        assert!(!s.is_null());
+        assert_eq!(unsafe { c_param(s) }, Some("peer\u{FFFD}text"));
+        grc_string_free(s);
+    }
 }

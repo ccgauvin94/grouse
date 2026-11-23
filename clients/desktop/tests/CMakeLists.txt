@@ -14,17 +14,7 @@ find_package(Qt6 REQUIRED COMPONENTS Test QuickTest)
 
 # The app's core minus main.cpp, compiled once and shared by every C++ test.
 # libgrouse_core.so is dlopen'd at runtime (never linked) — see src/corebridge.
-add_library(grouse_core STATIC
-    ${CMAKE_SOURCE_DIR}/src/corebridge.cpp
-    ${CMAKE_SOURCE_DIR}/src/appbridge.cpp
-    ${CMAKE_SOURCE_DIR}/src/manager.cpp
-    ${CMAKE_SOURCE_DIR}/src/messagelistmodel.cpp
-    ${CMAKE_SOURCE_DIR}/src/sessionlistmodel.cpp
-    ${CMAKE_SOURCE_DIR}/src/markdown.cpp
-    ${CMAKE_SOURCE_DIR}/src/myday.cpp
-    ${CMAKE_SOURCE_DIR}/src/roamlistmodel.cpp
-    ${CMAKE_SOURCE_DIR}/src/notifier.cpp
-)
+add_library(grouse_core STATIC ${GROUSE_CORE_SOURCES})
 target_include_directories(grouse_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(grouse_core PUBLIC Qt6::Widgets Qt6::DBus Qt6::Network)
 

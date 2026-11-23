@@ -29,6 +29,16 @@ option(BUILD_KRUNNER "Build the KRunner session-search plugin" ON)
 # same list, so a file added here cannot silently disappear from the tests (or
 # vice versa). Keep it absolute: tests live in a subdirectory.
 set(GROUSE_CORE_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/catalogcontroller.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/catalogcontroller.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/chatcontroller.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/chatcontroller.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/coreapi.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/coreapi.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/settingsstore.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/settingsstore.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/transcriptprojection.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/transcriptprojection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/dbusadapter.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/dbusadapter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/appbridge.h
@@ -130,14 +140,9 @@ install(FILES
 )
 
 if(BUILD_TESTING)
+    # tests/CMakeLists consumes ${GROUSE_CORE_SOURCES}: a new source cannot be
+    # added to the app without also being compiled into every test target.
     add_subdirectory(tests)
-    # tests/CMakeLists still carries its historical literal list; make the
-    # canonical list above authoritative for grouse_core too. When that file is
-    # next touched, replace its add_library() source list with
-    # ${GROUSE_CORE_SOURCES} and drop this override.
-    if(TARGET grouse_core)
-        set_property(TARGET grouse_core PROPERTY SOURCES ${GROUSE_CORE_SOURCES})
-    endif()
 endif()
 
 if(BUILD_KRUNNER)

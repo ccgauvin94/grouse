@@ -9,9 +9,13 @@ repository = "https://github.com/ccgauvin94/grouse"
 [lib]
 crate-type = ["rlib"]
 
-[dependencies]
-grouse-core = { path = "../grouse-core" }
-
-# Test-only; same crate the core already uses for its own test harness.
+# This crate owns the callback-interface DECLARATION (as a macro expanded in
+# grouse-core, so uniffi keeps the `grouse_core` namespace) and the intent
+# manifest; grouse-core owns the implementations and re-exports both. The only
+# dependency back to grouse-core is test-only: the no-op contract test drives
+# the real shim. A dev-dependency cycle is allowed by Cargo and keeps the
+# normal build graph acyclic (grouse-core -> grouse-unstable).
 [dev-dependencies]
+grouse-core = { path = "../grouse-core" }
+# Test-only; same crate the core already uses for its own test harness.
 parking_lot = "0.12"

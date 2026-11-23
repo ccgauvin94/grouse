@@ -665,17 +665,7 @@ impl GrouseUnstable {
             }),
         ) {
             Ok(result) => {
-                let mut text = String::new();
-                if let Some(contents) = result.get("content").and_then(Value::as_array) {
-                    for entry in contents {
-                        if let Some(t) = entry.get("text").and_then(Value::as_str) {
-                            text.push_str(t);
-                        }
-                    }
-                }
-                // A tool can fail at the server without the RPC itself failing:
-                // goose reports that as `isError: true` on a successful reply.
-                let is_error = result.get("isError").and_then(Value::as_bool).unwrap_or(false);
+                let (text, is_error, _) = parse_tool_call_reply(&result);
                 self.listener.on_tool_result(text, is_error);
             }
             Err(e) => self.listener.on_tool_result(format!("{e}"), true),
@@ -1056,6 +1046,42 @@ fn config_value_string(value: Option<&Value>) -> String {
         Some(Value::String(s)) => s.clone(),
         Some(v) => v.to_string(),
     }
+}
+
+/// Decode a `_goose/unstable/tools/call` reply ONCE for every consumer
+/// (the shim's `tools_call_named`, `tasks.rs` and `Core`'s hidden-session calls).
+///
+/// Returns the concatenated text blocks, the error flag and the JSON object a
+/// text block carries, when it carries one. Goose spells the flag `isError`;
+/// `is_error` is accepted too so a shape change degrades into a reported error
+/// rather than silent empty content. Non-text blocks are ignored, never
+/// stringified. `payload` tries the concatenation first and falls back to the
+/// first text block, so a multi-block reply whose first block was JSON still
+/// parses exactly as the old attachment reader did.
+pub(crate) fn parse_tool_call_reply(reply: &Value) -> (String, bool, Option<Value>) {
+    let mut text = String::new();
+    let mut first_text: Option<&str> = None;
+    if let Some(blocks) = reply.get("content").and_then(Value::as_array) {
+        for block in blocks {
+            if let Some(t) = block.get("text").and_then(Value::as_str) {
+                if first_text.is_none() {
+                    first_text = Some(t);
+                }
+                text.push_str(t);
+            }
+        }
+    }
+    let is_error = reply
+        .get("isError")
+        .or_else(|| reply.get("is_error"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let payload = serde_json::from_str::<Value>(&text).ok().or_else(|| {
+        first_text
+            .filter(|first| *first != text.as_str())
+            .and_then(|first| serde_json::from_str::<Value>(first).ok())
+    });
+    (text, is_error, payload)
 }
 
 /// The KEY goose files a session extension under, from the NAME the transcript
@@ -2060,6 +2086,37 @@ mod tests {
                 Ev::AppResource("autovisualiser|charts/radar".to_string(), String::new()),
             ]
         );
+    }
+
+    #[test]
+    fn parse_tool_call_reply_is_the_one_decoder_for_all_three_consumers() {
+        // Block concatenation, both error spellings and the JSON payload all
+        // come out of the same reply. The payload's first-block fallback keeps
+        // the attachment reader's old behaviour on multi-block replies.
+        let (text, is_error, payload) = parse_tool_call_reply(&json!({
+            "content": [
+                {"type": "text", "text": r#"{"bytes":4}"#},
+                {"type": "image", "data": "ignored"},
+                {"type": "text", "text": "trailing"},
+            ],
+            "isError": false,
+        }));
+        assert_eq!(text, r#"{"bytes":4}trailing"#);
+        assert!(!is_error);
+        assert_eq!(payload, Some(json!({"bytes": 4})));
+
+        let (text, is_error, payload) = parse_tool_call_reply(&json!({
+            "content": [{"type": "text", "text": "nope"}],
+            "is_error": true,
+        }));
+        assert_eq!(text, "nope");
+        assert!(is_error);
+        assert_eq!(payload, None);
+
+        let (text, is_error, payload) = parse_tool_call_reply(&json!({}));
+        assert!(text.is_empty());
+        assert!(!is_error);
+        assert_eq!(payload, None);
     }
 
     #[test]

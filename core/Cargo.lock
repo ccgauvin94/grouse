@@ -1467,6 +1467,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "grouse-roam-core",
+ "grouse-unstable",
  "image",
  "parking_lot",
  "rustls",

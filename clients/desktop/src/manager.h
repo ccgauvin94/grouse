@@ -11,6 +11,12 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+#include "catalogcontroller.h"
+#include "chatcontroller.h"
+#include "coreapi.h"
+#include "settingsstore.h"
+#include "transcriptprojection.h"
+
 class CoreBridge;
 class AppBridgeServer;
 class RoamListModel;
@@ -49,6 +55,13 @@ inline bool turnOwnerMatches(const QString &promptingSessionId,
 class Manager : public QObject
 {
     Q_OBJECT
+    // The extracted units reach the shared QML-facing state by reference; the
+    // facade still owns the properties, signals and coreOn* dispatcher.
+    friend class SettingsStore;
+    friend class CoreApi;
+    friend class TranscriptProjection;
+    friend class CatalogController;
+    friend class ChatController;
     Q_PROPERTY(QString host READ host WRITE setHost NOTIFY settingsChanged)
     Q_PROPERTY(QString port READ port WRITE setPort NOTIFY settingsChanged)
     Q_PROPERTY(QString secretKey READ secretKey WRITE setSecretKey NOTIFY settingsChanged)
@@ -153,7 +166,7 @@ public:
      *  verification, matching the core and Android. MIGRATION: installs with no
      *  stored value now verify; users of self-signed hosts must tick Settings >
      *  Skip TLS certificate verification once. An explicit stored true is kept. */
-    static constexpr bool DEFAULT_ACCEPT_INVALID_CERTS = false;
+    static constexpr bool DEFAULT_ACCEPT_INVALID_CERTS = SettingsStore::DEFAULT_ACCEPT_INVALID_CERTS;
 
     /** Namespace-only FALLBACK for the peer of a `roam:<label>:<id>` display id.
      *  Routing asks the core (`sessionPeerLabel`); this only keeps an older/absent
@@ -941,7 +954,7 @@ private:
     /// A message that must wait: for the running turn to end, or for a session bound.
     /// `sessionId` is the chat it was TYPED in — draining it into whatever chat happens
     /// to be on screen is how a reply once streamed into the wrong conversation.
-    struct PendingSend { QString text; QVariantList images; QStringList files; QString sessionId; int id = 0; };
+    using PendingSend = ChatController::PendingSend;
     void dispatchSend(const QString &text, const QVariantList &blocks,
                       const QStringList &files = {});
     void enqueue(const PendingSend &p);
@@ -979,7 +992,6 @@ private:
     QString m_streamMsgId;
     int m_currentIndex = -1;
 
-    QSettings m_store;
     CoreBridge *m_bridge = nullptr;
     QString m_activePeerLabel;      // empty = main connection owns the active session
     RoamListModel *m_roamModel = nullptr;
@@ -1030,16 +1042,7 @@ private:
     bool m_discoveringAttached = false;
 
     /// One configured extension's profile, as goose listed it (raw is the add-accept input).
-    struct ExtDef {
-        QString name;
-        QString key;                // configKey / extensionKey — the identity for
-                                    // sessionExts, tool prefixes, catalogs, and remove
-        QString type;
-        bool attrib = false;          // mcp-backed => tools are namespaced and individually toggleable
-        bool enabled = true;          // global config.yaml enabled state (config/extensions/list)
-        QStringList availableTools;   // current allowlist from ext.available_tools (empty = all)
-        QJsonObject raw;              // verbatim listed extension object
-    };
+    using ExtDef = CatalogController::ExtDef;
     QList<ExtDef> m_extDefs;
     /// The CURRENT chat's own server catalog (`config/extensions/list` on the chat's
     /// connection). `m_extDefs` above is the MAIN server's config.yaml — the settings
@@ -1213,4 +1216,12 @@ private:
     QVariantList m_permOptions;
     bool m_formNotifyPending = false;
     QVariantMap m_roamPinRefusal;
+
+    // Extracted units LAST: their constructors only bind references to the
+    // state above, which is fully constructed by then. All QML-visible
+    // properties, signals and coreOn* names still live on Manager.
+    SettingsStore m_settings;
+    TranscriptProjection m_transcript;
+    CatalogController m_catalog;
+    ChatController m_chat;
 };

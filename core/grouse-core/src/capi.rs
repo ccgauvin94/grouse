@@ -29,11 +29,17 @@
 //!     Callbacks fire on the core's worker thread (the C++ bridge marshals
 //!     onto Qt main).
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use serde::Serialize;
+
+// One source file for the C-string plumbing shared with the roam ABI (see the
+// module docs there for why a crate-level dependency cannot go this direction).
+#[path = "cabi_helpers.rs"]
+mod cabi_helpers;
+pub(crate) use cabi_helpers::{c_param, c_str, set_err, string_free};
 
 use crate::unstable::GrouseUnstable;
 use crate::{
@@ -94,35 +100,6 @@ pub extern "C" fn grouse_abi_version() -> u32 {
     GROUSE_ABI_VERSION
 }
 
-/// malloc-allocated UTF-8 copy of `s`, freed with `grouse_string_free`.
-///
-/// Server text is untrusted and can contain U+0000. `CString::new` rejects that
-/// and used to return NULL, which made every `cb_str*` silently SKIP the event
-/// (a turn, a permission request, a tool result — all lost). Replace interior
-/// NULs with U+FFFD instead: the callback always fires and the C string is
-/// always well-formed. The common no-NUL path costs no extra allocation.
-fn c_str(s: &str) -> *mut c_char {
-    let encoded = if s.as_bytes().contains(&0) {
-        CString::new(s.replace('\0', "\u{FFFD}").into_bytes())
-    } else {
-        CString::new(s.as_bytes())
-    };
-    encoded.map(CString::into_raw).unwrap_or(std::ptr::null_mut())
-}
-
-unsafe fn c_param<'a>(p: *const c_char) -> Option<&'a str> {
-    if p.is_null() {
-        return None;
-    }
-    CStr::from_ptr(p).to_str().ok()
-}
-
-fn set_err(out_err: *mut *mut c_char, msg: &str) {
-    if !out_err.is_null() {
-        unsafe { *out_err = c_str(msg) };
-    }
-}
-
 /// Serialize `v` to a JSON C-string for a callback payload. A serialization
 /// failure degrades to an empty string (never NULL), so a callback always
 /// receives a valid (possibly empty) pointer.
@@ -140,9 +117,7 @@ fn c_json_in<T: serde::de::DeserializeOwned>(p: *const c_char) -> Option<T> {
 /// Free a string returned by any other `grouse_*` function.
 #[no_mangle]
 pub extern "C" fn grouse_string_free(s: *mut c_char) {
-    if !s.is_null() {
-        unsafe { drop(CString::from_raw(s)) };
-    }
+    unsafe { string_free(s) };
 }
 
 /// Decode a push payload into a `PushEnvelope` JSON record (see `notify.rs`). The
@@ -2099,5 +2074,435 @@ mod capi_tests {
         let back = unsafe { c_param(s) }.unwrap_or("");
         assert_eq!(back, "hello grouse");
         grouse_string_free(s);
+    }
+
+    /// The missing C ABI test from the audit: install a recording callback in
+    /// EVERY slot of the ABI-20 table, fire every slot, and require each one to
+    /// deliver a valid C string (or valid JSON, or a numeric payload). Server
+    /// text carries a literal U+0000 on the raw-string paths — the old
+    /// `CString::new`-returns-NULL behaviour silently dropped those events.
+    mod listener_slots {
+        use super::*;
+
+        /// ABI 20's table has 50 entries. The literal below is exhaustive, so
+        /// adding a slot breaks this test at compile time; this catches the
+        /// other direction (a case that never got written).
+        const SLOT_COUNT: usize = 50;
+
+        #[derive(Clone, Copy)]
+        enum Payload {
+            /// An exact, NUL-sanitized raw string.
+            Text(&'static str),
+            /// A parseable JSON document containing this marker.
+            Json(&'static str),
+            /// One of the numeric-only callbacks (recorded as a tagged line).
+            Numeric,
+        }
+
+        struct SlotCase {
+            name: &'static str,
+            fire: fn(&CoreCallbackForwarder, &GrouseCoreListener, *mut c_void),
+            check: fn(&[String], &'static str),
+        }
+
+        fn expect(events: &[String], name: &str, want: &[Payload]) {
+            assert_eq!(
+                events.len(), want.len(),
+                "{name}: expected {} callback arguments, got {events:?}", want.len()
+            );
+            for (i, (got, expected)) in events.iter().zip(want).enumerate() {
+                match expected {
+                    Payload::Text(text) => {
+                        assert_eq!(got, text, "{name}: argument {i}");
+                        assert!(!got.contains('\0'), "{name}: argument {i} is not NUL-sanitized");
+                    }
+                    Payload::Json(marker) => {
+                        let value: serde_json::Value = serde_json::from_str(got)
+                            .unwrap_or_else(|e| panic!("{name}: arg {i} is not JSON ({e}): {got:?}"));
+                        assert!(
+                            value.to_string().contains(marker),
+                            "{name}: argument {i} lost its marker: {got:?}"
+                        );
+                    }
+                    Payload::Numeric => assert!(
+                        got.starts_with("i64:") || got.starts_with("u64:") || got.starts_with("i32:"),
+                        "{name}: argument {i} is not a numeric payload: {got:?}"
+                    ),
+                }
+            }
+        }
+
+        fn push(user_data: *mut c_void, value: String) {
+            let bridge = unsafe { &*(user_data as *const RecordingBridge) };
+            bridge.events.lock().push(value);
+        }
+
+        /// Decode with the same `c_param` the bridge uses. NULL/invalid UTF-8
+        /// becomes a sentinel an assertion will catch, never a panic across
+        /// the `extern "C"` boundary.
+        fn push_strings(user_data: *mut c_void, ptrs: &[*const c_char]) {
+            for p in ptrs {
+                push(user_data, unsafe { c_param(*p) }.unwrap_or("<null>").to_string());
+            }
+        }
+
+        extern "C" fn rec_1(ud: *mut c_void, a: *const c_char) {
+            push_strings(ud, &[a]);
+        }
+        extern "C" fn rec_2(ud: *mut c_void, a: *const c_char, b: *const c_char) {
+            push_strings(ud, &[a, b]);
+        }
+        extern "C" fn rec_3(ud: *mut c_void, a: *const c_char, b: *const c_char, c: *const c_char) {
+            push_strings(ud, &[a, b, c]);
+        }
+        extern "C" fn rec_usage(
+            ud: *mut c_void, used: i64, size: i64, cost: f64, currency: *const c_char,
+        ) {
+            push(ud, format!("i64:{used},{size}:f64:{cost}"));
+            push_strings(ud, &[currency]);
+        }
+        extern "C" fn rec_replay(
+            ud: *mut c_void, session: *const c_char, loaded: i64, total: i64, done: i32,
+        ) {
+            push(ud, format!("i64:{loaded},{total}:i32:{done}"));
+            push_strings(ud, &[session]);
+        }
+        extern "C" fn rec_probe(
+            ud: *mut c_void, a: *const c_char, b: *const c_char, count: i64,
+        ) {
+            push(ud, format!("i64:{count}"));
+            push_strings(ud, &[a, b]);
+        }
+        extern "C" fn rec_str_i32(ud: *mut c_void, text: *const c_char, error: i32) {
+            push(ud, format!("i32:{error}"));
+            push_strings(ud, &[text]);
+        }
+        extern "C" fn rec_nums_u64(
+            ud: *mut c_void, a: u64, b: u64, c: u64, cost: f64,
+        ) {
+            push(ud, format!("u64:{a},{b},{c}:f64:{cost}"));
+        }
+        extern "C" fn rec_nums_i64(ud: *mut c_void, a: i64, b: i64, cost: f64) {
+            push(ud, format!("i64:{a},{b}:f64:{cost}"));
+        }
+
+        fn sessions(marker: &str) -> Vec<SessionSummary> {
+            vec![SessionSummary {
+                id: marker.into(),
+                title: "title".into(),
+                updated_at: String::new(),
+                last_message_snippet: None,
+                project_id: None,
+                message_count: 0,
+                model: String::new(),
+                has_recipe: false,
+                has_new: false,
+                mode: None,
+                archived: false,
+            }]
+        }
+
+        fn owner() -> SessionOwner {
+            SessionOwner { kind: "main".into(), label: String::new() }
+        }
+
+        /// The two ABI-20 slots that are intentionally never fired by the
+        /// forwarder (it uses the request-id variants) still have to be
+        /// callable at their pinned offsets, so fire their function pointers
+        /// directly with a NUL-bearing string.
+        fn fire_direct(
+            name: &'static str,
+            f: Option<extern "C" fn(*mut c_void, *const c_char)>,
+            ud: *mut c_void,
+        ) {
+            let f = f.unwrap_or_else(|| panic!("{name}: slot is NULL"));
+            let s = c_str(&format!("slot_{name}\u{0}tail"));
+            f(ud, s);
+            grouse_string_free(s);
+        }
+
+        const CASES: &[SlotCase] = &[
+            SlotCase { name: "on_status", fire: |l, _, _| CoreListener::on_status(l,
+                ConnectionStatus::Error { message: "slot_on_status\u{0}tail".into() }),
+                check: |e, n| expect(e, n, &[Payload::Json("slot_on_status")]) },
+            SlotCase { name: "on_sessions", fire: |l, _, _| CoreListener::on_sessions(l,
+                sessions("slot_on_sessions")),
+                check: |e, n| expect(e, n, &[Payload::Json("slot_on_sessions")]) },
+            SlotCase { name: "on_item", fire: |l, _, _| CoreListener::on_item(l,
+                TranscriptOp::AppendText { id: "slot_on_item".into(), chunk: "a\u{0}b".into() }),
+                check: |e, n| expect(e, n, &[Payload::Json("slot_on_item")]) },
+            SlotCase { name: "on_usage", fire: |l, _, _| CoreListener::on_usage(
+                l, 7, 8, 1.5, "USD\u{0}tail".into()),
+                check: |e, n| expect(e, n, &[Payload::Numeric, Payload::Text("USD\u{FFFD}tail")]) },
+            SlotCase { name: "on_run_ended", fire: |l, _, _| CoreListener::on_run_ended(
+                l, "slot_on_run_ended".into(), "stop\u{0}tail".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("slot_on_run_ended"),
+                    Payload::Text("stop\u{FFFD}tail")]) },
+            SlotCase { name: "on_speak", fire: |l, _, _| CoreListener::on_speak(
+                l, "slot_on_speak\u{0}tail".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("slot_on_speak\u{FFFD}tail")]) },
+            SlotCase { name: "on_config", fire: |l, _, _| CoreListener::on_config(l,
+                vec![ConfigOption { id: "slot_on_config".into(), value: "v".into(),
+                    name: "n".into(), choices: Vec::new() }]),
+                check: |e, n| expect(e, n, &[Payload::Json("slot_on_config")]) },
+            SlotCase { name: "on_permission_request", fire: |l, _, _|
+                CoreListener::on_permission_request(l, PermissionRequest {
+                    tool_call_id: "slot_on_permission_request".into(), title: "t".into(),
+                    detail: "d".into(), options: Vec::new(), session_id: "s".into(),
+                    owner: "main".into() }),
+                check: |e, n| expect(e, n, &[Payload::Json("slot_on_permission_request")]) },
+            SlotCase { name: "on_session_touched", fire: |l, _, _|
+                CoreListener::on_session_touched(l, "session".into(),
+                    "slot_on_session_touched\u{0}tail".into(), "stamp".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("session"),
+                    Payload::Text("slot_on_session_touched\u{FFFD}tail"), Payload::Text("stamp")]) },
+            SlotCase { name: "on_projects", fire: |l, _, _| CoreListener::on_projects(l,
+                vec![ProjectSummary { path: "slot_on_projects".into(), name: "n".into(),
+                    description: None }]),
+                check: |e, n| expect(e, n, &[Payload::Json("slot_on_projects")]) },
+            SlotCase { name: "on_roam_peer_status", fire: |l, _, _|
+                CoreListener::on_roam_peer_status(l, "peer".into(),
+                    "slot_on_roam_peer_status\u{0}tail".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("peer"),
+                    Payload::Text("slot_on_roam_peer_status\u{FFFD}tail")]) },
+            SlotCase { name: "on_roam_sessions", fire: |l, _, _|
+                CoreListener::on_roam_sessions(l, "peer".into(), sessions("slot_on_roam_sessions")),
+                check: |e, n| expect(e, n, &[Payload::Text("peer"),
+                    Payload::Json("slot_on_roam_sessions")]) },
+            SlotCase { name: "on_peer_new_session", fire: |l, _, _|
+                CoreListener::on_peer_new_session(l, "peer".into(),
+                    "slot_on_peer_new_session".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("peer"),
+                    Payload::Text("slot_on_peer_new_session")]) },
+            SlotCase { name: "on_active_run", fire: |l, _, _| CoreListener::on_active_run(
+                l, "session".into(), "slot_on_active_run".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("session"),
+                    Payload::Text("slot_on_active_run")]) },
+            SlotCase { name: "on_commands", fire: |l, _, _| CoreListener::on_commands(
+                l, vec!["slot_on_commands\u{0}tail".into()]),
+                check: |e, n| expect(e, n, &[Payload::Json("slot_on_commands")]) },
+            SlotCase { name: "on_export", fire: |l, _, _| GrouseUnstableListener::on_export(
+                l, "slot_on_export\u{0}tail".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("slot_on_export\u{FFFD}tail")]) },
+            SlotCase { name: "on_recipe_params", fire: |_, t, ud| fire_direct(
+                "on_recipe_params", t.on_recipe_params, ud),
+                check: |e, n| expect(e, n, &[Payload::Text("slot_on_recipe_params\u{FFFD}tail")]) },
+            SlotCase { name: "on_elicitation", fire: |_, t, ud| fire_direct(
+                "on_elicitation", t.on_elicitation, ud),
+                check: |e, n| expect(e, n, &[Payload::Text("slot_on_elicitation\u{FFFD}tail")]) },
+            SlotCase { name: "on_compaction_status", fire: |l, _, _|
+                GrouseUnstableListener::on_compaction_status(l,
+                    "slot_on_compaction_status\u{0}tail".into()),
+                check: |e, n| expect(e, n,
+                    &[Payload::Text("slot_on_compaction_status\u{FFFD}tail")]) },
+            SlotCase { name: "on_message_usage", fire: |l, _, _|
+                GrouseUnstableListener::on_message_usage(l, 1, 2, 3, 4.5),
+                check: |e, n| expect(e, n, &[Payload::Numeric]) },
+            SlotCase { name: "on_unstable_usage", fire: |l, _, _|
+                GrouseUnstableListener::on_usage(l, 1, 2, 4.5),
+                check: |e, n| expect(e, n, &[Payload::Numeric]) },
+            SlotCase { name: "on_app_resource", fire: |l, _, _|
+                GrouseUnstableListener::on_app_resource(l, "key".into(),
+                    "slot_on_app_resource\u{0}tail".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("key"),
+                    Payload::Text("slot_on_app_resource\u{FFFD}tail")]) },
+            SlotCase { name: "on_recipes", fire: |l, _, _| GrouseUnstableListener::on_recipes(
+                l, r#"{"marker":"slot_on_recipes","text":"a\u0000b"}"#.into()),
+                check: |e, n| expect(e, n, &[Payload::Json("slot_on_recipes")]) },
+            SlotCase { name: "on_schedules", fire: |l, _, _| GrouseUnstableListener::on_schedules(
+                l, r#"{"marker":"slot_on_schedules"}"#.into()),
+                check: |e, n| expect(e, n, &[Payload::Json("slot_on_schedules")]) },
+            SlotCase { name: "on_unstable_projects", fire: |l, _, _|
+                GrouseUnstableListener::on_projects(l,
+                    r#"[{"name":"slot_on_unstable_projects"}]"#.into()),
+                check: |e, n| expect(e, n, &[Payload::Json("slot_on_unstable_projects")]) },
+            SlotCase { name: "on_skills", fire: |l, _, _| GrouseUnstableListener::on_skills(
+                l, "slot_on_skills\u{0}tail".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("slot_on_skills\u{FFFD}tail")]) },
+            SlotCase { name: "on_tools", fire: |l, _, _| GrouseUnstableListener::on_tools(
+                l, "main".into(), r#"[{"name":"slot_on_tools"}]"#.into()),
+                check: |e, n| expect(e, n, &[Payload::Text("main"),
+                    Payload::Json("slot_on_tools")]) },
+            SlotCase { name: "on_extensions", fire: |l, _, _|
+                GrouseUnstableListener::on_extensions(l,
+                    r#"{"a":"slot_on_extensions"}"#.into()),
+                check: |e, n| expect(e, n, &[Payload::Json("slot_on_extensions")]) },
+            SlotCase { name: "on_session_extensions", fire: |l, _, _|
+                GrouseUnstableListener::on_session_extensions(l, "main".into(),
+                    r#"{"a":"slot_on_session_extensions"}"#.into()),
+                check: |e, n| expect(e, n, &[Payload::Text("main"),
+                    Payload::Json("slot_on_session_extensions")]) },
+            SlotCase { name: "on_config_value", fire: |l, _, _|
+                GrouseUnstableListener::on_config_value(l, "mode".into(),
+                    "slot_on_config_value\u{0}tail".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("mode"),
+                    Payload::Text("slot_on_config_value\u{FFFD}tail")]) },
+            SlotCase { name: "on_supported_models", fire: |l, _, _|
+                GrouseUnstableListener::on_supported_models(l, "provider".into(),
+                    r#"["slot_on_supported_models"]"#.into()),
+                check: |e, n| expect(e, n, &[Payload::Text("provider"),
+                    Payload::Json("slot_on_supported_models")]) },
+            SlotCase { name: "on_providers", fire: |l, _, _|
+                GrouseUnstableListener::on_providers(l,
+                    r#"["slot_on_providers"]"#.into()),
+                check: |e, n| expect(e, n, &[Payload::Json("slot_on_providers")]) },
+            SlotCase { name: "on_session_probe", fire: |l, _, _|
+                GrouseUnstableListener::on_session_probe(l, "session".into(),
+                    "slot_on_session_probe\u{0}tail".into(), 42),
+                check: |e, n| expect(e, n, &[Payload::Numeric, Payload::Text("session"),
+                    Payload::Text("slot_on_session_probe\u{FFFD}tail")]) },
+            SlotCase { name: "on_tool_result", fire: |l, _, _|
+                GrouseUnstableListener::on_tool_result(l,
+                    "slot_on_tool_result\u{0}tail".into(), true),
+                check: |e, n| expect(e, n, &[Payload::Numeric,
+                    Payload::Text("slot_on_tool_result\u{FFFD}tail")]) },
+            SlotCase { name: "on_error", fire: |l, _, _| GrouseUnstableListener::on_error(
+                l, "method".into(), "slot_on_error\u{0}tail".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("method"),
+                    Payload::Text("slot_on_error\u{FFFD}tail")]) },
+            SlotCase { name: "on_dictation_config", fire: |l, _, _|
+                GrouseUnstableListener::on_dictation_config(l,
+                    r#"{"provider":"slot_on_dictation_config"}"#.into()),
+                check: |e, n| expect(e, n, &[Payload::Json("slot_on_dictation_config")]) },
+            SlotCase { name: "on_transcript", fire: |l, _, _|
+                GrouseUnstableListener::on_transcript(l,
+                    "slot_on_transcript\u{0}tail".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("slot_on_transcript\u{FFFD}tail")]) },
+            SlotCase { name: "on_session_open_failed", fire: |l, _, _|
+                CoreListener::on_session_open_failed(l, "session".into(),
+                    "slot_on_session_open_failed\u{0}tail".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("session"),
+                    Payload::Text("slot_on_session_open_failed\u{FFFD}tail")]) },
+            SlotCase { name: "on_tasks", fire: |l, _, _| CoreListener::on_tasks(
+                l, "slot_on_tasks\u{0}tail".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("slot_on_tasks\u{FFFD}tail")]) },
+            SlotCase { name: "on_replay_progress", fire: |l, _, _|
+                CoreListener::on_replay_progress(l, "slot_on_replay_progress".into(),
+                    3, 9, true),
+                check: |e, n| expect(e, n, &[Payload::Numeric,
+                    Payload::Text("slot_on_replay_progress")]) },
+            SlotCase { name: "on_file", fire: |l, _, _| CoreListener::on_file(l,
+                crate::attachments::FileEvent::Failed {
+                    path: "slot_on_file".into(), name: "f".into(),
+                    message: "boom".into(), session_id: "s".into(), request_id: "r".into(),
+                }),
+                check: |e, n| expect(e, n, &[Payload::Json("slot_on_file")]) },
+            SlotCase { name: "on_thread_ready", fire: |l, _, _|
+                CoreListener::on_thread_ready(l, "area".into(), "slot_on_thread_ready".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("area"),
+                    Payload::Text("slot_on_thread_ready")]) },
+            SlotCase { name: "on_extension_catalog", fire: |l, _, _|
+                GrouseUnstableListener::on_extension_catalog(l, "main".into(),
+                    r#"{"a":"slot_on_extension_catalog"}"#.into()),
+                check: |e, n| expect(e, n, &[Payload::Text("main"),
+                    Payload::Json("slot_on_extension_catalog")]) },
+            SlotCase { name: "on_context_report", fire: |l, _, _|
+                GrouseUnstableListener::on_context_report(l, "main".into(),
+                    r#"{"text":"slot_on_context_report"}"#.into()),
+                check: |e, n| expect(e, n, &[Payload::Text("main"),
+                    Payload::Json("slot_on_context_report")]) },
+            SlotCase { name: "on_thread_timeline", fire: |l, _, _|
+                CoreListener::on_thread_timeline(l, "area".into(),
+                    vec![TimelineRow { text: "slot_on_thread_timeline".into(),
+                        ..Default::default() }]),
+                check: |e, n| expect(e, n, &[Payload::Text("area"),
+                    Payload::Json("slot_on_thread_timeline")]) },
+            SlotCase { name: "on_sensitivity", fire: |l, _, _| CoreListener::on_sensitivity(
+                l, "slot_on_sensitivity\u{0}tail".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("slot_on_sensitivity\u{FFFD}tail")]) },
+            SlotCase { name: "on_advisor_report", fire: |l, _, _|
+                CoreListener::on_advisor_report(l, "session".into(),
+                    "slot_on_advisor_report\u{0}tail".into()),
+                check: |e, n| expect(e, n, &[Payload::Text("session"),
+                    Payload::Text("slot_on_advisor_report\u{FFFD}tail")]) },
+            SlotCase { name: "on_session_opened", fire: |l, _, _|
+                CoreListener::on_session_opened(l,
+                    "slot_on_session_opened\u{0}tail".into()),
+                check: |e, n| expect(e, n,
+                    &[Payload::Text("slot_on_session_opened\u{FFFD}tail")]) },
+            SlotCase { name: "on_recipe_params_request", fire: |l, _, _|
+                GrouseUnstableListener::on_recipe_params(l, owner(),
+                    "req_slot_on_recipe_params_request".into(),
+                    r#"{"marker":"slot_on_recipe_params_request"}"#.into()),
+                check: |e, n| expect(e, n, &[Payload::Json("main"),
+                    Payload::Text("req_slot_on_recipe_params_request"),
+                    Payload::Json("slot_on_recipe_params_request")]) },
+            SlotCase { name: "on_elicitation_request", fire: |l, _, _|
+                GrouseUnstableListener::on_elicitation(l, owner(),
+                    "req_slot_on_elicitation_request".into(),
+                    r#"{"marker":"slot_on_elicitation_request"}"#.into()),
+                check: |e, n| expect(e, n, &[Payload::Json("main"),
+                    Payload::Text("req_slot_on_elicitation_request"),
+                    Payload::Json("slot_on_elicitation_request")]) },
+        ];
+
+        #[test]
+        fn every_listener_slot_delivers_a_valid_payload() {
+            let bridge = RecordingBridge::default();
+            let user_data = &bridge as *const RecordingBridge as *mut c_void;
+            // Exhaustive literal (no `..Default::default()`): the compiler
+            // enforces one recorder per slot, and the case count below keeps
+            // the table and this test in lockstep.
+            let table = GrouseCoreListener {
+                on_status: Some(rec_1),
+                on_sessions: Some(rec_1),
+                on_item: Some(rec_1),
+                on_usage: Some(rec_usage),
+                on_run_ended: Some(rec_2),
+                on_speak: Some(rec_1),
+                on_config: Some(rec_1),
+                on_permission_request: Some(rec_1),
+                on_session_touched: Some(rec_3),
+                on_projects: Some(rec_1),
+                on_roam_peer_status: Some(rec_2),
+                on_roam_sessions: Some(rec_2),
+                on_peer_new_session: Some(rec_2),
+                on_active_run: Some(rec_2),
+                on_commands: Some(rec_1),
+                on_export: Some(rec_1),
+                on_recipe_params: Some(rec_1),
+                on_elicitation: Some(rec_1),
+                on_compaction_status: Some(rec_1),
+                on_message_usage: Some(rec_nums_u64),
+                on_unstable_usage: Some(rec_nums_i64),
+                on_app_resource: Some(rec_2),
+                on_recipes: Some(rec_1),
+                on_schedules: Some(rec_1),
+                on_unstable_projects: Some(rec_1),
+                on_skills: Some(rec_1),
+                on_tools: Some(rec_2),
+                on_extensions: Some(rec_1),
+                on_session_extensions: Some(rec_2),
+                on_config_value: Some(rec_2),
+                on_supported_models: Some(rec_2),
+                on_providers: Some(rec_1),
+                on_session_probe: Some(rec_probe),
+                on_tool_result: Some(rec_str_i32),
+                on_error: Some(rec_2),
+                on_dictation_config: Some(rec_1),
+                on_transcript: Some(rec_1),
+                on_session_open_failed: Some(rec_2),
+                on_tasks: Some(rec_1),
+                on_replay_progress: Some(rec_replay),
+                on_file: Some(rec_1),
+                on_thread_ready: Some(rec_2),
+                on_extension_catalog: Some(rec_2),
+                on_context_report: Some(rec_2),
+                on_thread_timeline: Some(rec_2),
+                on_sensitivity: Some(rec_1),
+                on_advisor_report: Some(rec_2),
+                on_session_opened: Some(rec_1),
+                on_recipe_params_request: Some(rec_3),
+                on_elicitation_request: Some(rec_3),
+            };
+            assert_eq!(CASES.len(), SLOT_COUNT, "every ABI slot needs a case");
+            let forwarder = CoreCallbackForwarder { table: &table, user_data };
+            for case in CASES {
+                bridge.events.lock().clear();
+                (case.fire)(&forwarder, &table, user_data);
+                let events = std::mem::take(&mut *bridge.events.lock());
+                (case.check)(&events, case.name);
+            }
+        }
     }
 }

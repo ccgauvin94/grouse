@@ -91,20 +91,20 @@ excluded = 26
 |---|---|---|
 | `item.id` | yes: ConnectionManager.kt#item.id | yes: src/manager.cpp#value(QStringLiteral("id")) |
 | `item.kind` | yes: ConnectionManager.kt#item.kind | yes: src/manager.cpp#value(QStringLiteral("kind")) |
-| `item.text` | yes: ConnectionManager.kt#item.text | yes: src/manager.cpp#value(QStringLiteral("text")) |
-| `item.detail` | yes: ConnectionManager.kt#item.detail | yes: src/manager.cpp#value(QStringLiteral("detail")) |
-| `item.output` | yes: ConnectionManager.kt#item.output | yes: src/manager.cpp#value(QStringLiteral("output")) |
-| `item.status` | yes: ConnectionManager.kt#item.status | yes: src/manager.cpp#value(QStringLiteral("status")) |
-| `item.app_key` | yes: ConnectionManager.kt#item.appKey | yes: src/manager.cpp#value(QStringLiteral("app_key")) |
-| `item.calls` | yes: ConnectionManager.kt#item.calls | yes: src/manager.cpp#value(QStringLiteral("calls")) |
-| `item.thought` | yes: ConnectionManager.kt#item.thought | yes: src/manager.cpp#value(QStringLiteral("thought")) |
+| `item.text` | yes: ConnectionManager.kt#item.text | yes: src/transcriptprojection.cpp#value(QStringLiteral("text")) |
+| `item.detail` | yes: ConnectionManager.kt#item.detail | yes: src/transcriptprojection.cpp#value(QStringLiteral("detail")) |
+| `item.output` | yes: ConnectionManager.kt#item.output | yes: src/transcriptprojection.cpp#value(QStringLiteral("output")) |
+| `item.status` | yes: ConnectionManager.kt#item.status | yes: src/transcriptprojection.cpp#value(QStringLiteral("status")) |
+| `item.app_key` | yes: ConnectionManager.kt#item.appKey | yes: src/transcriptprojection.cpp#value(QStringLiteral("app_key")) |
+| `item.calls` | yes: ConnectionManager.kt#item.calls | yes: src/transcriptprojection.cpp#value(QStringLiteral("calls")) |
+| `item.thought` | yes: ConnectionManager.kt#item.thought | yes: src/transcriptprojection.cpp#value(QStringLiteral("thought")) |
 | `item.summary` | yes: ConnectionManager.kt#item.summary | yes: src/manager.cpp#value(QStringLiteral("summary")) |
-| `item.steps` | yes: ConnectionManager.kt#item.steps | yes: src/manager.cpp#value(QStringLiteral("steps")) |
-| `item.attachments` | yes: ConnectionManager.kt#item.attachments | yes: src/manager.cpp#value(QStringLiteral("attachments")) |
-| `item.files` | yes: ConnectionManager.kt#item.files | yes: src/manager.cpp#value(QStringLiteral("files")) |
-| `item.images` | yes: ConnectionManager.kt#item.images | yes: src/manager.cpp#value(QStringLiteral("images")) |
+| `item.steps` | yes: ConnectionManager.kt#item.steps | yes: src/transcriptprojection.cpp#value(QStringLiteral("steps")) |
+| `item.attachments` | yes: ConnectionManager.kt#item.attachments | yes: src/transcriptprojection.cpp#value(QStringLiteral("attachments")) |
+| `item.files` | yes: ConnectionManager.kt#item.files | yes: src/transcriptprojection.cpp#value(QStringLiteral("files")) |
+| `item.images` | yes: ConnectionManager.kt#item.images | yes: src/transcriptprojection.cpp#value(QStringLiteral("images")) |
 | `item.message_id` | excluded: clients key rows on `id`; the server id is core-internal merge state | excluded: same — the row model keys on `id`, never on the server's message id |
-| `item.seq` | yes: ConnectionManager.kt#item.seq | yes: src/manager.cpp#value(QStringLiteral("seq")) |
+| `item.seq` | yes: ConnectionManager.kt#item.seq | yes: src/transcriptprojection.cpp#value(QStringLiteral("seq")) |
 | `item.created` | excluded: the area TIMELINE is its consumer (it places chat rows against My Day cards and actions); no chat row prints a date yet, and the field is additive so a client may ignore it | excluded: same — nothing on the desktop chat surface dates a row |
 | `work.id` | yes: ChatScreen.kt#key = { it.id } | yes: ui/ChatSidePanel.qml#modelData.id |
 | `work.title` | yes: ChatScreen.kt#lane.title | yes: ui/ChatSidePanel.qml#modelData.title |
@@ -114,19 +114,19 @@ excluded = 26
 | `work.outcome` | yes: ChatScreen.kt#lane.outcome | yes: ui/ChatSidePanel.qml#modelData.outcome |
 | `work.subagent` | yes: ChatScreen.kt#lane.subagent | yes: ui/ChatSidePanel.qml#modelData.subagent |
 | `work.steps` | yes: ChatScreen.kt#lane.steps | yes: ui/ChatSidePanel.qml#modelData.steps |
-| `call.id` | yes: ConnectionManager.kt#c.id | yes: src/manager.cpp#c.value("id") |
-| `call.title` | yes: ConnectionManager.kt#c.title | yes: src/manager.cpp#c.value("title") |
-| `call.detail` | yes: ConnectionManager.kt#c.detail | yes: src/manager.cpp#c.value("detail") |
-| `call.output` | yes: ConnectionManager.kt#c.output | yes: src/manager.cpp#c.value("output") |
-| `call.status` | yes: ConnectionManager.kt#c.status | yes: src/manager.cpp#c.value("status") |
-| `call.thought` | yes: ConnectionManager.kt#c.thought | yes: src/manager.cpp#c.value("thought") |
+| `call.id` | yes: ConnectionManager.kt#c.id | yes: src/transcriptprojection.cpp#c.value("id") |
+| `call.title` | yes: ConnectionManager.kt#c.title | yes: src/transcriptprojection.cpp#c.value("title") |
+| `call.detail` | yes: ConnectionManager.kt#c.detail | yes: src/transcriptprojection.cpp#c.value("detail") |
+| `call.output` | yes: ConnectionManager.kt#c.output | yes: src/transcriptprojection.cpp#c.value("output") |
+| `call.status` | yes: ConnectionManager.kt#c.status | yes: src/transcriptprojection.cpp#c.value("status") |
+| `call.thought` | yes: ConnectionManager.kt#c.thought | yes: src/transcriptprojection.cpp#c.value("thought") |
 | `call.seq` | yes: ConnectionManager.kt#c.seq | excluded: the desktop paints a group's calls in core order, which is already seq order |
-| `call.steps` | yes: ConnectionManager.kt#c.steps | yes: src/manager.cpp#c.value("steps") |
-| `step.name` | yes: Bubbles.kt#step.name | yes: src/manager.cpp#s.value(QStringLiteral("name")) |
-| `step.detail` | yes: Bubbles.kt#step.detail | yes: src/manager.cpp#s.value(QStringLiteral("detail")) |
-| `file.name` | yes: ConnectionManager.kt#AttachedFile(it.name | yes: src/manager.cpp#o.value(QStringLiteral("name")) |
-| `file.mime` | yes: ConnectionManager.kt#it.mime | yes: src/manager.cpp#o.value(QStringLiteral("mime")) |
-| `file.bytes` | yes: ConnectionManager.kt#it.bytes | yes: src/manager.cpp#o.value(QStringLiteral("bytes")) |
+| `call.steps` | yes: ConnectionManager.kt#c.steps | yes: src/transcriptprojection.cpp#c.value("steps") |
+| `step.name` | yes: Bubbles.kt#step.name | yes: src/transcriptprojection.cpp#s.value(QStringLiteral("name")) |
+| `step.detail` | yes: Bubbles.kt#step.detail | yes: src/transcriptprojection.cpp#s.value(QStringLiteral("detail")) |
+| `file.name` | yes: ConnectionManager.kt#AttachedFile(it.name | yes: src/transcriptprojection.cpp#o.value(QStringLiteral("name")) |
+| `file.mime` | yes: ConnectionManager.kt#it.mime | yes: src/transcriptprojection.cpp#o.value(QStringLiteral("mime")) |
+| `file.bytes` | yes: ConnectionManager.kt#it.bytes | yes: src/transcriptprojection.cpp#o.value(QStringLiteral("bytes")) |
 | `file.path` | excluded: a server-side path — clients show the file, never address it | excluded: same; the desktop reads name/mime/bytes off the record only |
 | `file.sha256` | excluded: content identity belongs to the core and the server, not the UI | excluded: same reasoning — the desktop never hashes a file it did not upload |
 | `session.id` | yes: Wire.kt#sessionId = id | yes: src/manager.cpp#o.value("id") |
@@ -148,41 +148,41 @@ excluded = 26
 | `config.choices` | yes: Wire.kt#choices = choices.map | yes: src/manager.cpp#o.value("choices").toArray() |
 | `choice.value` | yes: Wire.kt#Choice(it.value, it.name) | yes: src/manager.cpp#co.value("value") |
 | `choice.name` | yes: Wire.kt#Choice(it.value, it.name) | yes: src/manager.cpp#co.value("name") |
-| `permission.tool_call_id` | yes: ConnectionManager.kt#request.toolCallId | yes: src/manager.cpp#req.value("tool_call_id") |
+| `permission.tool_call_id` | yes: ConnectionManager.kt#request.toolCallId | yes: src/coreapi.cpp#req.value("tool_call_id") |
 | `permission.title` | yes: ConnectionManager.kt#request.title | yes: src/manager.cpp#req.value("title") |
-| `permission.detail` | yes: ConnectionManager.kt#request.detail | yes: src/manager.cpp#req.value("detail") |
-| `permission.options` | yes: ConnectionManager.kt#request.options.map | yes: src/manager.cpp#req.value("options").toArray() |
-| `permission.session_id` | yes: ConnectionManager.kt#sessionId = request.sessionId | yes: src/manager.cpp#req.value("session_id") |
-| `permission.owner` | yes: ConnectionManager.kt#owner = request.owner | yes: src/manager.cpp#req.value("owner") |
-| `permission_option.option_id` | yes: ConnectionManager.kt#it.optionId | yes: src/manager.cpp#oo.value("option_id") |
-| `permission_option.name` | yes: ConnectionManager.kt#it.name | yes: src/manager.cpp#oo.value("name") |
-| `permission_option.kind` | yes: ConnectionManager.kt#it.kind | yes: src/manager.cpp#oo.value("kind") |
+| `permission.detail` | yes: ConnectionManager.kt#request.detail | yes: src/coreapi.cpp#req.value("detail") |
+| `permission.options` | yes: ConnectionManager.kt#request.options.map | yes: src/coreapi.cpp#req.value("options").toArray() |
+| `permission.session_id` | yes: ConnectionManager.kt#sessionId = request.sessionId | yes: src/coreapi.cpp#req.value("session_id") |
+| `permission.owner` | yes: ConnectionManager.kt#owner = request.owner | yes: src/coreapi.cpp#req.value("owner") |
+| `permission_option.option_id` | yes: ConnectionManager.kt#it.optionId | yes: src/coreapi.cpp#oo.value("option_id") |
+| `permission_option.name` | yes: ConnectionManager.kt#it.name | yes: src/coreapi.cpp#oo.value("name") |
+| `permission_option.kind` | yes: ConnectionManager.kt#it.kind | yes: src/coreapi.cpp#oo.value("kind") |
 | `project.path` | yes: Wire.kt#path = path | yes: src/manager.cpp#o.value("path").toString() |
 | `project.name` | yes: Wire.kt#name = name | yes: src/manager.cpp#o.value("name").toString() |
 | `project.description` | yes: Wire.kt#description = description.orEmpty() | yes: src/manager.cpp#o.value("description").toString() |
-| `prompt_block.Text` | yes: ConnectionManager.kt#PromptBlock.Text(text) | yes: src/manager.cpp#QJsonObject{{"Text" |
-| `prompt_block.Image` | yes: ConnectionManager.kt#PromptBlock.Image(img.mimeType | yes: src/manager.cpp#QJsonObject{{"Image" |
-| `prompt_block.Resource` | excluded: the phone never builds a blob Resource block; goose drops it, so files go through sendPromptWithFiles and the core appends the link itself | yes: src/manager.cpp#QJsonObject{{"Resource" |
-| `prompt_block.Link` | yes: ConnectionManager.kt#core.sendPromptWithFiles | yes: src/manager.cpp#grouse_send_prompt_with_paths |
+| `prompt_block.Text` | yes: ConnectionManager.kt#PromptBlock.Text(text) | yes: src/coreapi.cpp#QJsonObject{{"Text" |
+| `prompt_block.Image` | yes: ConnectionManager.kt#PromptBlock.Image(img.mimeType | yes: src/coreapi.cpp#QJsonObject{{"Image" |
+| `prompt_block.Resource` | excluded: the phone never builds a blob Resource block; goose drops it, so files go through sendPromptWithFiles and the core appends the link itself | yes: src/coreapi.cpp#QJsonObject{{"Resource" |
+| `prompt_block.Link` | yes: ConnectionManager.kt#core.sendPromptWithFiles | yes: src/corebridge.cpp#grouse_send_prompt_with_paths |
 | `file_event.Progress` | yes: ConnectionManager.kt#FileEvent.Progress | yes: ui/ChatPage.qml#ev.Progress !== undefined |
 | `file_event.Saved` | yes: ConnectionManager.kt#FileEvent.Saved | yes: ui/ChatPage.qml#ev.Saved !== undefined |
 | `file_event.Failed` | yes: ConnectionManager.kt#FileEvent.Failed | yes: ui/ChatPage.qml#ev.Failed !== undefined |
-| `file_event.session_id` | yes: ConnectionManager.kt#event.sessionId | yes: src/manager.cpp#value(QStringLiteral("session_id")) |
+| `file_event.session_id` | yes: ConnectionManager.kt#event.sessionId | yes: src/transcriptprojection.cpp#value(QStringLiteral("session_id")) |
 | `file_event.request_id` | excluded: the core sends an empty request id until the wire has a per-fetch correlation id, so there is nothing for the phone to key or show | excluded: same — the field is reserved in the payload, but the core emits an empty string for every fetch today |
-| `op.Reset` | yes: ConnectionManager.kt#TranscriptOp.Reset | yes: src/manager.cpp#QStringLiteral("Reset") |
-| `op.Upsert` | yes: ConnectionManager.kt#TranscriptOp.Upsert | yes: src/manager.cpp#QStringLiteral("Upsert") |
-| `op.AppendText` | yes: ConnectionManager.kt#TranscriptOp.AppendText | yes: src/manager.cpp#QStringLiteral("AppendText") |
-| `op.AppendOutput` | yes: ConnectionManager.kt#TranscriptOp.AppendOutput | yes: src/manager.cpp#QStringLiteral("AppendOutput") |
-| `op.Remove` | yes: ConnectionManager.kt#TranscriptOp.Remove | yes: src/manager.cpp#QStringLiteral("Remove") |
-| `op.Window` | yes: ConnectionManager.kt#TranscriptOp.Window | yes: src/manager.cpp#QStringLiteral("Window") |
-| `kind.User` | yes: ConnectionManager.kt#ItemKind.USER | yes: src/manager.cpp#QLatin1String("User") |
-| `kind.Agent` | yes: ConnectionManager.kt#ItemKind.AGENT | yes: src/manager.cpp#QStringLiteral("agent") |
-| `kind.Thought` | yes: ConnectionManager.kt#ItemKind.THOUGHT | yes: src/manager.cpp#QLatin1String("Thought") |
-| `kind.Tool` | yes: ConnectionManager.kt#ItemKind.TOOL | yes: src/manager.cpp#QLatin1String("Tool") |
-| `kind.ToolGroup` | yes: ConnectionManager.kt#ItemKind.TOOL_GROUP | yes: src/manager.cpp#QLatin1String("ToolGroup") |
-| `kind.Chart` | yes: ConnectionManager.kt#ItemKind.CHART | yes: src/manager.cpp#QLatin1String("Chart") |
-| `kind.McpApp` | yes: ConnectionManager.kt#ItemKind.MCP_APP | yes: src/manager.cpp#QLatin1String("McpApp") |
-| `kind.Error` | yes: ConnectionManager.kt#ItemKind.ERROR | yes: src/manager.cpp#QLatin1String("Error") |
+| `op.Reset` | yes: ConnectionManager.kt#TranscriptOp.Reset | yes: src/transcriptprojection.cpp#QStringLiteral("Reset") |
+| `op.Upsert` | yes: ConnectionManager.kt#TranscriptOp.Upsert | yes: src/transcriptprojection.cpp#QStringLiteral("Upsert") |
+| `op.AppendText` | yes: ConnectionManager.kt#TranscriptOp.AppendText | yes: src/transcriptprojection.cpp#QStringLiteral("AppendText") |
+| `op.AppendOutput` | yes: ConnectionManager.kt#TranscriptOp.AppendOutput | yes: src/transcriptprojection.cpp#QStringLiteral("AppendOutput") |
+| `op.Remove` | yes: ConnectionManager.kt#TranscriptOp.Remove | yes: src/transcriptprojection.cpp#QStringLiteral("Remove") |
+| `op.Window` | yes: ConnectionManager.kt#TranscriptOp.Window | yes: src/transcriptprojection.cpp#QStringLiteral("Window") |
+| `kind.User` | yes: ConnectionManager.kt#ItemKind.USER | yes: src/transcriptprojection.cpp#QLatin1String("User") |
+| `kind.Agent` | yes: ConnectionManager.kt#ItemKind.AGENT | yes: src/transcriptprojection.cpp#QStringLiteral("agent") |
+| `kind.Thought` | yes: ConnectionManager.kt#ItemKind.THOUGHT | yes: src/transcriptprojection.cpp#QLatin1String("Thought") |
+| `kind.Tool` | yes: ConnectionManager.kt#ItemKind.TOOL | yes: src/transcriptprojection.cpp#QLatin1String("Tool") |
+| `kind.ToolGroup` | yes: ConnectionManager.kt#ItemKind.TOOL_GROUP | yes: src/transcriptprojection.cpp#QLatin1String("ToolGroup") |
+| `kind.Chart` | yes: ConnectionManager.kt#ItemKind.CHART | yes: src/transcriptprojection.cpp#QLatin1String("Chart") |
+| `kind.McpApp` | yes: ConnectionManager.kt#ItemKind.MCP_APP | yes: src/transcriptprojection.cpp#QLatin1String("McpApp") |
+| `kind.Error` | yes: ConnectionManager.kt#ItemKind.ERROR | yes: src/transcriptprojection.cpp#QLatin1String("Error") |
 | `listener.on_status` | yes: ConnectionManager.kt#override fun onStatus | yes: src/corebridge.cpp#cb_on_status |
 | `listener.on_sessions` | yes: ConnectionManager.kt#override fun onSessions | yes: src/corebridge.cpp#cb_on_sessions |
 | `listener.on_item` | yes: ConnectionManager.kt#override fun onItem | yes: src/corebridge.cpp#cb_on_item |
@@ -203,7 +203,7 @@ excluded = 26
 | `listener.on_tasks` | yes: ConnectionManager.kt#override fun onTasks | yes: src/corebridge.cpp#cb_on_tasks |
 | `listener.on_thread_ready` | yes: ConnectionManager.kt#override fun onThreadReady | yes: src/corebridge.cpp#cb_on_thread_ready |
 | `listener.on_replay_progress` | yes: ConnectionManager.kt#override fun onReplayProgress | yes: src/corebridge.cpp#cb_on_replay_progress |
-| `kind.File` | yes: ConnectionManager.kt#ItemKind.FILE | yes: src/manager.cpp#QLatin1String("File") |
+| `kind.File` | yes: ConnectionManager.kt#ItemKind.FILE | yes: src/transcriptprojection.cpp#QLatin1String("File") |
 | `listener.on_file` | yes: ConnectionManager.kt#override fun onFile | yes: src/corebridge.cpp#cb_on_file |
 | `listener.on_thread_timeline` | yes: ConnectionManager.kt#override fun onThreadTimeline | excluded: no desktop timeline surface yet — the C ABI slot and trampoline are in, the corebridge wiring is not |
 | `listener.on_sensitivity` | yes: ConnectionManager.kt#override fun onSensitivity | excluded: no desktop sensitivity surface yet — the knob is per-board and the desktop has no My Day strip to put it on |
@@ -217,7 +217,7 @@ excluded = 26
 | `ui.my-day-lazy-cache` | yes: ConnectionManager.kt#fun paintTasks | yes: src/manager.cpp#void Manager::paintCachedTasks |
 | `ui.my-day-thread-chat` | yes: ConnectionManager.kt#fun openThreadChat | yes: src/manager.cpp#grouse_open_thread |
 | `ui.chat-scroll-pinned` | yes: ChatScreen.kt#var follow by remember | yes: ui/ChatPage.qml#function pinToEnd |
-| `ui.chat-stream-hold` | yes: ChatScreen.kt#var heldStream | excluded: the desktop has no frozen streamed row; pinToEnd only scrolls at bounded intervals while the bubble is rewritten in place, so it is not a hold |
+| `ui.chat-stream-hold` | yes: ChatTranscript.kt#var heldStream | excluded: the desktop has no frozen streamed row; pinToEnd only scrolls at bounded intervals while the bubble is rewritten in place, so it is not a hold |
 | `ui.chat-stream-markdown` | yes: Bubbles.kt#fun settledParagraphEnd | excluded: the desktop streams the reply as plain text and re-parses rich text once at finalize (ui/ChatPage.qml) — its own answer to the same per-token cost |
 | `ui.tools-sheet-catalog` | yes: ConnectionManager.kt#fun onExtensionCatalog | yes: src/manager.cpp#void Manager::coreOnExtensionCatalog |
 | `ui.dev-mode` | yes: Drawer.kt#ic_dev_mode+ConnectionManager.kt#fun newRoamSession | yes: ui/main.qml#newChatInMode+ui/main.qml#dev-mode-symbolic |

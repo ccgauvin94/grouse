@@ -276,7 +276,7 @@ fun ContextRing(pct: Int, modifier: Modifier = Modifier, onClick: (() -> Unit)? 
 
 /** The mic level, 0..1 — a live "the microphone is actually running" readout. */
 @Composable
-private fun LevelBar(level: Float) {
+internal fun LevelBar(level: Float) {
     Box(Modifier.size(width = 64.dp, height = 6.dp)
         .clip(RoundedCornerShape(3.dp))
         .background(MaterialTheme.colorScheme.surfaceVariant)) {
@@ -323,7 +323,7 @@ fun BackgroundTasksGlyph(modifier: Modifier = Modifier, tint: Color = Color.Unsp
  *  chip every time would say nothing, and the connection dot already reports the healthy case.
  */
 @Composable
-private fun RoamSubtitle(peer: String, status: String?, onClick: () -> Unit) {
+internal fun RoamSubtitle(peer: String, status: String?, onClick: () -> Unit) {
     val state = roamLinkState(status)
     val color = when (state) {
         LinkState.Connected -> MaterialTheme.colorScheme.onSurfaceVariant
@@ -577,80 +577,15 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
 
     val currentModel = cm.config.value.firstOrNull { it.id == "model" }?.currentValue ?: ""
     var showVisionWarn by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    // "At bottom" = the last item is visible; drives autoscroll + the jump-to-bottom button.
-    // With reverseLayout the bottom is index 0; we're at the bottom when it's fully shown.
-    val atBottom by remember {
-        derivedStateOf {
-            listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
-        }
-    }
+
+    val ui = ChatUiState(link, roamPeer, debugTools,
+        ChatBriefing(briefingAgo, briefingHealthy, briefingLate, lastBriefing), currentModel)
     // FOLLOWING is a mode, and it is the only thing that keeps a chat at its bottom.
-    //
-    // A one-shot scroll cannot: rows are inserted at index 0 (each insert pushes the reader up
-    // a message), the newest bubble measures itself only when first composed (markdown
-    // re-parse, code blocks, attachment cards, images), the waiting bubble comes and goes, and
-    // the keyboard resizes the viewport. Every one of those moves the end AFTER the scroll ran
-    // — which is why an opened chat settled a message short of the bottom, and why the
-    // jump-to-bottom arrow sometimes needed two presses: the first press spent the distance
-    // that had appeared since the last measurement. So the list is driven from its own LAYOUT
-    // (below) rather than from the arrival of messages.
-    // A returning reader starts UNPINNED: initialising to true here would let the follower's
-    // first frame scroll the restored history position away before the restore effect runs.
+    // Hoisted here (with the reading position) so the transcript's follower can be a child
+    // without losing the scroll-through-sessions memory on rotation or navigation.
     var follow by remember(sessionKey) {
         mutableStateOf((ReadingPosition.decode(savedPositions[sessionKey]) ?: ReadingPosition(0, 0)).atBottom)
     }
-    // Follow decisions are keyed on a FINGER, not on scrolling: this code scrolls the list too
-    // (the pin, and the jump-to-bottom button), and a programmatic scroll that read as "the
-    // reader took over" would unpin itself and then never recover.
-    var fingerOnList by remember(sessionKey) { mutableStateOf(false) }
-
-    // The FREEZE: the text a live reply is held at, while the reader is not following it.
-    //
-    // A row that grows is the one thing that can drag a reading position with it. The newest
-    // bubble is anchored at the bottom of this reversed list, so every token it gains pushes
-    // everything above it up the screen — including a reader who scrolled up mid-reply, and a
-    // reader who is simply reading the first lines of a reply that has grown past the screen
-    // (which is why the follower stops following at that crossing rather than waiting for a
-    // drag). Nothing is lost: the turn keeps arriving in the core, and the row catches up —
-    // jumping to the newest text, with the list re-pinning — the moment the reader asks for
-    // it. The held text lives HERE rather than in the bubble because the bubble is disposed
-    // when it scrolls out of view, and a re-created one would silently reanimate mid-read.
-    var heldStream by remember(sessionKey) {
-        mutableStateOf<Pair<Long, String>?>(null)
-    }
-    LaunchedEffect(sessionKey, follow, cm.streamingRowId.value) {
-        val id = cm.streamingRowId.value
-        heldStream = when {
-            // Back at the bottom: the row catches up and the follower re-pins.
-            follow -> null
-            // No reply in flight and nothing held: an idle chat needs no freeze, so scrolling
-            // back through an old conversation keeps rendering it in full.
-            id == null -> heldStream
-            // A row that was already captured stays as captured — re-reading it here would
-            // re-freeze at the newest token and defeat the point.
-            heldStream?.first == id -> heldStream
-            // Otherwise capture NOW, in the effect and not in composition: `messages` is the
-            // whole transcript, and subscribing the screen to it would recompose everything
-            // once per token.
-            else -> cm.messages.firstOrNull { it.id == id }?.let { it.id to it.text }
-        }
-    }
-
-    // Scroll-back: ask the core for older items when the oldest end nears. With
-    // reverseLayout the oldest is the LAST index; the batch is prepended to the
-    // model (which is the far end of the reversed layout) and the LazyColumn keeps
-    // its position because every row is keyed by its stable id.
-    val shouldLoadOlder by remember {
-        derivedStateOf {
-            val info = listState.layoutInfo
-            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-            cm.itemHasOlder.value && info.totalItemsCount > 0 &&
-                last >= info.totalItemsCount - 3
-        }
-    }
-    LaunchedEffect(shouldLoadOlder) { if (shouldLoadOlder) cm.loadOlder() }
-
     fun reallySend() {
         // Sending is the reader asking to see the reply: follow it even if they had scrolled
         // up to re-read something first. (The desktop pins on send for the same reason.)
@@ -666,85 +601,6 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
         if (attachments.isNotEmpty() && !isLikelyVisionModel(currentModel) &&
             !cm.store.visionOk(currentModel)) { showVisionWarn = true; return }
         reallySend()
-    }
-
-    // The follower: one effect owns everything that moves the end.
-    //
-    // While following, rows arriving/leaving, the newest row growing as it lays out and the
-    // viewport resizing all move the end without any scroll, so any of them re-pins. Not keyed
-    // on `messages` content: that recomposed the whole screen per token.
-    //
-    // …until the live reply outgrows the SCREEN. Four lines into a long answer, "pinned to the
-    // bottom" and "keeping the reader's line still" are opposites: every token pushes the text
-    // they are reading off the top, which is what "it's still scrolling the replies" was.
-    //
-    // So the crossing of one viewport is a latch: the follower stops following, and the hold in
-    // `heldStream` freezes the row at the text it has — the reader's line cannot move because
-    // the row stops growing, and the jump-to-bottom button appears (a held row counts as "not
-    // at the bottom") carrying the busy dot, which is how the rest of the reply is reachable.
-    // Tapping it follows again, and there is no re-latch until the next reply, because the
-    // latch fires on the CROSSING rather than on "is over one screen".
-    LaunchedEffect(listState) {
-        var overScreen = false
-        snapshotFlow {
-            val info = listState.layoutInfo
-            val id = cm.streamingRowId.value
-            val row = if (id == null) null else info.visibleItemsInfo.firstOrNull { it.key == id }
-            EndFrame(info.totalItemsCount, info.viewportSize.height, id, row?.size ?: -1)
-        }.collect { f ->
-            if (f.streamId == null) {
-                overScreen = false
-                if (follow && !listState.isScrollInProgress) listState.scrollToItem(0)
-                return@collect
-            }
-            val nowOverScreen = f.viewport > 0 && f.size >= f.viewport
-            val crossed = crossedStreamingViewport(f, overScreen)
-            overScreen = nowOverScreen
-            if (follow && crossed) {
-                follow = false   // freezes the row via heldStream, below
-                return@collect
-            }
-            if (follow && !listState.isScrollInProgress) listState.scrollToItem(0)
-        }
-    }
-    // What decisions follow is the SETTLE of a finger's scroll, not the start: at the newest
-    // row means keep following, a drag that stopped anywhere above it means don't.
-    LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress }.collect { moving ->
-            if (!moving && fingerOnList) {
-                fingerOnList = false
-                follow = atBottom
-            }
-        }
-    }
-    // A FINGER on the list stops following at once, settle or no settle. A drag lasts about a
-    // second, and a reply that gained a line during it made the follower's own emission fire
-    // while `follow` was still true — snapping the reader back to the end they were leaving.
-    // It is also what arms the text hold below (`heldStream`), so the bubble freezes as the
-    // reader takes over rather than racing them.
-    LaunchedEffect(listState) {
-        listState.interactionSource.interactions.collect { i ->
-            if (i is DragInteraction.Start) {
-                fingerOnList = true
-                follow = false
-            }
-        }
-    }
-    // Opening a session with no saved place (or swapping in a fresh transcript after a replay)
-    // starts at the newest row. A RETURNING reader is restored BEFORE the follower is armed:
-    // arming it first would let the next layout frame pin them to the bottom of the chat they
-    // were reading halfway up. The follower still owns the pinning during backfill (600ms a
-    // page); this only decides whether it is armed at all. Identical Rebuilds never touch
-    // `messages`, so a plain re-render still preserves the reading position.
-    LaunchedEffect(sessionKey, cm.replayDoneTick.value) {
-        val saved = ReadingPosition.decode(savedPositions[sessionKey])
-        if (saved == null) {
-            listState.scrollToItem(0)
-            follow = true
-        } else {
-            listState.scrollToItem(saved.index, saved.offset)
-            follow = saved.atBottom
-        }
     }
 
     // Background RPC failures surface as a toast, not a transcript bubble — the chat is
@@ -769,95 +625,37 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
             cm.exportData.value = null
         }
     }
-    if (showActivity) {
-        ActivitySheet(cm, onDismiss = { showActivity = false })
-    }
 
-    // The "…" menu. session/list only returns chats that have messages, so a brand-new
-    // chat is not in cm.sessions yet — build a row from the id rather than come up empty.
-    if (showChatMenu) {
-        val sid = cm.currentSession.value
-        val info = cm.sessions.value.firstOrNull { it.sessionId == sid }
-            ?: sid?.let {
-                SessionInfo(it, cm.currentChatTitle ?: ctx.getString(R.string.new_chat), "", 0, "")
-            }
-        if (info != null) SessionActionsDialog(
-            cm, info,
-            onDone = { showChatMenu = false },
-            onActivity = { showChatMenu = false; showActivity = true },
-            // The Assistant thread is not a chat you rename or archive away: notify and the
-            // scheduler find it by id and by the exact title "Assistant".
-            sessionActions = !cm.onAssistant,
-        )
-    }
-
-    if (showComposer) {
-        ComposerSheet(cm,
-            // Every tile closes the sheet first (ComposerSheet does it): each
-            // opens a whole other app, and a sheet that covers the input hides
-            // the thumbnail/attachment the user just picked (grouse#17).
-            onCamera = { launchCamera() },
-            onPhotos = { picker.launch(PickVisualMediaRequest(
-                ActivityResultContracts.PickVisualMedia.ImageOnly)) },
-            onFiles = { filePicker.launch(arrayOf("*/*")) },
-            onDismiss = { showComposer = false },
-            onActivity = { showActivity = true },
-        )
-    }
-
-    if (showModelSheet) {
-        ModelSheet(
-            cm.config.value,
-            cm.providerChoices(
-                cm.config.value.firstOrNull { it.id == "provider" }?.currentValue.orEmpty()
-            ),
-            if (ConnectionManager.roamPeer(cm.currentSession.value) != null) emptySet()
-            else cm.knownModels.value,
-            cm::setOption,
-            onDismiss = { showModelSheet = false },
-        )
-    }
-
-    if (showVisionWarn) AlertDialog(
-        onDismissRequest = { showVisionWarn = false },
-        title = { Text(stringResource(R.string.model_may_not_support_images)) },
-        text = { Text("“$currentModel” probably can't read images and may get stuck on them — " +
-            "even later text messages. If that happens, start a New chat.\n\n" +
-            "Sending anyway won't ask again for this model.") },
-        confirmButton = { TextButton(onClick = {
+    ChatOverlays(
+        cm = cm,
+        ctx = ctx,
+        ui = ui,
+        showActivity = showActivity,
+        showChatMenu = showChatMenu,
+        showComposer = showComposer,
+        showModelSheet = showModelSheet,
+        showVisionWarn = showVisionWarn,
+        showTurnLog = showTurnLog && debugTools,
+        showSchedule = showSchedule,
+        onDismissActivity = { showActivity = false },
+        onDismissChatMenu = { showChatMenu = false },
+        onChatMenuActivity = { showChatMenu = false; showActivity = true },
+        onCamera = { launchCamera() },
+        onPhotos = { picker.launch(PickVisualMediaRequest(
+            ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+        onFiles = { filePicker.launch(arrayOf("*/*")) },
+        onDismissComposer = { showComposer = false },
+        onComposerActivity = { showActivity = true },
+        onDismissModelSheet = { showModelSheet = false },
+        onDismissVisionWarn = { showVisionWarn = false },
+        onConfirmVisionSend = {
             showVisionWarn = false
             cm.store.markVisionOk(currentModel)   // remember: don't ask again for THIS model
             reallySend()
-        }) { Text(stringResource(R.string.send_anyway)) } },
-        dismissButton = { TextButton(onClick = { showVisionWarn = false }) { Text(stringResource(R.string.cancel)) } },
-    )
-
-    if (showTurnLog && debugTools) {
-        TurnLogDialog(cm) { showTurnLog = false }
-    }
-
-    if (showSchedule) AlertDialog(
-        onDismissRequest = { showSchedule = false },
-        confirmButton = { TextButton(onClick = { showSchedule = false }) { Text(stringResource(R.string.close)) } },
-        title = { Text(stringResource(R.string.assistant_briefings)) },
-        text = {
-            Column {
-                Text(stringResource(R.string.briefing_schedule_note))
-                Spacer(Modifier.height(6.dp))
-                Text("Last briefing: $briefingAgo")
-                Text("Status: " + when {
-                    briefingHealthy -> "up to date"
-                    briefingLate -> "running late"
-                    lastBriefing <= 0L -> "no briefings yet"
-                    else -> "not updating"
-                })
-                Spacer(Modifier.height(8.dp))
-                Text(stringResource(R.string.schedule_managed_on_server),
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
-            }
         },
+        onDismissTurnLog = { showTurnLog = false },
+        onDismissSchedule = { showSchedule = false },
     )
-
     // --- pinned MCP-App end drawer ------------------------------------------
     // Per-session dock: one pinned app (ConnectionManager.pinnedApps). The docked pane is the
     // ONLY live view of a pinned app — its transcript bubble collapses to a slim bar — so this
@@ -874,301 +672,24 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
     DisposableEffect(Unit) { onDispose { cm.pinnedDockOpen.value = false } }
 
     Scaffold(topBar = {
-        Column {
-        TopAppBar(
-            title = {
-                Column {
-                    Row(verticalAlignment = Alignment.CenterVertically,
-                        // fillMaxWidth, and the name COLUMN carries the weight, so the cluster
-                        // sits at the far right and the name ellipsizes into what is left.
-                        // CentreVertically is against the whole column — a remote chat's
-                        // two-line header puts the ring in the middle of both lines instead
-                        // of on the first one's baseline.
-                        modifier = Modifier.fillMaxWidth()
-                            // Long-press the title for the core's turn log: the one
-                            // place the client can show WHY a chat thinks it is busy.
-                            .pointerInput(debugTools) {
-                                // Long-press is the debug gesture only; with the switch
-                                // off the title is just the title. Reconnecting is no
-                                // longer a tap HERE — see the mark beside the name.
-                                if (debugTools) {
-                                    detectTapGestures(onLongPress = { showTurnLog = true })
-                                }
-                            }) {
-                        // The name and the endpoint pill are ONE block, and the header row's
-                        // weight lives HERE rather than on the name. Measured against the name
-                        // alone, everything to the right centred on the FIRST line and hung
-                        // high the moment a remote chat grew a second one — the ring sat on
-                        // the title's baseline instead of in the middle of the header.
-                        //
-                        // Both lines are CENTRED in this column, which is what makes the bar
-                        // read like the other assistant app's: the name sits in the middle
-                        // with its pill under it rather than hanging off the left margin.
-                        // The centre is the column's, not the window's, so it is a few dp
-                        // left of true centre whenever the running glyph is also out — the
-                        // readouts on the right are part of this slot. Correcting that would
-                        // mean drawing the title outside the app bar's own layout, which
-                        // costs more than the few dp are worth.
-                        Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Row(verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.Center,
-                                modifier = Modifier.fillMaxWidth()) {
-                                // The connection mark, and ONLY when there is something wrong:
-                                // the green dot that used to sit here said "fine" on every
-                                // glance at a name the user was already reading, so a healthy
-                                // wire now draws nothing and the name sits alone. A roam chat
-                                // draws nothing here either — its pill two lines below already
-                                // carries that endpoint's dot — and the mark that does appear
-                                // is where the wire's settings live.
-                                if (roamPeer == null) {
-                                    LinkProblemIcon(
-                                        state = link,
-                                        onClick = { nav.navigate("instance") },
-                                    )
-                                    Spacer(Modifier.width(2.dp))
-                                }
-                                // Single line + ellipsis: this Row shares the app bar with the
-                                // status cluster, so on a compact width the default (titleLarge,
-                                // unbounded) title used to wrap to a second line and collide with
-                                // the icons. A tighter style plus a hard single-line cap keeps it
-                                // readable and self-eliding instead of visually breaking.
-                                //
-                                // The TITLE is the chat's NAME, full stop. It used to be replaced by
-                                // "Reconnecting…" / "Connecting…" / "Offline · tap to reconnect" and
-                                // then it carried " · working…" while a turn ran — both cost the user
-                                // the name of the chat they were in at exactly the moment they needed
-                                // to know where they were. Turn progress is the composer's thinking
-                                // line, which does not overwrite anything.
-                                Text(
-                                    if (cm.onAssistant) "Assistant" else cm.currentChatTitle ?: "Grouse",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    maxLines = 1,
-                                    // No weight here any more: the COLUMN is what carries the header
-                                    // row's weight, so a long name still ellipsizes into the space
-                                    // the cluster leaves instead of pushing the donut off the bar.
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            // A remote chat names its endpoint UNDER its name, the way the other
-                            // app puts "Remote Control" there. It used to be an AssistChip in
-                            // `actions`, where it fought the donut for the one line and reported
-                            // the wire's state a second time right beside the connection dot.
-                            // Tapping it opens the endpoint page — reconnect / disconnect /
-                            // remove live there.
-                            if (roamPeer != null) {
-                                RoamSubtitle(
-                                    peer = roamPeer,
-                                    status = cm.roamStatus[roamPeer],
-                                    onClick = { nav.navigate("roam_endpoint/" + Uri.encode(roamPeer)) },
-                                )
-                            }
-                        }
-                        // The right-hand cluster: live work, then the context donut. Both are
-                        // readouts about this chat, not part of its name.
-                        val running = cm.activity.value.count { it.running }
-                        // LIVE work only. It used to read "3 agents" for the life of the chat
-                        // and, after a cancel, kept saying it for work that no longer existed
-                        // (2026-11-13). It is the background-tasks mark now — drawn the way the
-                        // other app draws it, so the header and the menu row are one symbol —
-                        // and it is on screen only while something is actually running.
-                        if (running > 0) {
-                            Box(
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .clip(CircleShape)
-                                    .clickable { showActivity = true },
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                BackgroundTasksGlyph(
-                                    modifier = Modifier.size(17.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
-                        cm.usage.value?.let { u ->
-                            if (u.size > 0 && !cm.compacting.value) {
-                                if (running > 0) Spacer(Modifier.width(4.dp))
-                                // A 24dp target around a 14dp ring: the tap is the only way
-                                // into the breakdown, and 14dp is a miss waiting to happen on
-                                // a phone held one-handed.
-                                Box(
-                                    modifier = Modifier
-                                        .size(24.dp)
-                                        .clickable {
-                                            showContextDetail = !showContextDetail
-                                            if (showContextDetail) cm.requestContextReport()
-                                        },
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    ContextRing(
-                                        pct = (u.used * 100 / u.size).coerceIn(0, 100),
-                                        modifier = Modifier.size(14.dp),
-                                    )
-                                }
-                                // No spacer after the ring: the margin to the "…" beside it is
-                                // already built twice over — this Box is 24dp around a 14dp
-                                // ring, and the action button that follows carries its own
-                                // inset around its glyph. The 6dp that used to sit here read
-                                // as a hole in the bar, which is what "move the donut up
-                                // against the …" was pointing at.
-                            }
-                        }
-                    }
-                }
+        ChatTopBar(
+            cm = cm,
+            nav = nav,
+            onOpenDrawer = onOpenDrawer,
+            ui = ui,
+            showContextDetail = showContextDetail,
+            onToggleContextDetail = {
+                showContextDetail = !showContextDetail
+                if (showContextDetail) cm.requestContextReport()
             },
-            navigationIcon = {
-                IconButton(onClick = onOpenDrawer) { Icon(Icons.Filled.Menu, contentDescription = "menu") }
-            },
-            actions = {
-                // Assistant/Sessions/Settings are now drawer items — this icon's navigation role
-                // moved there. On the Assistant thread itself it stays as the page-local briefing-
-                // health indicator (opens the schedule dialog); off it, there's nothing to show here.
-                if (cm.onAssistant) IconButton(onClick = { showSchedule = true }) {
-                    val dot = when {
-                        briefingHealthy -> MaterialTheme.statusColors.online                     // fresh → green
-                        briefingLate -> MaterialTheme.statusColors.connecting                        // late → amber
-                        else -> MaterialTheme.colorScheme.error                  // stale/never → red
-                    }
-                    Box {
-                        Icon(Icons.Filled.Psychology, contentDescription = "assistant status",
-                            tint = MaterialTheme.colorScheme.primary)
-                        Surface(color = dot, shape = RoundedCornerShape(50),
-                            modifier = Modifier.size(9.dp).align(Alignment.TopEnd)) {}
-                    }
-                }
-                // The chat's own "…", where the other app keeps its overflow: background
-                // tasks at the head, then the session actions that used to be reachable
-                // only by long-pressing this chat's row in the drawer. The roam chip that
-                // used to sit here is a subtitle under the chat's name now.
-                IconButton(onClick = { showChatMenu = true }) {
-                    Icon(
-                        Icons.Filled.MoreVert,
-                        contentDescription = stringResource(R.string.chat_menu),
-                    )
-                }
-            }
+            onShowSchedule = { showSchedule = true },
+            onShowActivity = { showActivity = true },
+            onShowChatMenu = { showChatMenu = true },
+            onShowTurnLog = { showTurnLog = true },
         )
-                        // A session/load replay is streaming into the buffer: count replayed
-                        // messages live — a big history can take tens of seconds and a static
-                        // spinner looked hung. The counter proves it's advancing. It lives here
-                        // rather than in the title: the title is the chat's NAME and no
-                        // connection/loading event is allowed to replace it.
-                        if (cm.replayActive.value) {
-                            Row(verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(start = 18.dp, top = 2.dp)) {
-                                LinearProgressIndicator(modifier = Modifier.width(40.dp).height(3.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    if (cm.replayTotal.value > 0)
-                                        "Loading… ${cm.replayProgress.value} / ${cm.replayTotal.value}"
-                                    else "Loading… ${cm.replayProgress.value}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.outline)
-                            }
-                        } else if (cm.compacting.value) {
-                        // Compacting (manual /compact or a server-triggered auto-compact) takes priority
-                        // over the usage line — it's transient and explains why the numbers are about to
-                        // change. INDETERMINATE: the protocol only ever sends text status lines, never a
-                        // numeric percentage, so there's no real fraction to show.
-                            Row(verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(start = 18.dp, top = 2.dp)) {
-                                LinearProgressIndicator(modifier = Modifier.width(40.dp).height(3.dp))
-                                Spacer(Modifier.width(6.dp))
-                                // goose's own status line ("goose is compacting the
-                                // conversation...") when the server armed it; the local
-                                // placeholder only for a client-initiated /compact.
-                                Text(cm.compactionStatus.value.ifBlank { stringResource(R.string.compacting) },
-                                    style = MaterialTheme.typography.labelSmall,
-                                    maxLines = 2, overflow = TextOverflow.Ellipsis,
-                                    color = MaterialTheme.colorScheme.outline)
-                            }
-                        } else {
-                            // Context window panel — slides down under the title when
-                            // the donut is tapped: colored bar, number, Compact button.
-                            val u = cm.usage.value
-                            AnimatedVisibility(visible = showContextDetail && u != null && u.size > 0,
-                                enter = expandVertically() + fadeIn(),
-                                exit = shrinkVertically() + fadeOut()) {
-                                u?.let { uu ->
-                                    val pct = (uu.used * 100 / uu.size).coerceIn(0, 100)
-                                    val barColor = when {
-                                        pct >= 90 -> MaterialTheme.colorScheme.error
-                                        pct >= 60 -> MaterialTheme.statusColors.connecting
-                                        else -> MaterialTheme.statusColors.online
-                                    }
-                                    Row(verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.padding(start = 18.dp, top = 2.dp).fillMaxWidth()) {
-                                        Row(verticalAlignment = Alignment.CenterVertically,
-                                            modifier = Modifier.weight(1f)) {
-                                            Box(Modifier.width(64.dp).height(6.dp)
-                                                .clip(RoundedCornerShape(3.dp))
-                                                .background(MaterialTheme.colorScheme.surfaceVariant)) {
-                                                Box(Modifier.fillMaxWidth(pct / 100f).fillMaxHeight()
-                                                    .background(barColor))
-                                            }
-                                            Spacer(Modifier.width(8.dp))
-                                            Text("${fmtTokens(uu.used)} / ${fmtTokens(uu.size)} · ${pct}%",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = if (pct >= 90) MaterialTheme.colorScheme.error
-                                                        else MaterialTheme.colorScheme.outline)
-                                        }
-                                        TextButton(onClick = { cm.compact() },
-                                            enabled = !cm.compacting.value) {
-                                            Text(stringResource(R.string.compact))
-                                        }
-                                    }
-                                }
-                            }
-                            // The breakdown lives OUTSIDE the usage gate: a server can answer
-                            // the report without ever having pushed a usage update (and a roam
-                            // peer's custom notifications are the only usage source there).
-                            // Keyed to the chat on screen: a roam chat that has not answered yet
-                            // must show "measuring", never the previous chat's numbers.
-                            val report = cm.contextReport.value
-                                ?.takeIf { cm.contextReportSession.value == cm.currentSession.value }
-                            // Feedback for the wait ITSELF. Measuring a 600k-token chat takes
-                            // seconds, and a tap that changes nothing on screen reads as a tap
-                            // that missed — this is the line that says it landed.
-                            if (showContextDetail && report == null && cm.contextReportLoading.value) {
-                                Text(stringResource(R.string.context_measuring_long),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.outline,
-                                    modifier = Modifier.padding(start = 18.dp, top = 4.dp))
-                            }
-                            AnimatedVisibility(visible = showContextDetail && report != null,
-                                enter = expandVertically() + fadeIn(),
-                                exit = shrinkVertically() + fadeOut()) {
-                                report?.let {
-                                    ContextBreakdown(
-                                        it,
-                                        loading = cm.contextReportLoading.value,
-                                        onRefresh = { cm.requestContextReport(force = true) },
-                                    )
-                                }
-                            }
-                        }
-        }
     }) { pad ->
         Box(Modifier.padding(pad).fillMaxSize()) {
             Column(Modifier.padding(horizontal = 12.dp).fillMaxSize()) {
-                // A delegate runs for minutes with nothing on screen to show it: its row
-                // may be scrolled away, or folded inside a collapsed tool run. Show a
-                // one-line strip exactly WHILE that is true — never when the row is in
-                // view, which would just duplicate what is already in front of you.
-                val chatRows = groupChatItems(cm.messages)
-                val activeDelegate = cm.messages.lastOrNull {
-                    it.role == "tool" && it.status == "in_progress" && it.steps.isNotEmpty()
-                }
-                val delegateRow = activeDelegate?.let { d ->
-                    chatRows.firstOrNull { row ->
-                        when (row) {
-                            is ChatItem.Msg -> row.m.id == d.id
-                            is ChatItem.Tools -> row.items.any { it.id == d.id }
-                        }
-                    }
-                }
-                val delegateOnScreen = delegateRow != null &&
-                    listState.layoutInfo.visibleItemsInfo.any { it.key == delegateRow.firstId }
                 if (cm.onAssistant && !hintDismissed) AssistantHint {
                     hintDismissed = true; cm.store.assistantHintSeen = true
                 }
@@ -1176,516 +697,25 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
                 // label, and what has been handed over, painted above the conversation
                 // instead of left to a tool call the user cannot see.
                 cm.currentThreadLabel?.let { label -> ThreadPanel(cm, label) }
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    if (cm.messages.isEmpty() && !cm.busy.value && cm.replayActive.value) {
-                        // Opening an existing chat with nothing painted yet: the wire
-                        // is fetching it. The landing copy below would read as "this
-                        // chat is empty", which is the opposite of what is happening.
-                        Column(
-                            Modifier.fillMaxSize().padding(32.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
-                            Spacer(Modifier.height(14.dp))
-                            Text(stringResource(R.string.loading_conversation), style = MaterialTheme.typography.titleMedium)
-                            if (cm.replayProgress.value > 0) {
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    if (cm.replayTotal.value > 0)
-                                        "${cm.replayProgress.value} / ${cm.replayTotal.value} messages"
-                                    else
-                                        "${cm.replayProgress.value} messages",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.outline)
-                                // A reload rebuilds the whole history: say how far
-                                // along it is instead of leaving a spinner to stand
-                                // in for minutes. Thin, and gone the moment it ends.
-                                if (cm.replayTotal.value > 0) {
-                                    Spacer(Modifier.height(6.dp))
-                                    LinearProgressIndicator(
-                                        progress = { cm.replayProgress.value.toFloat() /
-                                            cm.replayTotal.value.toFloat() },
-                                        modifier = Modifier.width(180.dp).height(3.dp),
-                                        strokeCap = androidx.compose.ui.graphics.StrokeCap.Round,
-                                    )
-                                }
-                            }
-                        }
-                    } else if (cm.messages.isEmpty() && !cm.busy.value) {
-                        Column(
-                            Modifier.fillMaxSize().padding(32.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            // A chat that FAILED to open must say so: the core
-                            // substitutes no session (grouse#19), so the copy
-                            // below would read as "this chat is empty" over a
-                            // thread whose contents never loaded.
-                            val failure = cm.openFailed.value
-                            if (failure != null) {
-                                Icon(Icons.Filled.ErrorOutline, contentDescription = null,
-                                    modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.error)
-                                Spacer(Modifier.height(12.dp))
-                                Text(stringResource(R.string.open_failed_title),
-                                    style = MaterialTheme.typography.titleMedium)
-                                Spacer(Modifier.height(4.dp))
-                                Text(failure, style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.outline, textAlign = TextAlign.Center)
-                            } else {
-                                Icon(Icons.Filled.Psychology, contentDescription = null,
-                                    modifier = Modifier.size(56.dp), tint = MaterialTheme.colorScheme.primary)
-                                Spacer(Modifier.height(12.dp))
-                                Text(
-                                    when (link) {
-                                        LinkState.Down -> "Not connected"
-                                        LinkState.Retrying -> "Reconnecting…"
-                                        LinkState.Connected -> "Ask Grouse anything"
-                                    },
-                                    style = MaterialTheme.typography.titleMedium)
-                                Spacer(Modifier.height(4.dp))
-                                Text(stringResource(R.string.wired_up_hint),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.outline, textAlign = TextAlign.Center)
-                            }
-                        }
-                    } else {
-                        // reverseLayout: index 0 renders at the BOTTOM. Typing indicator first (very
-                        // bottom), then messages newest→oldest upward. Bottom is always index 0, so
-                        // "open at bottom", "jump to bottom", and streaming-stays-pinned are trivial.
-                        LazyColumn(state = listState, reverseLayout = true, modifier = Modifier.fillMaxSize()) {
-                            if (cm.busy.value) item {
-                                // The readout only fills in when the turn has gone
-                                // quiet (see ConnectionManager.turnDiag). Gated with the
-                                // rest of the debug surface: with the switch off nothing
-                                // polls and the indicator is the plain typing dots.
-                                val diag = if (debugTools) turnStateReadout(cm) else ""
-                                TypingIndicator(diag)
-                            }
-                            // Consecutive tool calls collapse into one dropdown (goose often fires a run of
-                            // 5-10 shell/read calls back to back — a wall of individual chips otherwise).
-                            // Grouped on the forward list so adjacency is chronological, then reversed for
-                            // display like the flat list was. NOT remembered on messages.size: the streaming
-                            // assistant message updates via .copy() (new object, same id, size unchanged), so
-                            // a size-keyed cache would go stale mid-stream. Grouping is O(#messages) — cheap.
-                            val grouped = chatRows.asReversed()
-                            // key on the stable id of the group's first message so a growing tool-call run
-                            // (or the streaming assistant bubble) reuses its composition instead of rebuilding;
-                            // i==0 is the newest item → mark an assistant Msg streaming so it renders as plain
-                            // text until the turn finishes (skips the per-token Markdown re-parse).
-                            itemsIndexed(grouped, key = { _, item -> item.firstId }) { i, item ->
-                                when (item) {
-                                    // `live` is what lets a running step's chip pulse: it is this
-                                    // CHAT's turn, and a chip in a finished chat must not animate.
-                                    is ChatItem.Tools -> ToolChipGroup(item.items, live = cm.busy.value)
-                                    // A file the SERVER shared draws as a card: name,
-                                    // type and size came with the tool call, the bytes
-                                    // did not (a blob in a tool result would be stored in
-                                    // the session and replayed on every open). Tapping
-                                    // fetches it; tapping a fetched one opens it.
-                                    is ChatItem.Msg -> if (item.m.role == "file") {
-                                        SharedFileRow(cm, item.m, ctx)
-                                    } else {
-                                        val pinned = item.m.role == "mcpapp" &&
-                                            item.m.appKey.isNotEmpty() && item.m.appKey == pins
-                                        // Held still while the reader is scrolled away from the
-                                        // bottom — see heldStream above. Matched on the id so a
-                                        // NEW reply never inherits the old row's text.
-                                        val held = heldStream
-                                            ?.takeIf { it.first == item.m.id }?.second
-                                        MessageBubble(
-                                            item.m,
-                                            // Only the bubble the core is writing into renders
-                                            // progressively (settled paragraphs as Markdown, the
-                                            // tail as plain text); the previous reply keeps its
-                                            // finished Markdown while the next one starts (see
-                                            // ConnectionManager.streamingRowId). A HELD row keeps
-                                            // that progressive render too, including after its
-                                            // turn ends: switching it to finalized Markdown under
-                                            // a reader's eyes would reflow the text they are on by
-                                            // everything it grew while they were away.
-                                            streaming = held != null ||
-                                                (item.m.role == "assistant" &&
-                                                    item.m.id == cm.streamingRowId.value),
-                                            heldText = held,
-                                            live = cm.busy.value,
-                                            // Each message carries its own stats now, so an older reply
-                                            // long-presses to ITS numbers rather than the latest turn's.
-                                            usage = item.m.usage,
-                                            pinned = pinned,
-                                            onPin = { cm.pinApp(item.m.appKey) },
-                                            onUnpin = { cm.unpinApp() },
-                                        )
-                                    }
-                                }
-                            }
-                            // The top of the scroll-back is where the CORE goes to the
-                            // wire: past what this device has already fetched, a batch
-                            // is a round trip (docs/TRANSCRIPT_MODEL.md, "Windows"). Say
-                            // so, or the list just stops with nothing to show for the
-                            // gesture. Rendered AFTER the rows, which reverseLayout puts
-                            // at the visual top.
-                            if (cm.loadingOlderItems.value) item(key = "older-loading") {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
-                                    horizontalArrangement = Arrangement.Center,
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.5.dp)
-                                    Spacer(Modifier.width(8.dp))
-                                    Text(
-                                        "loading older messages…",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.outline,
-                                    )
-                                }
-                            }
-                        }
-                        if (!atBottom || heldStream != null) Box(Modifier.align(Alignment.BottomEnd).padding(10.dp)) {
-                            SmallFloatingActionButton(
-                                // follow = true first: the animation lands on the end as it is
-                                // measured NOW, and the follower finishes the trip if a row
-                                // measured after that moved it again.
-                                // Asking for the newest line resumes following: this is the
-                                // reader choosing to watch the reply arrive again.
-                                onClick = {
-                                    follow = true
-                                    scope.launch { listState.animateScrollToItem(0) }
-                                },
-                            ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "scroll to bottom") }
-                            // A streaming row deliberately stops updating while the reader is
-                            // away from the bottom, so say that the turn is still arriving down
-                            // there — otherwise a bubble that stopped growing reads as one that
-                            // stalled.
-                            if (cm.busy.value) Surface(
-                                color = MaterialTheme.colorScheme.primary,
-                                shape = CircleShape,
-                                modifier = Modifier.size(9.dp).align(Alignment.TopEnd),
-                            ) {}
-                        }
-                    }
-                }
-
-                // Pull-up reload handle: a dropped turn can leave the local view
-                // partial, and there is otherwise no way to force a re-fetch. When
-                // already at the bottom the ARMED pull reloads FROM THE START; when
-                // scrolled back it just tails, because the reader asked to see the
-                // end, not to re-download the chat. A dedicated handle (not a
-                // list-edge swipe) because the transcript is reverseLayout, where an
-                // upward drag is ordinary scroll-back.
-                //
-                // The armed pull is the FULL reload (grouse#18), matching what the
-                // desktop's Reload button means, and it used to be the QUICK one:
-                // QUICK is allowed to decide the cache is current and fetch nothing,
-                // so the one gesture the phone offers could look exactly like a
-                // reload that silently did nothing — reported 2026-11-12 as "full
-                // refresh doesn't grab the latest messages, especially from another
-                // client". The label under the bar always said "Release to reload",
-                // so this is the action it promised. QUICK still runs on every open
-                // (and on a reconnect's resume); it needs no gesture of its own.
-                val reloadHint = when (link) {
-                    LinkState.Down -> "Offline — pull up to reload"
-                    LinkState.Retrying -> "Reconnecting… pull up to reload"
-                    LinkState.Connected -> null
-                }
-                ReloadHandle(
-                    hint = reloadHint,
-                    onPullUp = {
-                        if (atBottom) cm.reloadCurrentFromStart()
-                        else { follow = true; scope.launch { listState.animateScrollToItem(0) } }
-                    },
-                    onTail = { follow = true; scope.launch { listState.animateScrollToItem(0) } },
-                    onReloadFromStart = { cm.reloadCurrentFromStart() },
+                ChatTranscript(
+                    cm = cm,
+                    listState = listState,
+                    sessionKey = sessionKey,
+                    follow = follow,
+                    onFollowChange = { follow = it },
+                    savedPositions = savedPositions,
+                    ui = ui,
+                    pins = pins,
                 )
-
-                // Slash-command autocomplete (goose's available commands).
-                val slash = input.startsWith("/") && !input.contains(' ')
-                if (slash) {
-                    val matches = cm.commands.value.filter { it.startsWith(input.drop(1), true) }.take(6)
-                    if (matches.isNotEmpty()) Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column {
-                            matches.forEach { name ->
-                                Text("/$name", modifier = Modifier.fillMaxWidth()
-                                    .clickable { input = "/$name " }.padding(horizontal = 12.dp, vertical = 8.dp),
-                                    style = MaterialTheme.typography.bodyMedium)
-                            }
-                        }
-                    }
-                }
-
-                // Scrolls sideways rather than clipping: three cards already
-                // exceed a phone's width, and a card that is cut off hides the
-                // size — which is half the reason it is a card.
-                if (attachments.isNotEmpty() || cm.draftFiles.isNotEmpty()) Row(
-                    Modifier.padding(vertical = 4.dp).horizontalScroll(rememberScrollState())) {
-                    // An image is a pick too, so it gets the same card; its size
-                    // is the base64 payload's, which is what will actually go on
-                    // the wire (the original bytes were ~3/4 of it).
-                    attachments.forEachIndexed { i, img ->
-                        AttachmentCard(
-                            AttachedFile(
-                                "image ${i + 1}",
-                                img.mimeType,
-                                (img.dataB64.length.toLong() * 3) / 4,
-                            ),
-                            modifier = Modifier.padding(end = 6.dp).widthIn(max = 240.dp),
-                            onRemove = { attachments.removeAt(i) },
-                        )
-                    }
-                    // A picked file shows the same card the sent bubble will:
-                    // icon by kind, name, and size, so what is about to go is
-                    // identifiable before it is uploaded rather than a name alone.
-                    cm.draftFiles.forEachIndexed { i, f ->
-                        AttachmentCard(
-                            f.toAttachedFile(),
-                            modifier = Modifier.padding(end = 6.dp).widthIn(max = 240.dp),
-                            onRemove = { cm.draftFiles.removeAt(i) },
-                        )
-                    }
-                }
-
-                if (activeDelegate != null && !delegateOnScreen) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                val idx = chatRows.asReversed()
-                                    .indexOfFirst { it.firstId == delegateRow?.firstId }
-                                // reverseLayout index 0 is the typing indicator while a
-                                // turn is busy — which it always is with a live delegate.
-                                val offset = if (cm.busy.value) 1 else 0
-                                if (idx >= 0) scope.launch { listState.animateScrollToItem(idx + offset) }
-                            }
-                            .padding(start = 4.dp, top = 2.dp, bottom = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        CircularProgressIndicator(Modifier.size(11.dp), strokeWidth = 1.4.dp)
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "subagent · " +
-                                (activeDelegate.steps.lastOrNull()?.name?.replace('_', ' ')
-                                    ?: "working") +
-                                " · ${activeDelegate.steps.size} steps",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-
-                // A parked message is a CARD above the composer, not a count: the text stays
-                // visible with a "Queued" label, and the user can promote it into the running
-                // turn (steer) or drop it. Sending mid-turn parks by default — a steer
-                // REDIRECTS the reply being written, so it is always a deliberate tap.
-                val queuedSends = cm.queuedSends.value
-                if (queuedSends.isNotEmpty()) {
-                    val steerable = cm.busy.value && cm.activeRunIdState.value != null
-                    val offline = !cm.wireUpForCurrentChat
-                    Column(Modifier.fillMaxWidth().padding(top = 4.dp)) {
-                        queuedSends.forEach { q ->
-                            key(q.id) {
-                                QueuedSendCard(
-                                    q = q,
-                                    canSteer = steerable && q.attachments == 0,
-                                    offline = offline,
-                                    onSteer = { cm.steerQueued(q.id) },
-                                    onCancel = { cm.cancelQueued(q.id) },
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // The dev advisor's review of the turn that just ended (Settings → Dev).
-                // A card above the composer, not a bubble: a review is ABOUT the turn, so
-                // putting it in the transcript would replay it into the conversation and
-                // send it back to the model as history next turn — the advisor would end
-                // up reviewing itself.
-                cm.advisorReport.value?.let { (reviewSession, review) ->
-                    if (reviewSession == cm.currentSession.value) {
-                        AdvisorCard(
-                            text = review,
-                            onDismiss = cm::dismissAdvisorReport,
-                        )
-                    }
-                }
-
-                // Composer modelled on Claude's: ONE rounded, outlined container holding the text
-                // field and the action row together, rather than a pill field with buttons floating
-                // underneath it. The container is the affordance -- everything inside belongs to the
-                // message you are composing.
-                //
-                // Send/stop is a single filled circle on the right that CHANGES MEANING with state
-                // (arrow to send, square to stop), which is why it reads at a glance. The previous
-                // layout showed stop and send as two separate square buttons simultaneously.
-                Surface(
-                    shape = GrouseShapes.composer,
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
-                ) {
-                    Column(Modifier.padding(start = 18.dp, end = 10.dp, top = 14.dp, bottom = 8.dp)) {
-                        // BasicTextField, not TextField: Material's own container/padding/indicator
-                        // would draw a second surface inside this one. Here the Surface IS the field.
-                        Box(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
-                            if (input.isEmpty()) {
-                                Text(
-                                    // Mid-turn a send PARKS the message; promoting it into the
-                                    // running turn is the queue card's Steer button, so the
-                                    // placeholder must not promise a steer.
-                                    when {
-                                        cm.busy.value -> "Queue message…"
-                                        else -> "Message Grouse…"
-                                    },
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            BasicTextField(
-                                value = input,
-                                onValueChange = { input = it },
-                                textStyle = MaterialTheme.typography.bodyLarge.copy(
-                                    color = MaterialTheme.colorScheme.onSurface),
-                                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                                maxLines = 8,
-                                modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp),
-                            )
-                        }
-                        // The voice state line: the ONLY place the loop reports itself, so a
-                        // silent mic never looks like a dead button again. The level bar is the
-                        // proof the mic is live even when nothing is being transcribed.
-                        val vState = cm.voiceState.value
-                        val vNotice = cm.voiceNotice.value
-                        if (vState != VoiceState.IDLE || vNotice != null) {
-                            Row(Modifier.fillMaxWidth().padding(bottom = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically) {
-                                when (vState) {
-                                    VoiceState.LISTENING -> {
-                                        LevelBar(cm.voiceLevel.value)
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("Listening…", style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.primary)
-                                    }
-                                    VoiceState.TRANSCRIBING -> {
-                                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("Transcribing…", style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    }
-                                    VoiceState.SPEAKING -> {
-                                        Icon(Icons.Filled.Mic, contentDescription = null,
-                                            modifier = Modifier.size(14.dp),
-                                            tint = MaterialTheme.colorScheme.primary)
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("Speaking… talk over me to interrupt",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.primary)
-                                    }
-                                    else -> Text(vNotice ?: "",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.error)
-                                }
-                            }
-                        }
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            // "+" pill, left -- Claude-style composer: attach (camera/photos/files),
-                            // the tool-approval mode, and the tools-for-this-chat list all live in
-                            // the bottom sheet it opens. The MODEL pill stays beside it (the model
-                            // you're about to prompt with, worth seeing at a glance while typing).
-                            Surface(
-                                shape = RoundedCornerShape(20.dp),
-                                color = MaterialTheme.colorScheme.surface,
-                                modifier = Modifier.clickable { showComposer = true },
-                            ) {
-                                Row(
-                                    Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Icon(Icons.Filled.Add, contentDescription = "attach, mode, tools",
-                                        modifier = Modifier.size(18.dp),
-                                        tint = MaterialTheme.colorScheme.onSurface)
-                                }
-                            }
-                            Spacer(Modifier.width(6.dp))
-                            // MODEL pill, right beside "+": the model you're about to prompt with,
-                            // switchable without opening the Tune panel. Opens the full-width
-                            // source/model/effort sheet.
-                            val modelOpt = cm.config.value.firstOrNull { it.id == "model" }
-                            // `weight(fill = false)`: takes the slack when there is any,
-                            // and SHRINKS (ellipsising its label) when there is not — so no
-                            // future control in this row can push the send button off the
-                            // edge the way the old Plan chip did.
-                            ModelPill(modelOpt, cm.knownModels.value, cm::setOption,
-                                onOpenSheet = { showModelSheet = true },
-                                modifier = Modifier.weight(1f, fill = false))
-                            Spacer(Modifier.weight(1f))
-                            // Conversation mode: one tap in, one tap out. A plain Box, not a
-                            // Button — a Button's own clickable consumes the press (and a
-                            // pointerInput nested inside one silently no-ops; the first cut did).
-                            val vs = cm.voiceState.value
-                            val on = vs != VoiceState.IDLE
-                            Box(
-                                modifier = Modifier
-                                    .size(42.dp)
-                                    .clip(CircleShape)
-                                    .background(
-                                        when (vs) {
-                                            VoiceState.IDLE, VoiceState.TRANSCRIBING ->
-                                                MaterialTheme.colorScheme.surface
-                                            else -> MaterialTheme.colorScheme.primary
-                                        }
-                                    )
-                                    .clickable(enabled = vs != VoiceState.TRANSCRIBING) { cm.toggleConversation() },
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                if (vs == VoiceState.TRANSCRIBING) {
-                                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                                } else {
-                                    Icon(
-                                        Icons.Filled.Mic,
-                                        contentDescription =
-                                            if (on) "stop conversation" else "start conversation",
-                                        modifier = Modifier.size(20.dp),
-                                        tint = if (on) MaterialTheme.colorScheme.onPrimary
-                                               else MaterialTheme.colorScheme.onSurface,
-                                    )
-                                }
-                            }
-                            Spacer(Modifier.width(6.dp))
-                            // One circle, two states: stop while a turn runs, send when there is
-                            // something to send. Sending mid-turn queues, so the arrow is never
-                            // wrong -- it just may not go out immediately.
-                            // An image-only message IS a message: the core takes prompt blocks
-                            // with no text at all (the desktop already sends one), so the arrow
-                            // must light for attachments alone.
-                            val canSend = input.isNotBlank() ||
-                                attachments.isNotEmpty() || cm.draftFiles.isNotEmpty()
-                            FilledIconButton(
-                                onClick = { if (canSend) doSend() else if (cm.busy.value) cm.cancel() },
-                                enabled = canSend || cm.busy.value,
-                                modifier = Modifier.size(42.dp),
-                                colors = IconButtonDefaults.filledIconButtonColors(
-                                    containerColor = if (canSend) MaterialTheme.colorScheme.primary
-                                                     else MaterialTheme.colorScheme.surface,
-                                ),
-                            ) {
-                                Icon(
-                                    if (canSend) Icons.Filled.ArrowUpward else Icons.Filled.Stop,
-                                    contentDescription = when {
-                                        canSend -> when {
-                                            cm.busy.value -> "queue"
-                                            else -> "send"
-                                        }
-                                        else -> "stop"
-                                    },
-                                    modifier = Modifier.size(20.dp),
-                                )
-                            }
-                        }
-                    }
-                }
+                ChatComposer(
+                    cm = cm,
+                    input = input,
+                    onInputChange = { input = it },
+                    onShowComposer = { showComposer = true },
+                    onShowModelSheet = { showModelSheet = true },
+                    onSend = { doSend() },
+                    delegateStrip = { ChatDelegateStrip(cm, listState) },
+                )
             }
             PinnedDock(cm, session, pins, pinCount, showPinned) { showPinned = it }
         }
@@ -1701,7 +731,7 @@ fun ChatScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -> Un
  * steer is a REDIRECT of the answer being written, so it is never what pressing send does.
  */
 @Composable
-private fun QueuedSendCard(
+internal fun QueuedSendCard(
     q: ConnectionManager.QueuedSend,
     canSteer: Boolean,
     offline: Boolean,
@@ -1851,7 +881,7 @@ private fun BoxScope.PinnedDock(
  *  Holding it replays the chat from the start (grouse#18's FULL reload). */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ReloadHandle(
+internal fun ReloadHandle(
     hint: String?,
     onPullUp: () -> Unit,
     onTail: () -> Unit,
@@ -2373,7 +1403,7 @@ private fun ToolManagementBody(cm: ConnectionManager, title: String = "Tools for
  *  mode, then the tools-for-this-chat list. Replaces the old mode pill + attach button. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ComposerSheet(
+internal fun ComposerSheet(
     cm: ConnectionManager,
     onCamera: () -> Unit,
     onPhotos: () -> Unit,
@@ -2567,7 +1597,7 @@ private fun prettyOption(raw: String) = when (raw) {
  *  turn is in flight. Its own composable so the polling loop can be skipped entirely
  *  when Developer diagnostics is off — a `produceState` cannot skip itself. */
 @Composable
-private fun turnStateReadout(cm: ConnectionManager): String {
+internal fun turnStateReadout(cm: ConnectionManager): String {
     val diag by produceState("", cm.busy.value) {
         while (true) { value = cm.turnDiag(); delay(1000) }
     }
@@ -2578,7 +1608,7 @@ private fun turnStateReadout(cm: ConnectionManager): String {
  *  finish decision (including the ones that were IGNORED because nothing was in
  *  flight). Long-press the chat title to open it. */
 @Composable
-private fun TurnLogDialog(cm: ConnectionManager, onDismiss: () -> Unit) {
+internal fun TurnLogDialog(cm: ConnectionManager, onDismiss: () -> Unit) {
     val log = remember { cm.turnLog().ifBlank { "(no turn events yet)" } }
     val clip = LocalClipboardManager.current
     AlertDialog(
