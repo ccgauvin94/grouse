@@ -1996,16 +1996,41 @@ fun AdvisorCard(text: String, onDismiss: () -> Unit) {
 
 /** mapSaver adapters for the form's two maps: only primitive values survive a Bundle, so
  *  the state maps themselves are rebuilt on restore rather than remembered as objects. */
+// A Map is NOT Bundle-saveable: rememberSaveable's registry rejects it at
+// composition with "{} cannot be saved using the current SaveableStateRegistry",
+// which crashed every chat open. Save a Bundle (two parallel arrays) instead.
 private fun stringValuesSaver() = androidx.compose.runtime.saveable.Saver<
-        androidx.compose.runtime.snapshots.SnapshotStateMap<String, String>, Map<String, String>>(
-    save = { state -> state.toMap() },
-    restore = { raw -> raw.toList().toMutableStateMap() },
+        androidx.compose.runtime.snapshots.SnapshotStateMap<String, String>, android.os.Bundle>(
+    save = { state ->
+        android.os.Bundle().apply {
+            putStringArray("keys", state.keys.toTypedArray())
+            putStringArray("values", state.values.toTypedArray())
+        }
+    },
+    restore = { raw ->
+        val keys = raw.getStringArray("keys") ?: emptyArray()
+        val values = raw.getStringArray("values") ?: emptyArray()
+        mutableStateMapOf<String, String>().apply {
+            keys.zip(values).forEach { (k, v) -> put(k, v) }
+        }
+    },
 )
 
 private fun booleanValuesSaver() = androidx.compose.runtime.saveable.Saver<
-        androidx.compose.runtime.snapshots.SnapshotStateMap<String, Boolean>, Map<String, Boolean>>(
-    save = { state -> state.toMap() },
-    restore = { raw -> raw.toList().toMutableStateMap() },
+        androidx.compose.runtime.snapshots.SnapshotStateMap<String, Boolean>, android.os.Bundle>(
+    save = { state ->
+        android.os.Bundle().apply {
+            putStringArray("keys", state.keys.toTypedArray())
+            putBooleanArray("values", BooleanArray(state.size) { i -> state.values.elementAt(i) })
+        }
+    },
+    restore = { raw ->
+        val keys = raw.getStringArray("keys") ?: emptyArray()
+        val values = raw.getBooleanArray("values") ?: BooleanArray(0)
+        mutableStateMapOf<String, Boolean>().apply {
+            keys.zip(values.toList()).forEach { (k, v) -> put(k, v) }
+        }
+    },
 )
 
 /** Required numeric fields must PARSE, not merely be non-blank: "abc" used to enable Submit
