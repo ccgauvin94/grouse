@@ -40,6 +40,7 @@
     <string name="background_tasks">Background tasks</string>
     <string name="chat_menu">Chat menu</string>
     <string name="activity_empty">No background work in this chat.</string>
+    <string name="activity_finished">Finished</string>
     <string name="context_breakdown">What fills the window</string>
     <string name="context_measuring">measuring…</string>
     <string name="context_measuring_long">Measuring this context. A long chat takes a moment.</string>

@@ -98,6 +98,9 @@ Rectangle {
         id: bar
         property string title: ""
         property string badge: ""
+        /// A compact count bubble (0 = no bubble). The accessible name carries the
+        /// full sentence, so the shorter visual text does not lose its meaning.
+        property int count: 0
         property bool expanded: true
         signal toggleRequested()
         Layout.fillWidth: true
@@ -131,6 +134,26 @@ Rectangle {
             // width comes from the SplitView, so the loop stops there.
             Layout.maximumWidth: panel.width * 0.5
             font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.85
+        }
+        Rectangle {
+            Layout.alignment: Qt.AlignVCenter
+            visible: bar.count > 0
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 1.25
+            Layout.preferredHeight: Kirigami.Units.gridUnit * 1.25
+            radius: width / 2
+            color: Kirigami.Theme.highlightColor
+            // "9+" matches the phone's bubble; the exact number still reaches a
+            // screen reader, and zero hides the bubble instead of saying "0 running".
+            Accessible.role: Accessible.StaticText
+            Accessible.name: qsTr("%1 running background tasks").arg(bar.count)
+            Controls.Label {
+                anchors.centerIn: parent
+                text: bar.count > 9 ? "9+" : String(bar.count)
+                color: Kirigami.Theme.highlightedTextColor
+                font.bold: true
+                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.72
+                Accessible.ignored: true
+            }
         }
     }
 
@@ -376,7 +399,7 @@ Rectangle {
         // ---- Activity: the chat's work lanes ------------------------------
         SectionBar {
             title: qsTr("Activity")
-            badge: panel.runningCount > 0 ? String(panel.runningCount) + qsTr(" running") : ""
+            count: panel.runningCount
             expanded: panel.activityExpanded
             onToggleRequested: panel.activityExpanded = !panel.activityExpanded
         }
@@ -402,12 +425,39 @@ Rectangle {
             clip: true
             spacing: Kirigami.Units.smallSpacing
             model: Mgr.activity
+            // Manager already ordered the lanes running-first, newest first in each
+            // group; these sections only label the boundary. QVariantMap fields sit
+            // under `modelData`, so the section property needs that qualifier.
+            section.property: "modelData.section"
+            section.criteria: ViewSection.FullString
+            section.delegate: RowLayout {
+                id: sectionHeader
+                required property string section
+                width: ListView.view.width - Kirigami.Units.gridUnit
+                spacing: Kirigami.Units.smallSpacing
+                Controls.Label {
+                    text: sectionHeader.section === "finished" ? qsTr("Finished") : qsTr("Running")
+                    font.bold: true
+                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.8
+                    color: Kirigami.Theme.disabledTextColor
+                }
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 1
+                    color: Kirigami.Theme.disabledTextColor
+                    opacity: 0.4
+                }
+            }
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
             delegate: Column {
                 id: wdel
                 width: ListView.view.width - Kirigami.Units.gridUnit
                 spacing: 2
+                // History stays readable but recedes behind work that is live now.
+                // The core's `running` flag is the single verdict: a stale
+                // `in_progress` status from a stopped turn is not running work.
+                opacity: wdel.wFinished ? 0.65 : 1
                 property bool expanded: true
 
                 // The lane's identity is the tool call it belongs to (CONTRACT §3.7).
@@ -419,6 +469,7 @@ Rectangle {
                 // "completed" while the subagent still works. Reading `status` here is what
                 // made this panel say "done" the instant an agent was fired (2026-11-13).
                 readonly property bool wRunning: modelData.running === true
+                readonly property bool wFinished: !wRunning
                 readonly property bool wCancelled: modelData.outcome === "cancelled"
                 readonly property bool wUnfinished: modelData.outcome === "unfinished"
                 readonly property bool wFailed: modelData.outcome === "failed"

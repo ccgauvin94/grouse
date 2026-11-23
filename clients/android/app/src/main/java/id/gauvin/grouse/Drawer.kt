@@ -622,7 +622,23 @@ private fun SessionActionsSheet(
             // of it, and the mark is the one the header shows while work is live.
             if (onActivity != null) {
                 SheetRow(label = stringResource(R.string.background_tasks), onClick = onActivity) {
-                    BackgroundTasksGlyph(Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurface)
+                    // Same mark as the header, with the same live count — the 18dp slot is
+                    // unchanged so the row's gutter and the glyph's optical size stay put.
+                    val running = cm.activity.value.count { it.running }
+                    Box(Modifier.size(18.dp)) {
+                        BackgroundTasksGlyph(
+                            Modifier.fillMaxSize(),
+                            tint = MaterialTheme.colorScheme.onSurface,
+                        )
+                        if (running > 0) {
+                            BackgroundTasksCount(
+                                count = running,
+                                size = 14.dp,
+                                modifier = Modifier.align(Alignment.TopEnd)
+                                    .offset(x = 3.dp, y = (-3).dp),
+                            )
+                        }
+                    }
                 }
                 if (sessionActions) HorizontalDivider(Modifier.padding(horizontal = 20.dp, vertical = 6.dp))
             }

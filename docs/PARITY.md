@@ -106,7 +106,7 @@ excluded = 26
 | `item.message_id` | excluded: clients key rows on `id`; the server id is core-internal merge state | excluded: same — the row model keys on `id`, never on the server's message id |
 | `item.seq` | yes: ConnectionManager.kt#item.seq | yes: src/transcriptprojection.cpp#value(QStringLiteral("seq")) |
 | `item.created` | excluded: the area TIMELINE is its consumer (it places chat rows against My Day cards and actions); no chat row prints a date yet, and the field is additive so a client may ignore it | excluded: same — nothing on the desktop chat surface dates a row |
-| `work.id` | yes: ChatScreen.kt#key = { it.id } | yes: ui/ChatSidePanel.qml#modelData.id |
+| `work.id` | yes: ChatScreen.kt#key = { "active-${it.id}" } | yes: ui/ChatSidePanel.qml#modelData.id |
 | `work.title` | yes: ChatScreen.kt#lane.title | yes: ui/ChatSidePanel.qml#modelData.title |
 | `work.detail` | yes: ChatScreen.kt#lane.detail | yes: ui/ChatSidePanel.qml#modelData.detail |
 | `work.status` | excluded: the TOOL CALL's lifecycle, and a delegate's call completes its ack in a second — the badge prints `work.outcome` instead (2026-11-13) | excluded: same — `status` is what made the panel say "done" for a running sub-agent |
@@ -213,6 +213,7 @@ excluded = 26
 | `ui.chat-attachment-card` | yes: Files.kt#AttachmentCard | yes: ui/AttachmentCard.qml#objectName: "cardName" |
 | `ui.my-day` | yes: MyDayScreen.kt#MyDayScreen | yes: ui/MyDayPage.qml#objectName: "myDayCardBody" |
 | `ui.chat-work-panel` | yes: ChatScreen.kt#fun ActivitySheet | yes: ui/ChatSidePanel.qml#objectName: "workList" |
+| `ui.chat-work-count` | yes: ChatScreen.kt#fun BackgroundTasksCount | yes: ui/ChatSidePanel.qml#property int count |
 | `ui.context-breakdown` | yes: ChatScreen.kt#fun ContextBreakdown | yes: ui/ContextBreakdown.qml#function categoryLabel |
 | `ui.my-day-lazy-cache` | yes: ConnectionManager.kt#fun paintTasks | yes: src/manager.cpp#void Manager::paintCachedTasks |
 | `ui.my-day-thread-chat` | yes: ConnectionManager.kt#fun openThreadChat | yes: src/manager.cpp#grouse_open_thread |

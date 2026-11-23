@@ -1798,6 +1798,33 @@ void Manager::coreOnContextReport(const QString &sid, const QString &json)
     emit contextReportChanged();
 }
 
+QVariantList buildActivityLanes(const QJsonArray &lanes)
+{
+    QVariantList running, finished;
+    // Walk backwards: the core emits lanes in transcript order (oldest first), and
+    // both groups must read newest first. Nothing here mutates the input snapshot.
+    for (qsizetype i = lanes.size() - 1; i >= 0; --i) {
+        const QJsonObject laneJson = lanes.at(i).toObject();
+        const QString id = laneJson.value(QStringLiteral("id")).toString();
+        if (id.isEmpty())
+            continue;
+        QVariantMap lane = laneJson.toVariantMap();
+        // The core's `running` is the only trustworthy liveness signal. A stale
+        // `status` / `outcome` can read "in_progress" forever after a dropped turn,
+        // so grouping on either of those would keep a dead lane at the top.
+        const bool isRunning = laneJson.value(QStringLiteral("running")).toBool(false);
+        lane.insert(QStringLiteral("section"),
+                    isRunning ? QStringLiteral("running") : QStringLiteral("finished"));
+        lane.insert(QStringLiteral("finished"), !isRunning);
+        if (isRunning)
+            running.append(lane);
+        else
+            finished.append(lane);
+    }
+    running.append(finished);
+    return running;
+}
+
 void Manager::refreshActivity()
 {
     GROUSE_PHASE("phase activity");
@@ -1810,17 +1837,12 @@ void Manager::refreshActivity()
     }
     const QString json =
         m_bridge->takeString(m_bridge->api().grouse_activity(m_bridge->handle()));
-    QVariantList lanes;
     const QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());
-    for (const QJsonValue &v : doc.array()) {
-        const QJsonObject o = v.toObject();
-        if (o.value(QStringLiteral("id")).toString().isEmpty())
-            continue;
-        QVariantMap lane = o.toVariantMap();
-        // The steps are what make a delegate row expandable; keep them as a list of maps
-        // (QJsonValue::toVariant already gives QVariantList of QVariantMap).
-        lanes.append(lane);
-    }
+    // The steps stay a QVariantList of maps (QJsonValue::toVariant already does that),
+    // so a delegate row can still expand into its sub-agent calls. Comparison below is
+    // against the FINAL ordered/enriched list: reordering must repaint, an unchanged
+    // snapshot must not (this runs on every tool item that lands).
+    const QVariantList lanes = buildActivityLanes(doc.array());
     // A no-op refresh must not repaint: this is called on every tool item that lands.
     if (lanes == m_activity)
         return;

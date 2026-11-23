@@ -4,7 +4,9 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
+#include <QStringList>
 #include <QDir>
 #include <QUrl>
 
@@ -59,6 +61,7 @@ private slots:
     void permissionQueueKeepsEachRequestAndOwner();
     void formQueueKeepsEachRequestAndOwner();
     void cardPinStatusIsFormattedAndActionable();
+    void activityLanesAreGroupedNewestFirst();
 };
 
 /**
@@ -900,6 +903,52 @@ void TstManager::cardPinStatusIsFormattedAndActionable()
     QVERIFY(mgr.roamPinRefusal().isEmpty());
     QVERIFY(mgr.roamCardPins().isEmpty());                    // no core loaded
     QVERIFY(!mgr.clearRoamCardPin(QStringLiteral("nas"), QStringLiteral("typo")));
+}
+
+/** The background-work panel shows live lanes first and history after a divider,
+ *  both newest first, even though the core's getter emits oldest first. The core's
+ *  `running` flag decides the group: a stale `in_progress` status from a stopped
+ *  turn must stay in history. */
+void TstManager::activityLanesAreGroupedNewestFirst()
+{
+    auto lane = [](const QString &id, bool running, const QString &status) {
+        QJsonObject o;
+        o.insert(QStringLiteral("id"), id);
+        o.insert(QStringLiteral("title"), id);
+        o.insert(QStringLiteral("status"), status);
+        o.insert(QStringLiteral("running"), running);
+        return o;
+    };
+
+    QJsonArray raw;
+    raw.append(lane(QStringLiteral("done-1"), false, QStringLiteral("completed")));
+    raw.append(lane(QStringLiteral("live-1"), true, QStringLiteral("in_progress")));
+    // Stale in_progress, left behind by a dropped turn: finished, not live.
+    raw.append(lane(QStringLiteral("stale"), false, QStringLiteral("in_progress")));
+    raw.append(lane(QStringLiteral("done-2"), false, QStringLiteral("completed")));
+    raw.append(lane(QStringLiteral("live-2"), true, QStringLiteral("in_progress")));
+    raw.append(lane(QString(), true, QStringLiteral("in_progress")));   // id-less dropped
+
+    QVERIFY(buildActivityLanes(QJsonArray()).isEmpty());
+
+    const QVariantList lanes = buildActivityLanes(raw);
+    QStringList ids, sections;
+    for (const QVariant &v : lanes) {
+        const QVariantMap row = v.toMap();
+        ids.append(row.value(QStringLiteral("id")).toString());
+        sections.append(row.value(QStringLiteral("section")).toString());
+        QCOMPARE(row.value(QStringLiteral("finished")).toBool(),
+                 row.value(QStringLiteral("section")).toString() == QStringLiteral("finished"));
+    }
+    const QStringList expectedIds{QStringLiteral("live-2"), QStringLiteral("live-1"),
+                                  QStringLiteral("stale"), QStringLiteral("done-2"),
+                                  QStringLiteral("done-1")};
+    const QStringList expectedSections{QStringLiteral("running"), QStringLiteral("running"),
+                                       QStringLiteral("finished"), QStringLiteral("finished"),
+                                       QStringLiteral("finished")};
+    QCOMPARE(ids, expectedIds);
+    QCOMPARE(sections, expectedSections);
+    QCOMPARE(raw.size(), 6);   // the snapshot handed over by the core is not reordered
 }
 
 QTEST_MAIN(TstManager)

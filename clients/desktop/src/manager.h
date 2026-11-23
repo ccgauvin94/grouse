@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 #include <functional>
 #include <QSet>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QSettings>
 #include <QVariant>
@@ -51,6 +52,13 @@ inline bool turnOwnerMatches(const QString &promptingSessionId,
                                                        : promptingSessionId;
     return owner == lostSessionId;
 }
+
+/** Shape the core's activity getter into what the panel paints: running lanes first,
+ *  then finished lanes, each NEWEST FIRST (the core hands them over oldest first).
+ *  Every lane gets `section` ("running" | "finished") for the ListView's sections and
+ *  `finished` for the dimmed rows. `running` is the CORE's verdict: a stale
+ *  `status: "in_progress"` from a stopped turn is history, not live work. */
+QVariantList buildActivityLanes(const QJsonArray &lanes);
 
 class Manager : public QObject
 {
@@ -1170,7 +1178,8 @@ private:
     int m_replayTotal = 0;      // the server's message count (0 = unknown)
     bool m_myDayVisible = false;
     bool m_tasksLoading = false;
-    /// Decoded `grouse_activity` lanes, newest last (the panel's model).
+    /// Decoded `grouse_activity` lanes: running first, then finished, each newest
+    /// first, with `section` / `finished` fields for the panel (buildActivityLanes).
     QVariantList m_activity;
     QVariantList m_contextReport;
     QVariantMap m_contextReportTotal;

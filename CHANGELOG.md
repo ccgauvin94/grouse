@@ -6,6 +6,24 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed — the background-tasks readout says what is working now
+
+- **The lane says what it was asked to do at the START.** A delegate's tool call used to
+  carry only the model's generic title ("Delegating") and a blank `detail`, because the
+  core read the command argument only. It now pulls the human-readable brief from the
+  call's arguments (`instructions`, `task`, `description`, `prompt`, `brief`, …), flattens
+  it to one bounded line, and shows it while the sub-agent is still running — not after
+  its result lands. `command` still wins for shell-like calls, and server bookkeeping
+  (`source`, `subagent`, …) is never shown as a description.
+- **The active count is a bubble on the mark.** The header's background-tasks glyph and
+  the chat menu row now carry a small count of LIVE lanes (capped at "9+"); the desktop
+  Activity section header has the same bubble. The count follows `running`, so it goes
+  away when the turn is cancelled or dropped.
+- **Running work is at the top, history is under a divider.** The sheet/panel now groups
+  lanes on the core's `running` flag — newest first in each group — with a "Finished"
+  divider and slightly dimmed rows below it. No more scrolling past finished work to find
+  the agent that is still answering.
+
 ### Fixed — the full 2026-11-22 audit sweep
 
 Twelve parallel agents audited the core, both transports, the C ABI and every client

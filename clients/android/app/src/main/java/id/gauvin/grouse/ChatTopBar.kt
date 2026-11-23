@@ -250,16 +250,27 @@ internal fun ChatTopBar(
                         // other app draws it, so the header and the menu row are one symbol —
                         // and it is on screen only while something is actually running.
                         if (running > 0) {
-                            Box(
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .clip(CircleShape)
-                                    .clickable { onShowActivity() },
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                BackgroundTasksGlyph(
-                                    modifier = Modifier.size(17.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            // The bubble sits OUTSIDE the tap target: a 28dp box, unchanged
+                            // from the count-free header, with the live count hung off its
+                            // top end. Wrapping the glyph in a second box keeps the ripple
+                            // circular and stops the badge from stealing the click.
+                            Box(Modifier.size(28.dp)) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .clip(CircleShape)
+                                        .clickable { onShowActivity() },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    BackgroundTasksGlyph(
+                                        modifier = Modifier.size(17.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                BackgroundTasksCount(
+                                    count = running,
+                                    modifier = Modifier.align(Alignment.TopEnd)
+                                        .offset(x = 2.dp, y = (-2).dp),
                                 )
                             }
                         }

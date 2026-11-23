@@ -86,6 +86,7 @@ import androidx.compose.material3.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -117,7 +118,9 @@ import android.widget.Toast
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.Lifecycle
@@ -132,6 +135,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import uniffi.grouse_core.ActiveWork
 
 
 /** What fills the window, GROUPED the way goose defines it (`context/report`).
@@ -309,6 +313,38 @@ fun BackgroundTasksGlyph(modifier: Modifier = Modifier, tint: Color = Color.Unsp
         }
         drawPath(diamond(r), color, style = Stroke(width = stroke, join = StrokeJoin.Round))
         drawPath(diamond(r * 0.33f), color)
+    }
+}
+
+/** The count on the background-tasks mark, capped at 9+: past that the exact number stops
+ *  being readable in a bubble this size, and "there is a lot running" is the honest signal.
+ *  Kept pure so the badge's rule is testable without a Compose test. */
+internal fun activityCountLabel(count: Int): String = if (count > 9) "9+" else count.toString()
+
+/** A small bubble overlaid on the background-tasks mark. It is drawn OUTSIDE the mark's
+ *  clickable Box so the badge never steals a tap and the 28dp header target does not move
+ *  when work starts or stops. */
+@Composable
+internal fun BackgroundTasksCount(
+    count: Int,
+    size: Dp = 16.dp,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier.size(size)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.primary),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            activityCountLabel(count),
+            color = MaterialTheme.colorScheme.onPrimary,
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontSize = if (size <= 14.dp) 8.sp else 9.sp,
+                fontWeight = FontWeight.Bold,
+            ),
+            maxLines = 1,
+        )
     }
 }
 
@@ -1187,6 +1223,14 @@ fun ElicitationSheet(
     }
 }
 
+/** Split the chat's lanes into live work and history, each NEWEST FIRST. The core hands us
+ *  transcript order (oldest first); reversing the view before filtering keeps both groups
+ *  in the order the user reads them without touching the snapshot we were given. */
+internal fun partitionActivity(lanes: List<ActiveWork>): Pair<List<ActiveWork>, List<ActiveWork>> {
+    val newestFirst = lanes.asReversed()
+    return newestFirst.filter { it.running } to newestFirst.filter { !it.running }
+}
+
 /** The chat's WORK lanes: sub-agent runs (a delegate and the child tool calls it made)
  *  and anything still in flight (CONTRACT §3.7). goose keeps sub-agent SESSIONS off
  *  ACP, so this is the only place the phone can show what a delegate is doing while it
@@ -1206,108 +1250,134 @@ private fun ActivityLaneList(cm: ConnectionManager, modifier: Modifier = Modifie
         )
         return
     }
+    val (active, finished) = partitionActivity(lanes)
     LazyColumn(modifier.fillMaxWidth()) {
-        // NEWEST FIRST: lanes come in transcript order, so the live one used to be
-        // at the BOTTOM of a list of every delegate this chat ever ran — the top of
-        // the pane was always ancient finished work.
-        items(lanes.asReversed(), key = { it.id }) { lane ->
-            // `outcome` is the core's answer, NOT the tool call's status. A delegate's
-            // call returns its ack ("Delegated to subagent X") a second after it is
-            // issued, so `status` reads "completed" for the whole time the subagent
-            // works, and this pane said "done" the instant it was fired (reported
-            // 2026-11-13). `cancelled` is set when the turn that delegated it was
-            // stopped, which kills its subagents with it.
-            val running = lane.running
-            val badge = when (lane.outcome) {
-                "running" -> "running"
-                "cancelled" -> "cancelled"
-                "failed" -> "failed"
-                "unfinished" -> "unfinished"
-                else -> "done"
-            }
-            val tint = when (lane.outcome) {
-                "running" -> MaterialTheme.statusColors.connecting
-                "failed" -> MaterialTheme.colorScheme.error
-                "cancelled" -> MaterialTheme.colorScheme.onSurfaceVariant
-                else -> MaterialTheme.statusColors.online
-            }
-            Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        if (lane.subagent) Icons.Filled.Build else Icons.Filled.Refresh,
-                        contentDescription = null,
-                        tint = tint,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(Modifier.width(8.dp))
+        // NEWEST FIRST inside each group: lanes come in transcript order, so the live
+        // one used to be at the BOTTOM — the top of the pane was always ancient work.
+        // Keys carry the group so a lane id can never be ambiguous across the divider.
+        items(active, key = { "active-${it.id}" }) { lane ->
+            ActivityLaneRow(lane)
+        }
+        if (finished.isNotEmpty()) {
+            item(key = "activity-finished-header") {
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(top = 10.dp, bottom = 2.dp)) {
+                    HorizontalDivider(Modifier.weight(1f))
                     Text(
-                        lane.title.ifBlank { "tool call" },
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = if (lane.subagent) FontWeight.SemiBold else FontWeight.Normal,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(badge, style = MaterialTheme.typography.labelSmall, color = tint)
-                }
-                if (lane.detail.isNotBlank()) {
-                    Text(
-                        lane.detail,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(start = 24.dp, top = 2.dp),
-                    )
-                }
-                // What it is doing NOW. The child's own tool calls arrive on the
-                // delegate row while it works, so this is real progress rather than
-                // a spinner: the last step IS its current one.
-                if (running) {
-                    val now = lane.steps.lastOrNull()
-                    Text(
-                        if (now != null)
-                            "now · ${now.name.replace('_', ' ')} · ${now.detail}"
-                        else "working…",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.statusColors.connecting,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(start = 24.dp, top = 2.dp),
-                    )
-                }
-                // The sub-agent's own tool calls — what it ACTUALLY did, which
-                // neither the delegate's chip nor its summary says.
-                lane.steps.takeLast(6).forEach { step ->
-                    Row(Modifier.padding(start = 24.dp, top = 2.dp)) {
-                        Text(
-                            step.name,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.outline,
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            step.detail,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-                if (running && lane.steps.size > 6) {
-                    Text(
-                        "… ${lane.steps.size - 6} earlier steps",
+                        stringResource(R.string.activity_finished),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.outline,
-                        modifier = Modifier.padding(start = 24.dp, top = 2.dp),
+                        modifier = Modifier.padding(horizontal = 8.dp),
                     )
+                    HorizontalDivider(Modifier.weight(1f))
                 }
             }
-            HorizontalDivider()
+            items(finished, key = { "finished-${it.id}" }) { lane ->
+                ActivityLaneRow(lane, dimmed = true)
+            }
         }
+    }
+}
+
+/** One lane row. Finished work stays legible but sits back from what is running now —
+ *  the pane answers "what is happening" first, and history is context for that answer. */
+@Composable
+private fun ActivityLaneRow(lane: ActiveWork, dimmed: Boolean = false) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp).alpha(if (dimmed) 0.65f else 1f)) {
+        // `outcome` is the core's answer, NOT the tool call's status. A delegate's
+        // call returns its ack ("Delegated to subagent X") a second after it is
+        // issued, so `status` reads "completed" for the whole time the subagent
+        // works, and this pane said "done" the instant it was fired (reported
+        // 2026-11-13). `cancelled` is set when the turn that delegated it was
+        // stopped, which kills its subagents with it.
+        val running = lane.running
+        val badge = when (lane.outcome) {
+            "running" -> "running"
+            "cancelled" -> "cancelled"
+            "failed" -> "failed"
+            "unfinished" -> "unfinished"
+            else -> "done"
+        }
+        val tint = when (lane.outcome) {
+            "running" -> MaterialTheme.statusColors.connecting
+            "failed" -> MaterialTheme.colorScheme.error
+            "cancelled" -> MaterialTheme.colorScheme.onSurfaceVariant
+            else -> MaterialTheme.statusColors.online
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                if (lane.subagent) Icons.Filled.Build else Icons.Filled.Refresh,
+                contentDescription = null,
+                tint = tint,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                lane.title.ifBlank { "tool call" },
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (lane.subagent) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(badge, style = MaterialTheme.typography.labelSmall, color = tint)
+        }
+        if (lane.detail.isNotBlank()) {
+            Text(
+                lane.detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 24.dp, top = 2.dp),
+            )
+        }
+        // What it is doing NOW. The child's own tool calls arrive on the
+        // delegate row while it works, so this is real progress rather than
+        // a spinner: the last step IS its current one.
+        if (running) {
+            val now = lane.steps.lastOrNull()
+            Text(
+                if (now != null)
+                    "now · ${now.name.replace('_', ' ')} · ${now.detail}"
+                else "working…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.statusColors.connecting,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 24.dp, top = 2.dp),
+            )
+        }
+        // The sub-agent's own tool calls — what it ACTUALLY did, which
+        // neither the delegate's chip nor its summary says.
+        lane.steps.takeLast(6).forEach { step ->
+            Row(Modifier.padding(start = 24.dp, top = 2.dp)) {
+                Text(
+                    step.name,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    step.detail,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (running && lane.steps.size > 6) {
+            Text(
+                "… ${lane.steps.size - 6} earlier steps",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(start = 24.dp, top = 2.dp),
+            )
+        }
+        HorizontalDivider()
     }
 }
 

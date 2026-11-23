@@ -654,7 +654,9 @@ row — which the core already parses into `SubagentStep`s. `activity()` exposes
   call (`TranscriptStore::tool_name`). A delegate that has not called a tool yet is
   therefore a lane with `subagent: false`: nothing has come back to say otherwise.
 - **Fields:** `id` (the tool call), `title` (the run summary, else the call title),
-  `detail` (the call's arguments, flattened to one line and capped), `status`
+  `detail` (the call's arguments, flattened to one line and capped — for a delegate this is
+  the brief from `instructions`/`task`/`description` etc. at CALL time, not the result that
+  arrives after the child finishes), `status`
   (`in_progress` | `completed` | `failed` | `cancelled` — the TOOL CALL's lifecycle),
   `running`, `outcome` (`running` | `completed` | `failed` | `cancelled` | `unfinished`
   — what a client PRINTS), `subagent`, and `steps` — the child tool calls the sub-agent
@@ -691,10 +693,11 @@ row — which the core already parses into `SubagentStep`s. `activity()` exposes
   Activity tabs; Android: a sheet behind a header badge whose count is the LIVE lanes,
   so it returns to nothing when the work ends or is cancelled — the sheet is still
   reachable from the composer's "+" sheet, so a finished run is never lost). Both list
-  NEWEST FIRST, because the list is the chat's whole history of background work and the
-  live lane used to be at the bottom of it; both show the child's last step as
-  "now · <tool> · <detail>", which is real progress — the sub-agent's own calls arrive
-  on this row as it makes them.
+  live lanes first, then a "Finished" divider and slightly dimmed history, and NEWEST FIRST
+  inside each group — the live lane used to be at the bottom of the whole history. The active
+  count on the header/section mark is the LIVE-lane count only. Both show the child's last
+  step as "now · <tool> · <detail>", which is real progress — the sub-agent's own calls
+  arrive on this row as it makes them.
 
 ### 3.8 An area's timeline (`thread_timeline(label)`)
 

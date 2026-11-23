@@ -83,11 +83,9 @@ pub(super) fn share_from_tool_call(
 /// command detail.
 pub(crate) fn tool_call_kind(tc: &ToolCall) -> (ToolCallKind, String) {
     let raw_input = tc.raw_input.clone().unwrap_or(Value::Null);
-    let detail = raw_input
-        .get("command")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    // The lane panel shows the tool's generic title, so the brief has to ride on
+    // the CALL: a delegate's own output does not arrive until the child finishes.
+    let detail = summarize_tool_args(Some(&raw_input));
     let goose = tc
         .meta
         .as_ref()
@@ -225,27 +223,60 @@ pub(crate) fn tool_subagent_step(
     })
 }
 
+/// Detail keys in display priority. `command` stays first: for a shell-like tool
+/// the command IS the work. The delegate brief fields come next, because the
+/// lane panel only has the model's generic "Delegating" title until the child
+/// reports its first step. Server bookkeeping (`source`, `subagent`, ...) is
+/// deliberately absent — none of it says what the agent was asked to do.
+const DETAIL_KEYS: &[&str] = &[
+    "command",
+    "instructions",
+    "task",
+    "description",
+    "prompt",
+    "brief",
+    "objective",
+    "goal",
+    "question",
+    "message",
+    "path",
+    "file_path",
+    "query",
+    "url",
+    "title",
+    "name",
+];
+
 /// One line of a tool call's arguments, for a status list where the full JSON
-/// would be unreadable: the first useful scalar (a command, a path, a query), else
-/// a compact rendering, truncated.
+/// would be unreadable: the first useful scalar, else a compact rendering of
+/// the KNOWN keys only, truncated. Rendering unknown fields would spill large
+/// arguments and private values into a one-line label shared with the UI.
 fn summarize_tool_args(args: Option<&Value>) -> String {
     const MAX: usize = 120;
     let Some(args) = args.and_then(Value::as_object) else {
         return String::new();
     };
-    for key in ["command", "path", "file_path", "query", "url", "title", "name"] {
-        if let Some(value) = args.get(key).and_then(Value::as_str) {
-            if !value.is_empty() {
+    for key in DETAIL_KEYS {
+        if let Some(value) = args.get(*key).and_then(Value::as_str) {
+            if !value.trim().is_empty() {
                 return truncate_line(value, MAX);
             }
         }
     }
-    let compact = Value::Object(args.clone()).to_string();
-    truncate_line(&compact, MAX)
+    let known: Map<String, Value> = DETAIL_KEYS
+        .iter()
+        .filter_map(|key| args.get(*key).map(|value| ((*key).to_string(), value.clone())))
+        .collect();
+    if known.is_empty() {
+        return String::new();
+    }
+    truncate_line(&Value::Object(known).to_string(), MAX)
 }
 
+/// Flatten a value to ONE display line (delegate briefs are often markdown with
+/// newlines and bullets), bounded so a long brief cannot stretch a status lane.
 fn truncate_line(text: &str, max: usize) -> String {
-    let flat = text.replace('\n', " ");
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= max {
         return flat;
     }
@@ -568,3 +599,61 @@ pub(crate) fn permission_response(outcome: PermissionOutcome) -> RequestPermissi
     RequestPermissionResponse::new(outcome)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::schema::v1::ToolCallId;
+
+    fn call(raw_input: Value) -> ToolCall {
+        ToolCall::new(ToolCallId::new("t1"), "Delegating").raw_input(raw_input)
+    }
+
+    #[test]
+    fn delegate_brief_is_a_one_line_detail_at_call_time() {
+        // The lane panel gets the model's generic "Delegating" title; the brief
+        // is the ONLY thing that says what the subagent was asked to do until
+        // its first child tool call arrives. goose sends it as multiline prose.
+        let (_, detail) = tool_call_kind(&call(json!({
+            "instructions": "Audit the backlog\n  and  draft a report",
+            "source": "desktop",
+            "subagent": "20261123_1",
+        })));
+        assert_eq!(detail, "Audit the backlog and draft a report");
+        assert!(!detail.contains("subagent"), "{detail:?}");
+        assert!(!detail.contains('\n'), "{detail:?}");
+    }
+
+    #[test]
+    fn delegate_task_key_and_compact_fallback_stay_bounded() {
+        let (_, detail) = tool_call_kind(&call(json!({
+            "source": "cli",
+            "task": "check the mail",
+            "message": "ignored: a known earlier key wins",
+        })));
+        assert_eq!(detail, "check the mail");
+
+        // A structured brief still gets a compact, bounded rendering — but no
+        // server bookkeeping or unrecognised (possibly sensitive) arguments.
+        let long = "x".repeat(500);
+        let (_, detail) = tool_call_kind(&call(json!({
+            "instructions": { "steps": [long] },
+            "source": "cli",
+            "apiKey": "do-not-show",
+        })));
+        assert!(detail.chars().count() <= 120, "{detail:?}");
+        assert!(detail.contains("instructions"), "{detail:?}");
+        assert!(!detail.contains("source"), "{detail:?}");
+        assert!(!detail.contains("apiKey"), "{detail:?}");
+    }
+
+    #[test]
+    fn shell_command_still_wins_over_every_brief_key() {
+        let (_, detail) = tool_call_kind(&call(json!({
+            "command": "ssh -v host",
+            "description": "checking the banner",
+            "instructions": "ignore this",
+        })));
+        assert_eq!(detail, "ssh -v host");
+        assert!(matches!(tool_call_kind(&call(json!({"command": "ls"}))).0, ToolCallKind::Plain));
+    }
+}
