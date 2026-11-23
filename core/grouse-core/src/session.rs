@@ -977,6 +977,8 @@ pub(crate) fn info_cwd(info: &SessionInfo) -> String {
 /// The flat permission prompt for a wire request.
 pub(crate) fn permission_request(req: &RequestPermissionRequest) -> PermissionRequest {
     PermissionRequest {
+        session_id: String::new(), // stamped by the wire host via on_chat()
+        owner: String::new(),
         tool_call_id: req.tool_call.tool_call_id.to_string(),
         title: req.tool_call.fields.title.clone().unwrap_or_default(),
         detail: req

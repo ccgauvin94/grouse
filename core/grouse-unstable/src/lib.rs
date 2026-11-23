@@ -42,10 +42,10 @@ mod tests {
         fn on_export(&self, _data: String) {
             self.events.lock().push("on_export".into());
         }
-        fn on_recipe_params(&self, _parameters: String) {
+        fn on_recipe_params(&self, _owner: grouse_core::SessionOwner, _request_id: String, _parameters: String) {
             self.events.lock().push("on_recipe_params".into());
         }
-        fn on_elicitation(&self, _schema: String) {
+        fn on_elicitation(&self, _owner: grouse_core::SessionOwner, _request_id: String, _schema: String) {
             self.events.lock().push("on_elicitation".into());
         }
         fn on_compaction_status(&self, _message: String) {
@@ -177,8 +177,8 @@ mod tests {
         g.working_dir_update("s1".into(), "/tmp".into());
         g.tools_call("s1".into(), "shell__run".into(), r#"{"cmd":"echo hi"}"#.into());
         // Server-request answers (no pending request to answer -> clean no-op).
-        g.respond_recipe_params("accept".into(), r#"{"k":"v"}"#.into());
-        g.respond_elicitation("decline".into(), String::new());
+        g.respond_recipe_params("test-req".into(), "accept".into(), r#"{"k":"v"}"#.into());
+        g.respond_elicitation("test-req".into(), "decline".into(), String::new());
 
         assert!(
             listener.events().is_empty(),

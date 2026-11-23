@@ -39,7 +39,7 @@ use crate::unstable::GrouseUnstable;
 use crate::{
     ConfigOption, ConnectionStatus, Core, CoreListener, GrouseUnstableListener,
     PermissionOutcome, PermissionRequest, ProjectSummary, Prompt, RefreshMode, SendExpect,
-    ServerConfig, SessionSummary, TimelineRow, TranscriptOp,
+    ServerConfig, SessionOwner, SessionSummary, TimelineRow, TranscriptOp,
 };
 
 /// Bumped whenever the listener table's layout or a symbol's signature changes.
@@ -74,11 +74,19 @@ use crate::{
 /// verified Reply target; `null` for briefings, tasks and unverifiable turns).
 /// No symbol signature or listener-table layout changed, but a desktop built for
 /// 19 must not load an old `.so` whose decisions have no `reply_session` key.
+/// 20: request-correlated server forms and roam card pins. Two listener slots
+/// were APPENDED (never inserted): `on_recipe_params_request` and
+/// `on_elicitation_request`, each `(owner_json, request_id, payload)` — the old
+/// single-string slots keep their offsets but are no longer fired by the core.
+/// `respond_recipe_params` / `respond_elicitation` gained a leading
+/// `request_id`; `PermissionRequest`'s JSON gained `session_id` and `owner`;
+/// four `grouse_roam_card_pin*` exports expose the pin store the phone already
+/// has through uniffi. The table is 50 entries. A desktop built for 19 would
+/// read the new slots with the wrong arity and answer forms with the wrong key,
+/// so the ABI gate must change with the core.
 /// COORDINATOR: bump `kExpectedAbiVersion` in `clients/desktop/src/corebridge.cpp`
-/// to 19 and make the desktop read `reply_session` instead of the envelope's
-/// `session` in the same change. Android must regenerate its uniffi bindings
-/// (`just android-libs`) for the two new record fields.
-pub const GROUSE_ABI_VERSION: u32 = 19;
+/// to 20 and land the desktop's owner/request-id handlers with this library.
+pub const GROUSE_ABI_VERSION: u32 = 20;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
@@ -252,7 +260,10 @@ pub struct GrouseCoreListener {
     pub on_speak: Option<extern "C" fn(*mut c_void, *const c_char)>,
     /// `options` serialized as a JSON array of `ConfigOption`.
     pub on_config: Option<extern "C" fn(*mut c_void, *const c_char)>,
-    /// `request` serialized as JSON (`PermissionRequest`).
+    /// `request` serialized as JSON (`PermissionRequest`). Since ABI 20 that
+    /// JSON also carries `session_id` (the display id the approval belongs to)
+    /// and `owner` ("main" or the roam peer's bare label), so a prompt can name
+    /// the asking wire without parsing `roam:<label>:<id>` in the client.
     pub on_permission_request: Option<extern "C" fn(*mut c_void, *const c_char)>,
     pub on_session_touched:
         Option<extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char)>,
@@ -269,7 +280,11 @@ pub struct GrouseCoreListener {
     pub on_commands: Option<extern "C" fn(*mut c_void, *const c_char)>,
     // -- unstable raw-JSON families (CONTRACT §5) --
     pub on_export: Option<extern "C" fn(*mut c_void, *const c_char)>,
+    /// Legacy single-payload slot. Kept for table order; the core fires
+    /// `on_recipe_params_request` since ABI 20 (it needs the request id to
+    /// answer the right server request).
     pub on_recipe_params: Option<extern "C" fn(*mut c_void, *const c_char)>,
+    /// Legacy single-payload slot, retained for the same reason.
     pub on_elicitation: Option<extern "C" fn(*mut c_void, *const c_char)>,
     pub on_compaction_status: Option<extern "C" fn(*mut c_void, *const c_char)>,
     pub on_message_usage:
@@ -356,6 +371,16 @@ pub struct GrouseCoreListener {
     /// `Window` is NOT an open answer (a background fill sends those too).
     /// Appended at the END; ABI 18.
     pub on_session_opened: Option<extern "C" fn(*mut c_void, *const c_char)>,
+    /// A recipe-parameter form with the reply key: `(owner_json, request_id,
+    /// parameters_json)`. `owner_json` is a `SessionOwner` record (`kind`,
+    /// `label`); `request_id` goes back as the first argument of
+    /// `grouse_unstable_respond_recipe_params`. Appended at the END; ABI 20.
+    pub on_recipe_params_request:
+        Option<extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char)>,
+    /// An elicitation form with the reply key: `(owner_json, request_id,
+    /// schema_json)`. Appended at the END; ABI 20.
+    pub on_elicitation_request:
+        Option<extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char)>,
 }
 
 /// Bridges the core's typed listener traits to the installed C table. The raw
@@ -699,11 +724,21 @@ impl GrouseUnstableListener for CoreCallbackForwarder {
     fn on_export(&self, data: String) {
         unsafe { cb_str1(table_fn!(self, on_export), self.user_data, &data) };
     }
-    fn on_recipe_params(&self, parameters: String) {
-        unsafe { cb_str1(table_fn!(self, on_recipe_params), self.user_data, &parameters) };
+    fn on_recipe_params(&self, owner: SessionOwner, request_id: String, parameters: String) {
+        // The request id is the ONLY key that answers this exact server request;
+        // the legacy single-string slot cannot carry it and is left unfired.
+        let owner_json = serde_json::to_string(&owner).unwrap_or_default();
+        unsafe {
+            cb_str3(table_fn!(self, on_recipe_params_request), self.user_data,
+                    &owner_json, &request_id, &parameters);
+        }
     }
-    fn on_elicitation(&self, schema: String) {
-        unsafe { cb_str1(table_fn!(self, on_elicitation), self.user_data, &schema) };
+    fn on_elicitation(&self, owner: SessionOwner, request_id: String, schema: String) {
+        let owner_json = serde_json::to_string(&owner).unwrap_or_default();
+        unsafe {
+            cb_str3(table_fn!(self, on_elicitation_request), self.user_data,
+                    &owner_json, &request_id, &schema);
+        }
     }
     fn on_compaction_status(&self, message: String) {
         unsafe { cb_str1(table_fn!(self, on_compaction_status), self.user_data, &message) };
@@ -1543,6 +1578,85 @@ pub extern "C" fn grouse_card_fingerprint(card: *const c_char, out_err: *mut *mu
 }
 
 // ---------------------------------------------------------------------------
+// Roam card pins (ABI 20) — the same Core getters/intents the phone reaches
+// through uniffi. The core still verifies the pin at dial time; these exports
+// exist so a UI can SHOW and manage the pin store instead of guessing it.
+// ---------------------------------------------------------------------------
+
+/// One label's pinned card fingerprint as a JSON string (`"..."`) or an EMPTY
+/// string when the label was never enrolled — a client's "no pin" check is a
+/// simple empty QString, and a JSON `null` would be read back as the literal
+/// text "null". Free with `grouse_string_free`.
+#[no_mangle]
+pub extern "C" fn grouse_roam_card_pin(h: *mut c_void, label: *const c_char) -> *mut c_char {
+    let label = (unsafe { c_param(label) }).map(str::to_owned).unwrap_or_default();
+    catch_unwind(AssertUnwindSafe(|| match handle(h).core.roam_card_pin(label) {
+        Some(fingerprint) => c_json(&fingerprint),
+        None => c_str(""),
+    }))
+    .unwrap_or_else(|_| c_str(""))
+}
+
+/// All `{label: fingerprint}` pins as one JSON object string. Free with
+/// `grouse_string_free`.
+#[no_mangle]
+pub extern "C" fn grouse_roam_card_pins(h: *mut c_void) -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| c_str(&handle(h).core.roam_card_pins())))
+        .unwrap_or_else(|_| c_str("{}"))
+}
+
+/// Enroll/replace a label's pin after the user confirmed a re-shared card.
+/// Errors go to `out_err` (free with `grouse_string_free`); the core refuses a
+/// dial whose card no longer matches.
+#[no_mangle]
+pub extern "C" fn grouse_roam_card_pin_enroll(
+    h: *mut c_void,
+    label: *const c_char,
+    fingerprint: *const c_char,
+    out_err: *mut *mut c_char,
+) {
+    if !out_err.is_null() {
+        unsafe { *out_err = std::ptr::null_mut() };
+    }
+    let (Some(label), Some(fingerprint)) = (
+        (unsafe { c_param(label) }).map(str::to_owned),
+        (unsafe { c_param(fingerprint) }).map(str::to_owned),
+    ) else {
+        set_err(out_err, "label and fingerprint are required");
+        return;
+    };
+    if let Err(e) = catch_unwind(AssertUnwindSafe(|| {
+        handle(h).core.roam_card_pin_enroll(label, fingerprint)
+    }))
+    .unwrap_or_else(|_| Err("panic in grouse_roam_card_pin_enroll".to_string()))
+    {
+        set_err(out_err, &e);
+    }
+}
+
+/// Forget a label's pin so the next dial re-enrolls that peer. Errors go to
+/// `out_err` (free with `grouse_string_free`).
+#[no_mangle]
+pub extern "C" fn grouse_roam_card_pin_clear(
+    h: *mut c_void,
+    label: *const c_char,
+    out_err: *mut *mut c_char,
+) {
+    if !out_err.is_null() {
+        unsafe { *out_err = std::ptr::null_mut() };
+    }
+    let Some(label) = (unsafe { c_param(label) }).map(str::to_owned) else {
+        set_err(out_err, "label is required");
+        return;
+    };
+    if let Err(e) = catch_unwind(AssertUnwindSafe(|| handle(h).core.roam_card_pin_clear(label)))
+        .unwrap_or_else(|_| Err("panic in grouse_roam_card_pin_clear".to_string()))
+    {
+        set_err(out_err, &e);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unstable intents (CONTRACT §5) — mirror the GrouseUnstable uniffi surface.
 // ---------------------------------------------------------------------------
 
@@ -1854,25 +1968,43 @@ pub extern "C" fn grouse_unstable_tools_call_named(
 }
 
 #[no_mangle]
-pub extern "C" fn grouse_unstable_respond_recipe_params(h: *mut c_void, action: *const c_char, values_json: *const c_char) {
-    let (Some(action), Some(values_json)) = (
+pub extern "C" fn grouse_unstable_respond_recipe_params(
+    h: *mut c_void,
+    request_id: *const c_char,
+    action: *const c_char,
+    values_json: *const c_char,
+) {
+    let (Some(request_id), Some(action), Some(values_json)) = (
+        (unsafe { c_param(request_id) }).map(str::to_owned),
         (unsafe { c_param(action) }).map(str::to_owned),
         (unsafe { c_param(values_json) }).map(str::to_owned),
     ) else {
         return;
     };
-    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.respond_recipe_params(action, values_json))).ok();
+    catch_unwind(AssertUnwindSafe(|| {
+        handle(h).unstable.respond_recipe_params(request_id, action, values_json)
+    }))
+    .ok();
 }
 
 #[no_mangle]
-pub extern "C" fn grouse_unstable_respond_elicitation(h: *mut c_void, action: *const c_char, content_json: *const c_char) {
-    let (Some(action), Some(content_json)) = (
+pub extern "C" fn grouse_unstable_respond_elicitation(
+    h: *mut c_void,
+    request_id: *const c_char,
+    action: *const c_char,
+    content_json: *const c_char,
+) {
+    let (Some(request_id), Some(action), Some(content_json)) = (
+        (unsafe { c_param(request_id) }).map(str::to_owned),
         (unsafe { c_param(action) }).map(str::to_owned),
         (unsafe { c_param(content_json) }).map(str::to_owned),
     ) else {
         return;
     };
-    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.respond_elicitation(action, content_json))).ok();
+    catch_unwind(AssertUnwindSafe(|| {
+        handle(h).unstable.respond_elicitation(request_id, action, content_json)
+    }))
+    .ok();
 }
 
 // ---------------------------------------------------------------------------

@@ -49,8 +49,8 @@ impl CoreListener for L {
 struct UL;
 impl grouse_core::GrouseUnstableListener for UL {
     fn on_export(&self, _d: String) {}
-    fn on_recipe_params(&self, _p: String) {}
-    fn on_elicitation(&self, _s: String) {}
+    fn on_recipe_params(&self, _owner: grouse_core::SessionOwner, _request_id: String, _p: String) {}
+    fn on_elicitation(&self, _owner: grouse_core::SessionOwner, _request_id: String, _s: String) {}
     fn on_compaction_status(&self, _m: String) {}
     fn on_usage(&self, u: i64, s: i64, c: f64) { println!("-- on_usage(unstable): used={u} limit={s} cost={c}"); }
     fn on_message_usage(&self, o: u64, e: u64, t: u64, c: f64) {

@@ -388,11 +388,25 @@ struct AdvisorCard: View {
 
 struct PermissionSheet: View {
     let prompt: PermissionPrompt
-    let onAnswer: (String?) -> Void
+    let chatTitle: String
+    let owner: String
+    let remaining: Int
+    let onAnswer: (String, String?) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Tool approval").font(.headline)
+            // A prompt is meaningless without its provenance: the core now stamps the
+            // session and the owning wire so a roam peer cannot impersonate the main one.
+            Text("\(chatTitle) · \(owner)")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .lineLimit(2)
+            if remaining > 1 {
+                Text("\(remaining) approvals waiting")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
             Text(prompt.request.title)
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -410,15 +424,17 @@ struct PermissionSheet: View {
             // The SERVER decides what the answers are; this only labels them. A hardcoded
             // allow/deny pair is what made the KDE dialog offer nothing but "Deny".
             ForEach(prompt.request.options, id: \.optionId) { option in
-                Button(pretty(option)) { onAnswer(option.optionId) }
+                Button(pretty(option)) { onAnswer(prompt.id, option.optionId) }
                     .frame(maxWidth: .infinity)
             }
-            Button("Cancel") { onAnswer(nil) }
+            Button("Cancel") { onAnswer(prompt.id, nil) }
                 .keyboardShortcut(.cancelAction)
                 .frame(maxWidth: .infinity)
         }
         .padding(18)
         .frame(width: 420)
+        // Dismissal without an explicit choice would leave the core's responder parked.
+        .interactiveDismissDisabled()
     }
 
     private func pretty(_ option: PermissionOption) -> String {

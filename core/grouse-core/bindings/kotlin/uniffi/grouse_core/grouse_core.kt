@@ -726,10 +726,10 @@ internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod0 : com.su
     fun callback(`uniffiHandle`: Long,`data`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod1 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`parameters`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`owner`: RustBuffer.ByValue,`requestId`: RustBuffer.ByValue,`parameters`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod2 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`schema`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`uniffiHandle`: Long,`owner`: RustBuffer.ByValue,`requestId`: RustBuffer.ByValue,`schema`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceGrouseUnstableListenerMethod3 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`message`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
@@ -1564,9 +1564,9 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_resources_read(`ptr`: Long,`sessionId`: RustBuffer.ByValue,`uri`: RustBuffer.ByValue,`extension`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_grouse_core_fn_method_grouseunstable_respond_elicitation(`ptr`: Long,`action`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_grouse_core_fn_method_grouseunstable_respond_elicitation(`ptr`: Long,`requestId`: RustBuffer.ByValue,`action`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_grouse_core_fn_method_grouseunstable_respond_recipe_params(`ptr`: Long,`action`: RustBuffer.ByValue,`values`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_grouse_core_fn_method_grouseunstable_respond_recipe_params(`ptr`: Long,`requestId`: RustBuffer.ByValue,`action`: RustBuffer.ByValue,`values`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_schedules_delete(`ptr`: Long,`scheduleId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -2003,10 +2003,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_resources_read() and 0xFFFF) != 22648) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_respond_elicitation() and 0xFFFF) != 4683) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_respond_elicitation() and 0xFFFF) != 10388) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_respond_recipe_params() and 0xFFFF) != 15384) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_respond_recipe_params() and 0xFFFF) != 23606) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_schedules_delete() and 0xFFFF) != 63227) {
@@ -2153,10 +2153,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_export() and 0xFFFF) != 3482) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_recipe_params() and 0xFFFF) != 65119) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_recipe_params() and 0xFFFF) != 20969) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_elicitation() and 0xFFFF) != 60546) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_elicitation() and 0xFFFF) != 57419) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstablelistener_on_compaction_status() and 0xFFFF) != 2189) {
@@ -5398,16 +5398,19 @@ public interface GrouseUnstableInterface {
     fun `resourcesRead`(`sessionId`: kotlin.String, `uri`: kotlin.String, `extension`: kotlin.String)
     
     /**
-     * Answer a pending `elicitation/create` request: `accept` with a content object,
-     * `decline` / `cancel` without one.
+     * Answer ONE pending `elicitation/create` request: `accept` with a content
+     * object, `decline` / `cancel` without one. The id comes from
+     * `on_elicitation`; a stale id fails without touching another request.
      */
-    fun `respondElicitation`(`action`: kotlin.String, `content`: kotlin.String)
+    fun `respondElicitation`(`requestId`: kotlin.String, `action`: kotlin.String, `content`: kotlin.String)
     
     /**
-     * Answer a pending `recipe/request-params` request. `values` is JSON mapping key →
-     * string; single-slot per family (the CONTRACT signatures carry no request key).
+     * Answer ONE pending `recipe/request-params` request, keyed by the
+     * `request_id` delivered with `on_recipe_params`. A stale or unknown id
+     * fails instead of answering a different form. `values` is JSON mapping
+     * key → string.
      */
-    fun `respondRecipeParams`(`action`: kotlin.String, `values`: kotlin.String)
+    fun `respondRecipeParams`(`requestId`: kotlin.String, `action`: kotlin.String, `values`: kotlin.String)
     
     /**
      * Delete a job; re-lists.
@@ -5959,15 +5962,17 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
 
     
     /**
-     * Answer a pending `elicitation/create` request: `accept` with a content object,
-     * `decline` / `cancel` without one.
-     */override fun `respondElicitation`(`action`: kotlin.String, `content`: kotlin.String)
+     * Answer ONE pending `elicitation/create` request: `accept` with a content
+     * object, `decline` / `cancel` without one. The id comes from
+     * `on_elicitation`; a stale id fails without touching another request.
+     */override fun `respondElicitation`(`requestId`: kotlin.String, `action`: kotlin.String, `content`: kotlin.String)
         = 
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_grouse_core_fn_method_grouseunstable_respond_elicitation(
         it,
         
+        FfiConverterString.lower(`requestId`),
         FfiConverterString.lower(`action`),
         FfiConverterString.lower(`content`),_status)
 }
@@ -5977,15 +5982,18 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
 
     
     /**
-     * Answer a pending `recipe/request-params` request. `values` is JSON mapping key →
-     * string; single-slot per family (the CONTRACT signatures carry no request key).
-     */override fun `respondRecipeParams`(`action`: kotlin.String, `values`: kotlin.String)
+     * Answer ONE pending `recipe/request-params` request, keyed by the
+     * `request_id` delivered with `on_recipe_params`. A stale or unknown id
+     * fails instead of answering a different form. `values` is JSON mapping
+     * key → string.
+     */override fun `respondRecipeParams`(`requestId`: kotlin.String, `action`: kotlin.String, `values`: kotlin.String)
         = 
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_grouse_core_fn_method_grouseunstable_respond_recipe_params(
         it,
         
+        FfiConverterString.lower(`requestId`),
         FfiConverterString.lower(`action`),
         FfiConverterString.lower(`values`),_status)
 }
@@ -7129,6 +7137,19 @@ data class PermissionRequest (
     var `detail`: kotlin.String
     , 
     var `options`: List<PermissionOption>
+    , 
+    /**
+     * The DISPLAY session id this approval belongs to (`roam:<label>:<id>`
+     * for a peer chat), not a bare wire id the client has to re-prefix.
+     */
+    var `sessionId`: kotlin.String
+    , 
+    /**
+     * Which wire asked: `"main"` or a roam peer's bare connection-card label.
+     * `respond_permission` still routes by `tool_call_id`, but the prompt must
+     * be able to name the chat/wire instead of guessing from the screen.
+     */
+    var `owner`: kotlin.String
     
 ){
     
@@ -7149,6 +7170,8 @@ public object FfiConverterTypePermissionRequest: FfiConverterRustBuffer<Permissi
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterSequenceTypePermissionOption.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
         )
     }
 
@@ -7156,7 +7179,9 @@ public object FfiConverterTypePermissionRequest: FfiConverterRustBuffer<Permissi
             FfiConverterString.allocationSize(value.`toolCallId`) +
             FfiConverterString.allocationSize(value.`title`) +
             FfiConverterString.allocationSize(value.`detail`) +
-            FfiConverterSequenceTypePermissionOption.allocationSize(value.`options`)
+            FfiConverterSequenceTypePermissionOption.allocationSize(value.`options`) +
+            FfiConverterString.allocationSize(value.`sessionId`) +
+            FfiConverterString.allocationSize(value.`owner`)
     )
 
     override fun write(value: PermissionRequest, buf: ByteBuffer) {
@@ -7164,6 +7189,8 @@ public object FfiConverterTypePermissionRequest: FfiConverterRustBuffer<Permissi
             FfiConverterString.write(value.`title`, buf)
             FfiConverterString.write(value.`detail`, buf)
             FfiConverterSequenceTypePermissionOption.write(value.`options`, buf)
+            FfiConverterString.write(value.`sessionId`, buf)
+            FfiConverterString.write(value.`owner`, buf)
     }
 }
 
@@ -9838,9 +9865,19 @@ public interface GrouseUnstableListener {
     
     fun `onExport`(`data`: kotlin.String)
     
-    fun `onRecipeParams`(`parameters`: kotlin.String)
+    /**
+     * A recipe's declared parameters, keyed by the SERVER's request id. The
+     * owner is the `SessionOwner` record of the wire that asked, so the answer
+     * goes to that connection rather than whichever chat is on screen; pass
+     * `request_id` back as the first argument of `respond_recipe_params`.
+     */
+    fun `onRecipeParams`(`owner`: SessionOwner, `requestId`: kotlin.String, `parameters`: kotlin.String)
     
-    fun `onElicitation`(`schema`: kotlin.String)
+    /**
+     * An `elicitation/create` form, keyed the same way; answer with
+     * `respond_elicitation(request_id, action, content)`.
+     */
+    fun `onElicitation`(`owner`: SessionOwner, `requestId`: kotlin.String, `schema`: kotlin.String)
     
     fun `onCompactionStatus`(`message`: kotlin.String)
     
@@ -9941,10 +9978,12 @@ internal object uniffiCallbackInterfaceGrouseUnstableListener {
         }
     }
     internal object `onRecipeParams`: UniffiCallbackInterfaceGrouseUnstableListenerMethod1 {
-        override fun callback(`uniffiHandle`: Long,`parameters`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+        override fun callback(`uniffiHandle`: Long,`owner`: RustBuffer.ByValue,`requestId`: RustBuffer.ByValue,`parameters`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeGrouseUnstableListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
                 uniffiObj.`onRecipeParams`(
+                    FfiConverterTypeSessionOwner.lift(`owner`),
+                    FfiConverterString.lift(`requestId`),
                     FfiConverterString.lift(`parameters`),
                 )
             }
@@ -9953,10 +9992,12 @@ internal object uniffiCallbackInterfaceGrouseUnstableListener {
         }
     }
     internal object `onElicitation`: UniffiCallbackInterfaceGrouseUnstableListenerMethod2 {
-        override fun callback(`uniffiHandle`: Long,`schema`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+        override fun callback(`uniffiHandle`: Long,`owner`: RustBuffer.ByValue,`requestId`: RustBuffer.ByValue,`schema`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeGrouseUnstableListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
                 uniffiObj.`onElicitation`(
+                    FfiConverterTypeSessionOwner.lift(`owner`),
+                    FfiConverterString.lift(`requestId`),
                     FfiConverterString.lift(`schema`),
                 )
             }

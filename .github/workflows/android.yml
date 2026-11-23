@@ -1,25 +1,29 @@
-# Android APK build.
+# Android APK build (push/PR only; a `v*` tag goes through release.yml + gate).
 #
 # The artifact is a SIDELOAD build of the debug variant (fast, unminified, no R8). It used to
 # be signed with the runner's throwaway debug key, which GitHub regenerates on every run — so
 # the APK could not install over a release-signed app (INSTALL_FAILED_UPDATE_INCOMPATIBLE),
 # and no two CI builds upgraded each other either. It is now signed with the SAME key the
-# release workflow uses, so any build here installs straight over what is on the phone.
+# release workflow uses when the release secrets are available, so any build here installs
+# straight over what is on the phone.
 #
-# Signing, in preference order (mirrors release.yml):
+# Signing, in preference order:
 #   1. GROUSE_KEYSTORE_BASE64 + GROUSE_STORE_PASSWORD / GROUSE_KEY_ALIAS /
-#      GROUSE_KEY_PASSWORD — the real release key.
-#   2. GROUSE_DEBUG_KEYSTORE_B64 — a PERSISTED debug key (sideload-only, but build-to-build
-#      upgradeable).
+#      GROUSE_KEY_PASSWORD — the real release key (signer digest is asserted).
+#   2. GROUSE_DEBUG_KEYSTORE_B64 — a PERSISTED debug key (sideload-only, but
+#      build-to-build upgradeable).
 #   3. Neither available (e.g. a PR from a fork, which gets no secrets): the runner's one-off
 #      debug key, with a warning. Fine for a compile check, useless for a sideload.
+# A PARTIAL release secret set is a hard error, never a silent fallback.
+# Signing passwords live only in step-scoped env; they are never written to
+# $GITHUB_ENV where later steps would inherit them.
 #
-# Version pinning (X-7): every GitHub Action below is pinned to a major tag
-# (e.g. @v4). Major-tag pins are the accepted level here — they get compatible
-# patch updates automatically while still being a coarse lock. For stricter
-# supply-chain hardening, replace the major tag with a full commit SHA; the
-# action's owning-project tag notes and this comment are where that decision
-# would be recorded. See core.yml for the Rust toolchain "dedrift" note.
+# Version pinning (X-7): actions are pinned to major tags (e.g. @v4). We have not
+# SHA-pinned them: this repo has no Dependabot config to maintain digests, and a
+# stale digest is worse than a major tag that still gets compatible security
+# fixes. Pinning of the toolchains that actually produce the shipped bytes is
+# enforced in gate.yml / release.yml (rustc 1.97.1, uniffi 0.32.1, NDK
+# 27.0.12077973) and by the signer-digest assertion below.
 name: Android
 
 on:
@@ -27,11 +31,16 @@ on:
     branches: [main]
   pull_request:
 
-
 # Least privilege: the default token only needs to read the repo (CodeQL
 # actions/missing-workflow-permissions).
 permissions:
   contents: read
+
+env:
+  # CN=Grouse, O=Grouse, C=US — keep in step with release.yml and
+  # scripts/publish-apk.sh.
+  GROUSE_RELEASE_SIGNER_SHA256: 95b51fd4e9b7a8298a3c362da07ba4bc908f3b2ce8bcaa0820f87b34dd84474e
+
 jobs:
   apk:
     runs-on: ubuntu-latest
@@ -47,10 +56,11 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # The keystore is a file; carry it as base64 and materialize it where the gradle
-      # build's GROUSE_KEYSTORE path expects it. Shell guards keep this a no-op when the
-      # secret is unset — secrets are not reliable in `if:` (a fork PR has none at all).
+      # Materialize the keystore and record only its PATH and kind as outputs
+      # (never the passwords). Secrets are not reliable in `if:` — a fork PR
+      # has none at all — so the checks are shell guards.
       - name: Configure signing
+        id: signing
         env:
           RELEASE_KEYSTORE_B64: ${{ secrets.GROUSE_KEYSTORE_BASE64 }}
           DEBUG_KEYSTORE_B64: ${{ secrets.GROUSE_DEBUG_KEYSTORE_B64 }}
@@ -59,27 +69,26 @@ jobs:
           RELEASE_KEY_PASSWORD: ${{ secrets.GROUSE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ -n "${RELEASE_KEYSTORE_B64:-}" ]; then
-            KEYSTORE_PATH="$RUNNER_TEMP/grouse-release.jks"
-            printf '%s' "$RELEASE_KEYSTORE_B64" | base64 -d > "$KEYSTORE_PATH"
-            {
-              echo "GROUSE_KEYSTORE=$KEYSTORE_PATH"
-              echo "GROUSE_STORE_PASSWORD=$RELEASE_STORE_PASSWORD"
-              echo "GROUSE_KEY_ALIAS=$RELEASE_KEY_ALIAS"
-              echo "GROUSE_KEY_PASSWORD=$RELEASE_KEY_PASSWORD"
-            } >> "$GITHUB_ENV"
+          if [[ -n "${RELEASE_KEYSTORE_B64:-}" ]]; then
+            for var in RELEASE_STORE_PASSWORD RELEASE_KEY_ALIAS RELEASE_KEY_PASSWORD; do
+              [[ -n "${!var:-}" ]] || {
+                echo "::error::release keystore set without $var; refusing to fall back to a debug key"
+                exit 1; }
+            done
+            printf '%s' "$RELEASE_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/grouse-release.jks"
+            echo "keystore=$RUNNER_TEMP/grouse-release.jks" >> "$GITHUB_OUTPUT"
+            echo "kind=release" >> "$GITHUB_OUTPUT"
             echo "::notice::Signing with the release keystore."
-          elif [ -n "${DEBUG_KEYSTORE_B64:-}" ]; then
-            KEYSTORE_PATH="$RUNNER_TEMP/grouse-debug.jks"
-            printf '%s' "$DEBUG_KEYSTORE_B64" | base64 -d > "$KEYSTORE_PATH"
-            {
-              echo "GROUSE_KEYSTORE=$KEYSTORE_PATH"
-              echo "GROUSE_STORE_PASSWORD=android"
-              echo "GROUSE_KEY_ALIAS=androiddebugkey"
-              echo "GROUSE_KEY_PASSWORD=android"
-            } >> "$GITHUB_ENV"
+          elif [[ -n "${RELEASE_STORE_PASSWORD:-}${RELEASE_KEY_ALIAS:-}${RELEASE_KEY_PASSWORD:-}" ]]; then
+            echo "::error::release signing passwords set without GROUSE_KEYSTORE_BASE64"
+            exit 1
+          elif [[ -n "${DEBUG_KEYSTORE_B64:-}" ]]; then
+            printf '%s' "$DEBUG_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/grouse-debug.jks"
+            echo "keystore=$RUNNER_TEMP/grouse-debug.jks" >> "$GITHUB_OUTPUT"
+            echo "kind=debug" >> "$GITHUB_OUTPUT"
             echo "::warning::Signing with the persisted DEBUG keystore — sideload-only."
           else
+            echo "kind=none" >> "$GITHUB_OUTPUT"
             echo "::warning::No keystore secret available; this APK uses the runner's throwaway debug key and will not install over a released app."
           fi
 
@@ -90,27 +99,41 @@ jobs:
         working-directory: clients/android
 
       - name: Build debug APK
+        env:
+          GROUSE_KEYSTORE: ${{ steps.signing.outputs.keystore }}
+          GROUSE_STORE_PASSWORD: ${{ steps.signing.outputs.kind == 'debug' && 'android' || secrets.GROUSE_STORE_PASSWORD }}
+          GROUSE_KEY_ALIAS: ${{ steps.signing.outputs.kind == 'debug' && 'androiddebugkey' || secrets.GROUSE_KEY_ALIAS }}
+          GROUSE_KEY_PASSWORD: ${{ steps.signing.outputs.kind == 'debug' && 'android' || secrets.GROUSE_KEY_PASSWORD }}
         run: ./gradlew --no-daemon assembleDebug
         working-directory: clients/android
 
-      # Prove which key signed it instead of assuming the config took: a silent fallback to
-      # the runner's key is exactly the failure this workflow exists to stop.
+      # Prove which key signed it instead of assuming the config took: a silent
+      # fallback to the runner's key is exactly the failure this workflow exists to stop.
       - name: Verify the APK's signer
+        env:
+          GROUSE_KEYSTORE: ${{ steps.signing.outputs.keystore }}
+          GROUSE_STORE_PASSWORD: ${{ steps.signing.outputs.kind == 'debug' && 'android' || secrets.GROUSE_STORE_PASSWORD }}
+          GROUSE_KEY_ALIAS: ${{ steps.signing.outputs.kind == 'debug' && 'androiddebugkey' || secrets.GROUSE_KEY_ALIAS }}
+          GROUSE_KEY_PASSWORD: ${{ steps.signing.outputs.kind == 'debug' && 'android' || secrets.GROUSE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          APK=$(ls clients/android/app/build/outputs/apk/debug/*.apk | head -1)
-          BT=$(ls -d "${ANDROID_SDK_ROOT:-$ANDROID_HOME}"/build-tools/* | sort -V | tail -1)
-          "$BT/apksigner" verify --print-certs "$APK" | sed -n '1,3p'
-          if [ -n "${GROUSE_KEYSTORE:-}" ]; then
-            WANT=$(keytool -list -v -keystore "$GROUSE_KEYSTORE" \
-                     -storepass "$GROUSE_STORE_PASSWORD" -alias "$GROUSE_KEY_ALIAS" \
-                   | sed -n 's/^[[:space:]]*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')
-            GOT=$("$BT/apksigner" verify --print-certs "$APK" \
-                   | sed -n 's/.*SHA-256 digest: //p')
-            echo "keystore: $WANT"
-            echo "apk:      $GOT"
-            if [ "$WANT" != "$GOT" ]; then
+          APK="$(ls clients/android/app/build/outputs/apk/debug/*.apk | head -1)"
+          BT="$(ls -d "${ANDROID_SDK_ROOT:-$ANDROID_HOME}"/build-tools/* | sort -V | tail -1)"
+          GOT="$("$BT/apksigner" verify --print-certs "$APK" \
+            | awk -F': ' '/^Signer #1 certificate SHA-256 digest/{print $2; exit}' \
+            | tr -d ':' | tr 'A-F' 'a-f')"
+          echo "apk signer: $GOT"
+          if [[ -n "${GROUSE_KEYSTORE:-}" ]]; then
+            WANT="$(keytool -list -v -keystore "$GROUSE_KEYSTORE" \
+              -storepass "$GROUSE_STORE_PASSWORD" -alias "$GROUSE_KEY_ALIAS" \
+              | sed -n 's/^[[:space:]]*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f' | head -1)"
+            if [[ "$WANT" != "$GOT" ]]; then
               echo "::error::The APK is not signed by the configured keystore."
+              exit 1
+            fi
+            if [[ "${{ steps.signing.outputs.kind }}" == "release" \
+                  && "$GOT" != "$GROUSE_RELEASE_SIGNER_SHA256" ]]; then
+              echo "::error::The APK is not signed by the pinned release key."
               exit 1
             fi
           fi

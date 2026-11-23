@@ -157,3 +157,17 @@ different "checkpoint" each time.
    `messages.clear()`s before calling the core (so any failed/half open shows an
    empty chat), drops `AppendText` deltas for ids it does not hold (the documented
    stub contract says create one), and never resets `itemHasOlder` on `Reset`.
+
+---
+
+## Status at `f3585cf3` (2026-11-22)
+
+This is a historical record; the list above is what was open **on the audit date**,
+not today's state. Item 1 has since been addressed by `connect_attach` and the
+generation-bound reconnect hooks (a reconnect that binds nothing no longer
+repaints another chat; see the 2026-11-22 audit sweep in `CHANGELOG.md`). Items 2
+and 3 remain as described: the merge still anchors rather than merging by id, and
+`RefreshMode::Full` is still a bounded rebuild despite its docstring. Item 6 is
+still present in `ConnectionManager.kt` (`Reset` clears rows, `AppendText` still
+ignores an unknown id, and `itemHasOlder` is not reset). Verify items 4 and 5
+against the code before treating them as current.

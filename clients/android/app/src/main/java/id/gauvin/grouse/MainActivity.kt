@@ -254,16 +254,22 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
     // overlay), so no route can park a request with no UI to answer it. A permission belongs
     // to the running turn, so bring that chat forward; recipe parameters may be raised from
     // the catalog, where their own screen is the better context, and only need the sheet.
-    val pendingPermission = cm.permissions.firstOrNull()
-    val pendingElicitation = cm.elicitations.firstOrNull()
-    LaunchedEffect(pendingPermission?.toolCallId, route) {
-        if (pendingPermission != null && route != "chat" && cm.configured) {
+    // The queues are keyed by the SERVER's request id. Rendering every pending row (each
+    // wrapped in `key(id)`) means a second request from another wire cannot evict the first;
+    // answering removes only the row with that id. `oldestRequest()` drives the "bring the
+    // owning chat forward" effect, and is not a single-slot store.
+    val pendingPermissions = cm.permissions
+    val pendingElicitations = cm.elicitations
+    val oldestPermission = pendingPermissions.oldestRequest()
+    val oldestElicitation = pendingElicitations.oldestRequest()
+    LaunchedEffect(oldestPermission?.first, route) {
+        if (oldestPermission != null && route != "chat" && cm.configured) {
             nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
         }
     }
-    LaunchedEffect(pendingElicitation?.requestKey, route) {
-        if (pendingElicitation != null && !pendingElicitation.recipeParams &&
-            route != "chat" && cm.configured) {
+    LaunchedEffect(oldestElicitation?.first, route) {
+        val e = oldestElicitation?.second?.event
+        if (e != null && !e.recipeParams && route != "chat" && cm.configured) {
             nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }
         }
     }
@@ -458,14 +464,21 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
             // The one and only host of these sheets. They sit above every route, so a
             // request that lands while the reader is on My Day or Settings is still
             // actionable; ChatScreen deliberately hosts no copies.
-            pendingPermission?.let { req ->
-                PermissionSheet(req, onChoose = { cm.answerPermission(req, it) })
+            pendingPermissions.forEach { (id, pending) ->
+                key(id) {
+                    PermissionSheet(pending.event, pending.ownerLabel,
+                        onChoose = { cm.answerPermission(id, it) })
+                }
             }
-            pendingElicitation?.let { e ->
-                ElicitationSheet(e,
-                    onAccept = { values -> cm.answerElicitation(e, values) },
-                    onDecline = { cm.answerElicitation(e, null) },
-                    onCancel = { cm.answerElicitation(e, null, cancelled = true) })
+            pendingElicitations.forEach { (id, pending) ->
+                key(id) {
+                    ElicitationSheet(pending.event, pending.ownerLabel,
+                        onAccept = { values -> cm.answerElicitation(id, pending.event.recipeParams, values) },
+                        onDecline = { cm.answerElicitation(id, pending.event.recipeParams, null) },
+                        onCancel = {
+                            cm.answerElicitation(id, pending.event.recipeParams, null, cancelled = true)
+                        })
+                }
             }
         }
     }

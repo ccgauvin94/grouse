@@ -1918,10 +1918,21 @@ private fun ReloadHandle(
 /** Tool-approval bottom sheet. Options come straight from goose (allow/reject × once/always). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PermissionSheet(req: AcpEvent.Permission, onChoose: (String?) -> Unit) {
+fun PermissionSheet(
+    req: AcpEvent.Permission,
+    ownerLabel: String? = null,
+    onChoose: (String?) -> Unit,
+) {
     ModalBottomSheet(onDismissRequest = { onChoose(null) }) {
         Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
             Text(stringResource(R.string.allow_tool), style = MaterialTheme.typography.titleLarge)
+            // Which chat/wire is asking: the core stamps owner + session id on the request,
+            // because a roam peer can ask while the main chat is on screen (and vice versa).
+            if (!ownerLabel.isNullOrBlank()) {
+                Spacer(Modifier.height(2.dp))
+                Text(ownerLabel, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             Spacer(Modifier.height(6.dp))
             Text(req.title, style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.primary)
@@ -2073,6 +2084,7 @@ internal fun elicitationValues(
 @Composable
 fun ElicitationSheet(
     e: AcpEvent.Elicitation,
+    ownerLabel: String? = null,
     onAccept: (Map<String, kotlinx.serialization.json.JsonPrimitive>) -> Unit,
     onDecline: () -> Unit,
     onCancel: () -> Unit,
@@ -2089,6 +2101,11 @@ fun ElicitationSheet(
     ModalBottomSheet(onDismissRequest = onCancel) {
         Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)
             .verticalScroll(rememberScrollState())) {
+            if (!ownerLabel.isNullOrBlank()) {
+                Text(ownerLabel, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(4.dp))
+            }
             Text(e.title.ifBlank { "Input requested" }, style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(4.dp))
             Text(e.message, style = MaterialTheme.typography.bodyMedium,

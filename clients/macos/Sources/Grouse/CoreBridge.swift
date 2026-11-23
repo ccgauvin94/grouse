@@ -58,8 +58,17 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
     /// being credited to the one on screen.
     @Published var fileTransfers: [String: FileTransfer] = [:]
 
-    // Prompts the server is parked on
-    @Published var permission: PermissionPrompt?
+    // Prompts the server is parked on. Both queues are keyed by the SERVER's id, not by
+    // "the current prompt": a main-wire approval and a roam peer's form can overlap, and a
+    // single slot would strand the first request when the second arrives (CONTRACT §5).
+    @Published var permissionPrompts: [PermissionPrompt] = []
+    @Published var formPrompts: [ServerFormPrompt] = []
+    /// Pinned card fingerprints by peer label, read from the core (never forked here).
+    @Published var peerPins: [String: String] = [:]
+
+    var activePermission: PermissionPrompt? { permissionPrompts.first }
+    var activeForm: ServerFormPrompt? { formPrompts.first }
+
     @Published var commands: [String] = []
 
     // Dev advisor (Settings → Dev, global like the other clients)
@@ -80,6 +89,10 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
 
     private var core: Core?
     private var listener: Listener?
+    /// The unstable shim is a SECOND uniffi object with its own listener: recipe/elicitation
+    /// forms ride it, and its respond intents are the ones that carry a request id.
+    private var unstable: GrouseUnstable?
+    private var unstableListener: UnstableListener?
     private let coreQueue = DispatchQueue(label: "id.gauvin.grouse.macos.core", qos: .userInitiated)
 
     /// Where the core keeps transcripts, the session cache and the roam identity.
@@ -113,12 +126,17 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
         let oldCore = core
         core = nil
         listener = nil
+        unstable = nil
+        unstableListener = nil
         if let oldCore {
             coreQueue.async { oldCore.disconnect() }
         }
         chat.reset()
         sessions = []
         roamPeers = []
+        peerPins = [:]
+        permissionPrompts = []
+        formPrompts = []
         currentSessionId = ""
         openAttempt = nil
         prompting = false
@@ -130,6 +148,10 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
         self.listener = listener
         let core = Core(listener: listener, cacheDir: Self.cacheDir)
         self.core = core
+        let unstableListener = UnstableListener(self)
+        self.unstableListener = unstableListener
+        unstable = GrouseUnstable(listener: unstableListener)
+        refreshPins()
         let advisorOn = advisorEnabled
         let config = ServerConfig(
             host: host,
@@ -168,6 +190,8 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
         let oldCore = core
         core = nil
         listener = nil
+        unstable = nil
+        unstableListener = nil
         if let oldCore {
             coreQueue.async { oldCore.disconnect() }
         }
@@ -179,6 +203,11 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
         prompting = false
         activeRuns.removeAll()
         loadingOlder = false
+        // An unanswered prompt must not survive a disconnect: its responder is gone with
+        // the old core, and a stale sheet would send an answer to nothing.
+        permissionPrompts = []
+        formPrompts = []
+        peerPins = [:]
     }
 
     func listSessions() {
@@ -310,6 +339,7 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
             sessions = core.allSessions()
         }
         syncPeersFromSessions()
+        refreshPins()
     }
 
     private func syncPeersFromSessions() {
@@ -344,9 +374,23 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
             status = "a peer label and a connection card are required"
             return
         }
+        guard Self.validPeerLabel(label) else {
+            status = "a peer label cannot be blank, padded, or contain ':'"
+            return
+        }
         upsertPeer(label, status: "connecting: dialing")
         core?.roamConnect(card: card, label: label)
         refreshSessions()
+    }
+
+    /// The core rejects the same labels; checking here keeps the sheet honest instead of
+    /// watching a dial fail with an Alert. Labels cannot contain ':' because display ids
+    /// are `roam:<label>:<id>` and ownership is resolved by label prefix.
+    static func validPeerLabel(_ label: String) -> Bool {
+        !label.isEmpty
+            && label == label.trimmingCharacters(in: .whitespacesAndNewlines)
+            && !label.contains(":")
+            && !label.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
     }
 
     func disconnectPeer(label: String) {
@@ -359,6 +403,39 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
             prompting = false
         }
         refreshSessions()
+    }
+
+    // MARK: - Roam card pins
+
+    /// The core owns the pin store; this is a read-through cache for the peer row. A
+    /// relaunch shows the pins again because `connect()` reads them from the core.
+    func refreshPins() {
+        guard let core,
+              let data = core.roamCardPins().data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let pins = object as? [String: String] else {
+            peerPins = [:]
+            return
+        }
+        peerPins = pins
+    }
+
+    func cardPin(for label: String) -> String {
+        peerPins[label] ?? ""
+    }
+
+    /// Forget a pin after the user confirmed a re-shared card. The NEXT dial re-enrolls
+    /// that label; nothing is auto-enrolled by this client, so a stale card cannot be
+    /// silently trusted again.
+    func clearPeerPin(label: String) {
+        guard let core else { return }
+        do {
+            try core.roamCardPinClear(label: label)
+            status = "card pin cleared for \(label) — reconnect with the peer's card to re-enroll"
+            refreshPins()
+        } catch {
+            status = "couldn't clear the card pin for \(label): \(error.localizedDescription)"
+        }
     }
 
     // MARK: - Files
@@ -395,11 +472,82 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
         fileTransfers.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    func answerPermission(_ optionId: String?) {
-        guard let prompt = permission else { return }
-        permission = nil
-        core?.respondPermission(toolCallId: prompt.request.toolCallId,
-                               outcome: optionId.map { .selected(optionId: $0) } ?? .cancelled)
+    /// Answer ONE request by its tool-call id. Removing by id (rather than clearing a
+    /// single slot) is what lets a second request arrive without stranding the first.
+    func answerPermission(_ optionId: String?, for id: String) {
+        guard let index = permissionPrompts.firstIndex(where: { $0.id == id }) else { return }
+        let prompt = permissionPrompts.remove(at: index)
+        core?.respondPermission(requestId: prompt.request.toolCallId,
+                                outcome: optionId.map { .selected(optionId: $0) } ?? .cancelled)
+    }
+
+    /// Escape/dismiss means deny every still-open prompt; leaving a responder parked is
+    /// worse than a denial, which the server can always ask again.
+    func denyAllPermissions() {
+        let prompts = permissionPrompts
+        permissionPrompts = []
+        for prompt in prompts {
+            core?.respondPermission(requestId: prompt.request.toolCallId, outcome: .cancelled)
+        }
+    }
+
+    // MARK: - Recipe / elicitation forms
+
+    /// Both forms arrive with (owner, requestId, payload). The payload is the server's raw
+    /// JSON; `ServerFormPrompt` only decodes what it can render, but the request id is kept
+    /// regardless so even a malformed form can be cancelled instead of parked forever.
+    func handleRecipeParams(owner: String, requestId: String, parameters: String) {
+        guard !requestId.isEmpty else { return }
+        guard !formPrompts.contains(where: { $0.id == requestId }) else { return }
+        guard let prompt = ServerFormPrompt.recipe(owner: owner, requestId: requestId,
+                                                   payload: parameters) else {
+            try? unstable?.respondRecipeParams(requestId: requestId, action: "cancel", values: "{}")
+            return
+        }
+        formPrompts.append(prompt)
+    }
+
+    func handleElicitation(owner: String, requestId: String, schema: String) {
+        guard !requestId.isEmpty else { return }
+        guard !formPrompts.contains(where: { $0.id == requestId }) else { return }
+        guard let prompt = ServerFormPrompt.elicitation(owner: owner, requestId: requestId,
+                                                        payload: schema) else {
+            // decline/cancel carry NO content on the ACP wire, only the action.
+            try? unstable?.respondElicitation(requestId: requestId, action: "cancel", content: "")
+            return
+        }
+        formPrompts.append(prompt)
+    }
+
+    /// `action` is the server's verb: submit/cancel for recipe params, accept/decline/cancel
+    /// for elicitation. It rides WITH the request id — never in place of it.
+    func answerForm(_ requestId: String, action: String, values: [String: String]) {
+        guard let index = formPrompts.firstIndex(where: { $0.id == requestId }) else { return }
+        let prompt = formPrompts.remove(at: index)
+        let json = prompt.answerJSON(action: action, textValues: values)
+        switch prompt.kind {
+        case .recipe:
+            let valuesJSON = action == "cancel" ? "{}" : json
+            try? unstable?.respondRecipeParams(requestId: requestId, action: action, values: valuesJSON)
+        case .elicitation:
+            let content = (action == "cancel" || action == "decline") ? "" : json
+            try? unstable?.respondElicitation(requestId: requestId, action: action, content: content)
+        }
+    }
+
+    func cancelAllForms() {
+        let prompts = formPrompts
+        formPrompts = []
+        for prompt in prompts {
+            switch prompt.kind {
+            case .recipe:
+                try? unstable?.respondRecipeParams(requestId: prompt.requestId,
+                                                   action: "cancel", values: "{}")
+            case .elicitation:
+                try? unstable?.respondElicitation(requestId: prompt.requestId,
+                                                  action: "cancel", content: "")
+            }
+        }
     }
 
     func setConfig(id: String, value: String) {
@@ -515,9 +663,42 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
     }
 
     func handlePermission(_ request: PermissionRequest) {
-        // A fresh wrapper per request: `PermissionPrompt` is the sheet's identity, and
-        // reusing one object is how a dialog shows a previous request's options.
-        permission = PermissionPrompt(request: request)
+        let prompt = PermissionPrompt(request: request)
+        // The core rejects duplicate tool-call ids across wires; a repeat event is the
+        // same request, not a second sheet. Keep the first wrapper (its options are the
+        // ones the user was shown) and ignore the duplicate.
+        guard !permissionPrompts.contains(where: { $0.id == prompt.id }) else { return }
+        permissionPrompts.append(prompt)
+    }
+
+    /// The prompt shows WHICH chat/wire asked. The core now stamps both fields on the
+    /// request; reading them by label keeps this working whether `owner` is generated as a
+    /// plain string or as the `SessionOwner` record (both shapes exist across bindings).
+    static func requestField(_ name: String, in request: PermissionRequest) -> String {
+        let children = Mirror(reflecting: request).children
+        guard let child = children.first(where: { $0.label == name }) else { return "" }
+        if let text = child.value as? String { return text }
+        let nestedChildren = Mirror(reflecting: child.value).children
+        func childText(_ key: String) -> String {
+            nestedChildren.first(where: { $0.label == key })?.value as? String ?? ""
+        }
+        let label = childText("label")
+        if !label.isEmpty { return label }
+        let kind = childText("kind")
+        return kind.isEmpty ? String(describing: child.value) : kind
+    }
+
+    func permissionSessionTitle(_ request: PermissionRequest) -> String {
+        let id = Self.requestField("sessionId", in: request)
+        if let title = sessions.first(where: { $0.id == id })?.title, !title.isEmpty {
+            return title
+        }
+        return id.isEmpty ? "this chat" : id
+    }
+
+    func permissionOwner(_ request: PermissionRequest) -> String {
+        let owner = Self.requestField("owner", in: request)
+        return owner.isEmpty ? "main" : owner
     }
 
     func handleSessionTouched(sessionId: String, title: String) {
@@ -598,6 +779,9 @@ final class CoreBridge: ObservableObject, @unchecked Sendable {
 
     func handleRoamStatus(label: String, status: String) {
         upsertPeer(label, status: status)
+        // The first successful dial of a label enrolls its card in the core; show the
+        // fingerprint as soon as the peer reports ready.
+        refreshPins()
     }
 
     func handleRoamSessions(label: String, sessions: [SessionSummary]) {
@@ -768,10 +952,11 @@ private func decodeFileEvent(_ event: FileEvent) -> FileEventInfo {
     )
 }
 
-/// A permission request as sheet state. `Identifiable` so SwiftUI treats each request as a
-/// new sheet instead of mutating an already-presented one.
+/// A permission request as sheet state. Identity is the core's tool-call id, which is also
+/// the key of the responder on the owning wire: answering by this id cannot hit another
+/// chat's prompt, and a second request cannot replace an unanswered one.
 struct PermissionPrompt: Identifiable {
-    let id = UUID()
+    var id: String { request.toolCallId }
     let request: PermissionRequest
 }
 

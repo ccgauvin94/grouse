@@ -4,744 +4,50 @@
 //! (the only wire-level protocol coverage; the desktop is a thin client over
 //! the C ABI and has no C++ wire client to test).
 //!
-//! The fake server speaks just enough ACP JSON-RPC: initialize, session/new,
-//! session/list and session/prompt handlers, and it streams
-//! `agent_message_chunk` notifications before answering a prompt — exactly
-//! what the desktop's FakeGooseServer scripts. Every request frame (and the
-//! `X-Secret-Key` upgrade header) is recorded so tests can assert the wire
-//! shape — the protocol footguns live there.
+//! Every test builds its Core through `spine_harness()`, which owns a private
+//! cache dir and a strict protocol oracle; see `test_support`. The fake server
+//! replays ACP exactly enough to catch protocol drift (a misspelled method or
+//! param fails the test instead of getting a harmless `{}`).
 
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::Arc;
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use async_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
-use async_tungstenite::tungstenite::Message as WsMessage;
-use futures::stream::StreamExt;
 use grouse_core::{
-    ConfigOption, ConnectionStatus, Core, CoreListener, PermissionRequest, ProjectSummary, Prompt,
-    ConfigChoice, PromptBlock, SendExpect, SessionSummary, TranscriptOp,
+    ConfigChoice, ConfigOption, ConnectionStatus, Prompt, PromptBlock, SendExpect, TranscriptOp,
 };
-use parking_lot::Mutex;
 use serde_json::{Value, json};
 
-/// Both cache e2e tests set the process-global XDG_DATA_HOME; they must not
-/// run concurrently or each reads the other's cache dir.
-static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
+mod test_support;
+use test_support::*;
 
-// ---------------------------------------------------------------------------
-// Recording listener
-// ---------------------------------------------------------------------------
+/// The fake server is a protocol ORACLE, not a permissive stub: a typo used to
+/// get `{}` and every test still passed. Both halves are checked here — an
+/// unscripted method and a misspelled required param — plus the recording that
+/// fails the harness even when the core tolerates the unanswered request.
+#[test]
+fn strict_oracle_catches_misspelled_method_and_param() {
+    let method_params = json!({ "sessionId": "sess-r" });
+    let method_reason = check_request("session/laod", &method_params).unwrap_err();
+    assert!(
+        method_reason.contains("unknown RPC method"),
+        "{method_reason}"
+    );
 
-// Vec<String> images on Item outsize some other variant enough to trip
-// clippy's variant-size lint; boxing over the whole recording surface is not
-// worth the churn for a test-only type.
-#[allow(clippy::large_enum_variant)]
-#[allow(dead_code)] // full listener surface; tests match a subset
-enum Ev {
-    Status(ConnectionStatus),
-    Sessions(Vec<SessionSummary>),
-    Item(TranscriptOp),
-    Usage(i64, i64, f64, String),
-    RunEnded(String, String),
-    Speak(String),
-    Config(Vec<ConfigOption>),
-    Permission(PermissionRequest),
-    Touched(String, String, String),
-    Projects(Vec<ProjectSummary>),
-    RoamPeerStatus(String, String),
-    RoamSessions(String, Vec<SessionSummary>),
-    PeerNewSession(String, String),
-    ActiveRun(String, String),
-    Commands(Vec<String>),
-    /// An open/resume failed; nothing was substituted (grouse#19).
-    OpenFailed(String, String),
-    Tasks(String),
-}
+    let typo_params = json!({
+        "sessionID": "sess-r", // misspelled: goose drops unknown params silently
+        "cwd": "/tmp",
+        "mcpServers": []
+    });
+    let param_reason = check_request("session/load", &typo_params).unwrap_err();
+    assert!(param_reason.contains("sessionId"), "{param_reason}");
 
-struct RecordingListener {
-    tx: mpsc::Sender<Ev>,
-}
-
-impl RecordingListener {
-    fn new(tx: mpsc::Sender<Ev>) -> Self {
-        Self { tx }
-    }
-}
-
-impl CoreListener for RecordingListener {
-    fn on_session_opened(&self, _session_id: String) {}
-    fn on_advisor_report(&self, _: String, _: String) {}
-
-    fn on_sensitivity(&self, _data: String) {}
-    fn on_thread_timeline(&self, _label: String, _rows: Vec<grouse_core::TimelineRow>) {}
-    fn on_thread_ready(&self, _: String, _: String) {}
-    fn on_file(&self, _: grouse_core::FileEvent) {}
-    fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
-
-    fn on_status(&self, status: ConnectionStatus) {
-        let _ = self.tx.send(Ev::Status(status));
-    }
-    fn on_sessions(&self, sessions: Vec<SessionSummary>) {
-        let _ = self.tx.send(Ev::Sessions(sessions));
-    }
-    fn on_item(&self, op: TranscriptOp) {
-        let _ = self.tx.send(Ev::Item(op));
-    }
-    fn on_usage(&self, used: i64, size: i64, cost: f64, currency: String) {
-        let _ = self.tx.send(Ev::Usage(used, size, cost, currency));
-    }
-    fn on_run_ended(&self, session_id: String, stop_reason: String) {
-        let _ = self.tx.send(Ev::RunEnded(session_id, stop_reason));
-    }
-    fn on_speak(&self, text: String) {
-        let _ = self.tx.send(Ev::Speak(text));
-    }
-    fn on_config(&self, options: Vec<ConfigOption>) {
-        let _ = self.tx.send(Ev::Config(options));
-    }
-    fn on_permission_request(&self, request: PermissionRequest) {
-        let _ = self.tx.send(Ev::Permission(request));
-    }
-    fn on_session_touched(&self, session_id: String, title: String, updated_at: String) {
-        let _ = self.tx.send(Ev::Touched(session_id, title, updated_at));
-    }
-    fn on_projects(&self, projects: Vec<ProjectSummary>) {
-        let _ = self.tx.send(Ev::Projects(projects));
-    }
-    fn on_roam_peer_status(&self, label: String, status: String) {
-        let _ = self.tx.send(Ev::RoamPeerStatus(label, status));
-    }
-    fn on_roam_sessions(&self, label: String, sessions: Vec<SessionSummary>) {
-        let _ = self.tx.send(Ev::RoamSessions(label, sessions));
-    }
-    fn on_peer_new_session(&self, label: String, session_id: String) {
-        let _ = self.tx.send(Ev::PeerNewSession(label, session_id));
-    }
-    fn on_commands(&self, commands: Vec<String>) {
-        let _ = self.tx.send(Ev::Commands(commands));
-    }
-    fn on_active_run(&self, session_id: String, run_id: String) {
-        let _ = self.tx.send(Ev::ActiveRun(session_id, run_id));
-    }
-    fn on_session_open_failed(&self, session_id: String, message: String) {
-        let _ = self.tx.send(Ev::OpenFailed(session_id, message));
-    }
-    fn on_tasks(&self, tasks: String) {
-        let _ = self.tx.send(Ev::Tasks(tasks));
-    }
-}
-
-/// A rich cache-seed item (the cache is the item list now).
-fn item(id: &str, kind: grouse_core::ItemKind, text: &str) -> grouse_core::Item {
-    grouse_core::Item {
-        created: 0,
-        id: id.into(),
-        kind,
-        text: text.into(),
-        detail: String::new(),
-        output: String::new(),
-        status: String::new(),
-        app_key: String::new(),
-        calls: Vec::new(),
-        thought: String::new(),
-        summary: String::new(),
-        steps: Vec::new(),
-        seq: 0,
-        attachments: 0,
-        files: Vec::new(),
-        images: Vec::new(),
-        message_id: String::new(),
-    }
-}
-
-/// Wait for an event matching `pred`, skipping unrelated traffic.
-fn wait_for<F: Fn(&Ev) -> bool>(rx: &Receiver<Ev>, pred: F, what: &str) -> Ev {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(ev) => {
-                if pred(&ev) {
-                    return ev;
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => {
-                panic!("listener dropped while waiting for {what}")
-            }
-        }
-    }
-    panic!("timed out waiting for {what}");
-}
-
-/// Poll the recorded wire frames for `count` requests of `method`.
-fn wait_for_frames(server: &FakeServer, method: &str, count: usize, what: &str) -> Vec<Value> {
-    let deadline = Instant::now() + Duration::from_secs(8);
-    while Instant::now() < deadline {
-        let frames = server.frames_for(method);
-        if frames.len() >= count {
-            return frames;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("timed out waiting for {count} {method} frames ({what})");
-}
-
-// ---------------------------------------------------------------------------
-// Fake goosed server (in-process, scripted per method)
-// ---------------------------------------------------------------------------
-
-/// The scripted ACP server. Lives on its own tokio runtime thread; the test
-/// drives it only through the port + the recorded frames.
-struct FakeServer {
-    /// Every JSON-RPC frame the client sent, in arrival order.
-    frames: Arc<Mutex<Vec<Value>>>,
-    /// The `X-Secret-Key` upgrade header, if the handshake carried one.
-    secret_header: Arc<Mutex<Option<String>>>,
-    /// When set, the fake pushes `session_info_update` (with an activeRunId)
-    /// + `available_commands_update` notifications right after session/new.
-    notify: Arc<std::sync::atomic::AtomicBool>,
-    /// When set, `session/prompt` is recorded and left UNANSWERED, so a test can
-    /// observe the core sending a SECOND chat's prompt while the first turn is
-    /// still in flight (per-session concurrency).
-    hold_prompts: Arc<std::sync::atomic::AtomicBool>,
-    /// When set, `session/prompt` emits a run-end `session_info_update` (no
-    /// activeRunId) before answering — the server's own post-turn touch that
-    /// must not be mistaken for a remote change.
-    post_turn_touch: Arc<std::sync::atomic::AtomicBool>,
-    /// Fired by a test to close the live WebSocket(s), so the core's reconnect
-    /// path (and its `session/load` replay) actually runs.
-    drop_now: Arc<tokio::sync::Notify>,
-    /// When set, the `session/load` replay stamps its rows with a DIFFERENT
-    /// message id — modelling goose, which re-assigns ids on every replay, so a
-    /// replay's rows do not match the live rows they restate.
-    replay_alt_id: Arc<std::sync::atomic::AtomicBool>,
-    /// The live connection's out-of-band push half, so a test can inject a
-    /// notification (e.g. a remote `session_info_update` that makes the on-disk
-    /// cache stale) without a request to hang it on.
-    push: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Value>>>>,
-    /// When set, `session/prompt` on the MAIN session also emits a thinking
-    /// chunk and a tool call — a turn with a run for the summarizer to label.
-    tool_turn: Arc<std::sync::atomic::AtomicBool>,
-    /// The text of the last prompt sent. `session/load` replays it as a
-    /// `user_message_chunk` — the ONLY place a prompt reaches the client, since
-    /// goose never echoes it live.
-    last_prompt: Arc<Mutex<String>>,
-    /// When set, `session/load` answers with a JSON-RPC error (a stale/archived
-    /// session) instead of replaying. Drives the "an open failure must report,
-    /// never silently become a new session" coverage (grouse#19).
-    fail_load: Arc<std::sync::atomic::AtomicBool>,
-    /// When set, `session/load` streams its replay rows and then WAITS for
-    /// `release_load` before replying — the window in which the core must
-    /// ingest the replay silently (grouse#18).
-    gate_load: Arc<std::sync::atomic::AtomicBool>,
-    /// A synthetic conversation of this many messages, served by `session/load`
-    /// with `_meta.replayTail` honoured and `_meta.replaySkipped` reported —
-    /// the two things reverse loading is built on (docs/TRANSCRIPT_MODEL.md).
-    /// `0` = off (the small canned replay below).
-    history: Arc<Mutex<usize>>,
-    release_load: Arc<tokio::sync::Notify>,
-    /// When set, `session/list` answers in TWO pages with a `nextCursor` between
-    /// them, the way goose does past 50 sessions — the shape a client that never
-    /// followed the cursor silently truncated (2026-11-08: the Media project
-    /// showed one chat where it used to show five).
-    page_lists: Arc<std::sync::atomic::AtomicBool>,
-    /// Hold the FIRST `initialize` until `release_initialize` fires, so a test
-    /// can start a handshake, supersede it with a newer connect, and then let
-    /// the stale handshake continue.
-    hold_first_initialize: Arc<std::sync::atomic::AtomicBool>,
-    release_initialize: Arc<tokio::sync::Notify>,
-    /// Add a session whose listed message time matches a cached stamp — the
-    /// fresh-cache baseline a verification probe must be able to refute.
-    fresh_session_row: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl FakeServer {
-    /// Bind on 127.0.0.1:0 and spawn the accept+serve loop. Returns when the
-    /// listener is bound (the port is delivered through `port_tx`).
-    fn spawn(port_tx: mpsc::Sender<u16>) -> Arc<Self> {
-        let server = Arc::new(Self {
-            frames: Arc::new(Mutex::new(Vec::new())),
-            secret_header: Arc::new(Mutex::new(None)),
-            notify: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            hold_prompts: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            post_turn_touch: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            drop_now: Arc::new(tokio::sync::Notify::new()),
-            replay_alt_id: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            push: Arc::new(Mutex::new(None)),
-            tool_turn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            last_prompt: Arc::new(Mutex::new(String::new())),
-            fail_load: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            gate_load: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            history: Arc::new(Mutex::new(0)),
-            release_load: Arc::new(tokio::sync::Notify::new()),
-            page_lists: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            hold_first_initialize: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            release_initialize: Arc::new(tokio::sync::Notify::new()),
-            fresh_session_row: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        });
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("fake server runtime");
-        let for_thread = server.clone();
-        std::thread::spawn(move || {
-            rt.block_on(async move {
-                let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-                    .await
-                    .expect("bind fake server");
-                let port = listener.local_addr().expect("fake server addr").port();
-                let _ = port_tx.send(port);
-                // Accept repeatedly: open_session / reconnect each bring a new
-                // WebSocket; each is served on its own task.
-                loop {
-                    let (stream, _peer) = listener.accept().await.expect("fake server accept");
-                    let server = for_thread.clone();
-                    tokio::spawn(async move { serve_connection(server, stream).await });
-                }
-            });
-        });
-        server
-    }
-
-    fn frames_for(&self, method: &str) -> Vec<Value> {
-        self.frames
-            .lock()
-            .iter()
-            .filter(|frame| frame.get("method").and_then(Value::as_str) == Some(method))
-            .cloned()
-            .collect()
-    }
-
-    /// Close every live connection, so the core's reconnect path runs.
-    fn drop_connections(&self) {
-        self.drop_now.notify_one();
-    }
-
-    /// Push a notification to the live connection, out of band.
-    fn push_notification(&self, value: Value) {
-        if let Some(tx) = self.push.lock().as_ref() {
-            let _ = tx.send(value);
-        }
-    }
-}
-
-#[allow(clippy::result_large_err)] // tungstenite mandates the large ErrorResponse here
-async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream) {
-    let secret = server.secret_header.clone();
-    let ws = async_tungstenite::tokio::accept_hdr_async(
-        stream,
-        move |req: &Request, res: Response| {
-            let header = req
-                .headers()
-                .get("X-Secret-Key")
-                .and_then(|value| value.to_str().ok())
-                .map(|value| value.to_string());
-            *secret.lock() = header;
-            Ok::<_, ErrorResponse>(res)
-        },
-    )
-    .await
-    .expect("fake server ws handshake");
-
-    let (push_tx, mut push_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
-    *server.push.lock() = Some(push_tx);
-    let (mut tx, mut rx) = ws.split();
-    loop {
-        let next = tokio::select! {
-            _ = server.drop_now.notified() => break,
-            Some(pushed) = push_rx.recv() => {
-                let _ = tx.send(WsMessage::Text(pushed.to_string().into())).await;
-                continue;
-            }
-            msg = rx.next() => msg,
-        };
-        let Some(Ok(message)) = next else { break };
-        let WsMessage::Text(text) = message else { continue };
-        let Ok(frame) = serde_json::from_str::<Value>(text.as_str()) else {
-            continue;
-        };
-        server.frames.lock().push(frame.clone());
-        let method = frame
-            .get("method")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let id = frame.get("id").cloned();
-        let params = frame.get("params").cloned().unwrap_or(Value::Null);
-
-        // Notifications (no id): record and never reply.
-        let Some(id) = id else { continue };
-
-        let result = match method.as_str() {
-            "initialize" => {
-                if server
-                    .hold_first_initialize
-                    .swap(false, std::sync::atomic::Ordering::SeqCst)
-                {
-                    server.release_initialize.notified().await;
-                }
-                json!({ "protocolVersion": 1 })
-            }
-            "session/list" if server.fresh_session_row.load(std::sync::atomic::Ordering::SeqCst) => {
-                json!({
-                    "sessions": [{
-                        "sessionId": "sess-fresh",
-                        "title": "Fresh baseline",
-                        "cwd": "/tmp",
-                        // Cache stamp below matches this value byte-for-byte.
-                        "_meta": {
-                            "lastMessageAt": "2026-08-12T06:00:00Z",
-                            "messageCount": 2
-                        }
-                    }]
-                })
-            }
-            // The core's hidden summarizer session (issue #13) asks with
-            // `_meta.hidden`; give it an id of its own so its turn is
-            // distinguishable from a chat's.
-            "session/new" if params.pointer("/_meta/hidden").and_then(Value::as_bool) == Some(true) => {
-                json!({ "sessionId": "sess-sum", "configOptions": [] })
-            }
-            "session/new" => {
-                if server.notify.load(std::sync::atomic::Ordering::SeqCst) {
-                    // session/new params carry no sessionId; the fake's reply
-                    // is fixed to sess-e2e, so the notifications use that.
-                    let session = "sess-e2e";
-                    let run = json!({
-                        "jsonrpc": "2.0",
-                        "method": "session/update",
-                        "params": {
-                            "sessionId": session,
-                            "update": {
-                                "sessionUpdate": "session_info_update",
-                                "title": "E2E Chat",
-                                "updated_at": "2026-08-12T00:00:00.000Z",
-                                "_meta": { "goose": { "activeRunId": "run-abc" } }
-                            }
-                        }
-                    });
-                    let _ = tx.send(WsMessage::Text(run.to_string().into())).await;
-                    let commands = json!({
-                        "jsonrpc": "2.0",
-                        "method": "session/update",
-                        "params": {
-                            "sessionId": session,
-                            "update": {
-                                "sessionUpdate": "available_commands_update",
-                                "availableCommands": [
-                                    { "name": "/compact", "description": "compact" },
-                                    { "name": "/undo", "description": "undo" }
-                                ]
-                            }
-                        }
-                    });
-                    let _ = tx.send(WsMessage::Text(commands.to_string().into())).await;
-                }
-                json!({
-                    "sessionId": "sess-e2e",
-                    "configOptions": [
-                        { "id": "provider", "name": "Provider", "currentValue": "openai" },
-                        { "id": "model", "name": "Model", "currentValue": "m-a",
-                          "options": [ { "value": "m-a", "name": "A" },
-                                       { "value": "m-b", "name": "B" } ] }
-                    ]
-                })
-            }
-            "session/list" => {
-                if server.page_lists.load(std::sync::atomic::Ordering::SeqCst) {
-                    // Page 2 is asked for with the cursor page 1 handed out; a client
-                    // that ignores `nextCursor` never sends that request at all.
-                    let cursor = params.get("cursor").and_then(Value::as_str).unwrap_or("");
-                    if cursor == "page-2" {
-                        json!({
-                            "sessions": [{
-                                "sessionId": "sess-old",
-                                "title": "Movies",
-                                "updatedAt": "2026-01-01T00:00:00.000Z",
-                                "cwd": "/tmp",
-                                "_meta": { "messageCount": 4 }
-                            }]
-                        })
-                    } else {
-                        json!({
-                            "sessions": [{
-                                "sessionId": "sess-e2e",
-                                "title": "E2E Chat",
-                                "updatedAt": "2026-08-12T00:00:00.000Z",
-                                "cwd": "/tmp",
-                                "_meta": { "messageCount": 1, "lastMessageSnippet": "hi from the list" }
-                            }],
-                            "nextCursor": "page-2"
-                        })
-                    }
-                } else {
-                    json!({
-                        "sessions": [{
-                            "sessionId": "sess-e2e",
-                            "title": "E2E Chat",
-                            "updatedAt": "2026-08-12T00:00:00.000Z",
-                            "cwd": "/tmp",
-                            "_meta": { "messageCount": 1, "lastMessageSnippet": "hi from the list" }
-                        }]
-                    })
-                }
-            }
-            "session/load" => {
-                let session = params
-                    .get("sessionId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let history = *server.history.lock();
-                if history > 0 {
-                    // A synthetic conversation served the way goose serves one:
-                    // only the trailing `_meta.replayTail` messages are replayed,
-                    // and the count it withheld comes back as
-                    // `_meta.replaySkipped` (verified against a live serve).
-                    let tail = params
-                        .get("_meta")
-                        .and_then(|meta| meta.get("replayTail"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0) as usize;
-                    let skip = history.saturating_sub(tail);
-                    for i in skip..history {
-                        let frame = json!({
-                            "jsonrpc": "2.0",
-                            "method": "session/update",
-                            "params": {
-                                "sessionId": session,
-                                "update": {
-                                    "sessionUpdate": "agent_message_chunk",
-                                    "content": { "type": "text", "text": format!("history row {i}") },
-                                    "messageId": format!("h{i}")
-                                }
-                            }
-                        });
-                        let _ = tx.send(WsMessage::Text(frame.to_string().into())).await;
-                    }
-                    let mut reply = json!({
-                        "sessionId": session,
-                        "configOptions": [
-                            { "id": "provider", "name": "Provider", "currentValue": "openai" }
-                        ]
-                    });
-                    if skip > 0 {
-                        reply["_meta"] = json!({ "replaySkipped": skip });
-                    }
-                    reply
-                } else {
-                let mid = if server.replay_alt_id.load(std::sync::atomic::Ordering::SeqCst) {
-                    "r-2"
-                } else {
-                    "r-1"
-                };
-                // A replay DOES carry the prompts that were sent: the server
-                // stores them even though it never echoed them live.
-                let prompt = server.last_prompt.lock().clone();
-                let mut rows: Vec<(&str, String, &str)> = Vec::new();
-                if !prompt.is_empty() {
-                    rows.push(("user_message_chunk", prompt, "u-1"));
-                }
-                rows.push(("agent_message_chunk", "replayed line one".to_string(), mid));
-                rows.push(("agent_message_chunk", " and two".to_string(), mid));
-                for (tag, text, message_id) in rows {
-                    let frame = json!({
-                        "jsonrpc": "2.0",
-                        "method": "session/update",
-                        "params": {
-                            "sessionId": session,
-                            "update": {
-                                "sessionUpdate": tag,
-                                "content": { "type": "text", "text": text },
-                                "messageId": message_id
-                            }
-                        }
-                    });
-                    let _ = tx.send(WsMessage::Text(frame.to_string().into())).await;
-                }
-                // The replay's own session_info_update carries the CURRENT
-                // updatedAt — what the fresh cache must be stamped with.
-                let info = json!({
-                    "jsonrpc": "2.0",
-                    "method": "session/update",
-                    "params": {
-                        "sessionId": session,
-                        "update": {
-                            "sessionUpdate": "session_info_update",
-                            "title": "Replayed",
-                            // camelCase: the schema's rename_all makes this updatedAt.
-                            "updatedAt": "2026-08-12T12:00:00.000Z"
-                        }
-                    }
-                });
-                let _ = tx.send(WsMessage::Text(info.to_string().into())).await;
-                // Test hook: hold the reply open after the rows are on the wire,
-                // so a test can assert the client saw NOTHING while the replay
-                // was being ingested (grouse#18).
-                if server.gate_load.load(std::sync::atomic::Ordering::SeqCst) {
-                    server.release_load.notified().await;
-                }
-                json!({
-                    "sessionId": session,
-                    "configOptions": [
-                        { "id": "provider", "name": "Provider", "currentValue": "openai" }
-                    ]
-                })
-                }
-            }
-            // The summarizer's own turn: answer with the numbered labels the
-            // core parses (issue #13).
-            "session/prompt"
-                if params.get("sessionId").and_then(Value::as_str) == Some("sess-sum") =>
-            {
-                let frame = json!({
-                    "jsonrpc": "2.0",
-                    "method": "session/update",
-                    "params": {
-                        "sessionId": "sess-sum",
-                        "update": {
-                            "sessionUpdate": "agent_message_chunk",
-                            "content": { "type": "text", "text": "1. Look up the charging issue" },
-                            "messageId": "sum-1"
-                        }
-                    }
-                });
-                let _ = tx.send(WsMessage::Text(frame.to_string().into())).await;
-                json!({ "stopReason": "end_turn" })
-            }
-            "session/prompt" if server.hold_prompts.load(std::sync::atomic::Ordering::SeqCst) => {
-                // The frame is already recorded. Leave the request unanswered:
-                // the concurrency test asserts a SECOND chat's prompt goes out
-                // while this turn is still in flight.
-                continue;
-            }
-            "session/prompt" => {
-                // Stream the turn BEFORE the reply: two chunks of one agent
-                // message (same messageId -> one bubble), then end.
-                //
-                // NOTE: no `user_message_chunk`. Real goose does NOT echo the
-                // prompt — a user chunk for a prompt we sent never crosses the
-                // wire (verified against a live serve); it appears only in a
-                // later `session/load` replay. The harness echoed it for a long
-                // time, which is exactly why the missing local echo went
-                // unnoticed: every test saw a user row the real server never
-                // sends.
-                let session = params
-                    .get("sessionId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let prompt_text = params
-                    .pointer("/prompt/0/text")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                *server.last_prompt.lock() = prompt_text;
-                for (tag, text, message_id) in [
-                    ("agent_message_chunk", "hello from fake goose", "m-1"),
-                    ("agent_message_chunk", " and more", "m-1"),
-                ] {
-                    let frame = json!({
-                        "jsonrpc": "2.0",
-                        "method": "session/update",
-                        "params": {
-                            "sessionId": session,
-                            "update": {
-                                "sessionUpdate": tag,
-                                "content": { "type": "text", "text": text },
-                                "messageId": message_id
-                            }
-                        }
-                    });
-                    let _ = tx.send(WsMessage::Text(frame.to_string().into())).await;
-                }
-                // A turn with a tool run: the thinking that precedes it becomes
-                // the run's framing, which the summarizer then rewrites (#13).
-                if server.tool_turn.load(std::sync::atomic::Ordering::SeqCst) {
-                    let thought = json!({
-                        "jsonrpc": "2.0",
-                        "method": "session/update",
-                        "params": {
-                            "sessionId": session,
-                            "update": {
-                                "sessionUpdate": "agent_thought_chunk",
-                                "content": { "type": "text", "text": "Let me look up the charging issue." }
-                            }
-                        }
-                    });
-                    let _ = tx.send(WsMessage::Text(thought.to_string().into())).await;
-                    let call = json!({
-                        "jsonrpc": "2.0",
-                        "method": "session/update",
-                        "params": {
-                            "sessionId": session,
-                            "update": {
-                                "sessionUpdate": "tool_call",
-                                "toolCallId": "tc-1",
-                                "title": "kagi_search_fetch",
-                                "rawInput": { "query": "fairphone charging" }
-                            }
-                        }
-                    });
-                    let _ = tx.send(WsMessage::Text(call.to_string().into())).await;
-                }
-                if server
-                    .post_turn_touch
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    // The server's run-end touch: an updatedAt with no
-                    // activeRunId. Sent BEFORE the prompt reply, so its 1.5s
-                    // resync debounce lands after on_prompt_done clears
-                    // `prompting` — the race that used to replay our own turn.
-                    let touch = json!({
-                        "jsonrpc": "2.0",
-                        "method": "session/update",
-                        "params": {
-                            "sessionId": session,
-                            "update": {
-                                "sessionUpdate": "session_info_update",
-                                "updatedAt": "2026-08-12T14:00:00.000Z"
-                            }
-                        }
-                    });
-                    let _ = tx.send(WsMessage::Text(touch.to_string().into())).await;
-                }
-                json!({ "stopReason": "end_turn" })
-            }
-            "_goose/unstable/session/info" => json!({
-                "session": {
-                    "updatedAt": "2026-08-12T13:00:00.000Z",
-                    "_meta": { "messageCount": 3 }
-                }
-            }),
-            // goose's real shape for a select set: the CURRENT list with the
-            // chosen value, and (as on the typed notification) no per-option
-            // choices for the changed entry.
-            "session/set_config_option" => json!({
-                "configOptions": [
-                    { "id": "model", "name": "Model", "currentValue": "m-b" }
-                ]
-            }),
-            _ => json!({}),
-        };
-        let reply = if server.fail_load.load(std::sync::atomic::Ordering::SeqCst)
-            && method == "session/load"
-        {
-            // A stale/archived session: goose answers session/load with an
-            // error. The core must REPORT this, never substitute a session
-            // (grouse#19).
-            json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32602, "message": "session not found" }
-            })
-        } else {
-            json!({ "jsonrpc": "2.0", "id": id, "result": result })
-        };
-        let _ = tx.send(WsMessage::Text(reply.to_string().into())).await;
-    }
+    let log = Mutex::new(Vec::new());
+    record_violation(&log, "session/laod", &method_params, &method_reason);
+    record_violation(&log, "session/load", &typo_params, &param_reason);
+    let found = log.lock();
+    assert_eq!(found.len(), 2);
+    assert!(found[0].contains("session/laod"), "{found:?}");
+    assert!(found[1].contains("sessionId"), "{found:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -751,35 +57,17 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
 
 #[test]
 fn resume_replay_persists_the_fresh_cache() {
-    let _cache_guard = CACHE_TEST_LOCK.lock();
-    let data_dir =
-        std::env::temp_dir().join(format!("grouse-cache-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
-    std::env::set_var("XDG_DATA_HOME", &data_dir);
+    let h = spine_harness();
     // Seed a STALE cache: old content, old updatedAt.
-    let cache = grouse_core::cache::CacheStore::new(data_dir.join("grouse"));
+    let cache = h.cache_store();
     let stale = vec![item("m-old", grouse_core::ItemKind::User, "stale cached line")];
     assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z", true));
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let _server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (_server, port) = h.server();
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
 
     // Stale cache for sess-r (no session/list yet -> unknown updatedAt ->
@@ -808,7 +96,6 @@ fn resume_replay_persists_the_fresh_cache() {
     assert!(text.contains("replayed line one and two"), "cache holds the replayed content: {text}");
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -821,31 +108,14 @@ fn resume_replay_persists_the_fresh_cache() {
 /// chat labelled with the selected one.
 #[test]
 fn rejected_resume_reports_and_binds_no_substitute_session() {
-    let _cache_guard = CACHE_TEST_LOCK.lock();
-    let data_dir = std::env::temp_dir().join(format!("grouse-failload-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
-    std::env::set_var("XDG_DATA_HOME", &data_dir);
+    let h = spine_harness();
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (server, port) = h.server();
     server.fail_load.store(true, std::sync::atomic::Ordering::SeqCst);
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
     assert_eq!(core.active_session_id().as_deref(), Some("sess-e2e"));
 
@@ -876,7 +146,6 @@ fn rejected_resume_reports_and_binds_no_substitute_session() {
     );
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 /// The same rejection on the COLD path (the handshake's resume, what a
@@ -884,33 +153,15 @@ fn rejected_resume_reports_and_binds_no_substitute_session() {
 /// hand the client a chat it did not ask for.
 #[test]
 fn cold_resume_rejection_reports_and_binds_nothing() {
-    let _cache_guard = CACHE_TEST_LOCK.lock();
-    let data_dir =
-        std::env::temp_dir().join(format!("grouse-failload-cold-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
-    std::env::set_var("XDG_DATA_HOME", &data_dir);
+    let h = spine_harness();
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (server, port) = h.server();
     server.fail_load.store(true, std::sync::atomic::Ordering::SeqCst);
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
     core.connect_resume(
-        grouse_core::ServerConfig {
-            host: "127.0.0.1".to_string(),
-            port,
-            secret_key: "test-secret".to_string(),
-            use_tls: false,
-            accept_invalid_certs: false,
-            ca_cert_pem: None,
-            cwd: "/tmp".to_string(),
-            auto_connect: false,
-            client_id: "grouse-core-test".to_string(),
-            initial_recipe_id: None,
-            initial_project_id: None,
-        },
+        server_config(port),
         "sess-gone".to_string(),
     );
 
@@ -934,7 +185,6 @@ fn cold_resume_rejection_reports_and_binds_nothing() {
     );
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -947,31 +197,14 @@ fn cold_resume_rejection_reports_and_binds_nothing() {
 /// refresh land on the most recent messages with scroll-back for the rest.
 #[test]
 fn a_replay_is_ingested_silently_and_painted_once() {
-    let _cache_guard = CACHE_TEST_LOCK.lock();
-    let data_dir = std::env::temp_dir().join(format!("grouse-hold-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
-    std::env::set_var("XDG_DATA_HOME", &data_dir);
+    let h = spine_harness();
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (server, port) = h.server();
     server.gate_load.store(true, std::sync::atomic::Ordering::SeqCst);
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
 
     core.open_session("sess-r".to_string());
@@ -1019,7 +252,6 @@ fn a_replay_is_ingested_silently_and_painted_once() {
     );
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 /// A reconnect that is only about the CONNECTION binds nothing, so the chat on
@@ -1035,33 +267,14 @@ fn a_replay_is_ingested_silently_and_painted_once() {
 /// and the first explicit `open_session` binds.
 #[test]
 fn a_reconnect_that_binds_nothing_leaves_the_screen_alone() {
-    let _cache_guard = CACHE_TEST_LOCK.lock();
-    let data_dir = std::env::temp_dir().join(format!("grouse-attach-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let h = spine_harness();
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (server, port) = h.server();
     *server.history.lock() = 3;
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        data_dir.to_string_lossy().to_string(),
-    );
-    let config = || grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    };
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    let config = || server_config(port);
     core.connect(config());
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "first ready");
 
@@ -1125,7 +338,6 @@ fn a_reconnect_that_binds_nothing_leaves_the_screen_alone() {
     );
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 /// The two reload strengths (grouse#18). QUICK lets freshness decide — a settled
@@ -1134,32 +346,13 @@ fn a_reconnect_that_binds_nothing_leaves_the_screen_alone() {
 /// gesture and its hold variant call.
 #[test]
 fn refresh_modes_differ_on_the_wire() {
-    let _cache_guard = CACHE_TEST_LOCK.lock();
-    let data_dir = std::env::temp_dir().join(format!("grouse-rmode-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let h = spine_harness();
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (server, port) = h.server();
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        data_dir.to_string_lossy().to_string(),
-    );
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
 
     // Open once so a settled cache exists for the reloads to reason about.
@@ -1199,7 +392,161 @@ fn refresh_modes_differ_on_the_wire() {
     );
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// The open plan is the riskiest decision in the core (audit §7): the old
+/// tests called the helpers with flags they chose themselves. This table
+/// drives the REAL intents (`open_session`, `refresh_session`) over the fake
+/// wire and checks the one thing the client can observe from the plan: the
+/// `replayTail` on `session/load`, and whether the replay repainted a chat
+/// that owns a live turn.
+#[test]
+fn open_plan_selection_is_table_driven_over_the_public_path() {
+    #[derive(Clone, Copy)]
+    enum PlanCase {
+        StaleCache,
+        FreshCache,
+        MidTurnRefresh,
+        BindOnlyReopen,
+    }
+
+    // Byte-for-byte the stamp the fake's `session/list` hands out. The info
+    // probe must agree for the fresh path to keep its suppression.
+    const LIST_STAMP: &str = "2026-08-12T00:00:00.000Z";
+
+    for (name, case, expected_tail) in [
+        ("stale cache", PlanCase::StaleCache, 100u64),
+        ("fresh cache", PlanCase::FreshCache, 1u64),
+        ("mid-turn full refresh", PlanCase::MidTurnRefresh, 1u64),
+        ("bind-only reopen", PlanCase::BindOnlyReopen, 1u64),
+    ] {
+        let h = spine_harness();
+        let (core, server, port, ev_rx) = wire!(h);
+        let sid = "sess-e2e";
+        let marker = format!("{name}: cached row");
+
+        let live_turn = matches!(case, PlanCase::MidTurnRefresh | PlanCase::BindOnlyReopen);
+        server
+            .hold_prompts
+            .store(live_turn, std::sync::atomic::Ordering::SeqCst);
+
+        core.connect(server_config(port));
+        wait_for(
+            &ev_rx,
+            |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)),
+            "the connect's transient ready",
+        );
+        if matches!(case, PlanCase::FreshCache) {
+            // The freshness baseline comes from session/list, not thin air.
+            core.list_sessions();
+            wait_for(&ev_rx, |ev| matches!(ev, Ev::Sessions(_)), "the listed stamp");
+        }
+        if live_turn {
+            core.send_prompt(
+                Prompt { blocks: vec![PromptBlock::Text { text: "live-turn".to_string() }] },
+                Some(SendExpect { session_id: sid.to_string() }),
+            );
+            wait_for_frames(&server, "session/prompt", 1, "the in-flight turn");
+        }
+        while ev_rx.try_recv().is_ok() {}
+
+        // Seed AFTER the connect: session/new binds sess-e2e and would otherwise
+        // overwrite the seeded cache with an empty transcript on Ready. The
+        // fresh case also needs the listed baseline (from session/list) first.
+        if matches!(case, PlanCase::StaleCache | PlanCase::FreshCache) {
+            let stamp = if matches!(case, PlanCase::FreshCache) {
+                *server.info_stamp.lock() = LIST_STAMP.to_string();
+                LIST_STAMP
+            } else {
+                "2026-01-01T00:00:00.000Z"
+            };
+            assert!(h.cache_store().save_transcript(
+                sid,
+                &[item("cached-1", grouse_core::ItemKind::Agent, &marker)],
+                stamp,
+                true,
+            ));
+        }
+
+        match case {
+            PlanCase::MidTurnRefresh => {
+                core.refresh_session(sid.to_string(), grouse_core::RefreshMode::Full)
+            }
+            _ => core.open_session(sid.to_string()),
+        }
+
+        let frames = wait_for_frames(&server, "session/load", 1, "the open plan's load");
+        let load = frames.last().expect("a session/load");
+        assert_eq!(
+            load.pointer("/params/_meta/replayTail").and_then(Value::as_u64),
+            Some(expected_tail),
+            "{name}: the plan asked for the wrong window: {load:?}"
+        );
+
+        // Watch the paint events while waiting for the load's Ready. A live
+        // turn may be re-shown (repaint_window at bind, plus the replay's own
+        // window repaint of that SAME store); what must never happen is a
+        // replay row being painted over a store the server cannot reproduce.
+        let mut resets = 0;
+        let mut painted: Vec<String> = Vec::new();
+        let mut take = |ev: Ev| {
+            match ev {
+                Ev::Item(TranscriptOp::Reset { .. }) => resets += 1,
+                Ev::Item(TranscriptOp::Upsert { item }) => painted.push(item.text),
+                _ => {}
+            }
+        };
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match ev_rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(Ev::Status(ConnectionStatus::Ready)) => break,
+                Ok(ev) => take(ev),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => assert!(
+                    Instant::now() < deadline,
+                    "{name}: the open never finished"
+                ),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("{name}: listener dropped before the open finished")
+                }
+            }
+        }
+        while let Ok(ev) = ev_rx.try_recv() {
+            take(ev);
+        }
+
+        let text: String = core
+            .rich_transcript()
+            .iter()
+            .map(|i| i.text.clone())
+            .collect::<Vec<_>>()
+            .join("");
+        match case {
+            PlanCase::StaleCache => assert!(
+                text.contains("replayed line one and two"),
+                "a stale open must replay: {text}"
+            ),
+            PlanCase::FreshCache => assert!(
+                text.contains(marker.as_str()) && !text.contains("replayed line one"),
+                "a fresh cache is authoritative: {text}"
+            ),
+            PlanCase::MidTurnRefresh | PlanCase::BindOnlyReopen => {
+                assert!(
+                    text.contains("live-turn") && !text.contains("replayed line one"),
+                    "the live turn is the only copy of the reply: {text}"
+                );
+                assert!(
+                    resets >= 1,
+                    "{name}: the live store must have been re-shown on bind"
+                );
+                assert!(
+                    painted.iter().any(|t| t.contains("live-turn"))
+                        && !painted.iter().any(|t| t.contains("replayed line one")),
+                    "{name}: only the live store may be painted, never the replay: {painted:?}"
+                );
+            }
+        }
+        core.disconnect();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1208,39 +555,20 @@ fn refresh_modes_differ_on_the_wire() {
 
 #[test]
 fn a_tail_first_open_pages_the_rest_of_the_history_from_the_wire() {
+    let h = spine_harness();
     // docs/TRANSCRIPT_MODEL.md, "Windows". Opening a chat this device has not
     // seen used to stream its WHOLE history before anything appeared (the
     // Assistant thread: 4,221 messages). It now asks for a bounded tail, paints
     // the recent part, and pages the rest back on demand — through the server's
     // own `_meta.replayTail` / `_meta.replaySkipped` contract, which the fake
     // server here implements the way goose does.
-    let _cache_guard = CACHE_TEST_LOCK.lock();
-    let data_dir = std::env::temp_dir().join(format!("grouse-pages-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (server, port) = h.server();
     *server.history.lock() = 300;
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        data_dir.to_string_lossy().to_string(),
-    );
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
 
     core.open_session("sess-p".to_string());
@@ -1326,7 +654,6 @@ fn a_tail_first_open_pages_the_rest_of_the_history_from_the_wire() {
     assert_eq!(unique.len(), 300, "a page may not duplicate a row");
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -1335,11 +662,8 @@ fn a_tail_first_open_pages_the_rest_of_the_history_from_the_wire() {
 
 #[test]
 fn cold_start_emits_cached_directory() {
-    let _cache_guard = CACHE_TEST_LOCK.lock();
-    let data_dir = std::env::temp_dir().join(format!("grouse-dir-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
-    std::env::set_var("XDG_DATA_HOME", &data_dir);
-    let cache = grouse_core::cache::CacheStore::new(data_dir.join("grouse"));
+    let h = spine_harness();
+    let cache = h.cache_store();
     let sessions = vec![grouse_core::SessionSummary {
         mode: None,
         id: "sess-c".into(),
@@ -1358,8 +682,8 @@ fn cold_start_emits_cached_directory() {
     assert!(cache.save_directory(&sessions, &cwds));
 
     // A brand-new Core (no connect yet) must emit the cached names right away.
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
     match wait_for(&ev_rx, |ev| matches!(ev, Ev::Sessions(_)), "cached sessions") {
         Ev::Sessions(s) => {
             assert_eq!(s.len(), 1);
@@ -1369,7 +693,6 @@ fn cold_start_emits_cached_directory() {
         _ => unreachable!(),
     }
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 /// The Android regression: the UI supplies a real cache dir at construction
@@ -1378,9 +701,8 @@ fn cold_start_emits_cached_directory() {
 /// empty on every cold start.
 #[test]
 fn cold_start_emits_cached_directory_from_supplied_dir() {
-    let dir = std::env::temp_dir().join(format!("grouse-supplied-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let cache = grouse_core::cache::CacheStore::new(dir.clone());
+    let h = spine_harness();
+    let cache = h.cache_store();
     let sessions = vec![grouse_core::SessionSummary {
         mode: None,
         id: "sess-d".into(),
@@ -1396,11 +718,8 @@ fn cold_start_emits_cached_directory_from_supplied_dir() {
     }];
     assert!(cache.save_directory(&sessions, &std::collections::BTreeMap::new()));
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        dir.to_string_lossy().into_owned(),
-    );
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
     match wait_for(&ev_rx, |ev| matches!(ev, Ev::Sessions(_)), "cached sessions") {
         Ev::Sessions(s) => {
             assert_eq!(s.len(), 1);
@@ -1410,7 +729,6 @@ fn cold_start_emits_cached_directory_from_supplied_dir() {
         _ => unreachable!(),
     }
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -1419,26 +737,17 @@ fn cold_start_emits_cached_directory_from_supplied_dir() {
 
 #[test]
 fn spine_e2e_active_run_commands_and_recipe_connect() {
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
+    let h = spine_harness();
+    let (server, port) = h.server();
     server.notify.store(true, std::sync::atomic::Ordering::SeqCst);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
 
     core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
         initial_recipe_id: Some("r-42".to_string()),
         initial_project_id: Some("proj-7".to_string()),
+        ..server_config(port)
     });
 
     // The recipe rode the session/new call (cold-start recipe run, gap 4).
@@ -1480,37 +789,17 @@ fn spine_e2e_active_run_commands_and_recipe_connect() {
 /// The old global `prompting` latch queued it until the first turn ended.
 #[test]
 fn a_second_chat_prompts_while_the_first_turn_is_in_flight() {
-    let _guard = CACHE_TEST_LOCK.lock();
-    let data_dir =
-        std::env::temp_dir().join(format!("grouse-concurrent-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let h = spine_harness();
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (server, port) = h.server();
     // Neither prompt is answered: the test observes the wire, not run ends.
     server
         .hold_prompts
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        data_dir.to_string_lossy().to_string(),
-    );
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "Ready");
     assert_eq!(core.active_session_id().as_deref(), Some("sess-e2e"));
 
@@ -1559,32 +848,18 @@ fn a_second_chat_prompts_while_the_first_turn_is_in_flight() {
     assert!(ids.contains(&"sess-b".to_string()), "{ids:?}");
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 #[test]
 fn spine_e2e_connect_prompt_stream() {
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let h = spine_harness();
+    let (server, port) = h.server();
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
 
     // connect() blocks (bounded) until the handshake completes.
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    core.connect(server_config(port));
 
     // Ready + the bound session + config.
     assert!(
@@ -1725,29 +1000,16 @@ fn spine_e2e_connect_prompt_stream() {
 
 #[test]
 fn prompt_does_not_resync_its_own_turn() {
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
+    let h = spine_harness();
+    let (server, port) = h.server();
     server
         .post_turn_touch
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
 
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "Ready");
     assert_eq!(core.active_session_id().as_deref(), Some("sess-e2e"));
 
@@ -1761,10 +1023,17 @@ fn prompt_does_not_resync_its_own_turn() {
         "RunEnded",
     );
 
-    // The run-end touch debounces 1.5s before it probes; give the whole cycle
-    // room. A spurious resync would clear the store and issue `session/load`,
-    // re-streaming the transcript.
-    std::thread::sleep(Duration::from_millis(2500));
+    // Event-driven wait: the server's run-end touch schedules a 1.5s debounce
+    // whose FIRST observable effect is the `_goose/unstable/session/info`
+    // probe. Waiting for that frame proves the debounce actually fired; no
+    // production clock seam and no blind 2.5s sleep. A spurious resync would
+    // clear the store and issue `session/load`, re-streaming the transcript.
+    wait_for_frames(
+        &server,
+        "_goose/unstable/session/info",
+        1,
+        "the post-turn debounce probe",
+    );
     assert!(
         server.frames_for("session/load").is_empty(),
         "the server's own run-end touch must not replay the session: {:?}",
@@ -1792,26 +1061,13 @@ fn prompt_does_not_resync_its_own_turn() {
 
 #[test]
 fn set_config_update_merges_and_preserves_choices() {
-    let (port_tx, port_rx) = mpsc::channel();
-    let _server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let h = spine_harness();
+    let (_server, port) = h.server();
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
 
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "Ready");
 
     core.set_config_option("model".to_string(), "m-b".to_string());
@@ -1848,40 +1104,17 @@ fn set_config_update_merges_and_preserves_choices() {
 
 #[test]
 fn stale_cache_is_painted_then_replaced_not_appended() {
-    // Own cache dir, passed to Core explicitly: XDG_DATA_HOME is process-global
-    // and the spine_e2e_* tests build a Core with an empty cache dir, so they
-    // resolve whatever it points at when THEY construct — steering it here made
-    // their sess-e2e writes land in this test's directory.
-    let data_dir =
-        std::env::temp_dir().join(format!("grouse-paint-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
-    let cache = grouse_core::cache::CacheStore::new(data_dir.clone());
+    let h = spine_harness();
+    let cache = h.cache_store();
     let stale = vec![item("m-old", grouse_core::ItemKind::Agent, "STALE-MARKER")];
     // An updatedAt the server will not agree with => stale => the load replays.
     assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z", true));
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let _server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (_server, port) = h.server();
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        data_dir.to_string_lossy().to_string(),
-    );
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
 
     core.open_session("sess-r".to_string());
@@ -1923,41 +1156,20 @@ fn stale_cache_is_painted_then_replaced_not_appended() {
     );
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 #[test]
 fn reconnect_replaces_the_live_transcript_not_appends() {
-    let _guard = CACHE_TEST_LOCK.lock();
-    let data_dir =
-        std::env::temp_dir().join(format!("grouse-reconnect-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
-    let cache = grouse_core::cache::CacheStore::new(data_dir.clone());
+    let h = spine_harness();
+    let cache = h.cache_store();
     let stale = vec![item("m-old", grouse_core::ItemKind::Agent, "STALE-MARKER")];
     assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z", true));
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (server, port) = h.server();
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        data_dir.to_string_lossy().to_string(),
-    );
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
 
     core.open_session("sess-r".to_string());
@@ -2008,7 +1220,6 @@ fn reconnect_replaces_the_live_transcript_not_appends() {
     assert!(!after.contains("STALE-MARKER"), "the stale paint must not survive: {after}");
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 /// grouse#1: a prompt typed while the socket is down (the reconnect window)
@@ -2016,33 +1227,13 @@ fn reconnect_replaces_the_live_transcript_not_appends() {
 /// session once Ready arrives, with no substitute session created.
 #[test]
 fn prompt_while_reconnecting_is_queued_and_flushed_after_ready() {
-    let _guard = CACHE_TEST_LOCK.lock();
-    let data_dir =
-        std::env::temp_dir().join(format!("grouse-reattach-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let h = spine_harness();
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (server, port) = h.server();
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        data_dir.to_string_lossy().to_string(),
-    );
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
     core.open_session("sess-r".to_string());
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "open ready");
@@ -2088,7 +1279,6 @@ fn prompt_while_reconnecting_is_queued_and_flushed_after_ready() {
     );
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -2098,35 +1288,16 @@ fn prompt_while_reconnecting_is_queued_and_flushed_after_ready() {
 
 #[test]
 fn rich_transcript_paints_and_replaces_on_a_stale_open() {
-    let data_dir =
-        std::env::temp_dir().join(format!("grouse-rich-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
-    let cache = grouse_core::cache::CacheStore::new(data_dir.clone());
+    let h = spine_harness();
+    let cache = h.cache_store();
     let stale = vec![item("m-old", grouse_core::ItemKind::Agent, "STALE-MARKER")];
     assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z", true));
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let _server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (_server, port) = h.server();
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        data_dir.to_string_lossy().to_string(),
-    );
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
 
     core.open_session("sess-r".to_string());
@@ -2150,7 +1321,6 @@ fn rich_transcript_paints_and_replaces_on_a_stale_open() {
     assert_eq!(core.item(replayed.id.clone()).unwrap().kind, grouse_core::ItemKind::Agent);
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -2160,41 +1330,22 @@ fn rich_transcript_paints_and_replaces_on_a_stale_open() {
 
 #[test]
 fn stale_cache_tail_merge_keeps_the_older_prefix() {
+    let h = spine_harness();
     // Same harness as stale_cache_is_painted_then_replaced_not_appended, but the
     // cache CONTAINS the replay's first id, so the bounded tail anchors into it:
     // the older prefix survives and the replayed row lands exactly once.
-    let data_dir =
-        std::env::temp_dir().join(format!("grouse-merge-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
-    let cache = grouse_core::cache::CacheStore::new(data_dir.clone());
+    let cache = h.cache_store();
     let stale = vec![
         item("old-1", grouse_core::ItemKind::User, "VERY-OLD-PREFIX"),
         item("r-1", grouse_core::ItemKind::Agent, "replayed line one and two"),
     ];
     assert!(cache.save_transcript("sess-r", &stale, "2026-01-01T00:00:00.000Z", true));
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (server, port) = h.server();
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        data_dir.to_string_lossy().to_string(),
-    );
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
 
     core.open_session("sess-r".to_string());
@@ -2223,7 +1374,6 @@ fn stale_cache_tail_merge_keeps_the_older_prefix() {
     assert!(prefix < tail, "the older prefix must precede the tail: {joined}");
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -2233,32 +1383,13 @@ fn stale_cache_tail_merge_keeps_the_older_prefix() {
 
 #[test]
 fn reopening_a_cached_session_merges_a_tail_instead_of_full_replay() {
-    let data_dir =
-        std::env::temp_dir().join(format!("grouse-switch-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let h = spine_harness();
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (server, port) = h.server();
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        data_dir.to_string_lossy().to_string(),
-    );
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
 
     // Open A (no cache yet → the first load may be a full replay); its transcript
@@ -2266,7 +1397,7 @@ fn reopening_a_cached_session_merges_a_tail_instead_of_full_replay() {
     core.open_session("sess-a".to_string());
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "A ready");
     assert!(
-        data_dir.join("sess-a.json").exists(),
+        h.cache_dir().join("sess-a.json").exists(),
         "opening a session must persist its transcript for the next open"
     );
 
@@ -2298,7 +1429,6 @@ fn reopening_a_cached_session_merges_a_tail_instead_of_full_replay() {
     assert!(text.contains("replayed line one and two"), "reopen shows content: {text}");
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -2308,41 +1438,20 @@ fn reopening_a_cached_session_merges_a_tail_instead_of_full_replay() {
 
 #[test]
 fn cold_start_paint_is_not_filed_under_the_transient_session() {
-    // Own cache dir, passed to Core explicitly — see the note in
-    // stale_cache_is_painted_then_replaced_not_appended.
-    let cache_dir =
-        std::env::temp_dir().join(format!("grouse-owner-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&cache_dir);
-    let cache = grouse_core::cache::CacheStore::new(cache_dir.clone());
+    let h = spine_harness();
+    let cache = h.cache_store();
     let seeded = vec![item("m-1", grouse_core::ItemKind::Agent, "OWNED-BY-SESS-R")];
     assert!(cache.save_transcript("sess-r", &seeded, "2026-01-01T00:00:00.000Z", true));
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let _server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (_server, port) = h.server();
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        cache_dir.to_string_lossy().to_string(),
-    );
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
 
     // The cold-start sequence the UI runs: paint the last chat, THEN connect.
     // connect() creates a throwaway session before the real resume.
     core.load_cached_transcript("sess-r".to_string());
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
     // save_cache runs on ready, and probe_stamp_and_save follows asynchronously.
     std::thread::sleep(Duration::from_millis(600));
@@ -2355,7 +1464,7 @@ fn cold_start_paint_is_not_filed_under_the_transient_session() {
 
     // And nothing else picked them up either: exactly one transcript file, the
     // one they came from.
-    let transcripts: Vec<String> = std::fs::read_dir(&cache_dir)
+    let transcripts: Vec<String> = std::fs::read_dir(cache.dir())
         .expect("cache dir")
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().to_string())
@@ -2373,7 +1482,6 @@ fn cold_start_paint_is_not_filed_under_the_transient_session() {
     assert!(painted.contains("OWNED-BY-SESS-R"), "paint must stay on screen: {painted}");
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&cache_dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -2382,39 +1490,21 @@ fn cold_start_paint_is_not_filed_under_the_transient_session() {
 
 #[test]
 fn session_list_follows_the_cursor_instead_of_stopping_at_the_first_page() {
+    let h = spine_harness();
     // goose pages `session/list` at 50 rows ordered by last message. This box's
     // Assistant thread chats and hourly scheduled runs fill that page on their own, so
     // the sessions a project view is built from fell off the end: the Media project
     // showed "Games" alone where it used to show Movies and Music too (2026-11-08).
     // The cursor was always in the reply; nothing followed it.
-    let cache_dir = std::env::temp_dir().join(format!("grouse-pages-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&cache_dir);
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (server, port) = h.server();
     server
         .page_lists
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        cache_dir.to_string_lossy().to_string(),
-    );
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "ready");
     core.list_sessions();
 
@@ -2443,7 +1533,6 @@ fn session_list_follows_the_cursor_instead_of_stopping_at_the_first_page() {
     );
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&cache_dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -2452,31 +1541,14 @@ fn session_list_follows_the_cursor_instead_of_stopping_at_the_first_page() {
 
 #[test]
 fn a_tool_run_gets_a_model_written_label() {
-    let _cache_guard = CACHE_TEST_LOCK.lock();
-    let data_dir = std::env::temp_dir().join(format!("grouse-sum-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
-    std::env::set_var("XDG_DATA_HOME", &data_dir);
+    let h = spine_harness();
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
+    let (server, port) = h.server();
     server.tool_turn.store(true, std::sync::atomic::Ordering::SeqCst);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
 
-    let (ev_tx, _ev_rx) = mpsc::channel();
-    let core = Core::new(Box::new(RecordingListener::new(ev_tx)), String::new());
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    let (ev_tx, _ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
     core.send_prompt(
         Prompt { blocks: vec![PromptBlock::Text { text: "hi".to_string() }] },
         None,
@@ -2522,7 +1594,6 @@ fn a_tool_run_gets_a_model_written_label() {
     );
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -2535,36 +1606,18 @@ fn a_tool_run_gets_a_model_written_label() {
 
 #[test]
 fn a_prompt_survives_a_reopen_because_the_core_echoes_it() {
-    let data_dir = std::env::temp_dir().join(format!("grouse-prompt-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let h = spine_harness();
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
+    let (server, port) = h.server();
     // The server's run-end touch, so the freshness stamp moves exactly as it does
     // against a live serve.
     server.post_turn_touch.store(true, std::sync::atomic::Ordering::SeqCst);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
 
-    let config = grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    };
+    let config = server_config(port);
 
     // --- Ask something and let the turn finish. ---
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        data_dir.to_string_lossy().to_string(),
-    );
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
     core.connect(config.clone());
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "ready");
     core.send_prompt(
@@ -2589,7 +1642,7 @@ fn a_prompt_survives_a_reopen_because_the_core_echoes_it() {
     // probe (see `probe_stamp_and_save`), so the write lands AFTER RunEnded and a
     // single read can lose that race — it did, on CI. Same bounded wait the other
     // cache assertions in this file use.
-    let cache_path = data_dir.join("sess-e2e.json");
+    let cache_path = h.cache_dir().join("sess-e2e.json");
     let deadline = Instant::now() + Duration::from_secs(5);
     let cache_file = loop {
         if let Ok(body) = std::fs::read_to_string(&cache_path) {
@@ -2608,11 +1661,8 @@ fn a_prompt_survives_a_reopen_because_the_core_echoes_it() {
     core.disconnect();
 
     // --- Reopen, as a fresh launch would. ---
-    let (ev_tx2, ev_rx2) = mpsc::channel();
-    let core2 = Core::new(
-        Box::new(RecordingListener::new(ev_tx2)),
-        data_dir.to_string_lossy().to_string(),
-    );
+    let (ev_tx2, ev_rx2) = h.listener();
+    let core2 = h.core(ev_tx2);
     core2.connect_resume(config, "sess-e2e".to_string());
     wait_for(&ev_rx2, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "ready again");
     std::thread::sleep(Duration::from_millis(600)); // let the paint/replay settle
@@ -2628,7 +1678,6 @@ fn a_prompt_survives_a_reopen_because_the_core_echoes_it() {
     );
 
     core2.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 
@@ -2643,32 +1692,12 @@ fn a_prompt_survives_a_reopen_because_the_core_echoes_it() {
 /// to hold even when the client never asks for a reconnect itself.
 #[test]
 fn an_attach_reconnect_restores_the_wire_without_binding() {
-    let _cache_guard = CACHE_TEST_LOCK.lock();
-    let data_dir =
-        std::env::temp_dir().join(format!("grouse-attach-redial-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let h = spine_harness();
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        data_dir.to_string_lossy().to_string(),
-    );
-    let config = || grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    };
+    let (server, port) = h.server();
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    let config = || server_config(port);
 
     core.connect_attach(config());
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "attach ready");
@@ -2700,7 +1729,6 @@ fn an_attach_reconnect_restores_the_wire_without_binding() {
     );
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 /// A handshake held at `initialize` is superseded by a newer connect. When the
@@ -2708,34 +1736,14 @@ fn an_attach_reconnect_restores_the_wire_without_binding() {
 /// emit Ready — every one of those would overwrite the newer wire's state.
 #[test]
 fn a_superseded_handshake_never_binds_or_emits_ready() {
-    let _cache_guard = CACHE_TEST_LOCK.lock();
-    let data_dir =
-        std::env::temp_dir().join(format!("grouse-stale-hs-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let h = spine_harness();
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (server, port) = h.server();
     server.hold_first_initialize.store(true, std::sync::atomic::Ordering::SeqCst);
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        data_dir.to_string_lossy().to_string(),
-    );
-    let config = || grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    };
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    let config = || server_config(port);
 
     // The OLD connect is parked inside initialize. Its `connect_resume` would
     // bind `sess-old` and emit config if the shutdown flag were ignored.
@@ -2790,7 +1798,6 @@ fn a_superseded_handshake_never_binds_or_emits_ready() {
     assert_eq!(core.active_session_id().as_deref(), Some("sess-e2e"));
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 /// The paint/verify duplicate-tail case at the wire level: the cache looks
@@ -2800,12 +1807,9 @@ fn a_superseded_handshake_never_binds_or_emits_ready() {
 /// stale suffix rather than append a second copy of the newest turn.
 #[test]
 fn a_verification_downgrade_does_not_duplicate_the_replayed_tail() {
-    let _cache_guard = CACHE_TEST_LOCK.lock();
-    let data_dir =
-        std::env::temp_dir().join(format!("grouse-verify-merge-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let h = spine_harness();
 
-    let cache = grouse_core::cache::CacheStore::new(data_dir.clone());
+    let cache = h.cache_store();
     let cached = vec![
         item("old-1", grouse_core::ItemKind::User, "CACHED-PREFIX"),
         item("r-1", grouse_core::ItemKind::Agent, "replayed line one and two"),
@@ -2819,29 +1823,12 @@ fn a_verification_downgrade_does_not_duplicate_the_replayed_tail() {
         true
     ));
 
-    let (port_tx, port_rx) = mpsc::channel();
-    let server = FakeServer::spawn(port_tx);
-    let port = port_rx.recv_timeout(Duration::from_secs(5)).expect("fake server port");
+    let (server, port) = h.server();
     server.fresh_session_row.store(true, std::sync::atomic::Ordering::SeqCst);
 
-    let (ev_tx, ev_rx) = mpsc::channel();
-    let core = Core::new(
-        Box::new(RecordingListener::new(ev_tx)),
-        data_dir.to_string_lossy().to_string(),
-    );
-    core.connect(grouse_core::ServerConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        secret_key: "test-secret".to_string(),
-        use_tls: false,
-        accept_invalid_certs: false,
-        ca_cert_pem: None,
-        cwd: "/tmp".to_string(),
-        auto_connect: false,
-        client_id: "grouse-core-test".to_string(),
-        initial_recipe_id: None,
-        initial_project_id: None,
-    });
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "transient ready");
     core.list_sessions();
     wait_for(&ev_rx, |ev| matches!(ev, Ev::Sessions(_)), "the fresh session baseline");
@@ -2876,5 +1863,4 @@ fn a_verification_downgrade_does_not_duplicate_the_replayed_tail() {
     );
 
     core.disconnect();
-    let _ = std::fs::remove_dir_all(&data_dir);
 }

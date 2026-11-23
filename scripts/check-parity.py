@@ -25,9 +25,11 @@ What it checks
    grow only on purpose.
 5. `LISTENER_EVENTS` AND `LISTENER_SIGNATURES` in surface.rs must equal the
    `CoreListener` trait's callbacks and their parameter TYPES, parsed out of
-   `lib.rs`. The trait has defaults, so an added `fn on_*` — or a changed
-   payload type behind an unchanged name — compiles without touching the
-   inventory; this is the check that closes both holes.
+   `lib.rs`; `UNSTABLE_LISTENER_SIGNATURES` does the same for
+   `GrouseUnstableListener`, where the request-correlated form callbacks live.
+   Both traits have default bodies, so an added `fn on_*` — or a changed payload
+   type behind an unchanged name — compiles without touching the inventory;
+   this is the check that closes both holes.
 6. Evidence anchors must be relative paths inside the client's declared root,
    with no `..` and no token that exists only in a source comment. A `yes:`
    backed by `../core/…` or a commented-out call is not evidence.
@@ -79,8 +81,8 @@ def read(rel: str) -> str:
 def parse_inventory(text: str) -> dict:
     """The inventory, from `surface.rs`.
 
-    Three shapes: `LISTENER_EVENTS`/`LISTENER_SIGNATURES` are literals
-    (`pub static … = &["listener.x"]`); the record/enum groups are emitted by a
+    Three shapes: the listener signature lists are literals
+    (`pub static … = &["on_x(T)"]`); the record/enum groups are emitted by a
     macro whose CALL carries the field names (`record_surface!(…, "item": id,
     kind, …)`); and a field shared by every variant of a struct enum is a literal
     `pub static SOMETHING_FIELDS = &["prefix.field", …]` backed by its own
@@ -93,7 +95,7 @@ def parse_inventory(text: str) -> dict:
     for name, body in re.findall(
         r"pub static ([A-Z_]+): &\[&str\] = &\[(.*?)\];", text, re.S
     ):
-        if name not in ("LISTENER_EVENTS", "LISTENER_SIGNATURES") and not name.endswith("_FIELDS"):
+        if name not in ("LISTENER_EVENTS", "LISTENER_SIGNATURES", "UNSTABLE_LISTENER_SIGNATURES") and not name.endswith("_FIELDS"):
             continue  # macro-generated consts have no literal text; see below
         ids = re.findall(r'"[^"]+"', body)
         ids = [i[1:-1] for i in ids]
@@ -173,20 +175,20 @@ def normalize_signature(sig: str) -> str:
     return f"{name}({','.join(types)})"
 
 
-def parse_listener_trait(text: str) -> list:
-    """Normalized signatures of every `on_*` callback in `CoreListener`."""
-    start = text.find("pub trait CoreListener")
+def parse_listener_trait(text: str, trait: str = "CoreListener") -> list:
+    """Normalized signatures of every `on_*` callback in a core listener trait."""
+    start = text.find(f"pub trait {trait}")
     if start < 0:
-        raise SystemExit(f"check-parity: `pub trait CoreListener` not found in {LIB_RS}")
+        raise SystemExit(f"check-parity: `pub trait {trait}` not found in {LIB_RS}")
     end = text.find("\n}\n", start)
     if end < 0:
-        raise SystemExit("check-parity: unterminated CoreListener trait")
+        raise SystemExit(f"check-parity: unterminated {trait} trait")
     body = text[start:end]
     # Remove doc comments first: an example signature in prose is not a method.
     body = "\n".join(line for line in body.splitlines() if not line.strip().startswith("///"))
     found = re.findall(r"\bfn\s+(on_[a-z_]+)\s*\(([^)]*)\)\s*(?:->[^;]+)?;", body, re.S)
     if not found:
-        raise SystemExit("check-parity: no listener methods parsed out of CoreListener")
+        raise SystemExit(f"check-parity: no listener methods parsed out of {trait}")
     return [normalize_signature(f"fn {name}({params})") for name, params in found]
 
 
@@ -485,6 +487,28 @@ def check_listener_parity(groups: dict, lib_text: str) -> list:
     return errors
 
 
+def check_unstable_listener_signatures(groups: dict, lib_text: str) -> list:
+    """The unstable trait's callbacks carry request ids and owners; its arity
+    is as much ABI as CoreListener's, so it gets the same signature ratchet."""
+    declared = groups.get("UNSTABLE_LISTENER_SIGNATURES")
+    if not declared:
+        return ["surface.rs has no UNSTABLE_LISTENER_SIGNATURES — the checker cannot compare unstable payload types"]
+    try:
+        normalized = {normalize_signature(sig) for sig in declared}
+    except SystemExit as exc:
+        return [str(exc)]
+    trait = set(parse_listener_trait(lib_text, "GrouseUnstableListener"))
+    errors = []
+    for sig in sorted(trait - normalized):
+        errors.append(
+            f"GrouseUnstableListener::{sig} is not in surface.rs UNSTABLE_LISTENER_SIGNATURES"
+            f" — a C ABI trampoline built for the old payload would read it with the wrong shape"
+        )
+    for sig in sorted(normalized - trait):
+        errors.append(f"surface.rs UNSTABLE_LISTENER_SIGNATURES lists {sig}, which GrouseUnstableListener no longer has")
+    return errors
+
+
 # --------------------------------------------------------------------------
 # --self-test: a checker that stopped biting must fail loudly
 # --------------------------------------------------------------------------
@@ -603,6 +627,17 @@ def self_test() -> int:
          "LISTENER_SIGNATURES": ["on_file(  event :  crate :: attachments :: FileEvent )"]},
         spaced_lib), "signature", should_fail=False)
 
+    # The unstable trait carries the form request ids; a changed arity must
+    # break parity the same way a CoreListener payload change does.
+    unstable_lib = ("pub trait GrouseUnstableListener {\n"
+                    "    fn on_recipe_params(&self, owner: SessionOwner, request_id: String, parameters: String);\n"
+                    "}\n")
+    expect("an unstable callback whose arity changed", check_unstable_listener_signatures(
+        {"UNSTABLE_LISTENER_SIGNATURES": ["on_recipe_params(parameters: String)"]},
+        unstable_lib), "GrouseUnstableListener::on_recipe_params")
+    expect("a missing unstable signature inventory", check_unstable_listener_signatures(
+        {}, unstable_lib), "no UNSTABLE_LISTENER_SIGNATURES")
+
     print("\nself-test:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -618,13 +653,15 @@ def main(argv=None) -> int:
         return self_test()
 
     groups = parse_inventory(read(SURFACE_RS))
-    # LISTENER_SIGNATURES is a second view of LISTENER_EVENTS, not new ledger ids.
-    core_ids = [i for name, g in groups.items() if name != "LISTENER_SIGNATURES" for i in g]
+    # Both signature lists are views of the two listener traits, not new ledger ids.
+    core_ids = [i for name, g in groups.items() if name not in
+                ("LISTENER_SIGNATURES", "UNSTABLE_LISTENER_SIGNATURES") for i in g]
     ledger = parse_ledger(read(LEDGER))
     active = active_clients()
 
     errors = []
     errors += check_listener_parity(groups, read(LIB_RS))
+    errors += check_unstable_listener_signatures(groups, read(LIB_RS))
 
     ledger_clients = ledger["clients"]
     discovered = sorted(active)

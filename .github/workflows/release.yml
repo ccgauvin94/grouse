@@ -1,21 +1,29 @@
-# Release: on a version tag (`v*`), build the signed Android APK and the desktop
-# Flatpak bundle, then publish both as GitHub Release assets.
+# Release: on a version tag (`v*`), run the reusable gate FIRST, then build the
+# signed Android APK and the desktop Flatpak bundle and publish both as GitHub
+# Release assets. A tag whose commit failed core/clippy/JUnit/ctest/parity/
+# secrets/freshness never reaches a publish step (every build job `needs: gate`).
 #
-# Version pinning (X-7): actions are pinned to major tags (@v4/@v6/@v2), the
-# accepted lock level here. See core.yml for the toolchain "dedrift" note.
+# The `release` environment protects the signing secrets and the publish step:
+# create it in repo settings with required reviewers (and, ideally, a `v*`
+# deployment-branch rule). No debug-key fallback exists here — a missing
+# signing secret is a hard failure, not a green job with an unshippable asset.
 #
-# Android signing, in preference order:
-#   1. A real release key: GROUSE_KEYSTORE_BASE64 (keystore, `base64 -w0 k.jks`)
-#      + GROUSE_STORE_PASSWORD / GROUSE_KEY_ALIAS / GROUSE_KEY_PASSWORD.
-#   2. GROUSE_DEBUG_KEYSTORE_B64 (a PERSISTED debug key) with the standard
-#      android/androiddebugkey/android credentials — sideload-only, but the
-#      APKs upgrade each other, unlike the runner-generated debug key.
-#   3. Neither set: the runner's one-off generated debug key (APKs won't upgrade
-#      each other; a warning is emitted).
+# Version pinning (X-7): actions are major tags and container images are named
+# tags. We have NOT SHA-pinned them: there is no Dependabot configuration in
+# this repo to maintain digests, and a stale pin is worse than a major-tag pin
+# that still receives compatible security fixes. The compensating controls are
+# the pinned Rust/uniffi/NDK toolchains, the pinned signer digest, the
+# protected environment and the tests in gate.yml. Revisit if SHA pinning is
+# automated. See core.yml for the Rust toolchain "dedrift" note.
 #
-# The Android job builds the COMMITTED native lib + uniffi bindings. After a
-# core/ change, run `just android-libs` and commit the regenerated .so/bindings
-# BEFORE tagging; this workflow does not regenerate them (matching android.yml).
+# Android signing requires ALL of: GROUSE_KEYSTORE_BASE64 (`base64 -w0 k.jks`)
+# + GROUSE_STORE_PASSWORD + GROUSE_KEY_ALIAS + GROUSE_KEY_PASSWORD. The
+# persisted debug key is deliberately NOT accepted for a release. Signing
+# passwords are passed to the gradle/keytool steps as step-scoped env, never
+# written to $GITHUB_ENV where later steps could inherit them.
+#
+# The Android job builds the COMMITTED native lib + uniffi bindings. gate.yml
+# regenerates them into a temp dir and diffs before anything can publish.
 name: Release
 
 on:
@@ -26,59 +34,128 @@ permissions:
   contents: write
 
 jobs:
+  # Checkout in a called workflow resolves to the caller's ref: the tag, i.e.
+  # exactly the tree whose artifacts are about to be published.
+  gate:
+    uses: ./.github/workflows/gate.yml
+
   android:
+    needs: gate
     runs-on: ubuntu-latest
+    environment:
+      name: release
+    env:
+      # CN=Grouse, O=Grouse, C=US — the only key that has ever signed a shipped
+      # build. Keep in step with scripts/publish-apk.sh.
+      GROUSE_RELEASE_SIGNER_SHA256: 95b51fd4e9b7a8298a3c362da07ba4bc908f3b2ce8bcaa0820f87b34dd84474e
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v4
 
-      # The keystore is a file; carry it as base64 and materialize it where the
-      # gradle build's GROUSE_KEYSTORE path expects it. Shell guards keep this a
-      # no-op when the secret is unset — secrets are not reliable in `if:`.
-      - name: Configure signing
+      # Fail closed: a partial secret set used to fall through to a debug-signed
+      # APK that still published as a green release. Check every value, prove
+      # the alias/password open the keystore, and prove its certificate digest
+      # is the pinned release key BEFORE the build starts.
+      - name: Require and materialize the release keystore
         env:
           RELEASE_KEYSTORE_B64: ${{ secrets.GROUSE_KEYSTORE_BASE64 }}
-          DEBUG_KEYSTORE_B64: ${{ secrets.GROUSE_DEBUG_KEYSTORE_B64 }}
           RELEASE_STORE_PASSWORD: ${{ secrets.GROUSE_STORE_PASSWORD }}
           RELEASE_KEY_ALIAS: ${{ secrets.GROUSE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.GROUSE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ -n "${RELEASE_KEYSTORE_B64:-}" ]; then
-            KEYSTORE_PATH="$RUNNER_TEMP/grouse-release.jks"
-            printf '%s' "$RELEASE_KEYSTORE_B64" | base64 -d > "$KEYSTORE_PATH"
-            {
-              echo "GROUSE_KEYSTORE=$KEYSTORE_PATH"
-              echo "GROUSE_STORE_PASSWORD=$RELEASE_STORE_PASSWORD"
-              echo "GROUSE_KEY_ALIAS=$RELEASE_KEY_ALIAS"
-              echo "GROUSE_KEY_PASSWORD=$RELEASE_KEY_PASSWORD"
-            } >> "$GITHUB_ENV"
-            echo "Signing with the release keystore."
-          elif [ -n "${DEBUG_KEYSTORE_B64:-}" ]; then
-            KEYSTORE_PATH="$RUNNER_TEMP/grouse-debug.jks"
-            printf '%s' "$DEBUG_KEYSTORE_B64" | base64 -d > "$KEYSTORE_PATH"
-            {
-              echo "GROUSE_KEYSTORE=$KEYSTORE_PATH"
-              echo "GROUSE_STORE_PASSWORD=android"
-              echo "GROUSE_KEY_ALIAS=androiddebugkey"
-              echo "GROUSE_KEY_PASSWORD=android"
-            } >> "$GITHUB_ENV"
-            echo "::warning::Signing with the persisted DEBUG keystore — sideload-only."
-          else
-            echo "::warning::No keystore secret set; assembleRelease uses the runner's generated debug key."
+          missing=0
+          for var in RELEASE_KEYSTORE_B64 RELEASE_STORE_PASSWORD \
+                     RELEASE_KEY_ALIAS RELEASE_KEY_PASSWORD; do
+            if [[ -z "${!var:-}" ]]; then
+              echo "::error::missing release signing secret for $var (see the release environment)"
+              missing=1
+            fi
+          done
+          [[ "$missing" -eq 0 ]] || exit 1
+
+          KS="$RUNNER_TEMP/grouse-release.jks"
+          printf '%s' "$RELEASE_KEYSTORE_B64" | base64 -d > "$KS"
+          chmod 600 "$KS"
+          LISTING="$(keytool -list -v -keystore "$KS" \
+            -storepass "$RELEASE_STORE_PASSWORD" -alias "$RELEASE_KEY_ALIAS")" || {
+            echo "::error::release keystore alias/password did not open"; exit 1; }
+          KS_DIGEST="$(sed -n 's/^[[:space:]]*SHA256: //p' <<<"$LISTING" \
+            | tr -d ':' | tr 'A-F' 'a-f' | head -1)"
+          if [[ "$KS_DIGEST" != "$GROUSE_RELEASE_SIGNER_SHA256" ]]; then
+            echo "::error::configured keystore is not the pinned release key ($KS_DIGEST)"
+            exit 1
           fi
+          echo "release keystore: alias=$RELEASE_KEY_ALIAS digest=$KS_DIGEST"
 
       - name: Build release APK
+        env:
+          GROUSE_KEYSTORE: ${{ runner.temp }}/grouse-release.jks
+          GROUSE_STORE_PASSWORD: ${{ secrets.GROUSE_STORE_PASSWORD }}
+          GROUSE_KEY_ALIAS: ${{ secrets.GROUSE_KEY_ALIAS }}
+          GROUSE_KEY_PASSWORD: ${{ secrets.GROUSE_KEY_PASSWORD }}
         working-directory: clients/android
         run: ./gradlew --no-daemon assembleRelease -Pgrouse.versionName="${GITHUB_REF_NAME#v}"
+
+      # Prove the artifact, not just the config: the actual APK must carry the
+      # pinned signer, and its versionCode must be strictly ahead of the last
+      # published release's APK (a reused code installs as a no-op on a phone).
+      - name: Verify the APK signer and versionCode
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK="$(ls clients/android/app/build/outputs/apk/release/*.apk | head -1)"
+          BT="$(ls -d "${ANDROID_SDK_ROOT:-$ANDROID_HOME}"/build-tools/* | sort -V | tail -1)"
+          GOT="$("$BT/apksigner" verify --print-certs "$APK" \
+            | awk -F': ' '/^Signer #1 certificate SHA-256 digest/{print $2; exit}' \
+            | tr -d ':' | tr 'A-F' 'a-f')"
+          if [[ "$GOT" != "$GROUSE_RELEASE_SIGNER_SHA256" ]]; then
+            echo "::error::APK signer ${GOT:-<none>} is not the pinned release key"
+            exit 1
+          fi
+          echo "APK signer: $GOT"
+
+          VCODE="$("$BT/aapt2" dump badging "$APK" \
+            | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)"
+          [[ "$VCODE" =~ ^[0-9]+$ ]] || {
+            echo "::error::could not read versionCode from the APK"; exit 1; }
+
+          MAX=0
+          FOUND=0
+          if LAST_TAG="$(gh release view --repo "$GITHUB_REPOSITORY" \
+               --json tagName --jq .tagName 2>/dev/null)"; then
+            DIR="$RUNNER_TEMP/last-release-apk"
+            mkdir -p "$DIR"
+            gh release download "$LAST_TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern '*.apk' --dir "$DIR" --clobber
+            shopt -s nullglob
+            for old in "$DIR"/*.apk; do
+              c="$("$BT/aapt2" dump badging "$old" 2>/dev/null \
+                   | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)"
+              [[ "$c" =~ ^[0-9]+$ ]] || continue
+              FOUND=1
+              if (( c > MAX )); then MAX="$c"; fi
+            done
+            shopt -u nullglob
+            # A previous release with no APK means monotonicity cannot be
+            # proven. Fail closed rather than guessing.
+            if [[ "$FOUND" -eq 0 ]]; then
+              echo "::error::$LAST_TAG has no APK asset; cannot verify versionCode ordering"
+              exit 1
+            fi
+          fi
+          echo "versionCode: this=$VCODE last-release=$MAX"
+          if (( VCODE <= MAX )); then
+            echo "::error::versionCode must be bumped above $MAX before tagging"
+            exit 1
+          fi
 
       - name: Stage APK
         run: |
@@ -94,11 +171,26 @@ jobs:
   # Host-side components the flatpak SDK cannot build (KRunner plugin + the
   # dlopened grouse-core). Mirrors .github/workflows/flatpak.yml.
   desktop-host-components:
+    needs: gate
     runs-on: ubuntu-latest
     container:
       image: fedora:44
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          dnf install -y curl ca-certificates gcc gcc-c++ make cmake clang perl \
+            openssl-devel pkgconf-pkg-config
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain 1.97.1 --profile minimal
+          # shellcheck disable=SC1091
+          . "$HOME/.cargo/env"
+          case "$(rustc --version)" in
+            "rustc 1.97.1 "*) echo "rustc: $(rustc --version)" ;;
+            *) echo "::error::expected rustc 1.97.1, got $(rustc --version)"; exit 1 ;;
+          esac
 
       - name: Build KRunner plugin
         run: |
@@ -115,8 +207,14 @@ jobs:
 
       - name: Build grouse-core
         run: |
-          dnf install -y rust cargo cmake gcc
-          cargo build --release --manifest-path core/Cargo.toml -p grouse-core
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . "$HOME/.cargo/env"
+          # CWD core/ so rustup picks core/rust-toolchain.toml; never build the
+          # shipped .so with the distro's floating Fedora compiler.
+          cd core
+          cargo build --release --locked -p grouse-core
+          cd ..
           mkdir -p clients/desktop/grouse-core-prebuild
           cp core/target/release/libgrouse_core.so clients/desktop/grouse-core-prebuild/
 
@@ -128,8 +226,8 @@ jobs:
             clients/desktop/grouse-core-prebuild/libgrouse_core.so
 
   desktop:
+    needs: [gate, desktop-host-components]
     runs-on: ubuntu-latest
-    needs: desktop-host-components
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:kde-6.10
       options: --privileged
@@ -142,12 +240,14 @@ jobs:
           path: clients/desktop
 
       # Versionless names so `releases/latest/download/<name>` stays stable and
-      # the README can link straight at the current build.
+      # the README can link straight at the current build. cache: false — the
+      # builder's cache is keyed by module name, not source, so a tagged build
+      # could otherwise ship stale QML from a previous commit (audit §7).
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: grouse-desktop.flatpak
           manifest-path: clients/desktop/id.gauvin.Grouse.json
-          cache: true
+          cache: false
           upload-artifact: false
 
       - uses: actions/upload-artifact@v4
@@ -157,8 +257,12 @@ jobs:
           if-no-files-found: error
 
   release:
+    needs: [gate, android, desktop]
     runs-on: ubuntu-latest
-    needs: [android, desktop]
+    # The protected environment is the last gate: only after its reviewers
+    # approve does this job get a token with contents: write.
+    environment:
+      name: release
     steps:
       # Only the shippable artifacts: the intermediate `host-components`
       # (.so files consumed by the desktop job) must not become release assets.

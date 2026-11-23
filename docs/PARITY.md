@@ -50,11 +50,13 @@ This file is the ledger that makes that impossible to do quietly. Two rules:
   happen by accident, and the number is the ratchet's teeth: it can be lowered
   any time for free, and raising it is a decision someone signs.
 
-`LISTENER_EVENTS` and `LISTENER_SIGNATURES` in `surface.rs` are the hand-kept
-lists (the `CoreListener` trait has default bodies, so an added `fn on_*` — or a
-changed payload type behind the same name — compiles without noticing); the
-checker parses the trait out of `lib.rs` and compares normalized signatures, so
-a C ABI trampoline built for an old payload cannot pass parity by name alone.
+`LISTENER_EVENTS`/`LISTENER_SIGNATURES` and `UNSTABLE_LISTENER_SIGNATURES` in
+`surface.rs` are the hand-kept lists (both listener traits have default bodies,
+so an added `fn on_*` — or a changed payload type behind the same name —
+compiles without noticing); the checker parses both traits out of `lib.rs` and
+compares normalized signatures, so a C ABI trampoline built for an old payload
+cannot pass parity by name alone. Only the first two are ledger ids; the
+unstable signature list is an arity ratchet, not a client surface to dispose.
 
 The checker tests itself: `python3 scripts/check-parity.py --self-test` feeds it
 a missing row, a rotted row, a dead anchor, a traversal/absolute anchor, a
@@ -150,6 +152,8 @@ excluded = 26
 | `permission.title` | yes: ConnectionManager.kt#request.title | yes: src/manager.cpp#req.value("title") |
 | `permission.detail` | yes: ConnectionManager.kt#request.detail | yes: src/manager.cpp#req.value("detail") |
 | `permission.options` | yes: ConnectionManager.kt#request.options.map | yes: src/manager.cpp#req.value("options").toArray() |
+| `permission.session_id` | yes: ConnectionManager.kt#sessionId = request.sessionId | yes: src/manager.cpp#req.value("session_id") |
+| `permission.owner` | yes: ConnectionManager.kt#owner = request.owner | yes: src/manager.cpp#req.value("owner") |
 | `permission_option.option_id` | yes: ConnectionManager.kt#it.optionId | yes: src/manager.cpp#oo.value("option_id") |
 | `permission_option.name` | yes: ConnectionManager.kt#it.name | yes: src/manager.cpp#oo.value("name") |
 | `permission_option.kind` | yes: ConnectionManager.kt#it.kind | yes: src/manager.cpp#oo.value("kind") |
@@ -220,4 +224,4 @@ excluded = 26
 | `ui.advisor` | yes: ChatScreen.kt#fun AdvisorCard+SettingsScreens.kt#Review each dev turn | yes: ui/ChatPage.qml#advisorCard+ui/SettingsDialog.qml#advisorBox |
 | `ui.push-reply-target` | yes: Push.kt#validatedPushSession | excluded: desktop notifications are show-only — Notifier::send has no Reply action — so no push id is ever routed into a chat |
 | `ui.push-armed-owner` | excluded: the phone accepts a turn target only when it is a known session and the exact id it armed (validatedPushSession), so no sender-chosen roam label can become a destination | excluded: a single-client desktop announces live turns and never routes a push id to a wire, so no roam owner declaration is used |
-| `ui.roam-card-pin` | excluded: the core pins the saved card on every dial; the phone shows the computed fingerprint but has no pin-view or re-enroll UI, so the getter/enroll/clear calls have no consumer | excluded: the pin getter/enroll/clear calls are uniffi-only with no `grouse_*` C ABI symbol; the desktop relies on the core's dial-time check and has no management UI |
+| `ui.roam-card-pin` | excluded: the core pins the saved card on every dial; the phone shows the computed fingerprint but has no pin-view or re-enroll UI, so the getter/enroll/clear calls have no consumer | excluded: ABI 20 exports `grouse_roam_card_pin`/`_pins`/`_enroll`/`_clear` and the desktop resolves all four, but there is still no pin-view or re-enroll screen; the core's dial-time check remains the only enforcement |

@@ -43,9 +43,34 @@ struct RootView: View {
                     ChatView(chat: bridge.chat)
                 }
             }
-            .sheet(item: $bridge.permission) { prompt in
-                PermissionSheet(prompt: prompt) { optionId in
-                    bridge.answerPermission(optionId)
+            // ONE presented sheet over two QUEUES: a second request appends instead of
+            // replacing the first, and answering by id reveals the next one. SwiftUI only
+            // presents one sheet per hierarchy reliably, so the form queue follows the
+            // approval queue rather than stacking a second `.sheet` modifier. Dismissing
+            // without choosing denies/cancels every parked responder instead of stranding
+            // a wire that is waiting for an answer.
+            .sheet(isPresented: Binding(
+                get: { !bridge.permissionPrompts.isEmpty || !bridge.formPrompts.isEmpty },
+                set: { presented in
+                    if !presented {
+                        bridge.denyAllPermissions()
+                        bridge.cancelAllForms()
+                    }
+                }
+            )) {
+                if let prompt = bridge.activePermission {
+                    PermissionSheet(
+                        prompt: prompt,
+                        chatTitle: bridge.permissionSessionTitle(prompt.request),
+                        owner: bridge.permissionOwner(prompt.request),
+                        remaining: bridge.permissionPrompts.count
+                    ) { id, optionId in
+                        bridge.answerPermission(optionId, for: id)
+                    }
+                } else if let form = bridge.activeForm {
+                    ServerFormSheet(prompt: form) { id, action, values in
+                        bridge.answerForm(id, action: action, values: values)
+                    }
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -189,6 +214,9 @@ struct SessionRow: View {
 struct PeerRow: View {
     @EnvironmentObject private var bridge: CoreBridge
     let peer: PeerState
+    @State private var showPinConfirm = false
+
+    private var pin: String { bridge.cardPin(for: peer.label) }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -202,11 +230,29 @@ struct PeerRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                if !pin.isEmpty {
+                    // A fingerprint readout, not a secret: the core pins the card on every
+                    // dial and refuses a changed one until it is explicitly cleared here.
+                    Text("card pin \(pin.prefix(12))…")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
             }
         }
         .contextMenu {
             Button("New Chat Here") { bridge.newChat(peer: peer.label) }
+            Button("Clear Card Pin…") { showPinConfirm = true }
+                .disabled(pin.isEmpty)
             Button("Disconnect Peer") { bridge.disconnectPeer(label: peer.label) }
+        }
+        .confirmationDialog("Forget the pinned card for \(peer.label)?", isPresented: $showPinConfirm) {
+            Button("Clear Pin", role: .destructive) {
+                bridge.clearPeerPin(label: peer.label)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The next dial re-enrolls the card you paste. Verify the new card with the peer out of band first.")
         }
     }
 }
@@ -223,6 +269,11 @@ struct PeerConnectSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Connect to a roam peer").font(.headline)
             TextField("Peer label (e.g. home)", text: $label)
+            if !label.isEmpty && !CoreBridge.validPeerLabel(label) {
+                Text("A label cannot be padded, blank, or contain ':' — roam ids are roam:<label>:<id>.")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
             Text("Connection card from `goose serve --roam`")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -241,7 +292,7 @@ struct PeerConnectSheet: View {
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(label.trimmingCharacters(in: .whitespaces).isEmpty
+                .disabled(!CoreBridge.validPeerLabel(label)
                           || card.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }

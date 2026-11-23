@@ -589,6 +589,29 @@ pub struct PermissionRequest {
     pub title: String,
     pub detail: String,
     pub options: Vec<PermissionOption>,
+    /// The DISPLAY session id this approval belongs to (`roam:<label>:<id>`
+    /// for a peer chat), not a bare wire id the client has to re-prefix.
+    pub session_id: String,
+    /// Which wire asked: `"main"` or a roam peer's bare connection-card label.
+    /// `respond_permission` still routes by `tool_call_id`, but the prompt must
+    /// be able to name the chat/wire instead of guessing from the screen.
+    pub owner: String,
+}
+
+impl PermissionRequest {
+    /// Stamp the chat and wire that raised this prompt. Call this at the wire
+    /// construction site (main spine and roam peer), where the real owner is
+    /// known; [`crate::session::DispatchHost::permission`] fills anything a
+    /// caller leaves empty from the display id.
+    ///
+    /// `session_id` is the DISPLAY id; `owner` is `"main"` for the main wire or
+    /// the peer's bare label for roam (never `roam:<label>`, which the client
+    /// would have to parse back out).
+    pub(crate) fn on_chat(mut self, session_id: &str, owner: &str) -> Self {
+        self.session_id = session_id.to_string();
+        self.owner = owner.to_string();
+        self
+    }
 }
 
 /// The UI's answer to a permission request (CONTRACT §5).
@@ -788,8 +811,14 @@ pub trait CoreListener: Send + Sync {
 #[uniffi::export(callback_interface)]
 pub trait GrouseUnstableListener: Send + Sync {
     fn on_export(&self, data: String);
-    fn on_recipe_params(&self, parameters: String);
-    fn on_elicitation(&self, schema: String);
+    /// A recipe's declared parameters, keyed by the SERVER's request id. The
+    /// owner is the `SessionOwner` record of the wire that asked, so the answer
+    /// goes to that connection rather than whichever chat is on screen; pass
+    /// `request_id` back as the first argument of `respond_recipe_params`.
+    fn on_recipe_params(&self, owner: SessionOwner, request_id: String, parameters: String);
+    /// An `elicitation/create` form, keyed the same way; answer with
+    /// `respond_elicitation(request_id, action, content)`.
+    fn on_elicitation(&self, owner: SessionOwner, request_id: String, schema: String);
     fn on_compaction_status(&self, message: String);
     /// A context-window update that arrived over the unstable channel
     /// (`usage_update`): used/limit tokens plus the accumulated session cost.
@@ -6469,7 +6498,22 @@ impl crate::session::DispatchHost for Core {
         // spine behavior).
         self.inner.listener.on_commands(names);
     }
-    fn permission(&self, key: &str, request: PermissionRequest) {
+    fn permission(&self, key: &str, mut request: PermissionRequest) {
+        // The approval record must name its chat and wire: the reader may be
+        // looking at a different chat when a roam peer's tool asks, and the
+        // answer still routes by tool_call_id. The wire fills these where it
+        // knows them; the display id is enough to backfill either one.
+        if request.session_id.is_empty() {
+            request.session_id = key.to_string();
+        }
+        if request.owner.is_empty() {
+            let owner = self.session_owner(key.to_string());
+            request.owner = if owner.kind == "roam" {
+                owner.label
+            } else {
+                "main".to_string()
+            };
+        }
         if self.inner.hub.is_displayed(key) {
             self.inner.listener.on_permission_request(request);
         }
@@ -6790,6 +6834,12 @@ mod tests {
                 .filter_map(|line| line.strip_prefix("alert ").map(str::to_string))
                 .collect()
         }
+        fn permissions(&self) -> Vec<String> {
+            self.lines()
+                .into_iter()
+                .filter_map(|line| line.strip_prefix("permission ").map(str::to_string))
+                .collect()
+        }
         fn push(&self, line: String) {
             self.0.lock().unwrap().push(line);
         }
@@ -6817,7 +6867,12 @@ mod tests {
         }
         fn on_speak(&self, _: String) {}
         fn on_config(&self, _: Vec<ConfigOption>) {}
-        fn on_permission_request(&self, _: PermissionRequest) {}
+        fn on_permission_request(&self, request: PermissionRequest) {
+            self.push(format!(
+                "permission {} {} {}",
+                request.tool_call_id, request.session_id, request.owner
+            ));
+        }
         fn on_session_touched(&self, _: String, _: String, _: String) {}
         fn on_projects(&self, _: Vec<ProjectSummary>) {}
         fn on_roam_peer_status(&self, _: String, _: String) {}
@@ -7623,6 +7678,42 @@ mod tests {
         assert_eq!(
             events.opened(),
             vec!["s1".to_string(), "s3".to_string()]
+        );
+    }
+
+    #[test]
+    fn permission_prompt_carries_the_chat_and_wire_that_asked() {
+        let (core, events) = core();
+        let request = PermissionRequest {
+            tool_call_id: "call-9".to_string(),
+            title: "Run shell".to_string(),
+            detail: String::new(),
+            options: vec![],
+            session_id: String::new(),
+            owner: String::new(),
+        };
+        // A roam peer's chat: the display id alone resolves the bare peer label.
+        core.inner.hub.display("roam:desk:s1");
+        core.host().permission("roam:desk:s1", request.clone());
+        assert_eq!(
+            events.permissions(),
+            vec!["call-9 roam:desk:s1 desk".to_string()]
+        );
+        // An explicit wire stamp is kept; the fallback does not clobber it.
+        core.host().permission(
+            "roam:desk:s1",
+            request.clone().on_chat("roam:desk:s1", "desk"),
+        );
+        // The main wire reports "main", not an empty label.
+        core.inner.hub.display("s1");
+        core.host().permission("s1", request.on_chat("s1", "main"));
+        assert_eq!(
+            events.permissions(),
+            vec![
+                "call-9 roam:desk:s1 desk".to_string(),
+                "call-9 roam:desk:s1 desk".to_string(),
+                "call-9 s1 main".to_string(),
+            ]
         );
     }
 }

@@ -8,6 +8,9 @@
 #
 # The checker runs its own self-test first: a ratchet that stopped biting must
 # fail loudly rather than pass everything.
+#
+# Version pinning (X-7): actions are major tags, not SHAs — this repo has no
+# Dependabot config to maintain digests. See core.yml for the policy.
 name: Parity
 
 on:

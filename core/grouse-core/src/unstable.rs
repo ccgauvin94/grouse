@@ -17,7 +17,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::spine::{self, PendingRequest, RpcConn};
-use crate::GrouseUnstableListener;
+use crate::{GrouseUnstableListener, SessionOwner};
 
 /// The unstable `_goose/unstable/...` shim (CONTRACT §5), retiring with `grouse-unstable`.
 ///
@@ -43,8 +43,8 @@ impl GrouseUnstable {
         // answering via respond_recipe_params / respond_elicitation (CONTRACT §5).
         let _requests = spine::register_server_request_listener({
             let listener = Arc::clone(&listener);
-            Arc::new(move |method: &str, params: Value| {
-                Self::dispatch_server_request(&*listener, method, params);
+            Arc::new(move |method: &str, owner: SessionOwner, request_id: String, params: Value| {
+                Self::dispatch_server_request(&*listener, method, owner, request_id, params);
             })
         });
         // Goose-custom notifications (gated on `customNotifications`): `status_message` →
@@ -717,34 +717,68 @@ impl GrouseUnstable {
     // Server-request answers (CONTRACT §5)
     // -----------------------------------------------------------------------
 
-    /// Answer a pending `recipe/request-params` request. `values` is JSON mapping key →
-    /// string; single-slot per family (the CONTRACT signatures carry no request key).
-    pub fn respond_recipe_params(&self, action: String, values: String) {
-        spine::answer_request(
+    /// Answer ONE pending `recipe/request-params` request, keyed by the
+    /// `request_id` delivered with `on_recipe_params`. A stale or unknown id
+    /// fails instead of answering a different form. `values` is JSON mapping
+    /// key → string.
+    pub fn respond_recipe_params(&self, request_id: String, action: String, values: String) {
+        // Disconnected is a silent no-op on the whole shim (CONTRACT §1).
+        if spine::current_conn().is_none() {
+            return;
+        }
+        if !spine::answer_request(
             PendingRequest::RecipeParams,
+            &request_id,
             Self::recipe_params_answer(&action, &values),
-        );
+        ) {
+            self.listener.on_error(
+                "_goose/unstable/session/recipe/request-params".to_string(),
+                format!("no pending recipe form for request {request_id}"),
+            );
+        }
     }
 
-    /// Answer a pending `elicitation/create` request: `accept` with a content object,
-    /// `decline` / `cancel` without one.
-    pub fn respond_elicitation(&self, action: String, content: String) {
-        spine::answer_request(PendingRequest::Elicitation, Self::elicitation_answer(&action, &content));
+    /// Answer ONE pending `elicitation/create` request: `accept` with a content
+    /// object, `decline` / `cancel` without one. The id comes from
+    /// `on_elicitation`; a stale id fails without touching another request.
+    pub fn respond_elicitation(&self, request_id: String, action: String, content: String) {
+        // Disconnected is a silent no-op on the whole shim (CONTRACT §1).
+        if spine::current_conn().is_none() {
+            return;
+        }
+        if !spine::answer_request(
+            PendingRequest::Elicitation,
+            &request_id,
+            Self::elicitation_answer(&action, &content),
+        ) {
+            self.listener.on_error(
+                "elicitation/create".to_string(),
+                format!("no pending elicitation for request {request_id}"),
+            );
+        }
     }
 }
 
 impl GrouseUnstable {
-    /// Fan out a server→client request to the listener: recipe-params and elicitation
-    /// ride the raw JSON so the UI can render a form (CONTRACT §5).
-    fn dispatch_server_request(listener: &dyn GrouseUnstableListener, method: &str, params: Value) {
+    /// Fan out a server→client request to the listener: recipe-params and
+    /// elicitation ride the raw JSON so the UI can render a form (CONTRACT §5).
+    /// Both the owning wire and the reply key go with it — the client must
+    /// answer this id, never "the latest form" on another connection.
+    fn dispatch_server_request(
+        listener: &dyn GrouseUnstableListener,
+        method: &str,
+        owner: SessionOwner,
+        request_id: String,
+        params: Value,
+    ) {
         match method {
             "_goose/unstable/session/recipe/request-params" => {
                 let parameters = params.get("parameters").cloned().unwrap_or(Value::Null);
-                listener.on_recipe_params(parameters.to_string());
+                listener.on_recipe_params(owner, request_id, parameters.to_string());
             }
             "elicitation/create" => {
                 let schema = params.get("requestedSchema").cloned().unwrap_or(Value::Null);
-                listener.on_elicitation(schema.to_string());
+                listener.on_elicitation(owner, request_id, schema.to_string());
             }
             _ => {}
         }
@@ -1110,8 +1144,8 @@ mod tests {
     #[derive(Debug, Clone, PartialEq)]
     enum Ev {
         Export(String),
-        RecipeParams(String),
-        Elicitation(String),
+        RecipeParams(SessionOwner, String, String),
+        Elicitation(SessionOwner, String, String),
         CompactionStatus(String),
         Usage(i64, i64, f64),
         MessageUsage(u64, u64, u64, f64),
@@ -1150,11 +1184,11 @@ mod tests {
         fn on_export(&self, data: String) {
             self.events.lock().push(Ev::Export(data));
         }
-        fn on_recipe_params(&self, parameters: String) {
-            self.events.lock().push(Ev::RecipeParams(parameters));
+        fn on_recipe_params(&self, owner: SessionOwner, request_id: String, parameters: String) {
+            self.events.lock().push(Ev::RecipeParams(owner, request_id, parameters));
         }
-        fn on_elicitation(&self, schema: String) {
-            self.events.lock().push(Ev::Elicitation(schema));
+        fn on_elicitation(&self, owner: SessionOwner, request_id: String, schema: String) {
+            self.events.lock().push(Ev::Elicitation(owner, request_id, schema));
         }
         fn on_compaction_status(&self, message: String) {
             self.events.lock().push(Ev::CompactionStatus(message));
@@ -2235,42 +2269,52 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn recipe_params_request_forwards_parameters() {
+    fn recipe_params_request_forwards_parameters_owner_and_reply_key() {
         let _guard = TEST_LOCK.lock();
         let rec = Arc::new(RecordingListener::default());
+        let owner = SessionOwner { kind: "roam".into(), label: "desk".into() };
 
         GrouseUnstable::dispatch_server_request(
             &rec,
             "_goose/unstable/session/recipe/request-params",
+            owner.clone(),
+            "req-42".into(),
             json!({"parameters": [{"key": "topic", "default": "goose", "input_type": "string"}]}),
         );
 
         assert_eq!(
             rec.events(),
             vec![Ev::RecipeParams(
+                owner,
+                "req-42".into(),
                 "[{\"key\":\"topic\",\"default\":\"goose\",\"input_type\":\"string\"}]".to_string()
             )],
-            "the raw parameters array rides on_recipe_params so the UI can render a form"
+            "the form, its asking wire and its reply key all ride on_recipe_params"
         );
     }
 
     #[test]
-    fn elicitation_request_forwards_schema() {
+    fn elicitation_request_forwards_schema_owner_and_reply_key() {
         let _guard = TEST_LOCK.lock();
         let rec = Arc::new(RecordingListener::default());
+        let owner = SessionOwner { kind: "main".into(), label: String::new() };
 
         GrouseUnstable::dispatch_server_request(
             &rec,
             "elicitation/create",
+            owner.clone(),
+            "req-43".into(),
             json!({"mode": "form", "requestedSchema": {"title": "Ask", "properties": {}}}),
         );
 
         assert_eq!(
             rec.events(),
             vec![Ev::Elicitation(
+                owner,
+                "req-43".into(),
                 "{\"title\":\"Ask\",\"properties\":{}}".to_string()
             )],
-            "the requestedSchema rides on_elicitation"
+            "the requestedSchema, its owner and its reply key ride on_elicitation"
         );
     }
 

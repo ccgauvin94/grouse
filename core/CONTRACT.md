@@ -121,6 +121,12 @@ chat, which replaced the roam chat the reader was actually looking at.
 
 ### 3.2 `CoreListener` — events (core → UI), one method per family
 
+The authoritative callback inventory is `core/grouse-core/src/surface.rs`
+(`LISTENER_EVENTS` / `LISTENER_SIGNATURES`, signature-checked against the trait
+by `scripts/check-parity.py`) plus the generated uniffi bindings. The excerpt
+below is **illustrative** and carries rationale only; a hand-maintained list
+has lagged the trait before, so do not treat it as complete.
+
 ```rust
 #[uniffi::export(callback_interface)]
 pub trait CoreListener {
@@ -135,6 +141,10 @@ pub trait CoreListener {
     // speak before the turn ends; a client not narrating a live turn ignores it.
     fn on_speak(&self, text: String);
     fn on_config(&self, options: Vec<ConfigOption>);
+    // PermissionRequest also carries `session_id` (the DISPLAY id, so a
+    // `roam:<label>:<id>` approval is never answered on the main wire) and
+    // `owner: String` ("main" or a roam peer's bare label). Both ride in the
+    // record, so the callback arity is unchanged.
     fn on_permission_request(&self, request: PermissionRequest);
     fn on_session_touched(&self, session_id: String, title: String, updated_at: String);
     fn on_projects(&self, projects: Vec<ProjectSummary>);
@@ -191,10 +201,14 @@ pub trait CoreListener {
 ```
 
 The desktop C ABI mirrors this table field-for-field as `GrouseCoreListener`.
-`on_session_opened` was appended at the END and bumped the ABI to **18** (the
-current version is **19**, a record-shape-only bump — §5.5); the desktop refuses
-a library whose `grouse_abi_version()` differs, because a slot inserted anywhere
-else would call every later callback with the wrong arity.
+`on_session_opened` was appended at the END and bumped the ABI to **18**;
+**19** changed only record shapes (§5.5). **20** appends two more slots at the
+END — `on_recipe_params_request` and `on_elicitation_request`, each
+`(owner_json, request_id, payload_json)` — because the unstable form callbacks
+now carry the owner and the request id needed to answer them (§5). The legacy
+single-payload slots stay in place for offset stability but are not fired.
+Slots are never inserted: a client built for an older ABI would call every
+later callback with the wrong arity, so `grouse_abi_version()` is a hard gate.
 
 **A reload invalidates; a refresh merely asks.** `RefreshMode::Quick` trusts a
 settled cache and merges a bounded tail, which is right for an open and useless
@@ -834,12 +848,28 @@ Separate `GrouseUnstable` interface, clearly marked for retirement. Methods
 Server→client requests (both stable and unstable), answered by the CORE, with
 the UI prompted only where a human decision is needed:
 
-- `session/request_permission` → `on_permission_request` → UI answers
+- `session/request_permission` → `on_permission_request(PermissionRequest)` → UI answers
   `respond_permission(tool_call_id, outcome)` where `outcome = Selected(option_id) | Cancelled`.
+  The request carries `session_id` (display id) and `owner: String` (`"main"`
+  or the peer's bare label), so an approval from a roam peer can be named on
+  the prompt instead of guessed from the current screen. Responding still
+  routes by `tool_call_id`.
 - `_goose/unstable/session/recipe/request-params` → core auto-answers with
-  defaults; if the UI opts into forms, `on_recipe_params` + `respond_recipe_params`.
-- `elicitation/create` (form mode) → `on_elicitation` + `respond_elicitation`
-  (this is Android-only today; carried so the contract is complete).
+  defaults; if the UI opts into forms,
+  `on_recipe_params(owner, request_id, parameters)` +
+  `respond_recipe_params(request_id, action, values)`.
+- `elicitation/create` (form mode) →
+  `on_elicitation(owner, request_id, schema)` +
+  `respond_elicitation(request_id, action, content)`.
+
+**Request ids are reply keys, not decoration (ABI 20).** Both families are
+keyed by server request id and by owner: the core parks one responder per
+`(family, id)`, supersedes an unanswered request with the same key, and drops a
+reply whose key does not match. A client that answers "the latest form" with
+the old three-argument signature strands the first server request. On the C
+ABI the owner crosses as a `SessionOwner` JSON record and the new callbacks are
+`on_recipe_params_request` / `on_elicitation_request`, appended to the listener
+table (§3.2).
 
 Custom notifications (gated on `customNotifications`) — each starts with a
 session gate: a notification carrying a `sessionId` that is not the displayed
@@ -982,6 +1012,17 @@ sets the drawer's green dot via `SessionHub::mark_new` instead of painting.
 
 - intents: `roam_connect(card, label)`, `roam_disconnect(label)`,
   `roam_open_session(label, session_id)`
+- **Card pins (ABI 20).** A peer whose card fingerprint was enrolled is
+  rejected on dial when its card changes. The core owns the pin store (0600,
+  under the app cache); clients only manage it through
+  `roam_card_pin(label) -> Option<String>`, `roam_card_pins() -> JSON map`,
+  `roam_card_pin_enroll(label, fingerprint)` (after an explicit user
+  confirmation of a re-shared card) and `roam_card_pin_clear(label)`. The phone
+  reaches these through uniffi; the C ABI exports the same four as
+  `grouse_roam_card_pin` (JSON string, empty for no pin), `grouse_roam_card_pins` (JSON
+  object string), `grouse_roam_card_pin_enroll` and `grouse_roam_card_pin_clear`
+  (both report failures through `out_err`). Showing or clearing a pin is a UI
+  surface, not a protocol change: the dial-time check stays in the core.
 - events: `on_roam_peer_status(label, status)`, `on_roam_sessions(label, Vec<SessionSummary>)`
 - the peer's session id namespace uses the `roam:<peer>:<id>` prefix for
   sidebar grouping, exactly as today. The label cannot contain `:` and owner

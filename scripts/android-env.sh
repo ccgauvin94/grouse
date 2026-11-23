@@ -94,7 +94,8 @@ if [[ -n "${GROUSE_KEYSTORE:-}" && -e "${GROUSE_KEYSTORE}" ]]; then
 fi
 
 # -it only when there is a terminal: the APK build runs from CI or a non-tty
-# wrapper too, and podman warns loudly otherwise.
+# wrapper too, and podman warns loudly otherwise. dev-env.sh uses the same
+# guard; keep both in step so no repo build script assumes an interactive tty.
 tty=()
 [[ -t 0 ]] && tty=(-it)
 

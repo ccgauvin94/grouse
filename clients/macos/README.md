@@ -61,10 +61,11 @@ Flags: `--no-send` stops before prompting. Env: `GROUSE_TLS=0` for a plain-ws de
   `strip = true`, which removes the uniffi metadata sections bindgen reads — the Android
   script already documents this for Kotlin (`scripts/build-android-libs.sh`), and it bites
   the Swift path identically. Only the `.a` that gets linked is a release build.
-- **`CoreListener` has one requirement per event and no defaults.** Every conformance would have to
-  stub all of them, and each new listener event the core gains breaks that conformance.
-  `Sources/GrouseCore/ListenerDefaults.swift` supplies no-op defaults via a protocol
-  extension — one file, and a conformance then implements only what it uses.
+- **Both generated listener protocols have one requirement per event and no defaults.**
+  Every conformance would have to stub all of them, and each new listener event the core
+  gains breaks that conformance. `Sources/GrouseCore/ListenerDefaults.swift` and
+  `UnstableListenerDefaults.swift` supply no-op defaults via protocol extensions, so each
+  conformance implements only what it uses.
 
 ## What CI checks (and what it cannot)
 
@@ -77,12 +78,14 @@ two invariants that need no Darwin:
 1. **The bindings still generate.** `check-bindings.py` runs `uniffi-bindgen-swift` against
    a debug host build, so a core change that breaks Swift generation is caught here and not
    on the Mac.
-2. **`ListenerDefaults.swift` keeps up.** It compares the generated `CoreListener`
-   protocol's requirements against the defaults and fails with the exact signature to paste
-   — which is what stops a new core event from silently breaking a conformance that only
+2. **Both listener defaults keep up.** It compares the generated `CoreListener` and
+   `GrouseUnstableListener` protocols' requirements — full signatures, not just names —
+   against `ListenerDefaults.swift` and `UnstableListenerDefaults.swift`, and fails with the
+   exact signature to paste. That is what stops a new or re-shaped core event (for example
+   `owner`/`requestId` on a form callback) from silently breaking a conformance that only
    compiles on someone's laptop.
 
-Run it yourself: `python3 clients/macos/spike/check-bindings.py <path-to-libgrouse_core.so>`
+Run it yourself: `python3 clients/macos/check-bindings.py <path-to-libgrouse_core.so>`
 (a debug build — see the strip note above).
 
 ## What the first slice of the app does
@@ -98,18 +101,23 @@ that makes it pleasant:
   streaming and rendered once the turn ends
 - **composer** with ⌘↩ to send, **Stop** in the toolbar
 - **tool approval** driven by the server's own options (the four answers the KDE dialog
-  lost for months), plus **thinking** and **tool** rows that expand
+  lost for months). Requests are queued by tool-call id and the sheet names the owning
+  chat and wire, so a second approval cannot strand the first; recipe-parameter and
+  elicitation forms are queued by the core's request id and answered with that id
+- **thinking** and **tool** rows that expand
 - **advisor** card above the composer, driven by the global Dev switch
 - a status line with the wire state, the context count and replay progress
 
 The sidebar also lists roam peers from the core's roam callbacks and their chats from
 `allSessions()`; opening one asks `sessionOwner` which wire owns it. Server-shared files get
-a Download/Open action driven by `FileEvent`, and Stop is driven by `onActiveRun`.
+a Download/Open action driven by `FileEvent`, and Stop is driven by `onActiveRun`. A peer's
+pinned card fingerprint is read from the core and can be cleared from the peer's context
+menu; the next dial re-enrolls the pasted card (verify it out of band first).
 
 Deliberately NOT yet: Markdown as real block views, inline image rendering, full roam configuration,
-provider/model pickers, recipes/schedules/skills/extensions, My Day, threads, MCP Apps,
-notifications, speech, and the two scroll/windowing refinements. Each is a known, sized
-piece rather than a surprise.
+provider/model pickers, recipe/schedule authoring (the server-initiated parameter form IS
+implemented), skills/extensions, My Day, threads, MCP Apps, notifications, speech, and the
+two scroll/windowing refinements. Each is a known, sized piece rather than a surprise.
 
 ## Layout
 

@@ -7,9 +7,12 @@ Native chat clients for a self-hosted [goose](https://github.com/aaif-goose/goos
 agent.
 
 grouse is built on the official goose SDK (`agent-client-protocol`, Client role),
-with the `agent-client-protocol-http` WebSocket transport. The server owns
-sessions, memory, tools, and model choice. The clients render transcripts and send
-prompts.
+with a **custom WebSocket transport** — `WsTransport`'s `ConnectTo` implementation
+in `core/grouse-core/src/transport.rs`, *not* `agent-client-protocol-http`. The
+stock HTTP client cannot send grouse's `X-Secret-Key` header or implement its TLS
+policy. See [AGENTS.md](AGENTS.md) for the architecture and the protocol notes.
+The server owns sessions, memory, tools, and model choice. The clients render
+transcripts and send prompts.
 
 <details>
 <summary>Screenshots</summary>
@@ -30,7 +33,7 @@ prompts.
 |---|---|---|---|---|
 | Android | Kotlin + Jetpack Compose | Supported | [![Android](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/android.yml) | [APK](https://github.com/ccgauvin94/grouse/releases/latest/download/grouse-android.apk) |
 | Linux | Qt 6 + KF6 Kirigami | Supported | [![Flatpak](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml/badge.svg)](https://github.com/ccgauvin94/grouse/actions/workflows/flatpak.yml) | [Flatpak](https://github.com/ccgauvin94/grouse/releases/latest/download/grouse-desktop.flatpak) |
-| macOS | SwiftUI | Planned | | |
+| macOS | SwiftUI | Experimental — spike + first app slice; no CI compile or release ([notes](clients/macos/README.md)) | | |
 | iOS | SwiftUI | Not planned* | | |
 | TUI | Rust | Planned | | |
 
@@ -52,6 +55,7 @@ thin; protocol behavior is not duplicated in them.
   SDK.
 - `clients/android`: Kotlin + Jetpack Compose.
 - `clients/desktop`: Qt 6 + KF6 Kirigami.
+- `clients/macos`: SwiftUI spike and first app slice (experimental; built on a Mac only).
 - `clients/cli`: placeholder, no implementation.
 
 ## Building
@@ -84,6 +88,11 @@ Desktop (Flatpak bundle):
 ```sh
 just desktop
 ```
+
+macOS is not a supported release target yet: the SwiftUI slice and the uniffi Swift
+bindings live in `clients/macos/` and build only on a Mac (`./build.sh` there). CI
+checks that the bindings still generate and that listener defaults keep up, but it
+does **not** compile Swift. See `clients/macos/README.md`.
 
 ## Releasing
 

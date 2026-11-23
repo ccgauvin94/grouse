@@ -174,16 +174,17 @@ roam.rs        the peer registry: RoamPeer { label, transport, session list },
    - freshness is the CALLER's job (compare updatedAt); the store is dumb I/O.
      The core's caller is `Core::save_cache_for` (incomplete store ⇒ empty
      stamp) and `session::plan_paint`.
-   - **no default bodies in `DispatchHost`.** Every method is REQUIRED, and
-     `PrefixHost` (the peer's wrapper) forwards all of them. A method with a
-     default can be skipped by a wrapper and nothing says so — `listed_stamp` and
-     `is_incomplete` shipped defaulted, so roam compared a cached transcript
-     against its own session list and replayed a tail on every open, for two
-     release rounds, with tests and the compiler both looking past the wrapper
-     (2026-11-06). Adding a method now breaks the wrapper until someone decides
-     how to forward it; that compile error IS the ratchet. Same rule for the
-     transport seam: anything sequences around a `session/load` lives in
-     `session::replay_held`, never in a transport.
+   - **no default bodies in `DispatchHost`, with one deliberate exception.**
+     Every method is REQUIRED and `PrefixHost` (the peer's wrapper) forwards it,
+     EXCEPT `session_mode`, which has a default no-op: a transport with nothing
+     to say about a chat's mode should simply ignore it. Other methods used to
+     ship defaulted too — `listed_stamp` and `is_incomplete` — so roam compared a
+     cached transcript against its own session list and replayed a tail on every
+     open, for two release rounds, with tests and the compiler both looking past
+     the wrapper (2026-11-06). Adding a required method now breaks the wrapper
+     until someone decides how to forward it; that compile error IS the ratchet.
+     Same rule for the transport seam: anything sequences around a
+     `session/load` lives in `session::replay_held`, never in a transport.
    - **one stamp source.** The baseline a plan compares against is
      `DispatchHost::listed_stamp` — the same map `save_cache_for` stamps with —
      for BOTH wires. A transport that keeps its own copy of `updatedAt` (the
@@ -322,8 +323,14 @@ the paint policy is `session::plan_paint` for both.
 ## Build & test
 
 - `cargo check`/`cargo test` via `distrobox enter kde-build`.
-  At the 2026-11-22 audit that was 300 unit + 24 spine tests (plus roam and
-  unstable); the spine file has grown since.
+  Test counts move with every commit: count `#[test]` attributes at a pinned
+  revision rather than trusting a bare number. At this checkout (based on
+  `f3585cf3`, 2026-11-22, plus in-flight edits) that is 342 in
+  `grouse-core/src` plus 4 in `grouse-roam-core/src` and 2 in
+  `grouse-unstable/src` (348 unit tests), 27 in `grouse-core/tests/spine.rs`, 4 in
+  `grouse-roam-core/tests/core.rs`, and 1 ignored live-host e2e test. Re-count at
+  the revision you ship; the older "300 unit + 24 spine" figure was the audit
+  snapshot, not today's.
 - Tests: pure unit tests for stores/unstable (no server). For the spine, a
   minimal in-process scripted WS server (tokio-tungstenite). The desktop is no
   longer a reference implementation: it is a thin client over the C ABI

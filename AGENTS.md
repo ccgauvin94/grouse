@@ -10,6 +10,27 @@ a documented convention across the repo differs from what you find, the code and
 the inner contract files (`core/CONTRACT.md`, `core/grouse-core/INTERNAL.md`,
 `clients/desktop/AGENTS.md`, `CONTRIBUTING.md`) govern.
 
+### Doc ownership map
+
+One question, one owner. Do not restate a fact in a second document: link to its
+owner instead (the 2026-11-22 docs audit found four files claiming authority and
+the same invariant in five).
+
+| Kind | Owner | What it settles |
+|---|---|---|
+| Normative — architecture | this file (`AGENTS.md`) | how the pieces talk; protocol notes that bite |
+| Normative — core API | `core/CONTRACT.md` | the uniffi interface and its listener/record semantics |
+| Normative — internal seams | `core/grouse-core/INTERNAL.md` | module boundaries and threading inside the core |
+| Normative — generated surface | `core/grouse-core/src/surface.rs` + generated bindings | the authoritative field / op / callback inventory, checked by `scripts/check-parity.py` (a hand-written list in prose can lag; it is not a second source of truth) |
+| Normative — platform | `clients/desktop/AGENTS.md`, `clients/macos/README.md` | toolkit-specific rules |
+| Rationale / design | `docs/TRANSCRIPT_MODEL.md` | why the transcript is an item stream; historical sections are marked ARCHIVE |
+| Ledger | `docs/PARITY.md` + `scripts/check-parity.py` | per-client dispositions for every core surface |
+| Historical record | `docs/CACHE_OPEN_AUDIT.md`, `docs/QUALITY_AUDIT_2026-11-22.md`, `CHANGELOG.md` | what was found, fixed and shipped; never a claim about today's code without a status note |
+| Front door / process | `README.md`, `CONTRIBUTING.md` | claims a newcomer can check, and how to work |
+
+The workflow files under `.github/workflows/` own CI's jobs, triggers and required
+checks — see the CI section under Development Commands.
+
 ---
 
 ## Project Overview
@@ -72,7 +93,10 @@ twice: the generated bindings, and a hand-written C ABI (`capi.rs`) that mirrors
 the same surface for the desktop. Nothing else may reach into the core.
 
 - **Android (Kotlin/Compose)** consumes the uniffi-generated Kotlin bindings.
-- **macOS (SwiftUI, later)** will consume the uniffi-generated Swift bindings.
+- **macOS (SwiftUI, experimental)** consumes the uniffi-generated Swift bindings.
+  `clients/macos/` holds a working binding spike and the first slice of the app,
+  not a supported release: Swift is not compiled in CI here, and the Linux host
+  cannot build it. See `clients/macos/README.md`.
 - **Linux desktop (Qt6/KF6 Kirigami)** consumes the hand-written C ABI
   (`extern "C"`, `core/grouse-core/src/capi.rs`), dlopened as `libgrouse_core.so`
   by `src/corebridge.cpp`.
@@ -105,7 +129,7 @@ one-line labels for a run of tool calls), `capi.rs` (the C ABI above).
 |Linux desktop|Qt6 + KF6 Kirigami (QML/C++)|C ABI (`grouse_*`, dlopened `libgrouse_core.so`)|
 |Android|Kotlin + Jetpack Compose|uniffi Kotlin|
 |CLI|Rust TUI|direct crate dependency (placeholder — see Runtime/Tooling)|
-|macOS (later)|SwiftUI|uniffi Swift|
+|macOS (experimental, spike + first slice)|SwiftUI|uniffi Swift; no CI compile, no release|
 |Web|deferred — not a native UI|—|
 
 ### Data flow (core model)
@@ -313,10 +337,11 @@ keep them when extending the core.
 |`clients/desktop/`|Qt6/KF6 Kirigami thin client: QML + `corebridge` (dlopen of `libgrouse_core.so`, the only wire path), plus the host-side KRunner plugin (its own `AGENTS.md` is the C++-side contract).|
 |`clients/android/`|Kotlin/Compose client (app) + `grouse-core-aar` module carrying the uniffi bindings and native `.so`s.|
 |`clients/cli/`|Rust TUI — **README placeholder only, no `Cargo.toml` yet.**|
-|`docs/`|`TRANSCRIPT_MODEL.md` (the item stream the core emits), `NOTIFICATIONS.md` (push envelope + policy), and `ROAM_SESSION_LIST_FAILURE.md` (the 2026-11-09 roam outage: a 32-bit session counter broke `session/list` and the endpoint could not connect).|
+|`clients/macos/`|SwiftUI **experimental** spike + first app slice, consuming uniffi Swift bindings; builds on a Mac only, no release and no Swift compile in CI (its README owns the platform notes).|
+|`docs/`|`TRANSCRIPT_MODEL.md` (rationale for the item stream; historical sections marked ARCHIVE), `NOTIFICATIONS.md` (push envelope + policy), `ROAM_SESSION_LIST_FAILURE.md` (the 2026-11-09 roam outage), and the 2026-11-22 audit/historical records (see the doc ownership map).|
 |`design/`|Shared design tokens (`tokens.json` + `design-language.md`), owned by the design-language workstream, not platform dirs.|
 |`scripts/`|`android-env.sh` (runs a command inside the Android build image: SDK/NDK + the JDK), `build-android-libs.sh` (Android native libs + bindings), `publish-apk.sh` (verify a release-signed APK and publish it to Nextcloud), `dev-env.sh` (devcontainer wrapper on podman).|
-|`.github/workflows/`|CI: `core.yml`, `android.yml`, `codeql.yml`, `flatpak.yml`, `secrets.yml`; `release.yml` (tag-triggered APK + Flatpak → GitHub Release).|
+|`.github/workflows/`|CI's source of truth for jobs, triggers and required checks (see the CI section); no duplicated table in this file.|
 |`.devcontainer/`|Rocky Linux 9 dev container for the Rust core only (no Android NDK, no Qt).|
 
 ## Development Commands
@@ -419,19 +444,14 @@ gitleaks detect --source .    # CI-gated; a commit must not contain secrets
 
 ### CI (`.github/workflows/`)
 
-|Workflow|What it runs|Required check|
-|---|---|---|
-|`core.yml`|`cargo test` + `cargo clippy --all-targets -- -D warnings`, pinned toolchain 1.97.1|`Core / test`|
-|`android.yml`|`./gradlew --no-daemon testDebugUnitTest` + `assembleDebug` + APK artifact|`Android / apk`|
-|`codeql.yml`|CodeQL analysis of the Android build (push + weekly schedule)|CodeQL `analyze`|
-|`flatpak.yml`|KRunner plugin + `libgrouse_core.so` host build and desktop `ctest` (Fedora containers), then Flatpak bundle with `-DBUILD_TESTING=OFF` (org.kde.Platform 6.10)|`Flatpak / host-components`, `Flatpak / desktop-tests`, `Flatpak / flatpak`|
-|`secrets.yml`|gitleaks|`Secrets scan / gitleaks`|
-|`release.yml`|On a `v*` tag: signed release APK + desktop Flatpak, published as GitHub Release assets|— (not a PR check)|
-
-CI now gates Android JVM unit tests (`android.yml`) and desktop `ctest`
-(`flatpak.yml`, Fedora Qt container); run them locally too when changing the
-corresponding client code. QML lint and the `xvfb-run` page-load check remain
-manual.
+The workflow files themselves are the source of truth for CI's jobs, triggers and
+required checks — read them before claiming that a check exists; do not duplicate
+their contents here (a table of jobs goes stale the moment a workflow changes).
+That directory currently holds `core.yml`, `android.yml`, `parity.yml`,
+`flatpak.yml`, `codeql.yml`, `secrets.yml`, `macos.yml`, `gate.yml` and
+`release.yml`. Android JVM tests, desktop `ctest` and the parity ratchet are gated
+in those workflows; QML lint and the `xvfb-run` page-load check remain manual, and
+`macos.yml` guards the Swift bindings without compiling Swift.
 
 **Releases** are cut by pushing a version tag (`git tag v0.69 && git push origin
 v0.69`). `release.yml` then builds the signed `assembleRelease` APK and the
@@ -642,8 +662,9 @@ change before tagging.
     relay"]`**; run with `cargo test --test e2e -- --ignored --nocapture`.
 - **`grouse-unstable`** holds only the re-exports + the disconnected no-op
   contract tests; the shim's behavior is tested in `grouse-core`.
-- Run: `cargo test --manifest-path core/Cargo.toml`. This is the only test suite
-  CI runs (in `core.yml`).
+- Run: `cargo test --manifest-path core/Cargo.toml`. CI runs the core suite in
+  `core.yml`; other jobs (Android, desktop, parity) are defined in their own
+  workflow files — see the CI section.
 
 ### Desktop
 
@@ -672,7 +693,8 @@ change before tagging.
   framework-free: "parsers and wire framing only — no Android framework, no
   Robolectric". No `src/androidTest/`, no Compose UI tests. `mockwebserver` is
   declared but currently unused.
-- Run: `./gradlew testDebugUnitTest`. Not wired into CI.
+- Run: `./gradlew testDebugUnitTest`. CI runs it via `android.yml`; see
+  the CI section.
 
 ### Coverage
 

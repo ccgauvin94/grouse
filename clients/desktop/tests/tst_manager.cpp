@@ -56,6 +56,9 @@ private slots:
     void linkAllowlistMatchesQmlRule();
     void localFileOpensAreValidated();
     void appUrlsAreSessionScopedAndRevokedOnRefetch();
+    void permissionQueueKeepsEachRequestAndOwner();
+    void formQueueKeepsEachRequestAndOwner();
+    void cardPinStatusIsFormattedAndActionable();
 };
 
 /**
@@ -756,6 +759,147 @@ void TstManager::appUrlsAreSessionScopedAndRevokedOnRefetch()
     QVERIFY(refreshed != first);
     QVERIFY(refreshed != second);
     QCOMPARE(mgr.appViewUrl(appKey), refreshed);
+}
+
+/**
+ * ABI 20 requests carry their own id and owner. A second permission must not
+ * replace the first (the old one-slot member dropped the parked responder), and
+ * a late dialog answer must not deny a DIFFERENT request.
+ */
+void TstManager::permissionQueueKeepsEachRequestAndOwner()
+{
+    Manager mgr;
+    mgr.coreOnPermission(QStringLiteral(
+        R"({"PermissionRequest":{"request_id":"req-1","tool_call_id":"tool-1",)"
+        R"("session_id":"roam:nas:s1","owner":{"kind":"roam","label":"nas"},)"
+        R"("title":"Use the tool","detail":"dangerous",)"
+        R"("options":[{"option_id":"allow_once","name":"Allow","kind":"allow_once"}]}})"));
+    mgr.coreOnPermission(QStringLiteral(
+        R"({"PermissionRequest":{"request_id":"req-2","tool_call_id":"tool-2",)"
+        R"("session_id":"local-1","owner":{"kind":"main","label":""},)"
+        R"("title":"Second tool","detail":"",)"
+        R"("options":[{"option_id":"reject_once","name":"Deny","kind":"reject_once"}]}})"));
+
+    QCOMPARE(mgr.permissionCount(), 2);
+    QCOMPARE(mgr.permissionToolCallId(), QStringLiteral("req-1"));
+    QCOMPARE(mgr.permissionRequestId(), QStringLiteral("req-1"));
+    QCOMPARE(mgr.permissionOwner(), QStringLiteral("roam:nas"));
+    QVERIFY2(mgr.permissionTitle().contains(QStringLiteral("roam:nas")),
+             qPrintable(mgr.permissionTitle()));
+    QCOMPARE(mgr.permissionOptions().size(), 1);
+    QCOMPARE(mgr.permissionOptions().first().toMap().value(QStringLiteral("option_id")).toString(),
+             QStringLiteral("allow_once"));
+
+    // Answer the second by id: the first stays exactly where it was.
+    mgr.respondPermission(QStringLiteral("req-2"), QStringLiteral("reject_once"));
+    QCOMPARE(mgr.permissionCount(), 1);
+    QCOMPARE(mgr.permissionToolCallId(), QStringLiteral("req-1"));
+    mgr.respondPermission(QStringLiteral("req-1"), QStringLiteral("allow_once"));
+    QCOMPARE(mgr.permissionCount(), 0);
+    QVERIFY(mgr.permissionTitle().isEmpty());
+    // A stale click cannot answer the (now absent) request or its successor.
+    mgr.respondPermission(QStringLiteral("req-2"), QString());
+    QCOMPARE(mgr.permissionCount(), 0);
+
+    // Redelivery is idempotent: do not replace the visible title/options.
+    mgr.coreOnPermission(QStringLiteral(
+        R"({"request_id":"req-3","session_id":"s3","title":"Original","options":[]})"));
+    mgr.coreOnPermission(QStringLiteral(
+        R"({"request_id":"req-3","session_id":"s3","title":"Replacement","options":[]})"));
+    QCOMPARE(mgr.permissionCount(), 1);
+    QVERIFY2(mgr.permissionTitle().contains(QStringLiteral("Original")),
+             qPrintable(mgr.permissionTitle()));
+
+    // Pure helpers used by the queue: legacy tool-call ids and empty ids.
+    const QVariantList queue{QVariantMap{{"requestId", QStringLiteral("a")}},
+                             QVariantMap{{"toolCallId", QStringLiteral("b")}}};
+    QCOMPARE(Manager::requestQueueIndex(queue, QStringLiteral("a")), 0);
+    QCOMPARE(Manager::requestQueueIndex(queue, QStringLiteral("b")), 1);
+    QCOMPARE(Manager::requestQueueIndex(queue, QString()), -1);
+    QCOMPARE(Manager::requestQueueIndex(queue, QStringLiteral("c")), -1);
+    const QVariantMap parsed = Manager::parsePermissionRequest(
+        QStringLiteral(R"({"request_id":"r","owner":"nas","session_id":"roam:nas:s1"})"));
+    QCOMPARE(parsed.value(QStringLiteral("ownerLabel")).toString(), QStringLiteral("roam:nas"));
+}
+
+/** Forms are queued by request id too; the owner is part of the visible title. */
+void TstManager::formQueueKeepsEachRequestAndOwner()
+{
+    Manager mgr;
+    mgr.coreOnRecipeParams(QStringLiteral("roam:nas"),
+                           QStringLiteral("form-1"),
+                           QStringLiteral(R"([{"key":"branch","input_type":"string","requirement":"required"}])"));
+    mgr.coreOnElicitation(QStringLiteral(R"({"kind":"main","label":"main"})"),
+                          QStringLiteral("form-2"),
+                          QStringLiteral(R"({"title":"Pick one","properties":{"go":{"type":"boolean"}},"required":[]})"));
+
+    const QVariantMap first = mgr.pendingForm().toMap();
+    QCOMPARE(first.value(QStringLiteral("requestId")).toString(), QStringLiteral("form-1"));
+    QVERIFY(first.value(QStringLiteral("recipeParams")).toBool());
+    QVERIFY2(first.value(QStringLiteral("title")).toString().contains(QStringLiteral("roam:nas")),
+             qPrintable(first.value(QStringLiteral("title")).toString()));
+    QCOMPARE(first.value(QStringLiteral("fields")).toList().size(), 1);
+
+    // Answer the second by id; the recipe form is still the visible one.
+    mgr.answerFormFor(QStringLiteral("form-2"), QVariantMap{}, QStringLiteral("decline"));
+    const QVariantMap remains = mgr.pendingForm().toMap();
+    QCOMPARE(remains.value(QStringLiteral("requestId")).toString(), QStringLiteral("form-1"));
+
+    // A redelivered form cannot replace the parked one.
+    mgr.coreOnRecipeParams(QStringLiteral("roam:nas"), QStringLiteral("form-1"),
+                           QStringLiteral(R"([{"key":"other","input_type":"string"}])"));
+    QCOMPARE(mgr.pendingForm().toMap().value(QStringLiteral("requestId")).toString(),
+             QStringLiteral("form-1"));
+    QCOMPARE(mgr.pendingForm().toMap().value(QStringLiteral("fields")).toList().size(), 1);
+
+    // Answer the visible form: nothing is left parked.
+    mgr.answerForm(QVariantMap{{QStringLiteral("branch"), QStringLiteral("main")}},
+                   QStringLiteral("accept"));
+    QVERIFY(mgr.pendingForm().toMap().isEmpty());
+    mgr.answerFormFor(QStringLiteral("form-2"), QVariantMap{}, QStringLiteral("accept"));
+    QVERIFY(mgr.pendingForm().toMap().isEmpty());
+}
+
+/** Card pins are pure-formatted, and a refusal becomes one actionable dialog. */
+void TstManager::cardPinStatusIsFormattedAndActionable()
+{
+    const QVariantList rows = Manager::formatCardPins(
+        QVariantMap{{QStringLiteral("nas"), QStringLiteral("0123456789abcdef0123")},
+                    {QStringLiteral("home"), QStringLiteral("short")}});
+    QCOMPARE(rows.size(), 2);
+    QCOMPARE(rows.first().toMap().value(QStringLiteral("peer")).toString(),
+             QStringLiteral("home"));
+    QCOMPARE(rows.first().toMap().value(QStringLiteral("fingerprint")).toString(),
+             QStringLiteral("short"));
+    QCOMPARE(rows.last().toMap().value(QStringLiteral("short")).toString(),
+             QStringLiteral("0123456789ab…0123"));
+    QVERIFY(Manager::formatCardPins(QVariantMap{{QString(), QStringLiteral("fp")}}).isEmpty());
+
+    const QString status = QStringLiteral(
+        "error: roam card pin refused: roam card for 'nas' changed: pinned aaaa, "
+        "got bbbb. Refusing to dial — clear the pin to re-enroll this peer");
+    const QVariantMap refusal = Manager::parseCardPinRefusal(status);
+    QVERIFY(!refusal.isEmpty());
+    QCOMPARE(refusal.value(QStringLiteral("peer")).toString(), QStringLiteral("nas"));
+    QCOMPARE(refusal.value(QStringLiteral("pinned")).toString(), QStringLiteral("aaaa"));
+    QCOMPARE(refusal.value(QStringLiteral("got")).toString(), QStringLiteral("bbbb"));
+    QVERIFY(Manager::parseCardPinRefusal(QStringLiteral("connecting: dialing")).isEmpty());
+    QCOMPARE(Manager::parseCardPinRefusal(
+                 QStringLiteral("roam card pin refused: store is unusable"),
+                 QStringLiteral("home")).value(QStringLiteral("peer")).toString(),
+             QStringLiteral("home"));
+
+    Manager mgr;
+    mgr.coreOnRoamPeerStatus(QStringLiteral("nas"), status);
+    QCOMPARE(mgr.roamPinRefusal().value(QStringLiteral("peer")).toString(),
+             QStringLiteral("nas"));
+    mgr.coreOnRoamPeerStatus(QStringLiteral("nas"), status);   // a burst: no second dialog
+    QCOMPARE(mgr.roamPinRefusal().value(QStringLiteral("message")).toString(),
+             refusal.value(QStringLiteral("message")).toString());
+    mgr.dismissRoamPinRefusal();
+    QVERIFY(mgr.roamPinRefusal().isEmpty());
+    QVERIFY(mgr.roamCardPins().isEmpty());                    // no core loaded
+    QVERIFY(!mgr.clearRoamCardPin(QStringLiteral("nas"), QStringLiteral("typo")));
 }
 
 QTEST_MAIN(TstManager)

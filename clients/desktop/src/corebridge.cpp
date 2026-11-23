@@ -160,6 +160,10 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_identity_public_key);
     RESOLVE(grouse_card_fingerprint);
     RESOLVE(grouse_set_roam_identity);
+    RESOLVE(grouse_roam_card_pin);
+    RESOLVE(grouse_roam_card_pins);
+    RESOLVE(grouse_roam_card_pin_enroll);
+    RESOLVE(grouse_roam_card_pin_clear);
     RESOLVE(grouse_unstable_steer);
     RESOLVE(grouse_unstable_export_session);
     RESOLVE(grouse_unstable_session_info);
@@ -208,7 +212,9 @@ bool CoreBridge::resolve()
     // `reply_session` in NotifyDecision) — no symbol signature or listener-table
     // layout moved — but a desktop built for 19 must refuse an older .so: its
     // decisions have no verified Reply target. PushClient reads `reply_session`.
-    static constexpr unsigned kExpectedAbiVersion = 19;
+    // ABI 20 appends two request-correlated form slots and four card-pin
+    // symbols, and changes both respond_* signatures to take a request id.
+    static constexpr unsigned kExpectedAbiVersion = 20;
     if (!a.grouse_abi_version) {
         qWarning() << "CoreBridge: core library predates the ABI version symbol; refusing it";
         return false;
@@ -218,11 +224,11 @@ bool CoreBridge::resolve()
                    << kExpectedAbiVersion << "; refusing it";
         return false;
     }
-    // EVERY symbol in AimsApi is required by ABI 19. Checking only a handful
+    // EVERY symbol in AimsApi is required by ABI 20. Checking only a handful
     // left an otherwise accepted .so one NULL call away from a crash (the first
     // user of an unchecked Q_INVOKABLE). The size assertion makes a future
     // member without a REQUIRE line a build error instead of a runtime gap.
-    static_assert(sizeof(AimsApi) / sizeof(void (*)()) == 104,
+    static_assert(sizeof(AimsApi) / sizeof(void (*)()) == 108,
                   "AimsApi gained a symbol: add it to the resolve + REQUIRE lists");
     QStringList missing;
 #define REQUIRE(name) do { if (!a.name) missing << QStringLiteral(#name); } while (0)
@@ -242,7 +248,9 @@ bool CoreBridge::resolve()
     REQUIRE(grouse_window) REQUIRE(grouse_load_older) REQUIRE(grouse_config) REQUIRE(grouse_turn_log);
     REQUIRE(grouse_turn_diag) REQUIRE(grouse_roam_connect) REQUIRE(grouse_roam_disconnect) REQUIRE(grouse_roam_open_session);
     REQUIRE(grouse_roam_new_session) REQUIRE(grouse_roam_new_session_cwd) REQUIRE(grouse_roam_new_session_with_mode) REQUIRE(grouse_identity_generate);
-    REQUIRE(grouse_identity_public_key) REQUIRE(grouse_card_fingerprint) REQUIRE(grouse_set_roam_identity) REQUIRE(grouse_unstable_steer);
+    REQUIRE(grouse_identity_public_key) REQUIRE(grouse_card_fingerprint) REQUIRE(grouse_set_roam_identity);
+    REQUIRE(grouse_roam_card_pin) REQUIRE(grouse_roam_card_pins) REQUIRE(grouse_roam_card_pin_enroll)
+    REQUIRE(grouse_roam_card_pin_clear) REQUIRE(grouse_unstable_steer);
     REQUIRE(grouse_unstable_export_session) REQUIRE(grouse_unstable_session_info) REQUIRE(grouse_unstable_session_project) REQUIRE(grouse_unstable_list_tools);
     REQUIRE(grouse_unstable_session_extensions_list) REQUIRE(grouse_unstable_session_extensions_add) REQUIRE(grouse_unstable_session_extensions_remove) REQUIRE(grouse_unstable_list_global_extensions);
     REQUIRE(grouse_unstable_extension_catalog) REQUIRE(grouse_unstable_set_extension_enabled) REQUIRE(grouse_unstable_add_extension) REQUIRE(grouse_unstable_sources_list);
@@ -391,8 +399,26 @@ static void cb_on_file(void *u, const char *json) {
     marshal(u, nullptr, [=](Manager *m) { m->coreOnFile(s); });
 }
 static void cb_on_export(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnExport(s); }); }
-static void cb_on_recipe_params(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnRecipeParams(s); }); }
-static void cb_on_elicitation(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnElicitation(s); }); }
+// ABI 20: the core fires only the request-correlated slots. The owner is a
+// SessionOwner JSON record; the request id is the FIRST argument of the
+// matching respond_* export. Copy all three before the callback returns (the
+// core frees its C strings immediately afterwards).
+static void cb_on_recipe_params_request(void *u, const char *ownerJson, const char *requestId,
+                                        const char *json)
+{
+    const QString owner = copyStr(ownerJson);
+    const QString id = copyStr(requestId);
+    const QString s = copyStr(json);
+    marshal(u, nullptr, [=](Manager *m) { m->coreOnRecipeParams(owner, id, s); });
+}
+static void cb_on_elicitation_request(void *u, const char *ownerJson, const char *requestId,
+                                      const char *json)
+{
+    const QString owner = copyStr(ownerJson);
+    const QString id = copyStr(requestId);
+    const QString s = copyStr(json);
+    marshal(u, nullptr, [=](Manager *m) { m->coreOnElicitation(owner, id, s); });
+}
 static void cb_on_compaction_status(void *u, const char *json) { const QString s = copyStr(json); marshal(u, nullptr, [=](Manager *m) { m->coreOnCompactionStatus(s); }); }
 static void cb_on_message_usage(void *u, std::uint64_t a, std::uint64_t b, std::uint64_t c, double d) {
     marshal(u, nullptr, [a, b, c, d](Manager *m) { m->coreOnMessageUsage(a, b, c, d); });
@@ -472,8 +498,8 @@ void CoreBridge::installListener()
         cb_on_active_run,
         cb_on_commands,
         cb_on_export,
-        cb_on_recipe_params,
-        cb_on_elicitation,
+        nullptr,   // on_recipe_params (legacy single-payload slot, ABI 20)
+        nullptr,   // on_elicitation (legacy single-payload slot, ABI 20)
         cb_on_compaction_status,
         cb_on_message_usage,
         cb_on_unstable_usage,
@@ -511,6 +537,8 @@ void CoreBridge::installListener()
         nullptr,   // on_sensitivity (ABI 15)
         cb_on_advisor_report,   // ABI 16
         cb_on_session_opened,   // ABI 18
+        cb_on_recipe_params_request,   // ABI 20
+        cb_on_elicitation_request,     // ABI 20
     };
     m_listener = &table;
 

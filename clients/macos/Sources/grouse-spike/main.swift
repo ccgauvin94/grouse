@@ -108,7 +108,7 @@ final class Buffer: CoreListener, @unchecked Sendable {
         // The CLI answers anything it is asked with "cancel": a smoke test must never
         // approve a tool call on the user's behalf.
         say("  permission requested: \(oneLine(request.title)) → cancelling")
-        core?.respondPermission(toolCallId: request.toolCallId, outcome: .cancelled)
+        core?.respondPermission(requestId: request.toolCallId, outcome: .cancelled)
     }
 
     /// Set after construction (the listener is needed to build the core).

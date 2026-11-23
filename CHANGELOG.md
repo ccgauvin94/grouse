@@ -68,8 +68,12 @@ ownership. Highlights, all with regression coverage where the layer has a test s
   ledger has 112 surfaces / 126 rows with 19 pinned exclusions. Android unit tests and desktop
   ctest now run in CI.
 
-Core: 323 unit + 27 spine + 1 roam lib + 4 roam core + 2 unstable tests; clippy `-D warnings`
-clean; parity self-test and checker pass; Android: 150 JVM tests and a debug APK build.
+Core (counted from `#[test]` in this checkout, based on `f3585cf3` plus in-flight
+edits; re-count at the revision you ship): 342 `grouse-core/src` unit tests,
+4 in `grouse-roam-core/src`, 2 in `grouse-unstable/src`,
+27 spine integration tests, 4 roam-core integration tests and 1 ignored live-host e2e
+test; clippy `-D warnings` clean; parity self-test and checker pass; Android: 150 JVM
+tests and a debug APK build.
 Desktop Qt and macOS Swift builds are NOT possible on this host and remain unverified here.
 
 ### Fixed — the app comes back to the screen you left, not to the last main chat
@@ -408,6 +412,14 @@ Four read-only investigations plus a re-read of the code; the full findings are 
   to three grid units — the field is the only item that can shrink. MyDay's assistant
   row gets the same pin.
 
+> **Release-note cut-off.** The bare `grouse 0.2.x (versionCode N).` lines in this file
+> were trailers: each named the version the section ABOVE it shipped in. The five most
+> recent are promoted to the dated headings below; older ones are kept verbatim in the
+> archive section. Per-release notes stop at 0.2.118 here — later shipped versions are
+> recorded in git history, not in this file.
+
+## [0.2.118] - 2026-11-19
+
 ### Changed — the chat's own menu, and background work gets the mark it deserves
 
 - **A "…" in the top-right corner, where the other app keeps its overflow.** It opens the
@@ -432,7 +444,7 @@ Four read-only investigations plus a re-read of the code; the full findings are 
   find that session by id and by the exact title "Assistant", so rename/archive/delete are
   deliberately absent there.
 
-grouse 0.2.118 (versionCode 222).
+## [0.2.117] - 2026-11-19
 
 ### Fixed — a roam reopen that came back showing an older turn
 
@@ -456,7 +468,7 @@ grouse 0.2.118 (versionCode 222).
   cache, whose replayed rows are thrown away — no longer announces `0 of N` at all, which is
   what made a fully cached open flash the bar for a replay that never painted a row.
 
-grouse 0.2.117 (versionCode 221).
+## [0.2.116] - 2026-11-18
 
 ### Changed — the long-press chat menu is a sheet, not a dialog full of buttons
 
@@ -472,7 +484,7 @@ grouse 0.2.117 (versionCode 221).
 - The sub-dialogs (rename, archive, delete) are unchanged: they are confirmations, and a
   confirmation is the right thing for a dialog to be.
 
-grouse 0.2.116 (versionCode 220).
+## [0.2.115] - 2026-11-18
 
 ### Changed — the Activity slide-out is withdrawn, and the app bar gets out of the way
 
@@ -489,7 +501,7 @@ grouse 0.2.116 (versionCode 220).
   are most likely to be reading it. The composer's thinking line already reports the turn, and
   the running count still appears beside the donut.
 
-grouse 0.2.115 (versionCode 219).
+## [0.2.114] - 2026-11-18
 
 ### Changed — Activity is a pane on the chat's right edge, and the app bar is quieter
 
@@ -521,7 +533,17 @@ grouse 0.2.115 (versionCode 219).
   Both completion paths count (the server's "Compaction complete" line, and a run ending while
   a compaction was armed), and whichever sees it first is the one that spends the tokenization.
 
-grouse 0.2.114 (versionCode 218).
+## Archived shipped releases (0.2.112 and earlier)
+
+> **Cut-off.** Everything above this line in `Unreleased` and in the dated
+> sections is current or recently shipped history. Below, the original trailer
+> lines (`grouse 0.2.x (versionCode N).`) are kept verbatim as the historical
+> record: each marks the version the section ABOVE it shipped in. These are
+> shipped releases, not unreleased work. This file has no per-release notes for
+> 0.2.113, or for 0.2.119–0.2.131 (the build file at `f3585cf3`); those are in
+> git history. Dates for the older markers can be recovered from the version
+> bumps in `clients/android/app/build.gradle.kts`.
+
 ### Added — the advisor's model is an operator env var
 
 - **`GROUSE_ADVISOR_MODEL`** (and, when you need it, **`GROUSE_ADVISOR_PROVIDER`**) set in the
@@ -564,8 +586,6 @@ grouse 0.2.114 (versionCode 218).
 - Kept: the dev mode itself — the `grouse.mode` tag, the `</>` marker, the chat/dev choice at
   creation, the Dev settings section and the advisor. grouse#5 survives without plan mode:
   the dev tag still cannot be mutated, so `session/meta/update` is still wanted.
-
-grouse 0.2.112 (versionCode 216).
 
 ### Added — an advisor on every dev turn
 

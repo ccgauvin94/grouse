@@ -14,6 +14,10 @@
 # NOTE: this file only takes effect once default setup is DISABLED for the repo
 # (Security → Code security → CodeQL: switch off default setup). While default
 # setup is on, GitHub ignores this workflow.
+#
+# Version pinning (X-7): actions are major tags, not SHAs — this repo has no
+# Dependabot config to maintain digests, and a stale flag is worse than a tag
+# that still receives compatible fixes. core.yml records the policy.
 name: CodeQL
 
 on:

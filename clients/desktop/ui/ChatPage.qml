@@ -13,6 +13,10 @@ Kirigami.Page {
     /// chat's full width: they are about the conversation, not about a column of it.
     property bool sidePanelOpen: false
 
+    /// The core's dial-time card pins, refreshed when the manager dialog OPENS —
+    /// never as a binding on an invokable (QML evaluates that once, at startup).
+    property var roamPinRows: []
+
     /// Clear is destructive, so its confirmation lives with the window's other dialogs;
     /// the panel asks here and main.qml answers.
     signal clearRequested()
@@ -35,6 +39,14 @@ Kirigami.Page {
     function openLink(link) {
         if (Mgr.linkAllowed(link))
             Qt.openUrlExternally(link)
+    }
+
+    function refreshRoamPins() {
+        roamPinRows = Mgr.roamCardPins()
+    }
+    function openRoamPins() {
+        refreshRoamPins()
+        roamPinDialog.open()
     }
 
     // A fenced code block inside a message row. A RichText TextEdit wraps
@@ -504,6 +516,15 @@ Kirigami.Page {
             })
         }
         function onOnlineChanged() { page.keepScrolled(); page.updateSlashPopup() }
+        // The core refuses a changed roam card before it dials. This is not a
+        // transient status-line message: it needs a decision (clear + re-enroll
+        // after checking the new card out of band, or leave the pin intact).
+        function onRoamPinRefusalChanged() {
+            if (Mgr.roamPinRefusal && Mgr.roamPinRefusal.message) {
+                pinConfirm.text = ""
+                pinRefusalDialog.open()
+            }
+        }
         function onPromptingChanged() { page.keepScrolled() }
         // The one-way push into the composer: a thread chat's opening line, an item
         // named from My Day, or "" when a new conversation starts (a draft belongs
@@ -809,6 +830,18 @@ Kirigami.Page {
                               ? qsTr("%1 / %2").arg(Mgr.replayLoaded).arg(Mgr.replayTotal)
                               : qsTr("%1 messages").arg(Mgr.replayLoaded)
                     }
+                }
+
+                // Dial-time trust anchor for roam peers: the fingerprint the core
+                // pinned is shown here, and clearing it is a typed, deliberate act.
+                Controls.ToolButton {
+                    id: pinsPill
+                    display: Controls.AbstractButton.TextBesideIcon
+                    icon.name: "network-workgroup"
+                    text: qsTr("Roam pins")
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Show the card fingerprints pinned for each roam peer")
+                    onClicked: page.openRoamPins()
                 }
 
                 Controls.Button {
@@ -2953,6 +2986,173 @@ Kirigami.Page {
                 opacity: 0.7
             }
             MouseArea { anchors.fill: parent; onClicked: imageViewer.close() }
+        }
+    }
+
+    // The core's pin refusal is terminal for that dial: reconnecting with the
+    // OLD pin would be refused again. The only way forward is a deliberate
+    // clear, and the copy says why the user must check the card elsewhere first.
+    Controls.Dialog {
+        id: pinRefusalDialog
+        parent: Overlay.overlay
+        title: qsTr("Roam card pin refused")
+        modal: true
+        closePolicy: Controls.Popup.CloseOnEscape
+        width: Math.min(560, Math.max(320, page.width - 32))
+        height: Math.min(560, refusalColumn.implicitHeight + 2 * padding)
+        padding: Kirigami.Units.largeSpacing
+        property var refusal: Mgr.roamPinRefusal
+
+        contentItem: ColumnLayout {
+            id: refusalColumn
+            spacing: Kirigami.Units.smallSpacing
+            Controls.Label {
+                text: qsTr("The card a roam peer presented changed. The core refused the dial; nothing was enrolled.") + "\n"
+                      + (pinRefusalDialog.refusal.message || "")
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+            Controls.Label {
+                visible: !!pinRefusalDialog.refusal.peer
+                text: qsTr("Peer: %1").arg(pinRefusalDialog.refusal.peer || "")
+                textFormat: Text.PlainText
+                Layout.fillWidth: true
+            }
+            Controls.Label {
+                visible: !!pinRefusalDialog.refusal.pinned
+                text: qsTr("Pinned: %1").arg(pinRefusalDialog.refusal.pinned || "")
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+            Controls.Label {
+                visible: !!pinRefusalDialog.refusal.got
+                text: qsTr("Presented: %1").arg(pinRefusalDialog.refusal.got || "")
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+            Controls.Label {
+                text: qsTr("Only clear this if you verified the new card with the peer out of band (call, in person, another trusted channel). The next dial then pins whatever card it sees.")
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+            Controls.TextField {
+                id: pinConfirm
+                Layout.fillWidth: true
+                placeholderText: qsTr("Type the peer label to confirm")
+                enabled: !!pinRefusalDialog.refusal.peer
+            }
+        }
+        footer: RowLayout {
+            Layout.margins: Kirigami.Units.smallSpacing
+            Item { Layout.fillWidth: true }
+            Controls.Button {
+                text: qsTr("Keep pin")
+                flat: true
+                onClicked: {
+                    Mgr.dismissRoamPinRefusal()
+                    pinRefusalDialog.close()
+                }
+            }
+            Controls.Button {
+                text: qsTr("Clear pin & reconnect")
+                enabled: !!pinRefusalDialog.refusal.peer
+                         && pinConfirm.text.trim() === pinRefusalDialog.refusal.peer
+                onClicked: {
+                    const peer = pinRefusalDialog.refusal.peer
+                    if (Mgr.clearRoamCardPin(peer, pinConfirm.text)) {
+                        pinRefusalDialog.close()
+                        Mgr.redialRoamPeer(peer)
+                    }
+                }
+            }
+        }
+        onClosed: Mgr.dismissRoamPinRefusal()
+    }
+
+    // The management row per peer: full fingerprint available as a tooltip,
+    // typed-label confirmation on the Clear button (no one-click re-enroll).
+    Controls.Dialog {
+        id: roamPinDialog
+        parent: Overlay.overlay
+        title: qsTr("Pinned roam cards")
+        modal: true
+        closePolicy: Controls.Popup.CloseOnEscape | Controls.Popup.CloseOnPressOutside
+        width: Math.min(600, Math.max(320, page.width - 32))
+        height: Math.min(560, pinsColumn.implicitHeight + 2 * padding)
+        padding: Kirigami.Units.largeSpacing
+
+        contentItem: ColumnLayout {
+            id: pinsColumn
+            spacing: Kirigami.Units.smallSpacing
+            Controls.Label {
+                text: qsTr("Each peer's card is pinned on first dial and checked on every reconnect. Clearing a pin makes the NEXT dial enroll a new card — verify it out of band first.")
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+            Controls.Label {
+                visible: page.roamPinRows.length === 0
+                text: qsTr("No peers have been pinned yet.")
+                Layout.fillWidth: true
+            }
+            Repeater {
+                model: page.roamPinRows
+                delegate: Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: rowLayout.implicitHeight + 2 * Kirigami.Units.smallSpacing
+                    color: Kirigami.Theme.alternateBackgroundColor
+                    radius: Theme.radius.sm
+                    ColumnLayout {
+                        id: rowLayout
+                        anchors.fill: parent
+                        anchors.margins: Kirigami.Units.smallSpacing
+                        spacing: 2
+                        Controls.Label {
+                            text: modelData.peer
+                            textFormat: Text.PlainText
+                            font.weight: Font.DemiBold
+                            Layout.fillWidth: true
+                        }
+                        Controls.Label {
+                            text: modelData.short
+                            textFormat: Text.PlainText
+                            ToolTip.visible: hover.hovered
+                            ToolTip.text: modelData.fingerprint
+                            Layout.fillWidth: true
+                            HoverHandler { id: hover }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Controls.TextField {
+                                id: clearConfirm
+                                Layout.fillWidth: true
+                                placeholderText: qsTr("Type %1 to clear").arg(modelData.peer)
+                            }
+                            Controls.Button {
+                                text: qsTr("Clear pin")
+                                enabled: clearConfirm.text.trim() === modelData.peer
+                                onClicked: {
+                                    if (Mgr.clearRoamCardPin(modelData.peer, clearConfirm.text))
+                                        page.refreshRoamPins()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        footer: RowLayout {
+            Layout.margins: Kirigami.Units.smallSpacing
+            Item { Layout.fillWidth: true }
+            Controls.Button {
+                text: qsTr("Close")
+                flat: true
+                onClicked: roamPinDialog.close()
+            }
         }
     }
 

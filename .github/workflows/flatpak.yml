@@ -1,10 +1,12 @@
 # Flatpak bundle build.
 #
-# Version pinning (X-7): actions below are pinned to major tags (@v4/@v6) and the
-# two container images are pinned to named tags (fedora:44, ...kde-6.10). That is
-# the accepted lock level here; for stricter supply-chain hardening, pin actions
-# to full commit SHAs and the container images to immutable digests
-# (sha256:…). See core.yml for the Rust toolchain "dedrift" note.
+# Version pinning (X-7): actions are major tags (@v4/@v6) and container images
+# are named tags (fedora:44, ...kde-6.10). We have NOT SHA/digest-pinned them:
+# this repo has no Dependabot config to maintain pins, and a stale digest is
+# worse than a tag that still receives compatible security fixes. The bytes we
+# ship are pinned independently — rustc 1.97.1, --locked, clean flatpak-builder
+# cache — so a floating action image cannot silently change the compiler.
+# See core.yml for the Rust toolchain "dedrift" note.
 name: Flatpak
 
 on:
@@ -45,12 +47,26 @@ jobs:
              clients/desktop/krunner-prebuild/grouserunner.so
 
       # The core the desktop dlopens (transport, session state machine, roam —
-      # the whole thin-client engine). It is a workspace member, so this builds
-      # the in-tree grouse-core crate.
+      # the whole thin-client engine). Install rustc 1.97.1 with rustup rather
+      # than the distro's floating `rust`/`cargo`, assert it, and build from
+      # CWD core/ so rustup reads core/rust-toolchain.toml (--manifest-path
+      # from the repo root silently resolved a different compiler in CI).
       - name: Build grouse-core
         run: |
-          dnf install -y rust cargo cmake gcc
-          cargo build --release --manifest-path core/Cargo.toml -p grouse-core
+          set -euo pipefail
+          dnf install -y curl ca-certificates gcc gcc-c++ make cmake clang perl \
+            openssl-devel pkgconf-pkg-config
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain 1.97.1 --profile minimal
+          # shellcheck disable=SC1091
+          . "$HOME/.cargo/env"
+          case "$(rustc --version)" in
+            "rustc 1.97.1 "*) echo "rustc: $(rustc --version)" ;;
+            *) echo "::error::expected rustc 1.97.1, got $(rustc --version)"; exit 1 ;;
+          esac
+          cd core
+          cargo build --release --locked -p grouse-core
+          cd ..
           mkdir -p clients/desktop/grouse-core-prebuild
           cp core/target/release/libgrouse_core.so clients/desktop/grouse-core-prebuild/
 
@@ -114,9 +130,12 @@ jobs:
           name: host-components
           path: clients/desktop
 
+      # cache: false — the builder's cache is keyed by module name, not by
+      # source SHA, so a cache hit on an unchanged module can ship stale QML
+      # or a stale desktop binary (audit §7). Correctness beats build minutes.
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: grouse-desktop.flatpak
           manifest-path: clients/desktop/id.gauvin.Grouse.json
-          cache: true
+          cache: false
           upload-artifact: true

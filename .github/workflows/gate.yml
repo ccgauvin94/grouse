@@ -1,0 +1,214 @@
+# Release gate (audit §7): reusable workflow called by release.yml on every
+# `v*` tag. The publishing jobs `needs` this job, so a tag cannot publish an
+# APK or Flatpak built from a commit that never passed the checks.
+#
+# These steps deliberately DUPLICATE core.yml / android.yml / flatpak.yml /
+# parity.yml / secrets.yml: a gate that imported its checks from a mutable
+# branch could be weakened by the very commit it is supposed to be checking.
+# Checkout in a called workflow resolves to the CALLER's ref (the tag), so the
+# gate tests exactly the tree that would ship. Keep the commands in step.
+#
+# Version pinning (X-7): actions are major tags and toolchains/images are
+# pinned (see core.yml for why we have not SHA-pinned them). Adding a check
+# here means adding it to release.yml's gate call result automatically.
+name: Release gate
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          components: clippy
+
+      - name: Assert the compiler
+        run: |
+          set -euo pipefail
+          case "$(rustc --version)" in
+            "rustc 1.97.1 "*) echo "rustc: $(rustc --version)" ;;
+            *) echo "::error::expected rustc 1.97.1, got $(rustc --version)"; exit 1 ;;
+          esac
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+
+      # CWD core/ (not --manifest-path from the root): rustup resolves
+      # core/rust-toolchain.toml from the CWD, so this is the pinned compiler.
+      - name: Test
+        working-directory: core
+        run: cargo test --locked
+
+      - name: Clippy
+        working-directory: core
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  android-unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Run JVM unit tests
+        working-directory: clients/android
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+  desktop-tests:
+    # ctest needs the Qt/KF6 DEVELOPMENT headers, which the flatpak-builder
+    # image does not carry; the same Fedora container flatpak.yml uses has them.
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:44
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install desktop + pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          dnf install -y gcc gcc-c++ make cmake ninja-build clang perl git \
+            openssl-devel pkgconf-pkg-config \
+            qt6-qtbase-devel qt6-qtdeclarative-devel kf6-kirigami-devel \
+            kf6-kcoreaddons-devel extra-cmake-modules kf6-qqc2-desktop-style \
+            qt6-qtsvg curl ca-certificates
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain 1.97.1 --profile minimal
+          # shellcheck disable=SC1091
+          . "$HOME/.cargo/env"
+          case "$(rustc --version)" in
+            "rustc 1.97.1 "*) echo "rustc: $(rustc --version)" ;;
+            *) echo "::error::expected rustc 1.97.1, got $(rustc --version)"; exit 1 ;;
+          esac
+
+      - name: Build the core the desktop dlopens
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . "$HOME/.cargo/env"
+          cd core
+          cargo build --release --locked -p grouse-core
+
+      - name: Configure and build desktop with tests
+        run: |
+          cmake -S clients/desktop -B clients/desktop/build-tests \
+            -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_TESTING=ON -DBUILD_KRUNNER=OFF
+          cmake --build clients/desktop/build-tests -j"$(nproc)"
+
+      - name: Run ctest
+        run: ctest --test-dir clients/desktop/build-tests --output-on-failure
+        env:
+          QT_QPA_PLATFORM: offscreen
+          GROUSE_CORE: ${{ github.workspace }}/core/target/release/libgrouse_core.so
+
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The checker still catches what it claims to
+        run: python3 scripts/check-parity.py --self-test
+
+      - name: Every client has dispositioned every surface
+        run: python3 scripts/check-parity.py
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+  android-libs-freshness:
+    # The committed .so + bindings are what the APK ships. Prove they are the
+    # output of THIS commit's core, not a stale copy from an earlier build.
+    # Toolchain must match the committed artifacts exactly; see the note in
+    # scripts/build-android-libs.sh and .devcontainer/android/Containerfile.
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 27.0.12077973
+      CARGO_NDK_VERSION: 3.1.2
+      UNIFFI_VERSION: 0.32.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Install the pinned Android toolchain
+        run: |
+          set -euo pipefail
+          case "$(rustc --version)" in
+            "rustc 1.97.1 "*) ;;
+            *) echo "::error::expected rustc 1.97.1, got $(rustc --version)"; exit 1 ;;
+          esac
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          [[ -n "$SDK" && -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]] || {
+            echo "::error::runner Android SDK cmdline-tools not found"; exit 1; }
+          if [[ ! -d "$SDK/ndk/$NDK_VERSION" ]]; then
+            yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+            "$SDK/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION"
+          fi
+          echo "ANDROID_NDK_HOME=$SDK/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$SDK/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          rustup target add aarch64-linux-android x86_64-linux-android
+          cargo install cargo-ndk --version "$CARGO_NDK_VERSION" --locked
+          cargo install uniffi --version "$UNIFFI_VERSION" --features cli --locked
+          cargo ndk --version | grep -q "$CARGO_NDK_VERSION"
+          case "$(uniffi-bindgen --version 2>&1)" in
+            *"$UNIFFI_VERSION"*) echo "uniffi-bindgen: $(uniffi-bindgen --version 2>&1)" ;;
+            *) echo "::error::expected uniffi-bindgen $UNIFFI_VERSION"; exit 1 ;;
+          esac
+
+      - name: Regenerate into a temp dir and diff against the committed outputs
+        run: |
+          set -euo pipefail
+          TMP="$(mktemp -d)"
+          trap 'rm -rf "$TMP"' EXIT
+          ./scripts/build-android-libs.sh --out-dir "$TMP"
+
+          # Replace (do not just overlay) each staged tree so deleted generated
+          # files are visible too. This only touches the CI working tree.
+          refresh() {
+            mkdir -p "$2"
+            find "$2" -type f -delete
+            cp -r "$1/." "$2/"
+          }
+          refresh "$TMP/jniLibs"    clients/android/grouse-core-aar/src/main/jniLibs
+          refresh "$TMP/bindings"   core/grouse-core/bindings/kotlin
+          refresh "$TMP/aar-kotlin" clients/android/grouse-core-aar/src/main/kotlin
+
+          PATHS=(clients/android/grouse-core-aar/src/main/jniLibs \
+                 clients/android/grouse-core-aar/src/main/kotlin \
+                 core/grouse-core/bindings/kotlin)
+          if ! git diff --exit-code -- "${PATHS[@]}"; then
+            echo "::error::committed Android .so/bindings are stale; run 'just android-libs' and commit the result"
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain -- "${PATHS[@]}")" ]]; then
+            echo "::error::generated files not present in the committed Android outputs"
+            git status --short -- "${PATHS[@]}"
+            exit 1
+          fi

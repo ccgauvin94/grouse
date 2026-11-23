@@ -3,6 +3,10 @@
 # Publish a built APK to Nextcloud, refusing anything that is not signed with the
 # real release key or that would install as the same/older build.
 #
+# The pinned digest below is also enforced in .github/workflows/release.yml;
+# keep the two constants in step. CI verifies BEFORE publishing a GitHub
+# Release, this script verifies before dropping the file into Nextcloud.
+#
 # The two checks exist because both failures are silent on the phone:
 #   - a debug-signed APK installs fine (Android accepts it over the debug app) and
 #     then nobody can be updated to a properly signed one without an uninstall;

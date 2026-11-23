@@ -160,6 +160,13 @@ public:
         char *(*grouse_identity_public_key)(const char *secret, char **out_err);
         char *(*grouse_card_fingerprint)(const char *card, char **out_err);
         void (*grouse_set_roam_identity)(void *h, const char *secret);
+        // Roam card pins (ABI 20): JSON string / JSON object returns, freed with
+        // grouse_string_free. Enroll/clear report failures via out_err.
+        char *(*grouse_roam_card_pin)(void *h, const char *label);
+        char *(*grouse_roam_card_pins)(void *h);
+        void (*grouse_roam_card_pin_enroll)(void *h, const char *label,
+                                            const char *fingerprint, char **out_err);
+        void (*grouse_roam_card_pin_clear)(void *h, const char *label, char **out_err);
         // unstable intents
         void (*grouse_unstable_steer)(void *h, const char *text, const char *expected_run_id);
         void (*grouse_unstable_export_session)(void *h, const char *session_id);
@@ -205,8 +212,13 @@ public:
                                                  const char *extension_name,
                                                  const char *name, const char *args_json);
         void (*grouse_unstable_resources_read)(void *h, const char *sid, const char *uri, const char *ext);
-        void (*grouse_unstable_respond_recipe_params)(void *h, const char *action, const char *values_json);
-        void (*grouse_unstable_respond_elicitation)(void *h, const char *action, const char *content_json);
+        /// ABI 20: the request id from on_recipe_params_request/elicitation_request
+        /// is the first argument — answering the newest form by accident leaves
+        /// the older server request waiting forever.
+        void (*grouse_unstable_respond_recipe_params)(void *h, const char *request_id,
+                                                      const char *action, const char *values_json);
+        void (*grouse_unstable_respond_elicitation)(void *h, const char *request_id,
+                                                    const char *action, const char *content_json);
         /// What fills this session's context window if it were prompted right now; the
         /// answer rides `on_context_report` as raw JSON (ABI 13). Deliberately SILENT on a
         /// server older than goose 1.58 — that is a missing capability, not a fault.
@@ -358,5 +370,10 @@ struct GrouseCoreListener {
     // The positive counterpart of on_session_open_failed; a paint or a Window is
     // NOT an open answer (background fills send those too). Appended last; ABI 18.
     void (*on_session_opened)(void *, const char *);
+    // A server form with the reply key: (owner JSON, request id, form JSON).
+    // Appended at the END; ABI 20 — the legacy single-payload slots above keep
+    // their offsets and are no longer fired by the core.
+    void (*on_recipe_params_request)(void *, const char *, const char *, const char *);
+    void (*on_elicitation_request)(void *, const char *, const char *, const char *);
 };
 }

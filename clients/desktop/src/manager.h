@@ -134,13 +134,19 @@ class Manager : public QObject
     Q_PROPERTY(QVariant serverConfig READ serverConfig NOTIFY serverConfigChanged)
     Q_PROPERTY(QVariant supportedModels READ supportedModels NOTIFY supportedModelsChanged)
     Q_PROPERTY(QVariant skills READ skills NOTIFY skillsChanged)
-    /** A pending structured-input form (MCP elicitation, ACP form mode, or a
-     *  recipe's declared parameters) — an EMPTY map when nothing is waiting.
-     *  Keys: title, message, recipeParams (bool), fields (list of
-     *  {name,type,title,description,options:[{value,label}],required}).
-     *  Answer it with answerForm(); the dialog cannot be dismissed without an
-     *  answer, because a parked server request would hang the turn. */
+    /** The FIRST pending structured-input form (MCP elicitation, ACP form mode,
+     *  or a recipe's declared parameters) — an EMPTY map when nothing is waiting.
+     *  Keys: title, message, recipeParams (bool), owner, requestId, fields
+     *  (list of {name,type,title,description,options:[{value,label}],required}).
+     *  Requests are a QUEUE keyed by request id: a second form does not replace
+     *  the first. Answer it with answerForm()/answerFormFor(); the dialog cannot
+     *  be dismissed without an answer, because a parked server request would
+     *  hang the turn. */
     Q_PROPERTY(QVariant pendingForm READ pendingForm NOTIFY pendingFormChanged)
+    /** A core-reported roam card-pin mismatch, or an empty map. The dialog in
+     *  ChatPage acts on it: clear the pin only after an OUT-OF-BAND check of the
+     *  new card, then reconnect. {message, peer, pinned, got}. */
+    Q_PROPERTY(QVariantMap roamPinRefusal READ roamPinRefusal NOTIFY roamPinRefusalChanged)
 
 public:
     /** The ONE place the TLS trust-all default lives. Off means WebPKI
@@ -153,6 +159,26 @@ public:
      *  Routing asks the core (`sessionPeerLabel`); this only keeps an older/absent
      *  core library — and the pure unit test — working. */
     static QString roamPeerForSession(const QString &sessionId);
+
+    // Pure, UI-free helpers for the two parked-request queues and the pin
+    // status. They exist as statics so tst_manager can pin the policy without a
+    // core loaded (no dlopen, no listener table).
+    /** Parse a core `PermissionRequest` (bare or serde-externally-tagged) into
+     *  {requestId, toolCallId, sessionId, owner, ownerLabel, title, detail,
+     *  options}. A legacy request without request_id falls back to tool_call_id. */
+    static QVariantMap parsePermissionRequest(const QString &json);
+    /** Index of `requestId` in a queue of maps keyed by requestId (or, for a
+     *  legacy entry, toolCallId). -1 when it is not queued. */
+    static int requestQueueIndex(const QVariantList &queue, const QString &requestId);
+    /** Which chat/wire a request belongs to: the core's owner record when it
+     *  has one, else the roam id namespace, else the bare session id. */
+    static QString requestOwnerLabel(const QVariant &owner, const QString &sessionId);
+    /** Core pin map {label: fingerprint} -> row maps {peer, fingerprint, short}. */
+    static QVariantList formatCardPins(const QVariantMap &pins);
+    /** Parse a core "roam card pin refused: ..." status into
+     *  {message, peer, pinned, got}; empty when the status is unrelated. */
+    static QVariantMap parseCardPinRefusal(const QString &status,
+                                          const QString &peerLabel = QString());
     /** Only the wire that owns the turn may clear its state on a main-wire Ready. */
     static bool mainWireOwnsTurnState(const QString &activePeerLabel) { return activePeerLabel.isEmpty(); }
 
@@ -323,7 +349,11 @@ public:
     Q_INVOKABLE void compactConversation();
     /** Serialize a session and write it to `filePath` (JSON). */
     Q_INVOKABLE void exportSessionTo(const QString &sessionId, const QString &filePath);
-    Q_INVOKABLE void respondPermission(const QString &toolCallId, const QString &optionId);
+    /** Answer ONE parked permission request by its (core) request id. The id is
+     *  taken from `permissionRequestId()` for the visible dialog; an id that is
+     *  no longer queued is ignored so a late dialog answer cannot deny the NEXT
+     *  request. */
+    Q_INVOKABLE void respondPermission(const QString &requestId, const QString &optionId);
     Q_INVOKABLE void setConfigOption(const QString &id, const QString &value);
     Q_INVOKABLE void refreshSessions();
     Q_INVOKABLE void openSession(const QString &sessionId);
@@ -418,9 +448,30 @@ public:
     Q_INVOKABLE QString turnDiag(const QString &sessionId) const;
     Q_INVOKABLE void readServerConfig(const QString &key);
     Q_INVOKABLE void refreshSupportedModels(const QString &providerId);
-    Q_INVOKABLE QString permissionToolCallId() const { return m_permToolCallId; }
+    /** The current request's id. The old name is kept for main.qml, which copies
+     *  it into PermissionDialog; the value is the core's id for THIS request
+     *  (tool_call_id until PermissionRequest gains a request_id), so one turn
+     *  parking several prompts can answer them one at a time. */
+    Q_INVOKABLE QString permissionToolCallId() const;
+    Q_INVOKABLE QString permissionRequestId() const { return permissionToolCallId(); }
+    Q_INVOKABLE QString permissionOwner() const;
+    Q_INVOKABLE int permissionCount() const;
     Q_INVOKABLE QString permissionTitle() const { return m_permTitle; }
     Q_INVOKABLE QVariantList permissionOptions() const { return m_permOptions; }
+
+    // ---- roam card pins (core's dial-time trust anchor) ----------------------
+    /** {peer, fingerprint, short} per pinned roam peer, from the core's pin
+     *  store (never from the cards this app happens to have saved). */
+    Q_INVOKABLE QVariantList roamCardPins();
+    /** `confirmation` must be the peer label typed by the user: the core
+     *  re-enrolls whatever card dials next, so this is deliberately not a
+     *  one-click action. Returns false for a blank/mismatched confirmation. */
+    Q_INVOKABLE bool clearRoamCardPin(const QString &peer, const QString &confirmation);
+    Q_INVOKABLE QVariantMap roamPinRefusal() const { return m_roamPinRefusal; }
+    Q_INVOKABLE void dismissRoamPinRefusal();
+    /** Re-dial a persisted peer after its pin was cleared (the card is already
+     *  stored locally; no secret is shown in the dialog). */
+    Q_INVOKABLE bool redialRoamPeer(const QString &label);
 
     /// MCP-App surface. These MUST be public: QML only resolves a context-property
     /// method when the meta-object marks it public. All three were originally under
@@ -628,6 +679,10 @@ public:
      *  `action` is "accept"/"decline"/"cancel" — a recipe's parameters only
      *  understand submit/cancel, so decline is sent as cancel there. */
     Q_INVOKABLE void answerForm(const QVariantMap &values, const QString &action);
+    /** Answer a specific parked form by request id; an id that is not queued is
+     *  ignored (a stale dialog cannot answer the form that followed it). */
+    Q_INVOKABLE void answerFormFor(const QString &requestId,
+                                   const QVariantMap &values, const QString &action);
 
     // ---- CoreBridge event entry points ---------------------------------------
     // Invoked (on the main thread) by the CoreBridge listener table. They are
@@ -638,7 +693,13 @@ public:
     void coreOnUsage(qint64 used, qint64 size, double cost, const QString &currency);
     void coreOnRunEnded(const QString &sessionId, const QString &stopReason);
     void coreOnConfig(const QString &json);
-    void coreOnPermission(const QString &json);
+    /** ABI 20 sends the request as JSON; some C ABI spellings also pass owner
+     *  and request id as explicit arguments. Both forms fold into one queue. */
+    void coreOnPermission(const QString &json, const QString &owner,
+                          const QString &requestId);
+    void coreOnPermission(const QString &json) {
+        coreOnPermission(json, QString(), QString());
+    }
     void coreOnSessionTouched(const QString &sid, const QString &title, const QString &u);
     void coreOnProjects(const QString &json);
     void coreOnRoamPeerStatus(const QString &label, const QString &status);
@@ -668,8 +729,18 @@ public slots:
     void coreOnReplayProgress(const QString &sessionId, int loaded, int total, bool done);
 
 public:
-    void coreOnRecipeParams(const QString &parameters);
-    void coreOnElicitation(const QString &schema);
+    /** ABI 20 server-request events carry (owner, request_id, payload). The
+     *  one-argument overloads remain for an older bridge/test stub. */
+    void coreOnRecipeParams(const QString &owner, const QString &requestId,
+                            const QString &parameters);
+    void coreOnRecipeParams(const QString &parameters) {
+        coreOnRecipeParams(QString(), QString(), parameters);
+    }
+    void coreOnElicitation(const QString &owner, const QString &requestId,
+                           const QString &schema);
+    void coreOnElicitation(const QString &schema) {
+        coreOnElicitation(QString(), QString(), schema);
+    }
     void coreOnCompactionStatus(const QString &message);
     void coreOnMessageUsage(std::uint64_t outTok, std::uint64_t elapsedMs,
                             std::uint64_t ttftMs, double cost);
@@ -750,6 +821,9 @@ signals:
     void connectionTested(bool ok, const QString &message);
     /** The pending structured-input form arrived, changed, or was answered. */
     void pendingFormChanged();
+    /** A roam peer's card pin was refused (or the refusal was dismissed). */
+    void roamPinRefusalChanged();
+    void roamCardPinsChanged();
 private:
     /** Session-scoped key for client-side queues (attachment thumbnails). Two
      *  chats can send the identical prompt text; without the owner in the key the
@@ -844,8 +918,18 @@ private:
     void onSupportedModels(const QString &providerId, const QStringList &models);
     void onExportResult(const QString &data);
     void onCompactionStatus(const QString &message);
-    /** Queue a parsed structured-input form (one per family; see queueForm). */
+    /** Queue a parsed structured-input form keyed by its core request id. */
     void queueForm(const QVariantMap &form);
+    /** Fold a core status into the actionable card-pin refusal (once per message). */
+    void maybeShowCardPinRefusal(const QString &status, const QString &peerLabel);
+    /** Republish the queue's front to the dialog's accessors. `notify` is false
+     *  when a request arrives while the dialog is already showing: re-raising
+     *  it would swap the id out from under the click answering the FIRST one. */
+    void syncPermissionFront(bool notify = true);
+    /** Defer pendingFormChanged one tick: the dialog closes on the same click
+     *  that answers a form, and a synchronous change makes its onClosed deny
+     *  the NEXT form in the queue. */
+    void notifyFormQueue();
     void onMessageUsage(const QVariantMap &usage);
     void onCommands(const QStringList &commands);
     void onModeChanged(const QString &modeId);
@@ -1106,11 +1190,6 @@ private:
     void setMyDayVisible(bool v);
     /// The always-on thread: a normal chat titled "Assistant", newest wins.
     QString assistantSessionId() const;
-    // Pending structured-input forms, oldest first. The core parks ONE request
-    // per family (spine::answer_request takes a single responder), so a second
-    // request of the same family REPLACES the queued one — the old responder was
-    // already dropped server-side and answering it would answer nothing.
-    QVariantList m_forms;
     QString m_pendingExportPath;            // where to write the next session/export reply
     QString m_itemOldestId;                 // item-window cursor (docs/TRANSCRIPT_MODEL.md)
     bool m_itemHasOlder = false;
@@ -1124,8 +1203,14 @@ private:
     QHash<QString, QList<QVariantList>> m_pendingAttachments;
     QHash<QString, QVariantList> m_attachmentsByRow;   // item id -> its thumbnails
 
-    // pending permission request
+    // Parked server requests. Both queues are FIFO and keyed by the CORE'S
+    // request id: a second permission/form must never overwrite the first.
+    // The front of each queue is what the declared dialog shows.
+    QVariantList m_permissionQueue;
+    QVariantList m_formQueue;
     QString m_permToolCallId;
     QString m_permTitle;
     QVariantList m_permOptions;
+    bool m_formNotifyPending = false;
+    QVariantMap m_roamPinRefusal;
 };

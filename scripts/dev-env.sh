@@ -53,7 +53,12 @@ if [[ ${#args[@]} -eq 0 ]]; then
   args=(/bin/bash)
 fi
 
-exec podman run --rm -it \
+# -it only when attached to a terminal: --no-build one-shot commands and CI
+# wrappers have no tty, and podman warns (or fails) on `-it` without one.
+tty=()
+[[ -t 0 ]] && tty=(-it)
+
+exec podman run --rm "${tty[@]}" \
   --userns=keep-id \
   --user "$(id -u):$(id -g)" \
   --volume "${REPO_ROOT}:/workspace:Z" \

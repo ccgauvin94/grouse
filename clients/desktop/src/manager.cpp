@@ -12,6 +12,7 @@
 #include "sessionlistmodel.h"
 
 #include <cmath>
+#include <type_traits>
 
 #include <QDateTime>
 #include <QDebug>
@@ -42,6 +43,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QMimeDatabase>
 #include <QSaveFile>
 #include <QSet>
@@ -53,6 +55,118 @@
 #include <QThreadPool>
 #include <QTimer>
 #include <QUrl>
+
+namespace {
+// ABI 20 moved the request id to the FRONT of every respond intent and added
+// the roam pin getters. The if-constexpr shims keep this translation unit
+// compilable while the C ABI header lands in the same wave; an ABI-20 .so is
+// required at runtime, so the legacy branch is never reached in production.
+template <typename Fn>
+void respondRecipeIntent(Fn fn, void *h, const QByteArray &rid,
+                         const QByteArray &action, const QByteArray &payload)
+{
+    if constexpr (std::is_invocable_v<Fn, void *, const char *, const char *, const char *>)
+        fn(h, rid.constData(), action.constData(), payload.constData());
+    else
+        fn(h, action.constData(), payload.constData());
+}
+
+template <typename Fn>
+void respondElicitationIntent(Fn fn, void *h, const QByteArray &rid,
+                              const QByteArray &action, const QByteArray &payload)
+{
+    if constexpr (std::is_invocable_v<Fn, void *, const char *, const char *, const char *>)
+        fn(h, rid.constData(), action.constData(), payload.constData());
+    else
+        fn(h, action.constData(), payload.constData());
+}
+
+// A getter returning a MALLOC'd JSON string. Optional label for the singular
+// pin getter; the plural one takes no label.
+template <typename Fn>
+QString pinGetter(CoreBridge *bridge, Fn fn, void *h, const QByteArray *label)
+{
+    if constexpr (std::is_invocable_v<Fn, void *, const char *, char **>) {
+        if (!label)
+            return QString();
+        char *err = nullptr;
+        const QString out = bridge->takeString(fn(h, label->constData(), &err));
+        if (err) {
+            bridge->takeString(err);
+            return QString();
+        }
+        return out;
+    } else if constexpr (std::is_invocable_v<Fn, void *, const char *>) {
+        if (!label)
+            return QString();
+        return bridge->takeString(fn(h, label->constData()));
+    } else if constexpr (std::is_invocable_v<Fn, void *, char **>) {
+        Q_UNUSED(label);
+        char *err = nullptr;
+        const QString out = bridge->takeString(fn(h, &err));
+        if (err) {
+            bridge->takeString(err);
+            return QString();
+        }
+        return out;
+    } else {
+        Q_UNUSED(label);
+        return bridge->takeString(fn(h));
+    }
+}
+
+template <typename Fn>
+bool pinClearIntent(CoreBridge *bridge, Fn fn, void *h, const QByteArray &label,
+                    QString *error)
+{
+    if constexpr (std::is_invocable_v<Fn, void *, const char *, char **>) {
+        char *err = nullptr;
+        using R = std::invoke_result_t<Fn, void *, const char *, char **>;
+        if constexpr (std::is_same_v<R, char *>)
+            bridge->takeString(fn(h, label.constData(), &err));
+        else
+            fn(h, label.constData(), &err);
+        if (err) {
+            if (error)
+                *error = bridge->takeString(err);
+            return false;
+        }
+        return true;
+    } else if constexpr (std::is_invocable_v<Fn, void *, const char *>) {
+        using R = std::invoke_result_t<Fn, void *, const char *>;
+        if constexpr (std::is_same_v<R, char *>)
+            bridge->takeString(fn(h, label.constData()));
+        else
+            fn(h, label.constData());
+        return true;
+    } else {
+        return false;
+    }
+}
+
+QVariantMap pinMapFromJson(const QString &raw)
+{
+    if (raw.trimmed().isEmpty())
+        return {};
+    const QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8());
+    if (doc.isObject())
+        return doc.object().toVariant().toMap();
+    // lib.rs's roam_card_pins() already returns a JSON string; some C ABI
+    // spellings hand that string back as a JSON string value rather than an
+    // object. Unwrap once, never parse a peer-supplied value.
+    if (doc.isString())
+        return pinMapFromJson(doc.string());
+    return {};
+}
+
+QString pinStringFromJson(const QString &raw)
+{
+    if (raw.trimmed().isEmpty() || raw.trimmed() == QLatin1String("null"))
+        return QString();
+    const QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8());
+    return doc.isString() ? doc.string() : (doc.isObject() ? QString() : raw.trimmed());
+}
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Implementation notes
@@ -826,6 +940,120 @@ void Manager::restoreRoamPeers()
         const QByteArray l = it.key().toUtf8();
         m_bridge->api().grouse_roam_connect(m_bridge->handle(), c.constData(), l.constData());
     }
+}
+
+QVariantList Manager::formatCardPins(const QVariantMap &pins)
+{
+    QVariantList rows;
+    for (auto it = pins.constBegin(); it != pins.constEnd(); ++it) {
+        const QString peer = it.key().trimmed();
+        const QString fingerprint = it.value().toString().trimmed();
+        if (peer.isEmpty() || fingerprint.isEmpty())
+            continue;
+        const QString shortFp = fingerprint.length() > 16
+            ? fingerprint.left(12) + QStringLiteral("…") + fingerprint.right(4)
+            : fingerprint;
+        rows << QVariantMap{{"peer", peer},
+                            {"fingerprint", fingerprint},
+                            {"short", shortFp}};
+    }
+    return rows;
+}
+
+QVariantMap Manager::parseCardPinRefusal(const QString &status, const QString &peerLabel)
+{
+    const int at = status.indexOf(QLatin1String("roam card pin refused"), Qt::CaseInsensitive);
+    if (at < 0)
+        return {};
+    const QString message = status.mid(at).trimmed();
+    // Core wording: "roam card for '<label>' changed: pinned <fp>, got <fp>.
+    // Refusing to dial — clear the pin to re-enroll this peer".
+    const QRegularExpression re(QStringLiteral(
+        "roam card for '([^']+)' changed: pinned ([^,]+), got ([^.]+)"));
+    const QRegularExpressionMatch m = re.match(message);
+    QString peer = peerLabel.trimmed();
+    if (peer.isEmpty())
+        peer = m.captured(1).trimmed();
+    QVariantMap out{{"message", message},
+                    {"peer", peer},
+                    {"pinned", m.captured(2).trimmed()},
+                    {"got", m.captured(3).trimmed()}};
+    return out;
+}
+
+QVariantList Manager::roamCardPins()
+{
+    QVariantMap pins;
+    if (m_bridge && m_bridge->isAvailable()) {
+        const QString all = pinGetter(m_bridge, m_bridge->api().grouse_roam_card_pins,
+                                      m_bridge->handle(), nullptr);
+        pins = pinMapFromJson(all);
+        if (pins.isEmpty()) {
+            // Older ABI-20 spellings expose only the singular getter: ask it for
+            // every locally known peer. The PINS themselves still come from the
+            // core, never from the saved card (which may be the wrong one).
+            const QVariantMap cards = m_store.value(QStringLiteral("roam_cards")).toMap();
+            for (auto it = cards.constBegin(); it != cards.constEnd(); ++it) {
+                const QByteArray label = it.key().toUtf8();
+                const QString fp = pinStringFromJson(pinGetter(
+                    m_bridge, m_bridge->api().grouse_roam_card_pin,
+                    m_bridge->handle(), &label));
+                if (!fp.isEmpty())
+                    pins.insert(it.key(), fp);
+            }
+        }
+    }
+    return formatCardPins(pins);
+}
+
+bool Manager::clearRoamCardPin(const QString &peer, const QString &confirmation)
+{
+    const QString label = peer.trimmed();
+    if (label.isEmpty() || confirmation.trimmed() != label)
+        return false;               // out-of-band confirmation is a hard gate
+    if (!m_bridge || !m_bridge->isAvailable())
+        return false;
+    const QByteArray l = label.toUtf8();
+    QString error;
+    if (!pinClearIntent(m_bridge, m_bridge->api().grouse_roam_card_pin_clear,
+                        m_bridge->handle(), l, &error)) {
+        setStatus(error.isEmpty()
+                  ? QStringLiteral("Could not clear the pin for %1").arg(label)
+                  : error);
+        return false;
+    }
+    emit roamCardPinsChanged();
+    dismissRoamPinRefusal();
+    setStatus(QStringLiteral("Pin cleared for %1 — the next dial re-enrolls this peer; "
+                             "verify its card out of band first.").arg(label));
+    return true;
+}
+
+bool Manager::redialRoamPeer(const QString &label)
+{
+    const QString card = m_store.value(QStringLiteral("roam_cards")).toMap()
+                             .value(label.trimmed()).toString();
+    if (card.isEmpty())
+        return false;
+    connectRoam(card, label.trimmed());
+    return true;
+}
+
+void Manager::dismissRoamPinRefusal()
+{
+    if (m_roamPinRefusal.isEmpty())
+        return;
+    m_roamPinRefusal.clear();
+    emit roamPinRefusalChanged();
+}
+
+void Manager::maybeShowCardPinRefusal(const QString &status, const QString &peerLabel)
+{
+    const QVariantMap parsed = parseCardPinRefusal(status, peerLabel);
+    if (parsed.isEmpty() || parsed.value("message") == m_roamPinRefusal.value("message"))
+        return;                     // one dialog per refusal, not one per status burst
+    m_roamPinRefusal = parsed;
+    emit roamPinRefusalChanged();
 }
 
 void Manager::openRoamSession(const QString &label, const QString &sessionId, const QString &cwd)
@@ -1917,17 +2145,26 @@ void Manager::unarchiveSession(const QString &sessionId)
     m_bridge->api().grouse_unarchive_session(m_bridge->handle(), sid.constData());
 }
 
-void Manager::respondPermission(const QString &toolCallId, const QString &optionId)
+void Manager::respondPermission(const QString &requestId, const QString &optionId)
 {
+    const QString id = requestId.isEmpty() ? m_permToolCallId : requestId;
+    const int index = requestQueueIndex(m_permissionQueue, id);
+    if (index < 0)
+        return;   // a late dialog answer must not deny a DIFFERENT request
+    m_permissionQueue.removeAt(index);
+    syncPermissionFront();
+
     if (m_bridge && m_bridge->isAvailable()) {
-        const QByteArray id = toolCallId.toUtf8();
+        const QByteArray rid = id.toUtf8();
         const QByteArray outcome = optionId.isEmpty()
             ? QByteArrayLiteral("\"Cancelled\"")
             : QJsonDocument(QJsonObject{{"Selected", QJsonObject{{"option_id", optionId}}}})
                   .toJson(QJsonDocument::Compact);
-        m_bridge->api().grouse_respond_permission(m_bridge->handle(), id.constData(), outcome.constData());
+        // The queue key is the core's permission id (today: tool_call_id, the
+        // key `respond_permission` routes by; the record also carries the owner
+        // and display session so the prompt can name the right chat/wire).
+        m_bridge->api().grouse_respond_permission(m_bridge->handle(), rid.constData(), outcome.constData());
     }
-    m_permToolCallId.clear();
 }
 
 void Manager::setConfigOption(const QString &id, const QString &value)
@@ -2744,6 +2981,19 @@ static QJsonArray parseArr(const QString &json)
 void Manager::coreOnStatus(const QString &json)
 {
     const QString s = json;
+    // The card-pin check is a dial-time refusal. It arrives as an Error/Alert
+    // envelope (or a plain string); surface the actionable text even when the
+    // generic status branch below only paints the line.
+    const QJsonObject statusObj = parseObj(s);
+    QString statusText = s;
+    for (const char *key : {"Error", "Alert"}) {
+        const QJsonValue v = statusObj.value(QLatin1String(key));
+        if (v.isObject() && v.toObject().contains(QStringLiteral("message"))) {
+            statusText = v.toObject().value(QStringLiteral("message")).toString();
+            break;
+        }
+    }
+    maybeShowCardPinRefusal(statusText, QString());
     // Ready is a CONNECTION phase, never an open result. An open emits its own
     // on_session_opened (a paint / a Window is not one either: background fills
     // send those). Leave a chat's loading line alone until that answer arrives.
@@ -2934,16 +3184,20 @@ void Manager::coreOnAdvisorReport(const QString &sid, const QString &text)
     emit advisorReportChanged();
 }
 
-void Manager::coreOnPermission(const QString &json)
+QVariantMap Manager::parsePermissionRequest(const QString &json)
 {
-    const QJsonObject o = parseObj(json);
-    const QJsonObject req = o.value(QStringLiteral("PermissionRequest")).isObject()
-        ? o.value(QStringLiteral("PermissionRequest")).toObject() : o;
-    QString toolCallId = req.value("tool_call_id").toString();
-    // serde external tag puts the variant under the root; unwrap if needed.
-    if (toolCallId.isEmpty()) {
-        // Root may be the untagged object already.
-    }
+    const QJsonObject root = parseObj(json);
+    const QJsonObject req = root.value(QStringLiteral("PermissionRequest")).isObject()
+        ? root.value(QStringLiteral("PermissionRequest")).toObject() : root;
+    const QString toolCallId = req.value("tool_call_id").toString(req.value("toolCallId").toString());
+    const QString requestId = req.value("request_id").toString(
+        req.value("requestId").toString(toolCallId));
+    const QString sessionId = req.value("session_id").toString(req.value("sessionId").toString());
+    QVariant owner = req.value("owner").toVariant();
+    // Some C ABI spellings pass SessionOwner as a JSON *string*, not an object.
+    if (owner.userType() == QMetaType::QString && owner.toString().trimmed().startsWith(QLatin1Char('{')))
+        owner = QJsonDocument::fromJson(owner.toString().trimmed().toUtf8()).object().toVariant();
+
     QVariantList options;
     for (const auto &opt : req.value("options").toArray()) {
         const QJsonObject oo = opt.toObject();
@@ -2951,8 +3205,138 @@ void Manager::coreOnPermission(const QString &json)
                                {"name", oo.value("name").toString()},
                                {"kind", oo.value("kind").toString()}};
     }
-    onPermission(toolCallId, req.value("title").toString(),
-                 req.value("detail").toString(), options);
+    return {{"requestId", requestId},
+            {"toolCallId", toolCallId},
+            {"sessionId", sessionId},
+            {"owner", owner},
+            {"ownerLabel", requestOwnerLabel(owner, sessionId)},
+            {"title", req.value("title").toString()},
+            {"detail", req.value("detail").toString()},
+            {"options", options}};
+}
+
+int Manager::requestQueueIndex(const QVariantList &queue, const QString &requestId)
+{
+    if (requestId.isEmpty())
+        return -1;                 // never answer an ambiguous id
+    for (int i = 0; i < queue.size(); ++i) {
+        const QVariantMap entry = queue.at(i).toMap();
+        QString id = entry.value("requestId").toString();
+        if (id.isEmpty())
+            id = entry.value("toolCallId").toString();
+        if (id == requestId)
+            return i;
+    }
+    return -1;
+}
+
+QString Manager::requestOwnerLabel(const QVariant &owner, const QString &sessionId)
+{
+    QString label;
+    QString kind;
+    if (owner.userType() == QMetaType::QVariantMap) {
+        const QVariantMap o = owner.toMap();
+        label = o.value("label").toString();
+        kind = o.value("kind").toString();
+    } else if (owner.isValid() && !owner.isNull()) {
+        label = owner.toString();
+    }
+    if (!label.isEmpty()) {
+        if (label.startsWith(QLatin1String("roam:")))
+            return label;
+        if (kind == QLatin1String("roam"))
+            return QStringLiteral("roam:") + label;
+        // The core sends a BARE roam label in PermissionRequest::owner. Pair it
+        // with the display id so the dialog names both the wire and the chat.
+        if (sessionId.startsWith(QLatin1String("roam:"))) {
+            const QString peer = roamPeerForSession(sessionId);
+            if (!peer.isEmpty() && label == peer)
+                return QStringLiteral("roam:") + peer;
+        }
+        return sessionId.startsWith(label + QLatin1Char(':'))
+            ? QStringLiteral("roam:") + label : label;
+    }
+    if (sessionId.isEmpty())
+        return QString();
+    if (sessionId.startsWith(QLatin1String("roam:"))) {
+        const QString peer = roamPeerForSession(sessionId);
+        return peer.isEmpty() ? sessionId : QStringLiteral("roam:") + peer;
+    }
+    return sessionId;
+}
+
+void Manager::syncPermissionFront(bool notify)
+{
+    if (m_permissionQueue.isEmpty()) {
+        m_permToolCallId.clear();
+        m_permTitle.clear();
+        m_permOptions.clear();
+        return;
+    }
+    const QVariantMap req = m_permissionQueue.first().toMap();
+    m_permToolCallId = req.value("requestId").toString();
+    const QString title = req.value("title").toString();
+    const QString where = req.value("ownerLabel").toString();
+    const QString sid = req.value("sessionId").toString();
+    // Name BOTH the wire and the chat: a tool call id means nothing to the
+    // person, and the screen may be showing a different chat entirely.
+    QString ownerText = where;
+    if (!sid.isEmpty() && !ownerText.contains(sid))
+        ownerText = ownerText.isEmpty() ? sid : QStringLiteral("%1 · %2").arg(where, sid);
+    m_permTitle = ownerText.isEmpty() ? title : QStringLiteral("%1 — %2").arg(title, ownerText);
+    m_permOptions = req.value("options").toList();
+    // The dialog that just answered closes on the same click. Publishing the
+    // next request synchronously would make its onClosed deny that next one.
+    if (notify)
+        QTimer::singleShot(0, this, [this]() { emit permissionRequested(); });
+}
+
+void Manager::coreOnPermission(const QString &json, const QString &owner,
+                               const QString &requestId)
+{
+    QJsonObject root = parseObj(json);
+    const bool wrapped = root.value(QStringLiteral("PermissionRequest")).isObject();
+    QJsonObject payload = wrapped
+        ? root.value(QStringLiteral("PermissionRequest")).toObject() : root;
+    if (!owner.isEmpty() && !payload.contains(QStringLiteral("owner")))
+        payload.insert(QStringLiteral("owner"), owner);
+    if (!requestId.isEmpty() && !payload.contains(QStringLiteral("request_id")))
+        payload.insert(QStringLiteral("request_id"), requestId);
+    if (wrapped)
+        root.insert(QStringLiteral("PermissionRequest"), payload);
+    else
+        root = payload;
+    const QVariantMap req = parsePermissionRequest(
+        root.isEmpty() ? json
+                       : QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact)));
+    const QString id = req.value("requestId").toString();
+    if (id.isEmpty())
+        return;                     // nothing to answer by id
+    if (requestQueueIndex(m_permissionQueue, id) >= 0)
+        return;                     // redelivery must not replace a parked request
+    const bool raiseDialog = m_permissionQueue.isEmpty();
+    m_permissionQueue << req;
+    syncPermissionFront(raiseDialog);
+
+    if (notificationsEnabled() && !Notifier::appVisible())
+        Notifier::send(QStringLiteral("Grouse needs approval"),
+                       QStringLiteral("Allow “%1”?").arg(m_permTitle));
+}
+
+QString Manager::permissionToolCallId() const
+{
+    return m_permToolCallId;
+}
+
+QString Manager::permissionOwner() const
+{
+    return m_permissionQueue.isEmpty() ? QString()
+        : m_permissionQueue.first().toMap().value("ownerLabel").toString();
+}
+
+int Manager::permissionCount() const
+{
+    return m_permissionQueue.size();
 }
 
 void Manager::notifyTurnFinished()
@@ -3045,6 +3429,9 @@ void Manager::coreOnProjects(const QString &json)
 
 void Manager::coreOnRoamPeerStatus(const QString &label, const QString &status)
 {
+    // Roam reports the pin mismatch here with the PEER LABEL, which the generic
+    // status envelope may not carry. This is the dialog's source of truth.
+    maybeShowCardPinRefusal(status, label);
     const bool down = status == QStringLiteral("disconnected") || status.startsWith(QStringLiteral("error:"));
     m_roamModel->setPeerStatus(label, status, !down);
     emit wireUpChanged();
@@ -3535,7 +3922,25 @@ void Manager::coreOnExport(const QString &data)
     onExportResult(data);
 }
 
-void Manager::coreOnRecipeParams(const QString &parameters)
+namespace {
+// The C ABI's owner argument is either a bare label or a SessionOwner JSON
+// record. Both collapse to the same QVariant shape parsePermissionRequest uses.
+QVariant ownerFromWire(const QString &raw)
+{
+    const QString s = raw.trimmed();
+    if (s.isEmpty())
+        return {};
+    if (s.startsWith(QLatin1Char('{'))) {
+        const QVariant v = QJsonDocument::fromJson(s.toUtf8()).object().toVariant();
+        if (!v.toMap().isEmpty())
+            return v;
+    }
+    return s;
+}
+} // namespace
+
+void Manager::coreOnRecipeParams(const QString &owner, const QString &requestId,
+                                 const QString &parameters)
 {
     // A recipe started with declared parameters (via `_meta.recipeId`) cannot
     // run until they are supplied. The core PARKED the request, so dropping it
@@ -3568,15 +3973,22 @@ void Manager::coreOnRecipeParams(const QString &parameters)
             {"required", o.value("requirement").toString() == QLatin1String("required")},
         };
     }
+    const QString where = requestOwnerLabel(ownerFromWire(owner), QString());
+    const QString base = QStringLiteral("Recipe parameters");
     QVariantMap form;
-    form["title"] = QStringLiteral("Recipe parameters");
+    form["title"] = where.isEmpty() ? base : QStringLiteral("%1 — %2").arg(base, where);
     form["message"] = QStringLiteral("This recipe needs values before it can start.");
     form["recipeParams"] = true;
+    form["owner"] = where;
+    form["requestId"] = requestId.isEmpty()
+        ? QStringLiteral("legacy-%1").arg(m_formQueue.size()) : requestId;
+    form["wireRequestId"] = requestId;
     form["fields"] = fields;
     queueForm(form);
 }
 
-void Manager::coreOnElicitation(const QString &schema)
+void Manager::coreOnElicitation(const QString &owner, const QString &requestId,
+                                const QString &schema)
 {
     // elicitation/create, form mode: a tool wants structured input mid-turn.
     // Same shape as Android's ElicitationSheet — booleans, choices, typed text.
@@ -3612,42 +4024,72 @@ void Manager::coreOnElicitation(const QString &schema)
             {"required", required.contains(it.key())},
         };
     }
+    const QString where = requestOwnerLabel(ownerFromWire(owner), QString());
+    const QString base = o.value("title").toString(QStringLiteral("Input requested"));
     QVariantMap form;
-    form["title"] = o.value("title").toString(QStringLiteral("Input requested"));
+    form["title"] = where.isEmpty() ? base : QStringLiteral("%1 — %2").arg(base, where);
     form["message"] = o.value("description").toString();
     form["recipeParams"] = false;
+    form["owner"] = where;
+    form["requestId"] = requestId.isEmpty()
+        ? QStringLiteral("legacy-%1").arg(m_formQueue.size()) : requestId;
+    form["wireRequestId"] = requestId;
     form["fields"] = fields;
     queueForm(form);
 }
 
+void Manager::notifyFormQueue()
+{
+    if (m_formNotifyPending)
+        return;
+    m_formNotifyPending = true;
+    QTimer::singleShot(0, this, [this]() {
+        m_formNotifyPending = false;
+        emit pendingFormChanged();
+    });
+}
+
 void Manager::queueForm(const QVariantMap &form)
 {
-    // One parked responder per family in the core (spine::answer_request takes a
-    // single responder), so a second request of the same family REPLACES the
-    // queued one: the earlier responder was already dropped server-side and
-    // answering it would answer nothing.
-    const bool recipe = form.value("recipeParams").toBool();
-    for (int i = m_forms.size() - 1; i >= 0; --i)
-        if (m_forms.at(i).toMap().value("recipeParams").toBool() == recipe)
-            m_forms.removeAt(i);
-    m_forms << form;
-    emit pendingFormChanged();
+    // The core parks ONE responder per request id now. A redelivered request
+    // must not replace an unanswered form, and a second request of the same
+    // family must queue behind it rather than evict it.
+    const QString id = form.value("requestId").toString();
+    if (requestQueueIndex(m_formQueue, id) >= 0)
+        return;
+    const bool raiseDialog = m_formQueue.isEmpty();
+    m_formQueue << form;
+    // A form arriving behind an open dialog must NOT change `Mgr.pendingForm`:
+    // QML would rebind the fields the user is filling and answer the wrong id.
+    if (raiseDialog)
+        notifyFormQueue();
 }
 
 QVariant Manager::pendingForm() const
 {
-    return m_forms.isEmpty() ? QVariantMap{} : m_forms.first();
+    return m_formQueue.isEmpty() ? QVariantMap{} : m_formQueue.first();
 }
 
 void Manager::answerForm(const QVariantMap &values, const QString &action)
 {
-    if (m_forms.isEmpty())
+    if (m_formQueue.isEmpty())
         return;
-    const QVariantMap form = m_forms.takeFirst().toMap();
-    emit pendingFormChanged();
+    answerFormFor(m_formQueue.first().toMap().value("requestId").toString(), values, action);
+}
+
+void Manager::answerFormFor(const QString &requestId, const QVariantMap &values,
+                            const QString &action)
+{
+    const int index = requestQueueIndex(m_formQueue, requestId);
+    if (index < 0)
+        return;                     // a stale dialog must not answer the next form
+    const QVariantMap form = m_formQueue.takeAt(index).toMap();
+    if (index == 0)
+        notifyFormQueue();          // only a front answer exposes the next form
     if (!m_bridge || !m_bridge->isAvailable())
         return;
     const bool accepted = action == QLatin1String("accept");
+    const QByteArray rid = form.value("wireRequestId").toString().toUtf8();
     if (form.value("recipeParams").toBool()) {
         // recipe/request-params takes {action:"submit"|"cancel", values:{k:string}}:
         // every value is a STRING there (the server type is HashMap<String,String>)
@@ -3657,10 +4099,9 @@ void Manager::answerForm(const QVariantMap &values, const QString &action)
             for (auto it = values.begin(); it != values.end(); ++it)
                 vals.insert(it.key(), it.value().toString());
         const QByteArray js = QJsonDocument(vals).toJson(QJsonDocument::Compact);
-        m_bridge->api().grouse_unstable_respond_recipe_params(
-            m_bridge->handle(),
-            (accepted ? QStringLiteral("submit") : QStringLiteral("cancel")).toUtf8().constData(),
-            js.constData());
+        const QByteArray act = (accepted ? QStringLiteral("submit") : QStringLiteral("cancel")).toUtf8();
+        respondRecipeIntent(m_bridge->api().grouse_unstable_respond_recipe_params,
+                            m_bridge->handle(), rid, act, js);
         return;
     }
     // elicitation/create: accept carries the typed content object, decline and
@@ -3683,8 +4124,8 @@ void Manager::answerForm(const QVariantMap &values, const QString &action)
     const QString act = accepted ? QStringLiteral("accept")
         : action == QLatin1String("cancel") ? QStringLiteral("cancel")
                                             : QStringLiteral("decline");
-    m_bridge->api().grouse_unstable_respond_elicitation(
-        m_bridge->handle(), act.toUtf8().constData(), js.constData());
+    respondElicitationIntent(m_bridge->api().grouse_unstable_respond_elicitation,
+                             m_bridge->handle(), rid, act.toUtf8(), js);
 }
 
 void Manager::coreOnCompactionStatus(const QString &message)

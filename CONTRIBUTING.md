@@ -8,11 +8,10 @@ the goose compatibility shim (`_goose/unstable/*`), roam — lives once in `core
 and is exposed through the uniffi contract (and the C ABI for the Linux desktop).
 If a change would make two UIs diverge, it belongs in the core, not in the UIs.
 
-The contract lives in three places:
-
-- `AGENTS.md` — the architecture and the protocol notes that matter.
-- the core's uniffi interface — the machine-readable API boundary every UI consumes.
-- `design/` — the shared design tokens (owned by the design-language workstream).
+The doc ownership map in `AGENTS.md` says which file owns which claim: architecture
+lives there, the core's uniffi interface (with `core/grouse-core/src/surface.rs` and
+the generated bindings as the inventory) is the machine-readable API boundary, and
+`design/` owns the shared design tokens. Link to the owner rather than restating it.
 
 ## Development environment (devcontainer)
 
@@ -52,6 +51,9 @@ cargo test  --manifest-path core/Cargo.toml
 - **Linux desktop** — Qt6 + KF6 Kirigami; built inside a `kde-build` distrobox
   (see below).
 - **Android** — Android SDK + `gradlew`; see below.
+- **macOS** — SwiftUI spike + first app slice under `clients/macos/`, consuming
+  the uniffi Swift bindings. It builds on a Mac only (`./build.sh` there); CI
+  checks binding generation and listener defaults but does not compile Swift.
 
 ## Building and testing from one clone
 
@@ -79,9 +81,9 @@ Kirigami, and extra-cmake-modules installed:
 distrobox enter kde-build -- bash -lc 'cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug && cmake --build build -j$(nproc)'
 ```
 
-The Flatpak bundle builds from the manifest with flatpak-builder (see
-`clients/desktop/` once the desktop lands in the monorepo); `just desktop` wraps
-it.
+The Flatpak bundle builds from the manifest with flatpak-builder; `just desktop`
+wraps it. See `clients/desktop/AGENTS.md` for the bundle's build-script and cache
+footguns.
 
 ### Android (Kotlin/Compose)
 
@@ -98,12 +100,14 @@ The debug APK lands under `clients/android/app/build/outputs/apk/debug/`.
 gitleaks detect --source .
 ```
 
-CI runs this on every push; a commit must not contain secrets or personal
-identifiers.
+The secrets workflow in `.github/workflows/secrets.yml` runs on pushes; a commit
+must not contain secrets or personal identifiers.
 
 ## CI
 
-- Linux desktop → Flatpak bundle only.
-- Android → APK only.
-- Core → `cargo test` + `clippy`.
-- Every push → gitleaks secrets scan.
+The files in `.github/workflows/` are the source of truth for CI's jobs, triggers
+and required checks — read them before claiming that a check exists. They define
+the core, Android, desktop/Flatpak, parity, CodeQL, secrets, macOS binding-guard,
+gate and release jobs; no list here can stay current. Locally, run the matching
+commands from `AGENTS.md` before pushing. In particular, macOS Swift is **not**
+compiled in CI.

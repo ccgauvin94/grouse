@@ -35,14 +35,19 @@ normative surface.
   mints a stable id, Upserts once, then deltas; a replay that touches a row
   below the painted window is not emitted (the client does not hold it).
 
-**Phase 4 (in progress).** The legacy channels are deleted: `on_transcript`,
+**Phase 4 (shipped).** The legacy channels are deleted: `on_transcript`,
 `on_stream`, `TranscriptEvent` and `StreamEvent` are gone, and usage /
 run-ended — the two things that are not transcript rows — have their own
-`on_usage` / `on_run_ended` listener methods. Still to come: the flat `Message`
-projection + `transcript()` getter, and the provisional-merge machinery
-(removed once replay merges by id in place).
+`on_usage` / `on_run_ended` listener methods. The flat `Message` projection and
+`transcript()` getter are in the core too. The provisional/supersede machinery is
+still there because the merge anchors on an id or an adopted prompt rather than
+merging by id in place; that is a separate, still-open change (see
+`docs/CACHE_OPEN_AUDIT.md`, status note).
 
-## Why we want to replace the current model
+## ARCHIVE — Why we want to replace the current model
+
+*Historical design rationale from before the item stream shipped. Kept for the
+why, not as a claim about today's code.*
 
 1. **Two overlapping streams.** The core emits `on_stream`
    (chunks/tool calls) *and* `on_transcript` (Append/Update/Clear) for the same
@@ -60,7 +65,7 @@ projection + `transcript()` getter, and the provisional-merge machinery
    does not even redraw from the core's store on `Clear`, so the core's cache
    frequently cannot be used at all.
 
-## Goals
+## ARCHIVE — Goals
 
 - **One stream.** The client applies ops to a keyed store. No dual-stream
   reconciliation, no stashes, no "clear and rebuild".
@@ -74,7 +79,7 @@ projection + `transcript()` getter, and the provisional-merge machinery
 - **One implementation.** Desktop and Android run the same semantics; the core
   owns order, ids, and windows.
 
-## Non-goals
+## ARCHIVE — Non-goals
 
 - A backwards cursor on the wire. `goose serve` has none: paging is a growing
   trailing window (`_meta.replayTail`, see *Windowing*), so a page re-sends its
@@ -230,8 +235,10 @@ Rules:
 - **Upsert is idempotent and authoritative.** Every item is eventually Upserted
   with its final state; deltas are an optimization. A client that drops a delta
   still converges on the next Upsert.
-- **Unknown id on a delta** creates a stub, then the Upsert fills it. (Or the
-  core guarantees an Upsert precedes deltas; pick one and test it.)
+- **A fresh text row emits `Upsert` first**, then deltas; the contract
+  (`core/CONTRACT.md` §3.5) settles this question, so a client may rely on the
+  Upsert. Creating a stub for an unknown delta id is still harmless and is the
+  documented fallback for a row delivered out of order.
 - **Ops for items outside the client's window are ignored.** The core keeps
   them; they appear if the window grows.
 - **Reset** happens only on a session switch or a cache miss that forces a full
@@ -381,29 +388,54 @@ the anchor too: the adopted row stays, the cached suffix behind it goes (the
 replay re-supplies it), and `merge_overlap` is recorded. A gap is still reported
 when the tail really does start past the cache, and it still owes a full rebuild.
 
-## Types (sketch)
+## Types (as shipped)
+
+These are the uniffi records/enums on the contract; the C ABI carries the same
+shape as JSON. Field and variant lists here were generated from
+`core/grouse-core/src/surface.rs` (`ITEM_FIELDS`, `CALL_FIELDS`, `STEP_FIELDS`,
+`ITEM_KINDS`) at `f3585cf3`. **That file and the generated bindings are
+authoritative** — this prose sketch is not a second inventory, and a new field
+must be added there first.
 
 ```rust
-// uniffi records/enums on the contract; the C ABI carries the same shape as JSON.
 pub enum ItemKind { User, Agent, Thought, Tool, ToolGroup, Chart, McpApp, File, Error }
 
+pub struct SubagentStep { pub name: String, pub detail: String }
+
 pub struct ToolCall {
-    pub id: String, pub title: String, pub detail: String,
-    pub output: String, pub status: String,
+    pub id: String,
+    pub title: String,
+    pub detail: String,   // tool input
+    pub output: String,
+    pub status: String,
     pub thought: String,  // the thinking that preceded THIS call
+    pub seq: u32,         // position within the group
+    pub steps: Vec<SubagentStep>, // delegate's child calls
+}
+
+pub struct UploadedFile { // a REFERENCE: no bytes in the transcript
+    pub name: String, pub mime: String, pub bytes: u64,
+    pub path: String, pub sha256: String,
 }
 
 pub struct Item {
-    pub id: String,
+    pub id: String,               // stable client key (server id or core @n)
     pub kind: ItemKind,
-    pub text: String,     // text body / tool title
-    pub detail: String,   // tool input / chart spec / app input
-    pub output: String,   // tool result
-    pub status: String,   // tool lifecycle
-    pub app_key: String,  // mcpapp: "<ext>|<uri>"
-    pub calls: Vec<ToolCall>, // toolgroup children
-    pub thought: String,  // tool/toolgroup: the thinking the run absorbed
-    pub summary: String,  // tool/toolgroup: the run's one-line label
+    pub text: String,             // body / tool-app-chart title
+    pub detail: String,           // tool input / chart spec / app input
+    pub output: String,           // tool result
+    pub status: String,           // tool lifecycle
+    pub app_key: String,          // McpApp: "<ext>|<uri>"
+    pub calls: Vec<ToolCall>,     // ToolGroup children
+    pub thought: String,          // Tool/ToolGroup: absorbed framing
+    pub summary: String,          // Tool/ToolGroup: one-line label
+    pub steps: Vec<SubagentStep>, // Tool: delegate's child calls
+    pub attachments: u32,         // User: images + files on the prompt
+    pub files: Vec<UploadedFile>, // User prompt files / File rows (references)
+    pub images: Vec<String>,      // data:<mime>;base64,... URIs
+    pub message_id: String,       // server's own id for a text row
+    pub seq: u32,                 // transcript position; insert by this
+    pub created: i64,             // server creation instant (epoch seconds)
 }
 
 pub enum TranscriptOp {
@@ -477,7 +509,11 @@ exactly like a main one instead of replaying its whole history over the wire.
   recycled instead, and the view re-pins itself until the list reports `atYEnd`
   (the heights of pooled rows are estimates, not measurements).
 
-## Client shape
+## ARCHIVE — Client shape
+
+*The planned client shape, kept for rationale. The shipped models are keyed by
+item id and apply the same ops; their concrete classes are in each platform's
+source, not here.*
 
 Both clients reduce to the same small store:
 
@@ -516,7 +552,10 @@ onScrollNearTop: Mgr.loadOlder(50)   // once per Window, not per pixel
   and restored from cache.
 - *Pinning / docking*: unchanged — the dock renders an item by kind.
 
-## Migration
+## ARCHIVE — Migration
+
+*The original phase plan, all of which has shipped except the deferred
+id-merge change noted at the top. Kept as history, not as a to-do list.*
 
 Each phase is shippable; the old path stays until the last client moves.
 
@@ -559,8 +598,9 @@ needs no item code of its own and the merge/dedupe rules are "Upsert by id" once
 
 ## Open questions
 
-- **Delta before Upsert?** Decide whether the core guarantees an Upsert precedes
-  deltas for an id, or clients must create stubs. (Recommend the guarantee.)
+*Resolved and removed: "delta before Upsert?" — `core/CONTRACT.md` §3.5 requires
+`Upsert` first for a fresh text row; see the Ops rules above.*
+
 - **Coalescing rate.** Fixed ~50 ms timer vs. "every K chunks" vs. adaptive.
 - **`has_older: false` UX.** A "Load entire conversation" button, or refuse to
   scroll past what is cached and say so?

@@ -1,8 +1,10 @@
 # Core (Rust) test + lint.
 #
-# Version pinning (X-7): actions below are pinned to major tags (@v4/@v2), the
-# accepted lock level; upgrade them to full commit SHAs for stricter supply-chain
-# hardening. See the toolchain note just below.
+# Version pinning (X-7): actions below are pinned to major tags (@v4/@v2). We
+# have NOT SHA-pinned them: there is no Dependabot config here to maintain
+# digests, and a stale pin is worse than a major tag that still gets compatible
+# security fixes. The pinned rustc below, --locked builds and the release gate
+# (gate.yml) are the compensating controls. See the toolchain note just below.
 #
 # RUST TOOLCHAIN PIN (X-7): CI runs 1.97.1 via dtolnay/rust-toolchain
 # (toolchain: "1.97.1"), matching core/rust-toolchain.toml and the devcontainer
@@ -37,8 +39,20 @@ jobs:
         with:
           workspaces: core
 
+      - name: Assert the compiler
+        run: |
+          set -euo pipefail
+          case "$(rustc --version)" in
+            "rustc 1.97.1 "*) echo "rustc: $(rustc --version)" ;;
+            *) echo "::error::expected rustc 1.97.1, got $(rustc --version)"; exit 1 ;;
+          esac
+
+      # Run from core/ so rustup resolves core/rust-toolchain.toml; a
+      # --manifest-path invocation from the repo root uses the runner default.
       - name: Test
-        run: cargo test --manifest-path core/Cargo.toml
+        working-directory: core
+        run: cargo test --locked
 
       - name: Clippy
-        run: cargo clippy --manifest-path core/Cargo.toml --all-targets -- -D warnings
+        working-directory: core
+        run: cargo clippy --locked --all-targets -- -D warnings

@@ -26,8 +26,9 @@
 //!
 //! `LISTENER_EVENTS` is the one hand-kept list: the `CoreListener` trait gives
 //! every callback a default body, so an added `fn on_*` compiles fine without
-//! this module noticing. The checker therefore parses the trait out of `lib.rs`
-//! and refuses to run if the two disagree, which closes that hole for free.
+//! this module noticing. The checker therefore parses both `CoreListener` and
+//! `GrouseUnstableListener` out of `lib.rs` and refuses to run if either's
+//! signatures disagree with the hand-kept lists, which closes that hole.
 //!
 //! Ids are the ledger's primary keys: append, never renumber.
 
@@ -220,6 +221,11 @@ record_surface!(
     title,
     detail,
     options,
+    // Which chat and which wire asked for the approval. `owner` is a bare
+    // label/"main" — not a SessionOwner record. Both are carried on the
+    // request so no client re-parses `roam:<label>:<id>` for the prompt.
+    session_id,
+    owner,
 );
 
 record_surface!(
@@ -374,6 +380,39 @@ pub static LISTENER_SIGNATURES: &[&str] = &[
     "on_session_opened(session_id: String)",
 ];
 
+/// The unstable callbacks' parameter types (the same normalization as above).
+/// Kept even though these events are not ledger ids: the form callbacks gained
+/// an owner and a request id in the same change as their C ABI slots, and a
+/// trampoline still passing only the JSON form would answer the wrong request
+/// (a roam peer's form could be answered on the main wire).
+pub static UNSTABLE_LISTENER_SIGNATURES: &[&str] = &[
+    "on_export(data: String)",
+    // ABI 20: the owner is the SessionOwner record, not a label to re-parse.
+    "on_recipe_params(owner: SessionOwner, request_id: String, parameters: String)",
+    "on_elicitation(owner: SessionOwner, request_id: String, schema: String)",
+    "on_compaction_status(message: String)",
+    "on_usage(used: i64, size: i64, cost: f64)",
+    "on_message_usage(output_tokens: u64, elapsed_ms: u64, time_to_first_token_ms: u64, cost: f64)",
+    "on_app_resource(key: String, html: String)",
+    "on_recipes(recipes: String)",
+    "on_schedules(schedules: String)",
+    "on_projects(projects: String)",
+    "on_skills(skills: String)",
+    "on_tools(session_id: String, tools: String)",
+    "on_extensions(extensions: String)",
+    "on_session_extensions(session_id: String, extensions: String)",
+    "on_extension_catalog(session_id: String, extensions: String)",
+    "on_config_value(key: String, value: String)",
+    "on_supported_models(provider: String, models: String)",
+    "on_providers(providers: String)",
+    "on_session_probe(session_id: String, updated_at: String, message_count: i64)",
+    "on_context_report(session_id: String, report: String)",
+    "on_tool_result(text: String, is_error: bool)",
+    "on_dictation_config(providers: String)",
+    "on_transcript(text: String)",
+    "on_error(method: String, message: String)",
+];
+
 /// Every id in the inventory, in one list. What the checker reads.
 pub fn all() -> Vec<&'static str> {
     let mut out = Vec::new();
@@ -438,7 +477,7 @@ mod tests {
             (OWNER_FIELDS, 2),
             (CONFIG_FIELDS, 4),
             (CHOICE_FIELDS, 2),
-            (PERMISSION_FIELDS, 4),
+            (PERMISSION_FIELDS, 6),
             (PERMISSION_OPTION_FIELDS, 3),
             (PROJECT_FIELDS, 3),
             (PROMPT_BLOCK_VARIANTS, 4),
@@ -448,6 +487,7 @@ mod tests {
             (ITEM_KINDS, 9),
             (LISTENER_EVENTS, 24),
             (LISTENER_SIGNATURES, 24),
+            (UNSTABLE_LISTENER_SIGNATURES, 24),
         ] {
             assert_eq!(group.len(), n, "{} changed size: {:?}", group.len(), group);
         }

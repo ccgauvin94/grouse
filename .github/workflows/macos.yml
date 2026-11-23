@@ -12,6 +12,11 @@
 #
 # (2) is the one that matters: without it, a new listener event breaks an app that only
 # exists on a Mac, and nothing in this repo would notice.
+#
+# Version pinning (X-7): actions are major tags; they are not SHA-pinned because
+# this repo has no Dependabot config to maintain digests (a stale digest is
+# worse than a tag that still gets compatible fixes). The generator that can
+# rewrite committed bindings IS pinned: uniffi 0.32.1 + --locked + an assertion.
 name: macOS bindings
 
 on:
@@ -42,16 +47,34 @@ jobs:
         with:
           toolchain: 1.97.1
 
-      - name: uniffi-bindgen-swift
+      - name: Assert the compiler
         run: |
-          # Same CLI family as the committed Kotlin bindings (uniffi 0.32.x): a different
-          # generator version rewrites the Swift differently for no benefit.
-          cargo install uniffi --features cli --locked
+          set -euo pipefail
+          case "$(rustc --version)" in
+            "rustc 1.97.1 "*) echo "rustc: $(rustc --version)" ;;
+            *) echo "::error::expected rustc 1.97.1, got $(rustc --version)"; exit 1 ;;
+          esac
+
+      - name: uniffi-bindgen-swift
+        env:
+          UNIFFI_VERSION: 0.32.1
+        run: |
+          set -euo pipefail
+          # Same exact generator as the committed Kotlin bindings: a different
+          # 0.32.x patch rewrites the output for no benefit.
+          cargo install uniffi --version "$UNIFFI_VERSION" --features cli --locked
+          case "$(uniffi-bindgen --version 2>&1)" in
+            *"$UNIFFI_VERSION"*) echo "uniffi-bindgen: $(uniffi-bindgen --version 2>&1)" ;;
+            *) echo "::error::expected uniffi-bindgen $UNIFFI_VERSION"; exit 1 ;;
+          esac
 
       # DEBUG on purpose: the release profile sets strip = true, which removes the uniffi
       # metadata sections the generator reads. Same reason build.sh does it for the Mac.
+      # CWD core/ so rustup reads core/rust-toolchain.toml (--manifest-path from the
+      # repo root picked a different compiler on shared runners).
       - name: Build the host core (debug, unstripped)
-        run: cargo build --manifest-path core/Cargo.toml -p grouse-core
+        working-directory: core
+        run: cargo build --locked -p grouse-core
 
       - name: Bindings generate, and every listener event has a default
         run: python3 clients/macos/check-bindings.py core/target/debug/libgrouse_core.so

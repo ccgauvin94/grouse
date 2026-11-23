@@ -63,6 +63,78 @@ enum class SessionKind { ASSISTANT, CHAT, CODE }
 enum class OwnerKind { MAIN, PEER }
 data class OwnerView(val kind: OwnerKind, val peer: String?)
 
+/** One pending server request, held by ID rather than by a single `firstOrNull()` slot.
+ *  A second permission/form while the first sheet is open must not overwrite it, and an
+ *  answer must go to the connection that raised THAT request. The core supplies the owner
+ *  (a wire label) and, for permissions, the session id; we keep both on the row so the
+ *  prompt can name the chat/wire instead of asking the user to guess. */
+data class PendingPermission(
+    val requestId: String,
+    val event: AcpEvent.Permission,
+    val owner: String,
+    val sessionId: String,
+) {
+    val ownerLabel: String get() = requestOwnerLabel(owner, sessionId)
+}
+
+data class PendingElicitation(
+    val requestId: String,
+    val event: AcpEvent.Elicitation,
+    val owner: String,
+) {
+    val ownerLabel: String get() = requestOwnerLabel(owner, null)
+}
+
+/** Bounded FIFO of pending requests keyed by the server's request id. `mutableStateMapOf`
+ *  is backed by a LinkedHashMap, so insertion order is the order the server asked in.
+ *  The helpers below are deliberately extension functions on a plain MutableMap: the
+ *  queue policy is JVM-testable with no Android/Compose/native library. */
+private const val MAX_PENDING_REQUESTS = 8
+
+internal fun <T : Any> MutableMap<String, T>.enqueueRequest(id: String, value: T): Boolean {
+    if (id.isBlank() || containsKey(id)) return false   // a redelivery must not replace the first
+    put(id, value)
+    // Cap the surface: a server that spams requests must not grow this queue forever.
+    // At the cap the oldest row is evicted; a SECOND request never evicts the first.
+    while (size > MAX_PENDING_REQUESTS) {
+        val oldest = keys.firstOrNull() ?: break
+        remove(oldest)
+    }
+    return true
+}
+
+internal fun <T> MutableMap<String, T>.takeRequest(id: String): T? = remove(id)
+
+internal fun <T> Map<String, T>.oldestRequest(): Pair<String, T>? =
+    entries.firstOrNull()?.let { it.key to it.value }
+
+/** A server request id is authoritative; the local counter is only a fallback for a
+ *  malformed payload (an empty id would collide every form into one sheet). */
+internal fun serverRequestId(raw: String?, prefix: String, sequence: Int): String =
+    raw?.takeIf { it.isNotBlank() } ?: "$prefix-$sequence"
+
+/** Human-readable "where did this come from" line for an approval/form prompt. The core's
+ *  owner is a wire label (`main`, `roam`, a peer nickname or `roam:<peer>`); the session id
+ *  is shown when it is present so two chats on the same peer are distinguishable. Pure so
+ *  the format can be tested without a core. */
+internal fun requestOwnerLabel(owner: String?, sessionId: String?): String {
+    val o = owner?.trim().orEmpty()
+    val sid = sessionId?.trim().orEmpty()
+    val wire = when {
+        o.isEmpty() -> if (sid.startsWith("roam:")) "roam peer" else ""
+        o.equals("main", ignoreCase = true) || o.equals("local", ignoreCase = true) ||
+            o.equals("host", ignoreCase = true) -> "this device"
+        o.equals("roam", ignoreCase = true) || o.equals("peer", ignoreCase = true) ->
+            sid.takeIf { it.startsWith("roam:") }
+                ?.let { ConnectionManager.Companion.ownerFromId(it).peer }
+                ?.let { "peer $it" }
+                ?: "roam peer"
+        o.startsWith("roam:", ignoreCase = true) -> "peer " + o.substringAfter(':').trim()
+        else -> o
+    }
+    return listOf(wire, sid).filter { it.isNotBlank() }.joinToString(" · ")
+}
+
 /** The push-to-talk state machine, surfaced in the composer so the user can see it running. */
 enum class VoiceState { IDLE, LISTENING, TRANSCRIBING, SPEAKING }
 
@@ -540,8 +612,17 @@ class ConnectionManager private constructor(context: Context) {
     }, appContext.filesDir.absolutePath)
     private val unstable = GrouseUnstable(object : GrouseUnstableListener {
         override fun onExport(data: String) { main.post { exportData.value = data } }
-        override fun onRecipeParams(parameters: String) { main.post { this@ConnectionManager.onRecipeParams(parameters) } }
-        override fun onElicitation(schema: String) { main.post { this@ConnectionManager.onElicitation(schema) } }
+        // The owner + request id travel with the payload: (peer/wire, id, form). Keeping them
+        // on the queue row (not a single "current form" slot) is what lets two servers ask
+        // at once and lets the answer be routed to the right connection.
+        override fun onRecipeParams(owner: uniffi.grouse_core.SessionOwner, requestId: String, parameters: String) {
+            val label = owner.label.ifBlank { owner.kind }
+            main.post { this@ConnectionManager.onRecipeParams(label, requestId, parameters) }
+        }
+        override fun onElicitation(owner: uniffi.grouse_core.SessionOwner, requestId: String, schema: String) {
+            val label = owner.label.ifBlank { owner.kind }
+            main.post { this@ConnectionManager.onElicitation(label, requestId, schema) }
+        }
         override fun onCompactionStatus(message: String) { main.post { this@ConnectionManager.onCompactionStatus(message) } }
         // Context-window usage over the unstable channel (usage_update): roam only
         // transports these notifications, so this is what keeps the context bar live
@@ -914,8 +995,12 @@ class ConnectionManager private constructor(context: Context) {
 
     val streamingRowId = mutableStateOf<Long?>(null)
     val commands = mutableStateOf<List<String>>(emptyList())
-    val permissions = mutableStateListOf<AcpEvent.Permission>()   // pending approvals, oldest first
-    val elicitations = mutableStateListOf<AcpEvent.Elicitation>() // pending input forms, oldest first
+    // Pending server requests, KEYED BY REQUEST ID. A state map (LinkedHashMap-backed) is
+    // both the queue and the Compose-observable surface: insertion order is server order,
+    // and an answer removes exactly the row it is answering. Two requests from different
+    // wires can therefore coexist without either dropping the other.
+    val permissions = mutableStateMapOf<String, PendingPermission>()
+    val elicitations = mutableStateMapOf<String, PendingElicitation>()
     // Last background RPC failure (sidebar refresh, config read...). Shown as a toast by the
     // UI and cleared; never a transcript bubble.
     val backgroundNotice = mutableStateOf<String?>(null)
@@ -1682,29 +1767,44 @@ class ConnectionManager private constructor(context: Context) {
         if (url.isNotBlank()) io { unstable.configUpsert("GROUSE_PUSH_ENDPOINT", url) }
     }
 
-    /** Answer a pending elicitation form and drop it from the queue. */
-    fun answerElicitation(e: AcpEvent.Elicitation, values: Map<String, JsonPrimitive>?, cancelled: Boolean = false) {
+    /** Answer a pending elicitation form and drop exactly that row from the queue.
+     *  The DTO overload keeps the existing sheet call site; the id overload is the one that
+     *  talks to the core, so a stale sheet cannot answer a newer request. */
+    fun answerElicitation(e: AcpEvent.Elicitation, values: Map<String, JsonPrimitive>?, cancelled: Boolean = false) =
+        answerElicitation(e.requestKey, e.recipeParams, values, cancelled)
+
+    fun answerElicitation(
+        requestId: String,
+        recipeParams: Boolean,
+        values: Map<String, JsonPrimitive>?,
+        cancelled: Boolean = false,
+    ) {
         if (!permitted(AgentIntent.ANSWER_ELICITATION)) return
+        if (requestId.isBlank()) return
         io {
-            if (e.recipeParams) {
+            if (recipeParams) {
                 // Recipe-params answers ride the same UI but a different wire shape:
                 // {action:"submit"|"cancel", values:{key:string}} — values must be STRINGS
                 // (RecipeParamsResponse is HashMap<String,String> server-side).
-                if (cancelled || values == null) unstable.respondRecipeParams("cancel", "{}")
+                // The LEADING request id is the routing key on the core's new API: without
+                // it, a form from a roam peer could be answered on the main wire.
+                if (cancelled || values == null) unstable.respondRecipeParams(requestId, "cancel", "{}")
                 else unstable.respondRecipeParams(
+                    requestId,
                     "submit",
                     buildJsonObject { values.forEach { (k, v) -> put(k, v.content) } }.toString())
             } else {
                 when {
-                    cancelled -> unstable.respondElicitation("cancel", "")
-                    values == null -> unstable.respondElicitation("decline", "")
+                    cancelled -> unstable.respondElicitation(requestId, "cancel", "")
+                    values == null -> unstable.respondElicitation(requestId, "decline", "")
                     else -> unstable.respondElicitation(
+                        requestId,
                         "accept",
                         buildJsonObject { values.forEach { (k, v) -> put(k, v) } }.toString())
                 }
             }
         }
-        elicitations.remove(e)
+        elicitations.takeRequest(requestId)
     }
 
     /** Delete a session outright (history gone server-side). Archive remains the soft option. */
@@ -2905,11 +3005,18 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     /** Answer the given approval request; null optionId denies (cancelled). */
-    fun answerPermission(p: AcpEvent.Permission, optionId: String?) {
+    fun answerPermission(p: AcpEvent.Permission, optionId: String?) =
+        answerPermission(p.toolCallId, optionId)
+
+    /** The core's new responder API takes the REQUEST ID first; it is what selects the
+     *  parked wire-level responder (main or a specific roam peer). Removing by the same id
+     *  keeps the sheet queue in step with the core's own registry. */
+    fun answerPermission(requestId: String, optionId: String?) {
         if (!permitted(AgentIntent.ANSWER_PERMISSION)) return
-        core.respondPermission(p.toolCallId,
+        if (requestId.isBlank()) return
+        core.respondPermission(requestId,
             if (optionId != null) PermissionOutcome.Selected(optionId) else PermissionOutcome.Cancelled)
-        permissions.remove(p)
+        permissions.takeRequest(requestId)
     }
 
     // ---------------------------------------------------------------------------
@@ -3752,10 +3859,19 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     private fun onCorePermission(request: PermissionRequest) {
-        permissions.add(AcpEvent.Permission(
-            request.toolCallId, request.title, request.detail,
-            request.options.map { PermOption(it.optionId, it.name, it.kind) }))
-        if (!appForeground) notifier.postApprovalNeeded(request.title)
+        // `toolCallId` IS the core's request id for permissions. Key the queue with it:
+        // two peers can ask for approval at once, and answering one must never pop the
+        // other. Owner/sessionId come from the core (never re-derived from the screen).
+        val id = request.toolCallId
+        val row = PendingPermission(
+            requestId = id,
+            event = AcpEvent.Permission(
+                id, request.title, request.detail,
+                request.options.map { PermOption(it.optionId, it.name, it.kind) }),
+            owner = request.owner,
+            sessionId = request.sessionId,
+        )
+        if (permissions.enqueueRequest(id, row) && !appForeground) notifier.postApprovalNeeded(request.title)
     }
 
     private fun onCoreSessionTouched(sessionId: String, title: String, updatedAt: String) {
@@ -4129,8 +4245,10 @@ class ConnectionManager private constructor(context: Context) {
 
     private val elicitSeq = java.util.concurrent.atomic.AtomicInteger(1)
 
-    /** A tool/extension requested structured input (elicitation/create, form mode). */
-    private fun onElicitation(schemaJson: String) {
+    /** A tool/extension requested structured input (elicitation/create, form mode).
+     *  The core now sends (owner, requestId, schema): the id is the responder key and the
+     *  owner names the wire that must receive the answer. */
+    private fun onElicitation(owner: String, requestId: String, schemaJson: String) {
         val schema = try {
             Json.parseToJsonElement(schemaJson).jsonObject
         } catch (e: Exception) { null } ?: return
@@ -4159,17 +4277,24 @@ class ConnectionManager private constructor(context: Context) {
                 required = name in required,
             )
         }
-        elicitations.add(AcpEvent.Elicitation(
-            "elicit-" + elicitSeq.getAndIncrement(),
-            "Input requested",
-            schema["title"]?.jsonPrimitive?.contentOrNull ?: "",
-            fields))
+        val id = serverRequestId(requestId, "elicit", elicitSeq.getAndIncrement())
+        // requestKey is now the SERVER's id: it keys both the queue and the sheet's saved
+        // form state, so a redelivery cannot create a second sheet for the same request.
+        elicitations.enqueueRequest(id, PendingElicitation(
+            requestId = id,
+            event = AcpEvent.Elicitation(
+                id,
+                "Input requested",
+                schema["title"]?.jsonPrimitive?.contentOrNull ?: "",
+                fields),
+            owner = owner,
+        ))
     }
 
     /** A recipe with declared parameters, started via _meta.recipeId. Rendered through the
      *  SAME form UI as elicitations; the answer is routed to respond_recipe_params by the
      *  `recipeParams` flag, because the response shapes differ. */
-    private fun onRecipeParams(parametersJson: String) {
+    private fun onRecipeParams(owner: String, requestId: String, parametersJson: String) {
         val params = try {
             Json.parseToJsonElement(parametersJson) as? JsonArray
         } catch (e: Exception) { null } ?: return
@@ -4191,10 +4316,15 @@ class ConnectionManager private constructor(context: Context) {
                 required = o["requirement"]?.jsonPrimitive?.contentOrNull == "required",
             )
         }
-        elicitations.add(AcpEvent.Elicitation(
-            "recipeparams-" + elicitSeq.getAndIncrement(),
-            "This recipe needs parameters", "Recipe parameters", fields,
-            recipeParams = true))
+        val id = serverRequestId(requestId, "recipeparams", elicitSeq.getAndIncrement())
+        elicitations.enqueueRequest(id, PendingElicitation(
+            requestId = id,
+            event = AcpEvent.Elicitation(
+                id,
+                "This recipe needs parameters", "Recipe parameters", fields,
+                recipeParams = true),
+            owner = owner,
+        ))
     }
 
     // ---------------------------------------------------------------------------

@@ -7,11 +7,12 @@ _default:
 # Build the Rust core. (The CLI is not written yet — clients/cli is a README
 # placeholder, so building it here would just fail the recipe.)
 build:
-    cargo build --manifest-path core/Cargo.toml
+    cd core && cargo build --locked
 
-# Run the core test suite.
+# Run the core test suite. Both recipes run from core/ so rustup reads
+# core/rust-toolchain.toml; --manifest-path from the root used the host default.
 test:
-    cargo test --manifest-path core/Cargo.toml
+    cd core && cargo test --locked
 
 # Build the Linux desktop as a Flatpak bundle.
 desktop:
@@ -27,6 +28,29 @@ android-image:
 # libgrouse_core.so is what ships inside the APK, so skipping this ships stale code.
 android-libs:
     ./scripts/android-env.sh ./scripts/build-android-libs.sh
+
+# Verify the committed .so + bindings really are this core's output: regenerate
+# into a temp dir, copy over the staged trees, and fail on any git diff. Needs
+# the pinned Android toolchain on PATH; CI runs the same check in gate.yml.
+android-libs-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    ./scripts/build-android-libs.sh --out-dir "$tmp"
+    refresh() {
+      mkdir -p "$2"
+      find "$2" -type f -delete
+      cp -r "$1/." "$2/"
+    }
+    refresh "$tmp/jniLibs" clients/android/grouse-core-aar/src/main/jniLibs
+    refresh "$tmp/bindings" core/grouse-core/bindings/kotlin
+    refresh "$tmp/aar-kotlin" clients/android/grouse-core-aar/src/main/kotlin
+    paths=(clients/android/grouse-core-aar/src/main/jniLibs \
+           clients/android/grouse-core-aar/src/main/kotlin \
+           core/grouse-core/bindings/kotlin)
+    git diff --exit-code -- "${paths[@]}"
+    test -z "$(git status --porcelain -- "${paths[@]}")"
 
 # Build the Android debug APK.
 android:
