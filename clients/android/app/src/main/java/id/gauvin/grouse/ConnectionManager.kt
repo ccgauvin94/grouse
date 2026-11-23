@@ -397,6 +397,7 @@ class ConnectionManager private constructor(context: Context) {
         activeRunId = null
         activeRunIdState.value = null
         streamingRowId.value = null
+        wake.releaseAll("clear-turn-state")
     }
 
 
@@ -405,6 +406,13 @@ class ConnectionManager private constructor(context: Context) {
     // emits onSessions before the first connect), so `main` MUST be initialized before
     // `core` — declared here, not with the other handlers below.
     private val main = Handler(Looper.getMainLooper())
+
+    // The foreground service holds the process; this holds the CPU while a turn
+    // is live so a screen-off app can still answer keepalives and stream frames.
+    // Owners are per session so roam/main turns can overlap without one ending
+    // releasing the other's lock. Declared before `core`: its constructors can
+    // fire callbacks synchronously and run-end/adoption callbacks touch this.
+    private val wake = TurnWakeLock(appContext, main) { noteApp(it) }
 
     // --- Voice: push-to-talk STT (goose dictation) + on-device TTS ------------
     // The STT half is goose's dictation (the client records, the server transcribes
@@ -2527,6 +2535,9 @@ class ConnectionManager private constructor(context: Context) {
             }
             return
         }
+        // Hold the CPU from the moment the prompt leaves the app, not from the
+        // first activeRun callback: the screen can be off before goose replies.
+        wake.acquire(expect ?: "<none>", "send", "1")
         speaker.stop()   // a new prompt supersedes any reply still being spoken
         // The next bubble to stream is a NEW one; the reply on screen is finished.
         streamingRowId.value = null
@@ -2620,6 +2631,7 @@ class ConnectionManager private constructor(context: Context) {
 
     fun setForeground(fg: Boolean) {
         appForeground = fg
+        noteApp("app: lifecycle fg=$fg service=$serviceRunning wake=${wake.snapshot()}")
         if (fg) {
             notifier.cancelAlert()
             // The core owns reconnect + remote-change resync while the PROCESS
@@ -2859,6 +2871,7 @@ class ConnectionManager private constructor(context: Context) {
      *  business and survives. */
     fun cancel() {
         core.cancel()
+        wake.releaseAll("stop", immediate = true)
         main.removeCallbacks(thinkingFiller)
         speaker.stop()   // Stop means stop — spoken replies included
         currentSession.value?.let { sid ->
@@ -2986,6 +2999,11 @@ class ConnectionManager private constructor(context: Context) {
      * main socket while a peer owns the turn, must not.
      */
     private fun releaseTurnForLostWire(lostSessionId: String) {
+        noteApp("app: lost-wire $lostSessionId wake=${wake.snapshot()}")
+        // Release this chat's CPU hold even if it is not the UI-owned turn: a
+        // roam peer can stream in the background. The bounded grace lets the
+        // reconnect land before we let the phone sleep again.
+        wake.releaseSession(lostSessionId, "lost-wire")
         if (!turnOwnerMatches(turnInFlightSession, currentSession.value, lostSessionId)) return
         // Drop the id from the per-chat set too. Leaving it there made a switch away
         // and back RE-DERIVE turnInFlight from inFlight in resetTurnRouting, so the
@@ -3024,6 +3042,7 @@ class ConnectionManager private constructor(context: Context) {
     // ---------------------------------------------------------------------------
 
     private fun onCoreStatus(st: ConnectionStatus) {
+        noteApp("app: status=$st live=$live online=${online.value} wake=${wake.snapshot()}")
         if (st is ConnectionStatus.Alert) {
             // Advisory (failed control RPC, e.g. a roam provider pick the peer
             // refused): the connection is fine, so it must NOT land in the
@@ -3733,6 +3752,10 @@ class ConnectionManager private constructor(context: Context) {
         // saying "running" after the turn is over.
         refreshActivity()
         noteApp("app: runEnded $sessionId stop=$stopReason shown=${sessionId == currentSession.value} current=${currentSession.value}")
+        // The turn is over. A queued follow-up in this same chat re-acquires below,
+        // before the short release grace expires, so the CPU hold never lapses
+        // between back-to-back turns.
+        wake.releaseSession(sessionId, "run-ended")
         // Every completion clears ITS chat; only the chat on screen owns the
         // busy/compacting/run-id state the UI draws. Capture the run BEFORE the
         // map loses it: the live notification below must give the core a run id
@@ -4001,6 +4024,11 @@ class ConnectionManager private constructor(context: Context) {
     private fun onCoreActiveRun(sessionId: String, runId: String) {
         noteCoreEvent()
         noteApp("app: activeRun $sessionId run=${runId.take(8)} shown=${sessionId == currentSession.value}")
+        if (runId.isEmpty()) {
+            wake.releaseSession(sessionId, "run-cleared")
+        } else {
+            wake.acquire(sessionId, "run", runId)
+        }
         // Run ids are per session: keep them all so switching back to a running
         // chat restores steer/busy, and a completion for a background chat never
         // touches the chat on screen.

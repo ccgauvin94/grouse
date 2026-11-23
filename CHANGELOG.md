@@ -6,6 +6,21 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed — a backgrounded phone no longer lets the wire die mid-turn
+
+- **A live turn now holds a partial wake lock.** The foreground service kept the process
+  alive but not the CPU: with the screen off, Android could freeze the app long enough to
+  miss a WebSocket pong or streamed tool/thinking frame. Goose treats the resulting ACP
+  disconnect as the end of the prompt connection and cancels the run, which is why a
+  multi-step turn stopped until another message restarted it. The app now holds a bounded,
+  renewed `PARTIAL_WAKE_LOCK` from send (or live-run adoption) through run end / wire loss,
+  with a short release grace for reconnect. It is released immediately on Stop, and never
+  held merely for an idle "persistent connection".
+- **Turn diagnostics now include the app lifecycle and wake state.** `turn.log`
+  records foreground/background transitions, connection status, lost-wire events and
+  wake acquire/renew/release, so the next report can distinguish a frozen process from a
+  server-side cancellation without guessing.
+
 ### Changed — the background-tasks readout says what is working now
 
 - **The lane says what it was asked to do at the START.** A delegate's tool call used to

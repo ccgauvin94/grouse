@@ -538,6 +538,13 @@ change before tagging.
   the UIs through the bindings — uniffi for Android (and macOS later) and the C
   ABI (`capi.rs` ↔ `clients/desktop/src/corebridge.cpp`) for the desktop. The
   desktop holds no protocol logic to mirror.
+- **A live turn keeps the device awake, not just the app alive (Android).** The
+  `specialUse` foreground service protects the process from reclamation; it does not
+  stop the CPU from suspending and freezing the socket. Goose cancels a prompt when its
+  ACP connection dies, so an Android turn owner holds a bounded partial wake lock from
+  send / live-run adoption through run end or lost wire, with a short reconnect grace.
+  Never hold it for an idle "persistent connection" — that is what the foreground
+  service is for. Lifecycle, status and wake transitions belong in `turn.log`.
 - Never hardcode a machine-specific path into a shared file.
 
 ### Scroll is a mode, not a one-shot (both clients)
