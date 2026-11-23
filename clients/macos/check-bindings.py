@@ -75,7 +75,7 @@ def protocol_methods(swift: Path) -> dict[str, str]:
 def defaults_methods(path: Path) -> set[str]:
     """The `func on…` bodies supplied by the protocol extension."""
     if not path.is_file():
-        sys.exit(f"FAIL: {path} is missing — every conformance would have to stub all 23")
+        sys.exit(f"FAIL: {path} is missing — every conformance would have to stub every event")
     return set(re.findall(r"^\s*func (on\w+)\(", path.read_text(), re.MULTILINE))
 
 

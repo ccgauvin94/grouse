@@ -150,6 +150,18 @@ pub struct SessionSummary {
     pub archived: bool,
 }
 
+/// Which connection owns a display session id (§3 of the 2026-11-22 audit).
+///
+/// Clients used to re-derive this from the `roam:<peer>:<id>` prefix in three
+/// different languages. The core already resolves the owner for routing; this
+/// record is that answer, exposed as data: `kind` is `"main"` or `"roam"`, and
+/// `label` is the peer's connection-card label (empty for the main wire).
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionOwner {
+    pub kind: String,
+    pub label: String,
+}
+
 /// One accumulated transcript bubble (CONTRACT §3.3/§4.3).
 #[derive(uniffi::Record, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
@@ -652,6 +664,19 @@ pub trait CoreListener: Send + Sync {
     /// (grouse#19: a silent `session/new` here was the "tapped a thread, got a
     /// blank one" defect).
     fn on_session_open_failed(&self, session_id: String, message: String);
+    /// A session load/new just BOUND successfully: the store has been painted
+    /// and the connection adopted the session. The counterpart of
+    /// [`Self::on_session_open_failed`], so a client can stop inferring "did my
+    /// open work?" from Window/Ready arrivals and watchdog timers.
+    ///
+    /// `session_id` is the DISPLAY id (`roam:<peer>:<id>` for a peer chat).
+    /// Emitted exactly once per successful bind, including a live-wire reuse
+    /// and a handshake Resume, before/alongside Ready. Never for a failed open
+    /// or a bind-only load (the live-turn exception, where the server's replay
+    /// cannot contain the streamed reply). Required, not defaulted: uniffi
+    /// refuses defaults on an exported callback interface — a client with no
+    /// open-progress UI still states its no-op here.
+    fn on_session_opened(&self, session_id: String);
     /// The My Day tab's lists
     /// (`{"open": [...], "done": [...], "tasks": [...], "errors": {...}}`), from
     /// assistant-state's `state_items` and `task_list` over a deterministic
@@ -877,6 +902,20 @@ struct Backfill {
     wait: Option<usize>,
 }
 
+/// The single open this core is waiting to confirm on the CURRENT wire.
+///
+/// A load/new announces success once, on the bind — not on every status
+/// change. `expected` names the session for a Resume (the id the UI asked to
+/// open); `None` is a fresh `session/new`, whose id is only known from the
+/// reply. Generation-bound: a superseded wire's Ready must not announce a
+/// session for the wire now live, and a failed open clears the watch so the
+/// advisory Ready that follows a rejected load emits nothing.
+#[derive(Debug, Clone)]
+struct OpenWatch {
+    gen: u64,
+    expected: Option<String>,
+}
+
 /// The core's authoritative state, guarded by `CoreInner::state`.
 #[derive(Default)]
 struct CoreState {
@@ -922,6 +961,8 @@ struct CoreState {
     reconnect_gen: u64,
     /// Bumped per connection so a superseded connection's teardown is inert.
     conn_gen: u64,
+    /// The handshake-time open waiting to be confirmed on this generation.
+    open_watch: Option<OpenWatch>,
     /// Explicit `disconnect()`: no reconnect, and statuses surface Disconnected.
     user_disconnect: bool,
     /// Remote-change resync: session_info_update debounce generation.
@@ -1480,6 +1521,7 @@ impl Core {
         }
         self.inner.hub.clear_display();
         let config = self.inner.state.lock().last_config.clone();
+        let gen = self.inner.state.lock().conn_gen;
         let Some(config) = config else { return };
         // Live reuse: same host/port/key, already Ready — session/new on the
         // existing wire. This is the project-creation path
@@ -1509,6 +1551,16 @@ impl Core {
                             }
                             this.save_cache();
                             this.probe_stamp();
+                            // This bind never goes through a handshake, so no
+                            // status hook will announce it. Clear any stale
+                            // handshake watch first, then emit the successful
+                            // open ONCE here — the store was already cleared
+                            // and bound by `live_new_session_async` above, so
+                            // the paint precedes the event and Ready.
+                            this.clear_open_watch_for(gen);
+                            let display =
+                                crate::session::display_id(None, &session_id);
+                            this.on_session_opened(display);
                             // Live reuse doesn't go through the handshake's
                             // on_ready → on_conn_status(Ready) path, so the UI
                             // would stay in `connecting`/`Loading 0` forever.
@@ -1667,8 +1719,13 @@ impl Core {
             self.plan_cache_paint(&session_id, force_replay)
         };
         let (suppress, merge) = (paint.suppress, paint.merge);
+        // A live turn's load is BIND-ONLY: the wire adopts the session but
+        // discards the replay, which cannot contain the streamed reply. It is
+        // not an open the UI should treat as settled, on either wire.
+        let bind_only = paint.keep;
         crate::session::apply_paint(&store, &paint);
         let config = self.inner.state.lock().last_config.clone();
+        let gen = self.inner.state.lock().conn_gen;
         let Some(config) = config else {
             // No connection configuration has ever been installed in this
             // process, so there is nothing to load the session over. The client
@@ -1690,8 +1747,12 @@ impl Core {
                 let sid = session_id.clone();
                 let c = cwd.clone();
                 crate::roam::runtime().spawn(async move {
+                    // No handshake is involved, so drop any watch from this
+                    // generation: a later Ready must not announce this bind a
+                    // second time (or announce one that failed).
+                    this.clear_open_watch_for(gen);
                     if let Err(error) = conn
-                        .live_load_session_async(sid.clone(), c.clone(), suppress, merge, paint.keep)
+                        .live_load_session_async(sid.clone(), c.clone(), suppress, merge, bind_only)
                         .await
                     {
                         // The live wire refused the load. Do NOT bind a
@@ -1704,6 +1765,9 @@ impl Core {
                         this.on_session_open_failed(sid, format!("session/load failed: {error}"));
                         return;
                     }
+                    // `sid` is already a DISPLAY id here: roam sessions
+                    // returned from `open_session` took the peer branch.
+                    this.announce_live_bind(&sid, bind_only);
                     // Live reuse doesn't go through the handshake's
                     // on_ready → on_conn_status(Ready) path, so without this
                     // the UI stayed in `Loading…` (replayActive never
@@ -1721,6 +1785,13 @@ impl Core {
             suppress,
             merge,
         );
+        if bind_only {
+            // A full reconnect cannot carry a live-turn load, but it MUST NOT
+            // report an open either: nothing settled, and the streamed reply
+            // is still the only complete copy of this chat.
+            let gen = self.inner.state.lock().conn_gen;
+            self.clear_open_watch_for(gen);
+        }
     }
 
     /// Render the cached transcript for a session WITHOUT connecting (cold
@@ -1891,17 +1962,26 @@ impl Core {
                 .download_one(&display, &path, &name, &sha256)
                 .await;
             let event = match report {
+                // The DISPLAY id travels with every event: a roam fetch is
+                // keyed by path on a different peer, and a path-only client
+                // FIFO cross-wired two chats fetching the same name. The core
+                // has no per-request id for a fetch yet, so `request_id` is
+                // honestly empty; adding one is an API change, not a fake.
                 Ok((local, bytes)) => crate::attachments::FileEvent::Saved {
                     path,
                     name,
                     mime,
                     bytes,
                     local_path: local.to_string_lossy().to_string(),
+                    session_id: display.clone(),
+                    request_id: String::new(),
                 },
                 Err(message) => crate::attachments::FileEvent::Failed {
                     path,
                     name,
                     message,
+                    session_id: display,
+                    request_id: String::new(),
                 },
             };
             this.inner.listener.on_file(event);
@@ -2627,6 +2707,51 @@ impl Core {
         self.inner.state.lock().sessions.clone()
     }
 
+    /// The connection that owns a DISPLAY session id, as data (audit §3).
+    ///
+    /// A known roam peer is resolved by the same prefix match routing uses.
+    /// For a `roam:` id whose peer is gone, the label is recovered from the id
+    /// (last colon separates label from wire id, so labels with `:` survive)
+    /// rather than reporting `main` and misrouting an intent to the main wire.
+    pub fn session_owner(&self, session_id: String) -> SessionOwner {
+        if let Some(peer) = self.peer_for_session(&session_id) {
+            return SessionOwner {
+                kind: "roam".to_string(),
+                label: peer.label().to_string(),
+            };
+        }
+        if let Some(rest) = session_id.strip_prefix(crate::session::ROAM_PREFIX) {
+            let label = rest
+                .rsplit_once(':')
+                .map(|(label, _)| label)
+                .unwrap_or(rest);
+            return SessionOwner {
+                kind: "roam".to_string(),
+                label: label.to_string(),
+            };
+        }
+        SessionOwner {
+            kind: "main".to_string(),
+            label: String::new(),
+        }
+    }
+
+    /// Main session list plus every connected peer's list, in one snapshot.
+    ///
+    /// Peer ids already carry the `roam:<peer>:` prefix (see
+    /// [`crate::roam::RoamPeer::sessions`]), so no client has to keep a separate
+    /// roam model or re-add the namespace. The main list wins on id collision.
+    pub fn all_sessions(&self) -> Vec<SessionSummary> {
+        let mut all = self.inner.state.lock().sessions.clone();
+        let peers = self.inner.peers.lock().clone();
+        for session in crate::roam::all_peer_sessions(&peers) {
+            if !all.iter().any(|existing| existing.id == session.id) {
+                all.push(session);
+            }
+        }
+        all
+    }
+
     /// The accumulated active-session transcript.
     pub fn transcript(&self) -> Vec<Message> {
         self.store()
@@ -3303,6 +3428,9 @@ impl Core {
                     name: name.to_string(),
                     received: data.len() as u64,
                     total: chunk.total,
+                    // Same DISPLAY id as Saved/Failed for this one fetch.
+                    session_id: display.to_string(),
+                    request_id: String::new(),
                 });
             if chunk.data.is_empty() || data.len() as u64 >= chunk.total {
                 break;
@@ -3789,7 +3917,20 @@ impl Core {
         let gen = {
             let mut state = self.inner.state.lock();
             state.conn_gen += 1;
-            state.conn_gen
+            let gen = state.conn_gen;
+            // The handshake announces one successful bind on Ready. A Resume
+            // names the session the UI asked for; a New learns its id from the
+            // reply (and only announces one that actually became the display).
+            // An attaching wire binds nothing and watches nothing.
+            state.open_watch = match &spec {
+                ConnectSpec::Resume { session_id, .. } => Some(OpenWatch {
+                    gen,
+                    expected: Some(crate::session::display_id(None, session_id)),
+                }),
+                ConnectSpec::New { .. } => Some(OpenWatch { gen, expected: None }),
+                ConnectSpec::Attach => None,
+            };
+            gen
         };
         // Graceful teardown of any previous wire.
         if let Some(old) = self.inner.conn.lock().take() {
@@ -3913,6 +4054,10 @@ impl Core {
                 .lock()
                 .as_ref()
                 .and_then(|conn| conn.active_session_id());
+            // The handshake's bind arrived before this Ready. Announce it once
+            // here; a failed load left nothing bound (and cleared its watch),
+            // so the advisory Ready after grouse#19 cannot report an open.
+            self.maybe_announce_open(bound.as_deref(), gen);
             if let Some(key) = bound {
                 {
                     let mut state = self.inner.state.lock();
@@ -5220,6 +5365,71 @@ impl Core {
         self.inner.listener.on_config(snapshot);
     }
 
+    /// A successful session bind, announced to the UI. The shared exit for
+    /// every main-wire path; a roam peer calls the listener at its own bind
+    /// site (it has no `Core` handle, only the listener and shared hub).
+    ///
+    /// Call this AFTER the store has been painted and BEFORE Ready. Never call
+    /// it for a rejected load or a bind-only load: those paths leave the chat
+    /// unsettled and the client needs to keep waiting.
+    fn on_session_opened(&self, session_id: String) {
+        crate::session::emit_session_opened(self.inner.listener.as_ref(), &session_id);
+    }
+
+    /// A live-wire load/new succeeded. Bind-only is the live-turn exception:
+    /// the wire adopted the session but deliberately did NOT replay it, so it
+    /// is not an open the client can treat as settled.
+    fn announce_live_bind(&self, display_id: &str, bind_only: bool) {
+        if !bind_only {
+            self.on_session_opened(display_id.to_string());
+        }
+    }
+
+    /// Invalidate the pending open watch when an intent binds on the live wire
+    /// instead of through a handshake. Generation-bound so a concurrent new
+    /// connection's watch survives.
+    fn clear_open_watch_for(&self, gen: u64) {
+        let mut state = self.inner.state.lock();
+        if state
+            .open_watch
+            .as_ref()
+            .map(|watch| watch.gen == gen)
+            .unwrap_or(false)
+        {
+            state.open_watch = None;
+        }
+    }
+
+    /// On Ready, turn the handshake's open watch into one success event — but
+    /// only when the wire actually bound the session the UI asked for, and only
+    /// when that session is the one on display. A failed load leaves `bound`
+    /// empty and its watch cleared; a cold `ConnectSpec::Attach` has no watch.
+    fn maybe_announce_open(&self, bound: Option<&str>, gen: Option<u64>) {
+        let watch = {
+            let mut state = self.inner.state.lock();
+            let current = state.conn_gen;
+            match state.open_watch.take() {
+                Some(watch) if watch.gen == current && gen.is_none_or(|g| g == current) => {
+                    Some(watch)
+                }
+                _ => None,
+            }
+        };
+        let Some(watch) = watch else { return };
+        let Some(bound) = bound else { return };
+        let display = crate::session::display_id(None, bound);
+        if watch
+            .expected
+            .is_some_and(|expected| expected.as_str() != display.as_str())
+        {
+            return;
+        }
+        if self.inner.hub.displayed_key().as_deref() != Some(display.as_str()) {
+            return; // a hidden/bound session the UI never opened
+        }
+        self.on_session_opened(display);
+    }
+
     /// An open/resume failed; nothing was substituted (see the listener's
     /// `on_session_open_failed`).
     pub fn on_session_open_failed(&self, session_id: String, message: String) {
@@ -5537,6 +5747,11 @@ impl Core {
         Arc::new(move |session_id, message| {
             let current = core.inner.state.lock().conn_gen == gen;
             if current {
+                // No open succeeded on this wire: its Ready (which the spine
+                // still emits for an advisory load failure) must not announce
+                // one. Kept here, not in `on_session_open_failed`, because that
+                // method is also called for live-reuse failures with no watch.
+                core.clear_open_watch_for(gen);
                 core.on_session_open_failed(session_id, message);
             }
         })
@@ -6435,6 +6650,12 @@ mod tests {
                 .filter(|line| line.starts_with("run_ended "))
                 .collect()
         }
+        fn opened(&self) -> Vec<String> {
+            self.lines()
+                .into_iter()
+                .filter_map(|line| line.strip_prefix("opened ").map(str::to_string))
+                .collect()
+        }
         fn tasks(&self) -> Vec<String> {
             self.lines()
                 .into_iter()
@@ -6475,6 +6696,9 @@ mod tests {
         }
         fn on_commands(&self, _: Vec<String>) {}
         fn on_session_open_failed(&self, _: String, _: String) {}
+        fn on_session_opened(&self, session_id: String) {
+            self.push(format!("opened {session_id}"));
+        }
         fn on_tasks(&self, tasks: String) {
             self.push(format!("tasks {tasks}"));
         }
@@ -6564,6 +6788,9 @@ mod tests {
         }
         fn on_session_open_failed(&self, session_id: String, message: String) {
             self.0.on_session_open_failed(session_id, message);
+        }
+        fn on_session_opened(&self, session_id: String) {
+            self.0.on_session_opened(session_id);
         }
         fn on_thread_ready(&self, label: String, session_id: String) {
             self.0.on_thread_ready(label, session_id);
@@ -7096,5 +7323,87 @@ mod tests {
             .collect();
         assert!(temps.is_empty(), "a secret temp file survived: {temps:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn summary(id: &str, title: &str) -> SessionSummary {
+        SessionSummary {
+            id: id.to_string(),
+            title: title.to_string(),
+            updated_at: "2026-11-22T10:00:00Z".to_string(),
+            last_message_snippet: None,
+            project_id: None,
+            message_count: 1,
+            model: String::new(),
+            has_recipe: false,
+            has_new: false,
+            mode: None,
+            archived: false,
+        }
+    }
+
+    #[test]
+    fn session_owner_routes_by_prefix_and_all_sessions_keeps_the_main_list() {
+        let (core, _) = core();
+        let main = core.session_owner("s1".to_string());
+        assert_eq!((main.kind.as_str(), main.label.as_str()), ("main", ""));
+        // No live peer in this unit test, so the prefix fallback must still
+        // name a roam owner rather than misrouting the id to the main wire.
+        let roam = core.session_owner("roam:desk:s2".to_string());
+        assert_eq!((roam.kind.as_str(), roam.label.as_str()), ("roam", "desk"));
+        // A label with ':' in it survives: the last colon separates the wire id.
+        let colon = core.session_owner("roam:desk:1:s2".to_string());
+        assert_eq!((colon.kind.as_str(), colon.label.as_str()), ("roam", "desk:1"));
+
+        core.inner.state.lock().sessions = vec![summary("s1", "one"), summary("s2", "two")];
+        let all = core.all_sessions();
+        assert_eq!(
+            all.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["s1", "s2"]
+        );
+        // A connected peer would append `roam:<label>:<id>` rows here; its
+        // registry is exercised in roam.rs, where peers can be constructed.
+    }
+
+    #[test]
+    fn open_success_is_emitted_once_on_bind_and_not_on_failure_or_bind_only() {
+        let (core, events) = core();
+        let gen = {
+            let mut state = core.inner.state.lock();
+            state.conn_gen += 1;
+            state.open_watch = Some(OpenWatch {
+                gen: state.conn_gen,
+                expected: Some("s1".to_string()),
+            });
+            state.conn_gen
+        };
+        core.inner.hub.display("s1");
+        core.maybe_announce_open(Some("s1"), Some(gen));
+        assert_eq!(events.opened(), vec!["s1".to_string()]);
+        // The watch is consumed: a second Ready cannot announce the same bind.
+        core.maybe_announce_open(Some("s1"), Some(gen));
+        assert_eq!(events.opened().len(), 1);
+
+        // A rejected load clears the watch. The wire is still usable, so the
+        // spine emits Ready — but nothing was bound, so no open event.
+        let gen = {
+            let mut state = core.inner.state.lock();
+            state.conn_gen += 1;
+            state.open_watch = Some(OpenWatch {
+                gen: state.conn_gen,
+                expected: Some("s2".to_string()),
+            });
+            state.conn_gen
+        };
+        core.open_failed_hook(gen)("s2".to_string(), "stale session".to_string());
+        core.maybe_announce_open(None, Some(gen));
+        assert_eq!(events.opened().len(), 1);
+
+        // Live-wire paths announce directly; the bind-only load does not.
+        core.announce_live_bind("s3", false);
+        core.announce_live_bind("s4", true);
+        assert_eq!(
+            events.opened(),
+            vec!["s1".to_string(), "s3".to_string()]
+        );
     }
 }

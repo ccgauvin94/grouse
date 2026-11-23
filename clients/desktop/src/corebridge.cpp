@@ -140,6 +140,8 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_run_summaries);
     RESOLVE(grouse_active_session_id);
     RESOLVE(grouse_sessions);
+    RESOLVE(grouse_session_owner);
+    RESOLVE(grouse_all_sessions);
     RESOLVE(grouse_transcript);
     RESOLVE(grouse_transcript_rich);
     RESOLVE(grouse_item);
@@ -202,7 +204,7 @@ bool CoreBridge::resolve()
     // The listener table's layout and the symbol signatures are the contract.
     // An older core (or a stale GROUSE_CORE) is refused before any callback can
     // be invoked with the wrong arity.
-    static constexpr unsigned kExpectedAbiVersion = 17;
+    static constexpr unsigned kExpectedAbiVersion = 18;
     if (!a.grouse_abi_version) {
         qWarning() << "CoreBridge: core library predates the ABI version symbol; refusing it";
         return false;
@@ -212,11 +214,11 @@ bool CoreBridge::resolve()
                    << kExpectedAbiVersion << "; refusing it";
         return false;
     }
-    // EVERY symbol in AimsApi is required by ABI 17. Checking only a handful
+    // EVERY symbol in AimsApi is required by ABI 18. Checking only a handful
     // left an otherwise accepted .so one NULL call away from a crash (the first
     // user of an unchecked Q_INVOKABLE). The size assertion makes a future
     // member without a REQUIRE line a build error instead of a runtime gap.
-    static_assert(sizeof(AimsApi) / sizeof(void (*)()) == 102,
+    static_assert(sizeof(AimsApi) / sizeof(void (*)()) == 104,
                   "AimsApi gained a symbol: add it to the resolve + REQUIRE lists");
     QStringList missing;
 #define REQUIRE(name) do { if (!a.name) missing << QStringLiteral(#name); } while (0)
@@ -231,7 +233,8 @@ bool CoreBridge::resolve()
     REQUIRE(grouse_set_run_summaries) REQUIRE(grouse_set_image_rescale) REQUIRE(grouse_image_rescale) REQUIRE(grouse_tasks_refresh);
     REQUIRE(grouse_activity) REQUIRE(grouse_tasks_paint) REQUIRE(grouse_task_close) REQUIRE(grouse_task_snooze);
     REQUIRE(grouse_task_react) REQUIRE(grouse_assistant_project) REQUIRE(grouse_run_summaries) REQUIRE(grouse_active_session_id);
-    REQUIRE(grouse_sessions) REQUIRE(grouse_transcript) REQUIRE(grouse_transcript_rich) REQUIRE(grouse_item);
+    REQUIRE(grouse_sessions) REQUIRE(grouse_session_owner) REQUIRE(grouse_all_sessions) REQUIRE(grouse_transcript);
+    REQUIRE(grouse_transcript_rich) REQUIRE(grouse_item);
     REQUIRE(grouse_window) REQUIRE(grouse_load_older) REQUIRE(grouse_config) REQUIRE(grouse_turn_log);
     REQUIRE(grouse_turn_diag) REQUIRE(grouse_roam_connect) REQUIRE(grouse_roam_disconnect) REQUIRE(grouse_roam_open_session);
     REQUIRE(grouse_roam_new_session) REQUIRE(grouse_roam_new_session_cwd) REQUIRE(grouse_roam_new_session_with_mode) REQUIRE(grouse_identity_generate);
@@ -357,6 +360,11 @@ static void cb_on_session_open_failed(void *u, const char *sessionId, const char
     const QString sid = copyStr(sessionId);
     const QString msg = copyStr(message);
     marshal(u, nullptr, [=](Manager *m) { m->coreOnSessionOpenFailed(sid, msg); });
+}
+static void cb_on_session_opened(void *u, const char *sessionId) {
+    // Copy the payload inside the callback: the core frees the C string on return.
+    const QString sid = copyStr(sessionId);
+    marshal(u, nullptr, [=](Manager *m) { m->coreOnSessionOpened(sid); });
 }
 static void cb_on_tasks(void *u, const char *json) {
     const QString s = copyStr(json);
@@ -498,6 +506,7 @@ void CoreBridge::installListener()
         nullptr,   // on_thread_timeline (ABI 14)
         nullptr,   // on_sensitivity (ABI 15)
         cb_on_advisor_report,   // ABI 16
+        cb_on_session_opened,   // ABI 18
     };
     m_listener = &table;
 

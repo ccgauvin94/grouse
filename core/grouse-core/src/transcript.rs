@@ -2986,6 +2986,7 @@ mod tests {
     }
 
     impl CoreListener for TestListener {
+        fn on_session_opened(&self, _session_id: String) {}
     fn on_advisor_report(&self, _: String, _: String) {}
 
     fn on_sensitivity(&self, _data: String) {}

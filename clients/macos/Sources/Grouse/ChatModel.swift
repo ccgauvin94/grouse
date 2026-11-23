@@ -13,6 +13,14 @@ struct ChatRow: Identifiable, Equatable {
     var detail: String
     var output: String
     var status: String
+    /// `Item.files[0]` on an `ItemKind::File` row: a REFERENCE (server path + digest),
+    /// never bytes. The view uses it to drive `core.fetch_file`; the bytes come back on
+    /// `on_file` and land in the core's cache, not in this model.
+    var filePath: String = ""
+    var fileName: String = ""
+    var fileMime: String = ""
+    var fileSha256: String = ""
+    var fileBytes: UInt64 = 0
 
     var isAssistant: Bool { kind == "agent" }
     var isUser: Bool { kind == "user" }
@@ -61,6 +69,12 @@ final class ChatModel: ObservableObject, @unchecked Sendable {
         hasOlder = snapshot.hasOlder
     }
 
+    /// The reference a file row needs for a download. Identity is the core's item id,
+    /// not the server path: two messages can link the same path.
+    func row(id: String) -> ChatRow? {
+        rows.first { $0.id == id }
+    }
+
     func reset() {
         rows = []
         index = [:]
@@ -74,13 +88,19 @@ final class ChatModel: ObservableObject, @unchecked Sendable {
             reset()
 
         case .upsert(let item):
+            let shared = item.files.first
             let row = ChatRow(
                 id: item.id,
                 kind: kindName(item.kind),
                 text: item.text,
                 detail: item.detail,
                 output: item.output,
-                status: item.status
+                status: item.status,
+                filePath: shared?.path ?? "",
+                fileName: shared?.name ?? "",
+                fileMime: shared?.mime ?? "",
+                fileSha256: shared?.sha256 ?? "",
+                fileBytes: shared?.bytes ?? 0
             )
             if let idx = index[row.id] {
                 rows[idx] = row

@@ -412,6 +412,12 @@ struct ConnInner {
     /// Open/resume failure hook: `(session_id, message)`. Fired instead of
     /// silently binding a different session (grouse#19).
     on_open_failed: Mutex<Option<Arc<dyn Fn(String, String) + Send + Sync>>>,
+    /// Optional bind signal for the core host. `Core` emits
+    /// `CoreListener::on_session_opened` CENTRALLY (on Ready via its open
+    /// watch, plus the two live-reuse calls), so this spine hook is a no-op
+    /// unless a host chooses to drive the event straight from the bind
+    /// instead. It carries the DISPLAY id.
+    on_session_bound: Mutex<Option<Arc<dyn Fn(String) + Send + Sync>>>,
     /// `configOptions` hook (Core mirrors the config getter).
     on_config: Mutex<Option<Arc<dyn Fn(Vec<ConfigOption>) + Send + Sync>>>,
     /// Connection-ended hook (Core: reconnect decision).
@@ -462,6 +468,7 @@ impl Conn {
                 ready: Mutex::new(Some(ready_tx)),
                 on_status: Mutex::new(None),
                 on_open_failed: Mutex::new(None),
+                on_session_bound: Mutex::new(None),
                 on_config: Mutex::new(None),
                 on_ended: Mutex::new(None),
                 permission: Mutex::new(HashMap::new()),
@@ -597,21 +604,54 @@ impl Conn {
     }
 
     /// Bind a session without touching its store (a resume paints first).
-    fn bind_session(&self, session_id: &str) {
+    ///
+    /// Every successful bind on this wire ends here: the handshake's Resume
+    /// arm (including reconnect resume), `start_new_session` (via
+    /// `bind_new_session`) and the live `session/load` reuse path all call it.
+    /// That makes this the one seam for the optional bind hook. The shipped
+    /// core does NOT announce opens from here: it emits
+    /// `CoreListener::on_session_opened` centrally on Ready (which covers the
+    /// handshake, including reconnect resume) and at the two live-reuse call
+    /// sites, with bind-only loads deliberately excluded. `prebind_session`
+    /// moves the event gate ahead of the load but is NOT a bind.
+    fn bind_session_inner(&self, session_id: &str) -> Option<String> {
         if self.is_closing() {
-            return;
+            return None;
         }
         *self.inner.session_id.lock() = Some(session_id.to_string());
         let key = crate::session::display_id(self.inner.label.as_deref(), session_id);
         self.inner.hub.display(&key);
+        Some(key)
+    }
+
+    fn bind_session(&self, session_id: &str) {
+        if let Some(key) = self.bind_session_inner(session_id) {
+            self.report_session_bound(&key);
+        }
+    }
+
+    /// Notify a host that has opted into bind-driven emission. The shipped
+    /// core deliberately installs no hook: it announces the same successful
+    /// bind centrally on Ready (`Core::maybe_announce_open`) or at the
+    /// live-reuse call site. Emitting here as well would double the event.
+    fn report_session_bound(&self, display_id: &str) {
+        if self.is_closing() {
+            return;
+        }
+        if let Some(hook) = self.inner.on_session_bound.lock().clone() {
+            hook(display_id.to_string());
+        }
     }
 
     /// Bind a NEW session and clear the screen: there is no transcript yet, and
-    /// the previous chat's rows must not linger behind the empty one.
+    /// the previous chat's rows must not linger behind the empty one. Any
+    /// bind hook fires AFTER the clear, so a host reading the transcript in
+    /// its callback sees the new chat's empty rows, not the old chat's.
     fn bind_new_session(&self, session_id: &str) {
-        self.bind_session(session_id);
-        let key = crate::session::display_id(self.inner.label.as_deref(), session_id);
-        self.inner.hub.store(&key).clear();
+        if let Some(key) = self.bind_session_inner(session_id) {
+            self.inner.hub.store(&key).clear();
+            self.report_session_bound(&key);
+        }
     }
 
     /// The store for a session owned by this connection, in this connection's
@@ -629,6 +669,16 @@ impl Conn {
 
     pub(crate) fn set_on_open_failed(&self, f: Arc<dyn Fn(String, String) + Send + Sync>) {
         *self.inner.on_open_failed.lock() = Some(f);
+    }
+
+    /// Register a direct bind signal (DISPLAY id). The shipped core emits
+    /// `on_session_opened` centrally and therefore installs NO hook here; a
+    /// host that switches to bind-driven emission must register this AND
+    /// remove the central `Core::maybe_announce_open` / live-reuse calls, or
+    /// the UI gets the event twice.
+    #[allow(dead_code)] // no hook installed by the shipped core
+    pub(crate) fn set_on_session_bound(&self, f: Arc<dyn Fn(String) + Send + Sync>) {
+        *self.inner.on_session_bound.lock() = Some(f);
     }
 
     /// Report an open/resume failure to Core. The connection binds NO session

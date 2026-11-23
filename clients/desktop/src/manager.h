@@ -149,7 +149,9 @@ public:
      *  Skip TLS certificate verification once. An explicit stored true is kept. */
     static constexpr bool DEFAULT_ACCEPT_INVALID_CERTS = false;
 
-    /** The peer a `roam:<label>:<id>` display id belongs to (empty for a local id). */
+    /** Namespace-only FALLBACK for the peer of a `roam:<label>:<id>` display id.
+     *  Routing asks the core (`sessionPeerLabel`); this only keeps an older/absent
+     *  core library — and the pure unit test — working. */
     static QString roamPeerForSession(const QString &sessionId);
     /** Only the wire that owns the turn may clear its state on a main-wire Ready. */
     static bool mainWireOwnsTurnState(const QString &activePeerLabel) { return activePeerLabel.isEmpty(); }
@@ -462,6 +464,12 @@ public:
     Q_INVOKABLE void fetchFile(const QString &sessionId, const QString &path,
                                const QString &name, const QString &mime,
                                const QString &sha256);
+    /** The key a download card is stored under: the OWNING session's display id
+     *  plus the server-side path. `on_file` used to be keyed by path alone, so two
+     *  chats (or two roam peers) fetching the same server path shared one progress
+     *  state and the last event painted the wrong card. QML asks for this helper so
+     *  the row lookup and the event key are literally the same string. */
+    Q_INVOKABLE QString fileCardKey(const QString &sessionId, const QString &path) const;
 
     /** The displayed chat's parked-message count (NOT every chat's: the queue is
      *  per-chat, and a card for another conversation's message would be a lie). */
@@ -625,6 +633,10 @@ public:
     void coreOnPeerNewSession(const QString &label, const QString &sid);
     void coreOnActiveRun(const QString &sid, const QString &runId);
     void coreOnCommands(const QString &json);
+    /** An open/resume succeeded and the session is bound/displayed. The core's
+     *  positive answer — neither a painted Window nor a wire Ready is an open
+     *  result, because background fills and reconnects emit those too. */
+    void coreOnSessionOpened(const QString &sessionId);
     /** An open/resume failed and nothing was substituted (grouse#19). */
     void coreOnSessionOpenFailed(const QString &sessionId, const QString &message);
     void coreOnExport(const QString &data);
@@ -726,6 +738,14 @@ signals:
     /** The pending structured-input form arrived, changed, or was answered. */
     void pendingFormChanged();
 private:
+    /** Session-scoped key for client-side queues (attachment thumbnails). Two
+     *  chats can send the identical prompt text; without the owner in the key the
+     *  second chat's row consumed the first chat's pixels. */
+    static QString scopedKey(const QString &sessionId, const QString &localKey);
+    /** Which peer owns a display id, according to the CORE (grouse_session_owner).
+     *  Empty for the main wire. Falls back to the id namespace only when the core
+     *  cannot answer — routing itself is never inferred from a prefix. */
+    QString sessionPeerLabel(const QString &sessionId) const;
     void setStatus(const QString &s);
     void setOnline(bool o);
     /** The one refresh implementation: `full == 0` is the quick refresh, nonzero
@@ -1082,9 +1102,10 @@ private:
     QList<QVariantMap> m_olderPending;      // older items collected during a loadOlder
     bool m_loadingOlder = false;
     // The core owns the prompt row and carries an attachment COUNT only, so the
-    // pixels this client sent wait here keyed by prompt text until that row
-    // arrives (a queue: two prompts can share text). Not persisted — a reload
-    // replays text only, which is why thumbnails vanish on reopen.
+    // pixels this client sent wait here keyed by SESSION + prompt text until that
+    // row arrives (a queue: two prompts in one chat can share text; two chats can
+    // share it too). Not persisted — a reload replays text only, which is why
+    // thumbnails vanish on reopen.
     QHash<QString, QList<QVariantList>> m_pendingAttachments;
     QHash<QString, QVariantList> m_attachmentsByRow;   // item id -> its thumbnails
 

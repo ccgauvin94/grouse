@@ -61,7 +61,14 @@ use crate::{
 /// `grouse_push_decide_run` (run-id-aware notification policy). A desktop built
 /// for 17 calls these unconditionally, so an old `.so` must be refused at load:
 /// the ABI gate, not a NULL check at first use, is what keeps it from crashing.
-pub const GROUSE_ABI_VERSION: u32 = 17;
+///
+/// 18: `on_session_opened` appended to the listener table (the positive answer
+/// to `open_session`, so no client has to infer success from a paint/`Window`),
+/// plus two new getter symbols — `grouse_session_owner` and `grouse_all_sessions`
+/// — for the merged-main-and-peers session view (2026-11-23). The new slot makes
+/// the table 48 entries; both sides must bump together or every callback after
+/// it would be read with the wrong offset.
+pub const GROUSE_ABI_VERSION: u32 = 18;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
@@ -294,7 +301,10 @@ pub struct GrouseCoreListener {
     pub on_replay_progress:
         Option<extern "C" fn(*mut c_void, *const c_char, i64, i64, i32)>,
     /// A shared file's download as JSON (`FileEvent`: `progress` / `saved` /
-    /// `failed`), keyed by the server-side path. Appended at the END; ABI 9.
+    /// `failed`), keyed by the server-side path. Every variant also carries
+    /// `session_id` (display id) and `request_id` (the fetch this event answers),
+    /// so a client never has to guess the owner from the path alone. Appended at
+    /// the END; ABI 9 (payload extended at ABI 18).
     pub on_file: Option<extern "C" fn(*mut c_void, *const c_char)>,
     /// The conversation a thread's chat lives in: `(label, session_id)`, the reply to
     /// `grouse_open_thread`. The CLIENT opens it — see the listener's own note for why
@@ -323,6 +333,11 @@ pub struct GrouseCoreListener {
     /// Appended at the END; ABI 16.
     pub on_advisor_report:
         Option<extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
+    /// A session was opened successfully and is now bound/displayed: `(session_id)`.
+    /// The explicit counterpart of `on_session_open_failed` — a paint or a
+    /// `Window` is NOT an open answer (a background fill sends those too).
+    /// Appended at the END; ABI 18.
+    pub on_session_opened: Option<extern "C" fn(*mut c_void, *const c_char)>,
 }
 
 /// Bridges the core's typed listener traits to the installed C table. The raw
@@ -624,6 +639,9 @@ impl CoreListener for CoreCallbackForwarder {
     }
     fn on_advisor_report(&self, session_id: String, text: String) {
         unsafe { cb_str2(table_fn!(self, on_advisor_report), self.user_data, &session_id, &text) };
+    }
+    fn on_session_opened(&self, session_id: String) {
+        unsafe { cb_str1(table_fn!(self, on_session_opened), self.user_data, &session_id) };
     }
     fn on_file(&self, event: crate::attachments::FileEvent) {
         let p = c_json(&event);
@@ -1301,6 +1319,29 @@ pub extern "C" fn grouse_turn_diag(h: *mut c_void, session_id: *const c_char) ->
 #[no_mangle]
 pub extern "C" fn grouse_sessions(h: *mut c_void) -> *mut c_char {
     catch_unwind(AssertUnwindSafe(|| c_json(&handle(h).core.sessions()))).unwrap_or(std::ptr::null_mut())
+}
+
+/// Which connection owns a display id, as JSON `{"kind": "main"|"roam",
+/// "label": ""|<peer label>}`. A nullptr argument or a panic is a NULL return;
+/// the caller must free a returned string with `grouse_string_free`.
+#[no_mangle]
+pub extern "C" fn grouse_session_owner(h: *mut c_void, session_id: *const c_char) -> *mut c_char {
+    let Some(sid) = (unsafe { c_param(session_id) }).map(str::to_owned) else {
+        return std::ptr::null_mut();
+    };
+    catch_unwind(AssertUnwindSafe(|| c_json(&handle(h).core.session_owner(sid))))
+        .unwrap_or(std::ptr::null_mut())
+}
+
+/// The merged session snapshot — `Vec<SessionSummary>` as JSON: every known
+/// session across the MAIN wire and the roam peers, with the client-side
+/// `roam:<label>:` display ids. Unlike `grouse_sessions` (main wire only), this
+/// is the list a sidebar should render; the core resolves each row's owner once
+/// instead of every client re-parsing the prefix.
+#[no_mangle]
+pub extern "C" fn grouse_all_sessions(h: *mut c_void) -> *mut c_char {
+    catch_unwind(AssertUnwindSafe(|| c_json(&handle(h).core.all_sessions())))
+        .unwrap_or(std::ptr::null_mut())
 }
 
 #[no_mangle]

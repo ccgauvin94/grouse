@@ -28,11 +28,13 @@ This file is the ledger that makes that impossible to do quietly. Two rules:
   itself compile-guarded: it destructures every guarded record (`Item`,
   `ToolCall`, `SubagentStep`, `UploadedFile`, `SessionSummary`, `ConfigOption`,
   `ConfigChoice`, `PermissionRequest`, `PermissionOption`, `ProjectSummary`,
-  `ActiveWork`) with **no `..` rest** and matches the enums (`TranscriptOp`,
-  `ItemKind`, `PromptBlock`, `FileEvent`) with **no `_` arm**, so adding a field
-  or a variant breaks the core build until the new id is added to the inventory
-  — which is the same list this ledger is checked against. A surface therefore
-  cannot appear in the core without appearing here.
+  `ActiveWork`, `SessionOwner`) with **no `..` rest** and matches the enums
+  (`TranscriptOp`, `ItemKind`, `PromptBlock`, `FileEvent`) with **no `_` arm**;
+  `FileEvent`'s fields shared by all three variants have their own exhaustive
+  destructuring guard. Adding a field or a variant breaks the core build until
+  the new id is added to the inventory — which is the same list this ledger is
+  checked against. A surface therefore cannot appear in the core without
+  appearing here.
 - **Every id needs a cell per client**, and the client columns must match the
   clients that actually have source in `clients/`. The day `clients/cli` gains a
   `Cargo.toml` and a `src/`, CI demands a column for it — a new client cannot
@@ -76,7 +78,7 @@ Anchors are `file#token`; `+` joins more than one (all must resolve). Roots:
 android root = clients/android/app/src/main/java/id/gauvin/grouse
 desktop root = clients/desktop
 
-excluded = 19
+excluded = 21
 
 | surface | android | desktop |
 |---|---|---|
@@ -131,6 +133,8 @@ excluded = 19
 | `session.has_new` | yes: Wire.kt#hasNew = hasNew | excluded: no green-dot state in the desktop sidebar model; a staged chat is not marked there |
 | `session.mode` | yes: Wire.kt#mode = mode.orEmpty() | yes: src/manager.cpp#o.value("mode") |
 | `session.archived` | yes: Wire.kt#archived = archived | yes: src/manager.cpp#o.value("archived") |
+| `owner.kind` | yes: ConnectionManager.kt#classifyOwner(kind: String?, label: String?) | yes: src/manager.cpp#grouse_session_owner |
+| `owner.label` | yes: ConnectionManager.kt#classifyOwner(kind: String?, label: String?) | yes: src/manager.cpp#grouse_session_owner |
 | `config.id` | yes: Wire.kt#id = id | yes: src/manager.cpp#o.value("id").toString() |
 | `config.value` | yes: Wire.kt#currentValue = value | yes: src/manager.cpp#o.value("value").toString() |
 | `config.name` | yes: Wire.kt#name = name | yes: src/manager.cpp#{"name", o.value("name").toString()} |
@@ -154,6 +158,8 @@ excluded = 19
 | `file_event.Progress` | yes: ConnectionManager.kt#FileEvent.Progress | yes: ui/ChatPage.qml#ev.Progress !== undefined |
 | `file_event.Saved` | yes: ConnectionManager.kt#FileEvent.Saved | yes: ui/ChatPage.qml#ev.Saved !== undefined |
 | `file_event.Failed` | yes: ConnectionManager.kt#FileEvent.Failed | yes: ui/ChatPage.qml#ev.Failed !== undefined |
+| `file_event.session_id` | yes: ConnectionManager.kt#event.sessionId | yes: src/manager.cpp#value(QStringLiteral("session_id")) |
+| `file_event.request_id` | excluded: the core sends an empty request id until the wire has a per-fetch correlation id, so there is nothing for the phone to key or show | excluded: same — the field is reserved in the payload, but the core emits an empty string for every fetch today |
 | `op.Reset` | yes: ConnectionManager.kt#TranscriptOp.Reset | yes: src/manager.cpp#QStringLiteral("Reset") |
 | `op.Upsert` | yes: ConnectionManager.kt#TranscriptOp.Upsert | yes: src/manager.cpp#QStringLiteral("Upsert") |
 | `op.AppendText` | yes: ConnectionManager.kt#TranscriptOp.AppendText | yes: src/manager.cpp#QStringLiteral("AppendText") |
@@ -184,6 +190,7 @@ excluded = 19
 | `listener.on_active_run` | yes: ConnectionManager.kt#override fun onActiveRun | yes: src/corebridge.cpp#cb_on_active_run |
 | `listener.on_commands` | yes: ConnectionManager.kt#override fun onCommands | yes: src/corebridge.cpp#cb_on_commands |
 | `listener.on_session_open_failed` | yes: ConnectionManager.kt#override fun onSessionOpenFailed | yes: src/corebridge.cpp#cb_on_session_open_failed |
+| `listener.on_session_opened` | yes: ConnectionManager.kt#override fun onSessionOpened | yes: src/corebridge.cpp#cb_on_session_opened |
 | `listener.on_tasks` | yes: ConnectionManager.kt#override fun onTasks | yes: src/corebridge.cpp#cb_on_tasks |
 | `listener.on_thread_ready` | yes: ConnectionManager.kt#override fun onThreadReady | yes: src/corebridge.cpp#cb_on_thread_ready |
 | `listener.on_replay_progress` | yes: ConnectionManager.kt#override fun onReplayProgress | yes: src/corebridge.cpp#cb_on_replay_progress |

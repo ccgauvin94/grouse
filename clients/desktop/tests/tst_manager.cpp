@@ -3,6 +3,8 @@
 #include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 #include "corebridge.h"
 #include "manager.h"
@@ -40,7 +42,9 @@ private slots:
     void roamTitleComesFromThePeerList();
     void localSessionsKeepTheirProjectsAfterARoamChat();
     void providerChoicesDisambiguateDuplicateLabels();
-    void roamOpenClearsTheLoadingStatus();
+    void openSuccessEventFinalizesLoading();
+    void fileCardKeyIsSessionScoped();
+    void unifiedSessionListGroupsByCoreOwner();
     void runEndRendersTheLastStreamedBubble();
     void tailRendersWithoutAnySeal();
     void fencedCodeBecomesBlocksNotHtml();
@@ -530,7 +534,7 @@ void TstManager::providerChoicesDisambiguateDuplicateLabels()
     QCOMPARE(filtered.size(), 2);
 }
 
-void TstManager::roamOpenClearsTheLoadingStatus()
+void TstManager::openSuccessEventFinalizesLoading()
 {
     Manager mgr;
     QSignalSpy spy(&mgr, &Manager::statusChanged);
@@ -538,21 +542,86 @@ void TstManager::roamOpenClearsTheLoadingStatus()
                         QStringLiteral("roam:Phaethon:20261024_2"), QString());
     QCOMPARE(mgr.status(), QStringLiteral("loading…"));
 
-    // A peer's open is only confirmed by the painted window: a SUCCESSFUL open raises
-    // no other event, so without this the status stayed "loading…" forever (it showed
-    // under the chat name and in the composer).
+    // A Window only says rows were painted: background fills and load-older send
+    // one too, so it must NOT declare the open successful.
     mgr.coreOnItem(QStringLiteral(R"({"Window":{"oldest_id":"m1","has_older":true}})"));
-    QCOMPARE(mgr.status(), QStringLiteral("ready"));
+    QCOMPARE(mgr.status(), QStringLiteral("loading…"));
 
-    // A later Window (a load-older batch) must not disturb a status that says
-    // something meaningful — here, the visible failure a rejected open reports.
+    // A replay that reports progress but never says `done` used to leave the bar
+    // spinning forever once the chat was settled.
+    mgr.coreOnReplayProgress(QStringLiteral("roam:Phaethon:20261024_2"), 4, 10, false);
+    QVERIFY(mgr.reloading());
+    QCOMPARE(mgr.replayLoaded(), 4);
+
+    // The core's positive answer ends BOTH bars, for this chat only.
+    mgr.coreOnSessionOpened(QStringLiteral("roam:Phaethon:20261024_2"));
+    QCOMPARE(mgr.status(), QStringLiteral("ready"));
+    QVERIFY(!mgr.reloading());
+    QCOMPARE(mgr.replayLoaded(), 0);
+    QCOMPARE(mgr.replayTotal(), 0);
+    QVERIFY(spy.count() >= 1);
+
+    // Another chat's success (or a background bind) cannot settle this header.
     mgr.coreOnSessionOpenFailed(QStringLiteral("sess-gone"),
                                 QStringLiteral("session/load failed: stale"));
     const QString failure = mgr.status();
     QVERIFY2(failure.contains(QStringLiteral("stale")), qPrintable(failure));
+    mgr.coreOnReplayProgress(QStringLiteral("other"), 1, 1, false);
+    mgr.coreOnSessionOpened(QStringLiteral("other"));
     mgr.coreOnItem(QStringLiteral(R"({"Window":{"oldest_id":"m0","has_older":false}})"));
     QCOMPARE(mgr.status(), failure);
-    Q_UNUSED(spy);
+    QVERIFY(!mgr.reloading());   // the failure dropped the bar too
+}
+
+/** File events carry their owning session; the card key must include it. */
+void TstManager::fileCardKeyIsSessionScoped()
+{
+    Manager mgr;
+    const QString path = QStringLiteral("/srv/reports/same-name.pdf");
+    const QString local = QStringLiteral("roam:Phaethon:20261024_2");
+    const QString other = QStringLiteral("20261122_9");
+    QVERIFY(mgr.fileCardKey(local, path) != mgr.fileCardKey(other, path));
+    QCOMPARE(mgr.fileCardKey(local, path),
+             QStringLiteral("roam:Phaethon:20261024_2|/srv/reports/same-name.pdf"));
+
+    QSignalSpy spy(&mgr, &Manager::fileEvent);
+    // Serde's externally-tagged enum: fields live inside the variant object.
+    mgr.coreOnFile(QStringLiteral(R"({"Progress":{"path":"/srv/reports/same-name.pdf",)"
+                                  R"("name":"same-name.pdf","received":10,"total":20,)"
+                                  R"("session_id":"roam:Phaethon:20261024_2",)"
+                                  R"("request_id":"req-1"}})"));
+    QCOMPARE(spy.count(), 1);
+    const QJsonObject ev = QJsonDocument::fromJson(spy.at(0).at(0).toString().toUtf8()).object();
+    QCOMPARE(ev.value(QStringLiteral("key")).toString(), mgr.fileCardKey(local, path));
+    QCOMPARE(ev.value(QStringLiteral("session_id")).toString(), local);
+
+    // An older core omits the session: the chat on screen is the only fallback.
+    mgr.openSession(other);
+    mgr.coreOnFile(QStringLiteral(R"({"Saved":{"path":"/srv/reports/same-name.pdf",)"
+                                  R"("name":"same-name.pdf","mime":"application/pdf",)"
+                                  R"("bytes":20,"local_path":"/tmp/copy.pdf"}})"));
+    QCOMPARE(spy.count(), 2);
+    const QJsonObject older = QJsonDocument::fromJson(spy.at(1).at(0).toString().toUtf8()).object();
+    QCOMPARE(older.value(QStringLiteral("key")).toString(), mgr.fileCardKey(other, path));
+}
+
+/** One merged list from the core; the model groups by the core's owner answer. */
+void TstManager::unifiedSessionListGroupsByCoreOwner()
+{
+    Manager mgr;
+    mgr.coreOnProjects(QStringLiteral(R"([{"id":"hacking","name":"Hacking"}])"));
+    mgr.coreOnSessions(QStringLiteral(R"([
+        {"id":"local-1","title":"Local","updated_at":"2026-11-22T10:00:00Z","project_id":"hacking"},
+        {"id":"roam:Phaethon:peer-1","title":"Remote","updated_at":"2026-11-22T09:00:00Z"}
+    ])"));
+
+    auto *m = qobject_cast<SessionListModel *>(mgr.sessionsModel());
+    QVERIFY(m != nullptr);
+    QStringList sections;
+    for (int r = 0; r < m->rowCount(); ++r)
+        sections << m->data(m->index(r, 0), SessionListModel::SectionRole).toString();
+    QVERIFY(sections.contains(QStringLiteral("proj:hacking")));
+    QVERIFY2(sections.contains(QStringLiteral("peer:Phaethon")), qPrintable(sections.join('|')));
 }
 
 /**

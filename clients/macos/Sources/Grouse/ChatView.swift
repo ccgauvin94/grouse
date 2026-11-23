@@ -55,6 +55,30 @@ struct ChatView: View {
                 .disabled(!bridge.prompting)
                 .help("Stop the running turn")
             }
+            ToolbarItem(placement: .primaryAction) {
+                // Downloads are reported per request id (and per chat) by on_file; their
+                // finished bytes are local cache files the OS can open directly.
+                Menu {
+                    if bridge.orderedFileTransfers.isEmpty {
+                        Text("No file downloads")
+                    }
+                    ForEach(bridge.orderedFileTransfers) { transfer in
+                        Button {
+                            if transfer.state == "saved" {
+                                bridge.openFile(path: transfer.localPath)
+                            }
+                        } label: {
+                            Label("\(transfer.name) — \(transferStatus(transfer))",
+                                  systemImage: transfer.state == "saved" ? "doc.fill"
+                                                                         : "arrow.down.circle")
+                        }
+                        .disabled(transfer.state != "saved")
+                    }
+                } label: {
+                    Image(systemName: "arrow.down.circle")
+                }
+                .help("File downloads")
+            }
         }
     }
 
@@ -130,15 +154,69 @@ struct ChatRowView: View {
                 .textSelection(.enabled)
 
         case "file":
-            Label(row.text, systemImage: "doc")
-                .font(.callout)
-                .textSelection(.enabled)
+            FileRowView(row: row)
 
         default:
             Text(row.text.isEmpty ? row.kind : row.text)
                 .font(.callout)
                 .textSelection(.enabled)
         }
+    }
+}
+
+/// A server-shared file is a REFERENCE in the transcript (CONTRACT §8). The row offers
+/// the fetch the first time and the local open once the download landed; the bytes never
+/// travel through the transcript or this view model.
+struct FileRowView: View {
+    @EnvironmentObject private var bridge: CoreBridge
+    let row: ChatRow
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Label(row.fileName.isEmpty ? row.text : row.fileName, systemImage: "doc")
+                .font(.callout)
+                .textSelection(.enabled)
+            if row.fileBytes > 0 {
+                Text(ByteCountFormatter.string(fromByteCount: Int64(row.fileBytes),
+                                               countStyle: .file))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if let transfer = bridge.fileTransfer(for: row) {
+                Text(transferStatus(transfer))
+                    .font(.caption2)
+                    .foregroundStyle(transfer.state == "failed" ? .red : .secondary)
+            }
+            Spacer(minLength: 8)
+            if let transfer = bridge.fileTransfer(for: row),
+               transfer.state == "saved", !transfer.localPath.isEmpty {
+                Button { bridge.openFile(path: transfer.localPath) } label: {
+                    Label("Open", systemImage: "folder")
+                }
+                .buttonStyle(.borderless)
+                .help("Open the downloaded file")
+            } else if !row.filePath.isEmpty, !row.fileSha256.isEmpty {
+                Button { bridge.fetchFile(rowId: row.id) } label: {
+                    Label("Download", systemImage: "arrow.down.to.line")
+                }
+                .buttonStyle(.borderless)
+                .disabled(bridge.fileTransfer(for: row)?.state == "downloading")
+                .help("Fetch this file from the server into the local cache")
+            }
+        }
+    }
+}
+
+private func transferStatus(_ transfer: FileTransfer) -> String {
+    switch transfer.state {
+    case "saved": return "downloaded"
+    case "failed": return transfer.message.isEmpty ? "failed" : "failed: \(transfer.message)"
+    case "downloading":
+        if transfer.total > 0 {
+            return "\(transfer.received)/\(transfer.total)"
+        }
+        return "downloading"
+    default: return transfer.state
     }
 }
 

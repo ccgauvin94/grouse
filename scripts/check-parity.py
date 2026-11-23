@@ -79,18 +79,21 @@ def read(rel: str) -> str:
 def parse_inventory(text: str) -> dict:
     """The inventory, from `surface.rs`.
 
-    Two shapes: `LISTENER_EVENTS` is a literal `pub static … = &["listener.x"]`,
-    and the record/enum groups are emitted by a macro whose CALL carries the
-    field names (`record_surface!(…, "item": id, kind, …)`). The compiler sees
-    the expansion; this sees the call — which is the same list the compile-time
-    guard destructures, so the two cannot disagree.
+    Three shapes: `LISTENER_EVENTS`/`LISTENER_SIGNATURES` are literals
+    (`pub static … = &["listener.x"]`); the record/enum groups are emitted by a
+    macro whose CALL carries the field names (`record_surface!(…, "item": id,
+    kind, …)`); and a field shared by every variant of a struct enum is a literal
+    `pub static SOMETHING_FIELDS = &["prefix.field", …]` backed by its own
+    exhaustive match guard (the enum guard only sees variants). The compiler sees
+    the expansions; this sees the source — the same list each guard destructures,
+    so the two cannot disagree.
     """
     groups = {}
 
     for name, body in re.findall(
         r"pub static ([A-Z_]+): &\[&str\] = &\[(.*?)\];", text, re.S
     ):
-        if name not in ("LISTENER_EVENTS", "LISTENER_SIGNATURES"):
+        if name not in ("LISTENER_EVENTS", "LISTENER_SIGNATURES") and not name.endswith("_FIELDS"):
             continue  # macro-generated consts have no literal text; see below
         ids = re.findall(r'"[^"]+"', body)
         ids = [i[1:-1] for i in ids]

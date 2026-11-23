@@ -151,6 +151,11 @@ pub trait CoreListener {
     // explicitly with `new_session`. An answer to an intent, so it is not gated
     // by which chat is on screen (grouse#19).
     fn on_session_open_failed(&self, session_id: String, message: String);
+    // The positive answer to a successful open/resume/peer-open: the session is
+    // bound and displayed. The pair is complete — a paint, a `Window` or a
+    // `Ready` is NOT an open answer (a background fill sends those too), so a
+    // client no longer needs a watchdog or a rollback snapshot to guess one.
+    fn on_session_opened(&self, session_id: String);
     // My Day (§3.6): assistant-state's task lists as one JSON document,
     // `{"open": [...], "done": [...], "errors": {section: message}}`. Emitted
     // for every refresh and after every task action — never mid-turn, because
@@ -173,12 +178,22 @@ pub trait CoreListener {
     // A SHARED file's download (server -> client). Keyed by the SERVER-side
     // `path` — the same value in an `ItemKind::File` row's `files[0].path` — so
     // several rows can fetch at once and a reopened chat has no request order to
-    // reconstruct. Shapes: `Progress { path, name, received, total }`,
-    // `Saved { path, name, mime, bytes, local_path }`,
-    // `Failed { path, name, message }`.
+    // reconstruct. EVERY variant also carries `session_id` (the DISPLAY id the
+    // fetch belongs to — never re-derive the owner from the path) and
+    // `request_id` (the correlation id of this fetch; empty today because the
+    // core has no per-fetch id yet, reserved so a client need not re-key on a
+    // future protocol change). Shapes:
+    // `Progress { path, name, received, total, session_id, request_id }`,
+    // `Saved { path, name, mime, bytes, local_path, session_id, request_id }`,
+    // `Failed { path, name, message, session_id, request_id }`.
     fn on_file(&self, event: FileEvent);
 }
 ```
+
+The desktop C ABI mirrors this table field-for-field as `GrouseCoreListener`.
+`on_session_opened` was appended at the END and bumped the ABI to **18**; the
+desktop refuses a library whose `grouse_abi_version()` differs, because a slot
+inserted anywhere else would call every later callback with the wrong arity.
 
 **A reload invalidates; a refresh merely asks.** `RefreshMode::Quick` trusts a
 settled cache and merges a bounded tail, which is right for an open and useless
@@ -201,6 +216,15 @@ whatever the client's cache painted for the requested session — it stays
 provisional, so it can never suppress the replay of a later successful load —
 and no turn can end for a session nothing is bound to, so `save_cache_for`
 cannot re-stamp a cache the open never confirmed.
+
+**An open has two answers, both keyed by session id.** `on_session_opened(id)`
+means the requested session is bound and displayed; `on_session_open_failed(id,
+message)` means nothing was bound and nothing was substituted (grouse#19). The
+event fires for main, resumed and roam opens and is a direct answer to the
+intent — a client must not infer it from `Ready`, an `Upsert`, a `Window` or
+`active_session_id()`, all of which also happen for replay paging or a
+background fill. A client's pending-open watchdog, rollback snapshot and
+loading bar can be released by these two events alone.
 
 **An open/reload paints ONCE, at the end** (grouse#18). While a `session/load`
 replay is in flight the store ingests every row silently; on completion the client
@@ -225,6 +249,21 @@ cache paint in place.
   `_meta.archivedAt`; `session/list` has no archived filter, so the flag —
   not a drop — is how a UI distinguishes archived chats and restores them via
   `unarchive_session`).
+- `session_owner(session_id: String): SessionOwner` — **New 2026-11-23.** which
+  connection owns a DISPLAY id: `SessionOwner { kind: String, label: String }`,
+  where `kind` is `"main"` or `"roam"` and `label` is the peer's connection-card
+  label (empty for main). This is the core's own routing answer — the same
+  prefix resolution `owner_for` uses — so a client never re-parses
+  `roam:<label>:<id>` to decide where a session-bound intent goes. An unknown
+  or vanished peer still reports `kind: "roam"` with the label recovered from
+  the id, never a false `"main"`. C ABI: `grouse_session_owner`.
+- `all_sessions(): Vec<SessionSummary>` — **New 2026-11-23.** one snapshot of
+  every known session, main wire plus every connected roam peer, with the
+  client-side `roam:<label>:` ids already applied and duplicates resolved in
+  favour of the main list. This is the list a sidebar renders; `sessions()`
+  remains the main wire's raw list for the cases that need it, and
+  `on_roam_sessions` remains the incremental notification. C ABI:
+  `grouse_all_sessions`.
 - `transcript(): Vec<Message>` — the accumulated active-session transcript
 - `rich_transcript(): Vec<Item>` — the same transcript as rich items (§3.5)
 - `item(id): Option<Item>` — one item by id
@@ -916,7 +955,12 @@ sets the drawer's green dot via `SessionHub::mark_new` instead of painting.
   `roam_open_session(label, session_id)`
 - events: `on_roam_peer_status(label, status)`, `on_roam_sessions(label, Vec<SessionSummary>)`
 - the peer's session id namespace uses the `roam:<peer>:<id>` prefix for
-  sidebar grouping, exactly as today.
+  sidebar grouping, exactly as today. `session_owner(id)` (§3.3) is the single
+  answer to "which wire owns this id?", and `all_sessions()` is the merged
+  snapshot for the drawer — clients no longer keep a separate roam model or
+  re-split the prefix on every main refresh.
+- every successful open, including `roam_open_session`, reports
+  `on_session_opened(display_id)`; the failure counterpart is unchanged.
 - session-bound unstable RPCs (tools list/call, session extensions, project,
   working-dir, resources, export) ROUTE to the owning peer's connection when
   the session id carries the `roam:` prefix — the peer answers its own

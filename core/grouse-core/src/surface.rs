@@ -52,7 +52,7 @@ macro_rules! record_surface {
 use crate::attachments::{FileEvent, UploadedFile};
 use crate::{
     ActiveWork, ConfigChoice, ConfigOption, Item, ItemKind, PermissionOption, PermissionRequest,
-    ProjectSummary, PromptBlock, SessionSummary, SubagentStep, ToolCall, TranscriptOp,
+    ProjectSummary, PromptBlock, SessionOwner, SessionSummary, SubagentStep, ToolCall, TranscriptOp,
 };
 
 /// The same for an enum whose variants all carry fields (`{ .. }` matches them).
@@ -187,6 +187,14 @@ record_surface!(
 );
 
 record_surface!(
+    SessionOwner,
+    OWNER_FIELDS,
+    "owner":
+    kind,
+    label,
+);
+
+record_surface!(
     ConfigOption,
     CONFIG_FIELDS,
     "config":
@@ -251,6 +259,26 @@ struct_enum_surface!(
     Failed,
 );
 
+/// The fields every `FileEvent` variant carries. The enum guard above only sees
+/// variants, so the request correlation added at ABI 18 needs its own exhaustive
+/// destructuring: omitting a variant or either field from all three arms is a
+/// compile error. `..` is deliberate here — adding an UNRELATED variant field is
+/// the enum guard's job, not this one's.
+pub static FILE_EVENT_FIELDS: &[&str] = &["file_event.session_id", "file_event.request_id"];
+
+const _: () = {
+    #[allow(dead_code, unused_variables)]
+    fn exhaustive(v: &FileEvent) {
+        match v {
+            FileEvent::Progress { session_id, request_id, .. }
+            | FileEvent::Saved { session_id, request_id, .. }
+            | FileEvent::Failed { session_id, request_id, .. } => {
+                let _ = (session_id, request_id);
+            }
+        }
+    }
+};
+
 struct_enum_surface!(
     TranscriptOp,
     TRANSCRIPT_OPS,
@@ -308,6 +336,7 @@ pub static LISTENER_EVENTS: &[&str] = &[
     "listener.on_thread_timeline",
     "listener.on_sensitivity",
     "listener.on_advisor_report",
+    "listener.on_session_opened",
 ];
 
 /// The same callbacks with their parameter types, for the signature check.
@@ -342,6 +371,7 @@ pub static LISTENER_SIGNATURES: &[&str] = &[
     "on_replay_progress(session_id: String, loaded: i64, total: i64, done: bool)",
     "on_file(event: crate::attachments::FileEvent)",
     "on_advisor_report(session_id: String, text: String)",
+    "on_session_opened(session_id: String)",
 ];
 
 /// Every id in the inventory, in one list. What the checker reads.
@@ -354,6 +384,7 @@ pub fn all() -> Vec<&'static str> {
         WORK_FIELDS,
         FILE_FIELDS,
         SESSION_FIELDS,
+        OWNER_FIELDS,
         CONFIG_FIELDS,
         CHOICE_FIELDS,
         PERMISSION_FIELDS,
@@ -361,6 +392,7 @@ pub fn all() -> Vec<&'static str> {
         PROJECT_FIELDS,
         PROMPT_BLOCK_VARIANTS,
         FILE_EVENT_VARIANTS,
+        FILE_EVENT_FIELDS,
         TRANSCRIPT_OPS,
         ITEM_KINDS,
         LISTENER_EVENTS,
@@ -403,6 +435,7 @@ mod tests {
             (STEP_FIELDS, 2),
             (FILE_FIELDS, 5),
             (SESSION_FIELDS, 11),
+            (OWNER_FIELDS, 2),
             (CONFIG_FIELDS, 4),
             (CHOICE_FIELDS, 2),
             (PERMISSION_FIELDS, 4),
@@ -410,10 +443,11 @@ mod tests {
             (PROJECT_FIELDS, 3),
             (PROMPT_BLOCK_VARIANTS, 4),
             (FILE_EVENT_VARIANTS, 3),
+            (FILE_EVENT_FIELDS, 2),
             (TRANSCRIPT_OPS, 6),
             (ITEM_KINDS, 9),
-            (LISTENER_EVENTS, 23),
-            (LISTENER_SIGNATURES, 23),
+            (LISTENER_EVENTS, 24),
+            (LISTENER_SIGNATURES, 24),
         ] {
             assert_eq!(group.len(), n, "{} changed size: {:?}", group.len(), group);
         }

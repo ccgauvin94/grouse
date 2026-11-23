@@ -430,6 +430,10 @@ pub enum FileEvent {
         name: String,
         received: u64,
         total: u64,
+        /// DISPLAY session id (roam prefix included) that requested the file.
+        session_id: String,
+        /// Per-fetch id when the caller has one; empty until the wire exposes it.
+        request_id: String,
     },
     /// Finished and landed in the client's cache.
     Saved {
@@ -438,11 +442,15 @@ pub enum FileEvent {
         mime: String,
         bytes: u64,
         local_path: String,
+        session_id: String,
+        request_id: String,
     },
     Failed {
         path: String,
         name: String,
         message: String,
+        session_id: String,
+        request_id: String,
     },
 }
 

@@ -1,8 +1,8 @@
 // Default (no-op) implementations for every CoreListener callback.
 //
 // WHY THIS FILE EXISTS — a finding from generating the Swift bindings (2026-11-18):
-// uniffi emits `public protocol CoreListener` with 23 requirements and NO defaults, so
-// every conforming type in the app would have to stub all 23, and each new listener event
+// uniffi emits `public protocol CoreListener` with one requirement per event and NO defaults, so
+// every conforming type in the app would have to stub every event, and each new one
 // the core gains would break the build in every conformance. The Android and desktop
 // clients both hit this (Kotlin needs every member; the C ABI has a whole callback table
 // of nulls), and it is worse in Swift because a UI type would carry the noise.
@@ -40,6 +40,7 @@ public extension CoreListener {
     func onActiveRun(sessionId: String, runId: String) {}
     func onCommands(commands: [String]) {}
     func onSessionOpenFailed(sessionId: String, message: String) {}
+    func onSessionOpened(sessionId: String) {}
     func onTasks(tasks: String) {}
     func onThreadReady(label: String, sessionId: String) {}
     func onReplayProgress(sessionId: String, loaded: Int64, total: Int64, done: Bool) {}

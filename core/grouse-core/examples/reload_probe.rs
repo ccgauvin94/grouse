@@ -20,6 +20,7 @@ use grouse_core::{ConnectionStatus, Core, CoreListener, ItemKind, RefreshMode, S
 struct L;
 
 impl CoreListener for L {
+    fn on_session_opened(&self, _session_id: String) {}
     fn on_advisor_report(&self, _: String, _: String) {}
 
     fn on_sensitivity(&self, _data: String) {}

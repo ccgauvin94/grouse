@@ -356,6 +356,10 @@ struct PeerInner {
     active_run: Option<String>,
     /// The SDK connection handle, set once `initialize` succeeds.
     conn: Option<agent_client_protocol::ConnectionTo<Agent>>,
+    /// Optional override for the open-success notification (the core host's
+    /// central emitter). `None` emits `CoreListener::on_session_opened`
+    /// directly from the bind, like every other peer-scoped event here.
+    on_session_opened: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
     /// In-flight `session/request_permission` responders, keyed by tool call
     /// id so parallel calls can each be answered (the spine's map, not the old
     /// single slot that dropped the first responder).
@@ -386,6 +390,7 @@ impl PeerInner {
             session_cwds: HashMap::new(),
             active_run: None,
             conn: None,
+            on_session_opened: None,
             pending_permission: HashMap::new(),
             stream: None,
             closing: false,
@@ -616,6 +621,34 @@ impl RoamPeer {
     /// The peer's stable label (the routing key).
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    /// Take over open-success emission from the default `CoreListener` path.
+    /// The callback receives the DISPLAY session id (`roam:<label>:<raw>`).
+    /// Only a core that emits the event centrally should register one — doing
+    /// both emits the event twice.
+    #[allow(dead_code)] // the core host wires this only when it emits centrally
+    pub(crate) fn set_on_session_opened(&self, f: std::sync::Arc<dyn Fn(String) + Send + Sync>) {
+        self.inner.lock().on_session_opened = Some(f);
+    }
+
+    /// The successful-bind notification for this peer. Both peer binds —
+    /// `load_session` (a tap, a forced reload, or the supervised reconnect
+    /// resume) and `create_session` (`session/new`) — end here with the
+    /// prefixed id the UI routes by. No notification on a failed load.
+    fn report_session_opened(&self, display_id: &str) {
+        let (closing, hook) = {
+            let inner = self.inner.lock();
+            (inner.closing, inner.on_session_opened.clone())
+        };
+        if closing {
+            return;
+        }
+        if let Some(hook) = hook {
+            hook(display_id.to_string());
+        } else {
+            self.listener.on_session_opened(display_id.to_string());
+        }
     }
 
     /// Current peer status snapshot.
@@ -1139,6 +1172,10 @@ impl RoamPeer {
                 // next open cannot tell that the rows it just fetched are current
                 // — the second half of "it reloads every time".
                 self.host.stamp_probe(&key, true);
+                // Bind complete: one shared open-success event, under the
+                // prefixed id the UI routes by. The reconnect resume goes
+                // through this same function, so it notifies too.
+                self.report_session_opened(&key);
             }
             Err(error) => {
                 // The tapped session is stale/archived — do NOT quietly proxy
@@ -1211,6 +1248,10 @@ impl RoamPeer {
         if notify_new {
             self.listener.on_peer_new_session(self.label.clone(), sid);
         }
+        // The new chat is bound (hub.display + clear above): report the same
+        // open-success event a peer load reports, after the app has been told
+        // which id to switch to.
+        self.report_session_opened(&key);
         // The created session must enter the peer's list or the app's drawer
         // never learns it exists (and cannot route a chat to it). Re-list.
         let relist = tokio::time::timeout(
@@ -1506,6 +1547,22 @@ impl RoamPeer {
             .to_string()
     }
 
+    /// Display id for a session on this peer: `roam:<label>:<raw>`.
+    ///
+    /// Idempotent for this peer's ids, so a FileEvent emitter holding either
+    /// the raw wire id from a tool result or the already-prefixed id from the
+    /// UI ends up with the one form the clients key on. A foreign id is left
+    /// alone rather than double-prefixed.
+    #[allow(dead_code)] // available to the core's FileEvent emitters
+    pub(crate) fn display_id(&self, id: &str) -> String {
+        if id.starts_with(&format!("roam:{}:", self.label))
+            || id.starts_with(crate::session::ROAM_PREFIX)
+        {
+            return id.to_string();
+        }
+        crate::session::display_id(Some(&self.label), id)
+    }
+
     /// Rewrite a goose-custom notification's `sessionId` into this peer's
     /// display namespace (`roam:<label>:<raw>`), the id form the dispatch
     /// gate compares against. NO-OP when the payload carries no session id
@@ -1755,6 +1812,15 @@ pub(crate) fn peer_for_session(
         .cloned()
 }
 
+/// Snapshot of every session known to the live roam peers, keyed by the
+/// display id (`roam:<label>:<raw>`) the clients route by. The core's
+/// `all_sessions()` concatenates this with the main wire's list: labels are
+/// unique per registry, so the two namespaces cannot collide.
+#[allow(dead_code)] // the core host calls this from `Core::all_sessions`
+pub(crate) fn all_peer_sessions(peers: &[Arc<RoamPeer>]) -> Vec<SessionSummary> {
+    peers.iter().flat_map(|peer| peer.sessions()).collect()
+}
+
 /// Every page of a peer's `session/list`, merged into one reply.
 ///
 /// The peer's goose pages at 50 rows ordered by last message, exactly like the main
@@ -1943,6 +2009,9 @@ mod tests {
             self.events
                 .lock()
                 .push(format!("peer_new_session {label} {session_id}"));
+        }
+        fn on_session_opened(&self, session_id: String) {
+            self.events.lock().push(format!("session_opened {session_id}"));
         }
 
         fn on_active_run(&self, session_id: String, run_id: String) {
@@ -2938,6 +3007,44 @@ mod tests {
             "2026-01-01T00:00:00Z"
         );
         assert_eq!(super::freshness_stamp(peer.host.as_ref(), &list, "roam:laptop:nope"), "");
+    }
+
+    /// The FileEvent/open id helper: a raw wire id gets this peer's namespace,
+    /// an id that already carries any roam prefix is passed through untouched.
+    #[test]
+    fn display_id_helper_is_prefixed_and_idempotent() {
+        let listener = test_listener();
+        let (peer, _cmd_rx) =
+            offline_peer("laptop", listener, gate(Arc::new(AtomicBool::new(true))));
+        assert_eq!(peer.display_id("s1"), "roam:laptop:s1");
+        assert_eq!(peer.display_id("roam:laptop:s1"), "roam:laptop:s1");
+        assert_eq!(peer.display_id("roam:nas:s2"), "roam:nas:s2");
+    }
+
+    /// `Core::all_sessions()` is fed by this snapshot: every peer's rows keep
+    /// their `roam:<label>:` namespace, so the core can concatenate them with
+    /// the main list without a client-side merge.
+    #[test]
+    fn all_peer_sessions_keeps_each_peers_namespace() {
+        let a = offline_peer(
+            "laptop",
+            test_listener(),
+            gate(Arc::new(AtomicBool::new(false))),
+        )
+        .0;
+        let b = offline_peer(
+            "nas",
+            test_listener(),
+            gate(Arc::new(AtomicBool::new(false))),
+        )
+        .0;
+        a.apply_sessions(&list_response(&[("s1", "A", "2026-01-01T00:00:00Z")]));
+        b.apply_sessions(&list_response(&[("s1", "B", "2026-01-01T00:00:00Z")]));
+        let all = all_peer_sessions(&[a, b]);
+        assert_eq!(all.len(), 2);
+        let ids: Vec<_> = all.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(&"roam:laptop:s1"));
+        assert!(ids.contains(&"roam:nas:s1"));
     }
 
     #[test]

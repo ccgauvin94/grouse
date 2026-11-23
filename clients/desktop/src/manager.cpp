@@ -536,6 +536,41 @@ QString Manager::roamPeerForSession(const QString &sessionId)
     return sep > 0 ? rest.left(sep) : QString();
 }
 
+QString Manager::scopedKey(const QString &sessionId, const QString &localKey)
+{
+    // The display id already carries the peer (`roam:<peer>:<id>`), so it is the
+    // complete owner; '|' matches the key the phone builds for the same card.
+    return sessionId + QLatin1Char('|') + localKey;
+}
+
+QString Manager::fileCardKey(const QString &sessionId, const QString &path) const
+{
+    return scopedKey(sessionId, path);
+}
+
+QString Manager::sessionPeerLabel(const QString &sessionId) const
+{
+    if (sessionId.isEmpty())
+        return {};
+    if (m_bridge && m_bridge->isAvailable() && m_bridge->api().grouse_session_owner) {
+        const QByteArray sid = sessionId.toUtf8();
+        char *raw = m_bridge->api().grouse_session_owner(m_bridge->handle(), sid.constData());
+        const QString json = m_bridge->takeString(raw);
+        if (!json.isEmpty()) {
+            const QJsonObject owner = QJsonDocument::fromJson(json.toUtf8()).object();
+            if (owner.value(QStringLiteral("kind")).toString() == QLatin1String("roam"))
+                return owner.value(QStringLiteral("label")).toString();
+            // The core answered: a MAIN id is main even when its text looks like
+            // a roam handle (a vanished peer's id, a session the server reused).
+            return {};
+        }
+    }
+    // No core in this process (unit tests, an older library): the namespace is
+    // the only hint available, and it is still better than attributing a peer's
+    // turn to the main wire.
+    return roamPeerForSession(sessionId);
+}
+
 bool Manager::mainWireConnected() const
 {
     if (!m_bridge || !m_bridge->isAvailable())
@@ -1033,12 +1068,12 @@ void Manager::openSession(const QString &sessionId)
     const QString previous = m_currentSessionId;
     setMyDayVisible(false);   // opening a conversation takes the chat area back from My Day
     resetReloadProgress();    // a reload bar belongs to the chat that started it
-    // The `roam:` prefix is CLIENT-SIDE: the core resolves the owner from it. Keep
-    // the peer label in sync with the id — otherwise the core routes to the peer
-    // while this client still thinks the main wire owns the turn, and a main-wire
-    // Ready clears a live roam turn (Android's ConnectionManager.openSession sets
-    // the same owner from the prefixed id).
-    m_activePeerLabel = roamPeerForSession(sessionId);
+    // Ask the CORE which wire owns this display id (grouse_session_owner), not the
+    // `roam:` text: the core is the one routing the open. Keep the label in sync
+    // with that answer — otherwise the core routes to the peer while this client
+    // still thinks the main wire owns the turn, and a main-wire Ready clears a
+    // live roam turn. The namespace is only the fallback when the core cannot answer.
+    m_activePeerLabel = sessionPeerLabel(sessionId);
     // Parking is per chat: a message queued in the chat we are leaving keeps waiting for
     // ITS turn to end (flushQueue only drains the on-screen chat's), so a switch cannot
     // silently lose input. Stop is what discards it.
@@ -1354,7 +1389,7 @@ void Manager::dispatchSend(const QString &text, const QVariantList &blocks,
         // blocks-only guard is why an attached PDF showed up in the transcript as
         // nothing at all on this client.
         if ((!blocks.isEmpty() || !files.isEmpty()) && !shown.isEmpty())
-            m_pendingAttachments[text].append(shown);
+            m_pendingAttachments[scopedKey(m_currentSessionId, text)].append(shown);
         m_prompting = true;
         m_promptingSessionId = m_currentSessionId;
         if (!m_currentSessionId.isEmpty())
@@ -1909,8 +1944,20 @@ void Manager::setConfigOption(const QString &id, const QString &value)
 
 void Manager::refreshSessions()
 {
-    if (m_bridge && m_bridge->isAvailable())
-        m_bridge->api().grouse_list_sessions(m_bridge->handle());
+    if (!m_bridge || !m_bridge->isAvailable())
+        return;
+    // The CORE's merged snapshot is the sidebar's list (audit §3): one call, one
+    // set of SessionSummary rows for the main wire and every roam peer. The old
+    // path listed main + each peer separately and re-derived owners by prefix,
+    // which is why a list fetched while a peer chat was open grouped the local
+    // chats under that peer until the next refresh. `coreOnRoamSessions` still
+    // fills the separate ROAM ENDPOINT model — that one is connection management,
+    // not the conversation list.
+    const CoreBridge::AimsApi &api = m_bridge->api();
+    if (api.grouse_all_sessions)
+        api.grouse_all_sessions(m_bridge->handle());
+    else
+        api.grouse_list_sessions(m_bridge->handle());
 }
 
 void Manager::refreshProjects()
@@ -2064,7 +2111,9 @@ QString Manager::assistantSessionId() const
         if (s.value(QStringLiteral("title")).toString().trimmed() != QLatin1String("Assistant"))
             continue;
         const QString id = s.value(QStringLiteral("sessionId")).toString();
-        if (id.isEmpty() || id.startsWith(QLatin1String("roam:")))
+        // A peer can have an "Assistant" too; the always-on local thread must be
+        // resolved through the core's owner answer, not the id's spelling.
+        if (id.isEmpty() || !sessionPeerLabel(id).isEmpty())
             continue;
         const QString stamp = s.value(QStringLiteral("updatedAt")).toString();
         if (best.isEmpty() || stamp > bestStamp) {
@@ -2682,14 +2731,23 @@ static QJsonArray parseArr(const QString &json)
 void Manager::coreOnStatus(const QString &json)
 {
     const QString s = json;
+    // Ready is a CONNECTION phase, never an open result. An open emits its own
+    // on_session_opened (a paint / a Window is not one either: background fills
+    // send those). Leave a chat's loading line alone until that answer arrives.
+    const bool openingChat = m_status == QStringLiteral("loading…")
+                             || m_status == QStringLiteral("reloading…")
+                             || m_status == QStringLiteral("reloading from the start…");
     if (s == QStringLiteral("\"Ready\"") || s == QStringLiteral("Ready")) {
         setOnline(true);
-        setStatus(QStringLiteral("ready"));
+        if (!openingChat)
+            setStatus(QStringLiteral("ready"));
         // A MAIN-wire Ready may only clear turns OWNED BY THE MAIN WIRE. A peer's
         // turn is carried by its own connection; clearing it here is the desktop
         // twin of the Android bug fixed today — a roam chat's composer unlocks
         // while its reply is still streaming and the next send lands in a live turn.
-        if (mainWireOwnsTurnState(m_activePeerLabel)) {
+        // Ownership comes from the core, not from text parsing of the session id.
+        const bool currentIsRoam = !sessionPeerLabel(m_currentSessionId).isEmpty();
+        if (!currentIsRoam && mainWireOwnsTurnState(m_activePeerLabel)) {
             m_prompting = false;
             m_promptingSessionId.clear();
             // A reconnected client cannot receive the old turns' run ends.
@@ -2702,8 +2760,7 @@ void Manager::coreOnStatus(const QString &json)
             // A wire-only connect binds nothing. If the chat on screen is a MAIN
             // chat, bind it here (without the UI reset of openSession) so the
             // send queue can drain; a roam screen gets no main chat painted over it.
-            if (m_activePeerLabel.isEmpty() && !m_landing
-                && roamPeerForSession(m_currentSessionId).isEmpty())
+            if (m_activePeerLabel.isEmpty() && !m_landing && !currentIsRoam)
                 bindSessionAfterAttach();
         }
         // Resolve a pending testConnection() probe. The failure paths
@@ -2809,12 +2866,22 @@ void Manager::coreOnSessions(const QString &json)
         // The core DERIVES this (`grouse.mode`: chat | dev): the server returns no tags
         // on a row, so the core asks which sessions match the value and stamps it.
         m["mode"] = o.value("mode").toString();
-        // NO `peer` stamp here. This is the LOCAL server's list; a peer's sessions
-        // arrive on coreOnRoamSessions, which owns that label. Stamping this list with
-        // m_activePeerLabel (the peer whose CHAT is open) meant that opening a roam
-        // chat and going back to Main rendered every local session as one
-        // `peer: <label>` group — no Projects band, one flat list, and nothing healed
-        // it until the next list refresh (reported 2026-11-20).
+        // This handler now receives the CORE'S MERGED list: main + peer sessions,
+        // each with its `roam:<peer>:<id>` display id. Ask the core which wire owns
+        // the row rather than parsing the prefix or — worse — using the peer whose
+        // CHAT happens to be on screen (that bug turned the whole local list into a
+        // single `peer: <label>` group, 2026-11-20). SessionListModel still owns the
+        // grouping/collapse policy; it only needs an honest `peer` field.
+        const QString peer = sessionPeerLabel(m["sessionId"].toString());
+        if (!peer.isEmpty()) {
+            m["peer"] = peer;
+            // A peer's title used to arrive only in coreOnRoamSessions. The merged
+            // list carries it too, so opening a peer chat by cached id has a title
+            // even before the endpoint's own list lands.
+            const QString title = m["title"].toString();
+            if (!title.isEmpty())
+                m_roamTitles.insert(m["sessionId"].toString(), title);
+        }
         sessions << m;
     }
     onSessions(sessions);
@@ -3058,6 +3125,29 @@ void Manager::coreOnCommands(const QString &json)
     onCommands(commands);
 }
 
+void Manager::coreOnSessionOpened(const QString &sessionId)
+{
+    if (sessionId.isEmpty() || sessionId != m_currentSessionId)
+        return;   // a background bind or another peer's open is not THIS chat's answer
+    // The core emits this only after the store is painted and the session is bound
+    // (a rejected load and a bind-only load stay silent). It is the one honest end
+    // of the "loading…" line we set locally on open — Ready and Window are not.
+    if (m_status == QStringLiteral("loading…")
+        || m_status == QStringLiteral("reloading…")
+        || m_status == QStringLiteral("reloading from the start…"))
+        setStatus(QStringLiteral("ready"));
+    // Same for the replay bar: a suppressed replay emits no progress at all, and
+    // a paint whose ReplayProgress was lost used to leave the bar spinning after
+    // the chat was already settled. A completed open owns both bars' finish.
+    resetReloadProgress();
+    if (m_openFor == sessionId) {
+        timingLog(QStringLiteral("open %1 settled in %2ms (%3 rows)")
+                      .arg(sessionId)
+                      .arg(m_openClock.elapsed())
+                      .arg(m_messageModel->rowCount()));
+    }
+}
+
 void Manager::coreOnSessionOpenFailed(const QString &sessionId, const QString &message)
 {
     // The core bound NOTHING for a failed open (grouse#19): the chat keeps
@@ -3065,6 +3155,8 @@ void Manager::coreOnSessionOpenFailed(const QString &sessionId, const QString &m
     // failure where "reloading…" was, so an open that never loaded is visible
     // instead of looking like an empty conversation.
     setStatus(QStringLiteral("couldn't open that chat — %1").arg(message));
+    // A failed open cannot finish a replay either; drop the bar with the status.
+    resetReloadProgress();
     // A dead thread link is dropped by the CORE, which owns the map: a failed open is
     // the one signal a session invisible to every list can produce (grouse#19).
     emit currentThreadLabelChanged();
@@ -3321,9 +3413,37 @@ void Manager::reactTask(const QString &id, const QString &reaction)
 
 void Manager::coreOnFile(const QString &json)
 {
-    // The card keys its own state on the server-side path, so the raw event is
-    // enough: QML parses the three shapes and updates that one row.
-    emit fileEvent(json);
+    const QJsonObject root = parseObj(json);
+    // FileEvent is an externally-tagged enum; the fields live inside the variant.
+    // Every variant now carries the DISPLAY session id (roam ids included), so key
+    // the card by owner + path, never by a bare path two chats can share.
+    QJsonObject fields;
+    for (const auto &variant : {QStringLiteral("Progress"), QStringLiteral("Saved"),
+                                QStringLiteral("Failed")}) {
+        if (root.contains(variant)) {
+            fields = root.value(variant).toObject();
+            break;
+        }
+    }
+    const QString path = fields.value(QStringLiteral("path")).toString();
+    QString sessionId = fields.value(QStringLiteral("session_id")).toString();
+    if (sessionId.isEmpty())
+        sessionId = root.value(QStringLiteral("session_id")).toString();
+    if (sessionId.isEmpty()) {
+        // An older core has no session in the event: the fetch was started from
+        // the chat on screen, which is the only honest fallback we have.
+        sessionId = m_currentSessionId;
+    } else if (!sessionId.startsWith(QLatin1String("roam:"))
+               && m_currentSessionId.endsWith(QStringLiteral(":") + sessionId)
+               && !sessionPeerLabel(m_currentSessionId).isEmpty()) {
+        // A peer's raw wire id in an older event: normalize to the display id the
+        // row is keyed by (the core's DISPLAY id already matches and skips this).
+        sessionId = m_currentSessionId;
+    }
+    QJsonObject out = root;
+    out.insert(QStringLiteral("session_id"), sessionId);
+    out.insert(QStringLiteral("key"), fileCardKey(sessionId, path));
+    emit fileEvent(QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
 }
 
 void Manager::fetchFile(const QString &sessionId, const QString &path,
@@ -3839,7 +3959,10 @@ QVariantList Manager::attachmentsForItem(const QString &id, const QString &text,
         return {};
     if (m_attachmentsByRow.contains(id))
         return m_attachmentsByRow.value(id);
-    auto it = m_pendingAttachments.find(text);
+    // The queue is scoped to the chat that SENT the prompt: two chats can type the
+    // identical line, and a path/text-only key let one chat consume the other's
+    // thumbnails. The row is being painted for the chat on screen.
+    auto it = m_pendingAttachments.find(scopedKey(m_currentSessionId, text));
     if (it == m_pendingAttachments.end() || it->isEmpty())
         return {};
     const QVariantList images = it->takeFirst();
@@ -4083,16 +4206,11 @@ void Manager::coreOnItem(const QString &json)
                           .arg(hasOlder ? QStringLiteral("yes") : QStringLiteral("no")));
         }
         m_paintGap.restart();
-        // A Window is the core's "this session's window is painted" marker, and the
-        // only event that reports a SUCCESSFUL open (a failure arrives as
-        // on_session_open_failed). The status below is set locally when a chat opens,
-        // and nothing cleared it for a roam chat — the main wire only gets cleared by
-        // the connection-level Ready, which a peer open never emits — so "loading…"
-        // sat in the header and the composer for good.
-        if (m_status == QStringLiteral("loading…")
-            || m_status == QStringLiteral("reloading…")
-            || m_status == QStringLiteral("reloading from the start…"))
-            setStatus(QStringLiteral("ready"));
+        // A Window means "these rows were painted", NOT "the open succeeded": the
+        // background history fill and load-older both send one. The positive answer
+        // is coreOnSessionOpened; a rejected load is coreOnSessionOpenFailed. Using
+        // the Window here also mistimed a roam open (no main-wire Ready ever came)
+        // and could declare success for a paint that still had a turn in flight.
         // The first window after an open is the moment the chat is PAINTED. One line
         // per switch: the synchronous cost (cache parse + any core probe) against the
         // wait for a paint, which is the split that decides where a "hang" lives.

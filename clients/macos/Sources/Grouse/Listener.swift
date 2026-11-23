@@ -70,6 +70,33 @@ final class Listener: CoreListener, @unchecked Sendable {
         onMain { $0.handleOpenFailed(sessionId: sessionId, message: message) }
     }
 
+    /// The explicit "load bound this session" proof. A Reset is only a paint: the core
+    /// paints a cached transcript before it asks the server to bind, and that load can
+    /// still fail. Never infer open success from rows arriving (QUALITY_AUDIT §3/§6).
+    func onSessionOpened(sessionId: String) {
+        onMain { $0.handleOpened(sessionId: sessionId) }
+    }
+
+    func onActiveRun(sessionId: String, runId: String) {
+        onMain { $0.handleActiveRun(sessionId: sessionId, runId: runId) }
+    }
+
+    func onFile(event: FileEvent) {
+        onMain { $0.handleFile(event) }
+    }
+
+    func onRoamPeerStatus(label: String, status: String) {
+        onMain { $0.handleRoamStatus(label: label, status: status) }
+    }
+
+    func onRoamSessions(label: String, sessions: [SessionSummary]) {
+        onMain { $0.handleRoamSessions(label: label, sessions: sessions) }
+    }
+
+    func onPeerNewSession(label: String, sessionId: String) {
+        onMain { $0.handlePeerNewSession(label: label, sessionId: sessionId) }
+    }
+
     func onReplayProgress(sessionId: String, loaded: Int64, total: Int64, done: Bool) {
         onMain { $0.handleReplay(sessionId: sessionId, loaded: loaded, total: total, done: done) }
     }

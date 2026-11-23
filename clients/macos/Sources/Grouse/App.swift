@@ -77,9 +77,15 @@ struct ConnectView: View {
             .formStyle(.grouped)
             .frame(maxWidth: 460)
 
-            Button("Connect") { bridge.connect() }
-                .keyboardShortcut(.defaultAction)
-                .disabled(bridge.host.isEmpty || bridge.secretKey.isEmpty)
+            Button { bridge.connect() } label: {
+                if bridge.isConnecting {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Text("Connect")
+                }
+            }
+            .keyboardShortcut(.defaultAction)
+            .disabled(bridge.host.isEmpty || bridge.secretKey.isEmpty || bridge.isConnecting)
 
             if bridge.status != "disconnected" {
                 Text(bridge.status).foregroundStyle(.secondary).font(.callout)
@@ -96,16 +102,31 @@ struct ConnectView: View {
 
 struct SidebarView: View {
     @EnvironmentObject private var bridge: CoreBridge
+    @State private var showPeerSheet = false
 
     var body: some View {
-        List(bridge.sessions, id: \.id, selection: Binding(
+        List(selection: Binding(
             get: { bridge.currentSessionId },
             set: { id in if let id, id != bridge.currentSessionId { bridge.open(sessionId: id) } }
-        )) { session in
-            SessionRow(session: session)
-                .tag(session.id)
+        )) {
+            Section("Chats") {
+                ForEach(bridge.sessions) { session in
+                    SessionRow(session: session)
+                        .tag(session.id)
+                }
+            }
+            if !bridge.roamPeers.isEmpty {
+                Section("Peers") {
+                    ForEach(bridge.roamPeers) { peer in
+                        PeerRow(peer: peer)
+                    }
+                }
+            }
         }
         .listStyle(.sidebar)
+        .sheet(isPresented: $showPeerSheet) {
+            PeerConnectSheet()
+        }
         .overlay {
             if bridge.sessions.isEmpty {
                 ContentUnavailableView(
@@ -122,6 +143,8 @@ struct SidebarView: View {
                     Button("New Dev Chat") { bridge.newChat(mode: "dev") }
                     Divider()
                     Button("Reload") { bridge.listSessions() }
+                    Divider()
+                    Button("Add Roam Peer…") { showPeerSheet = true }
                     Button("Disconnect") { bridge.disconnect() }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -157,6 +180,73 @@ struct SessionRow: View {
         }
         .padding(.vertical, 2)
         .opacity(session.archived ? 0.5 : 1)
+    }
+}
+
+/// A peer observed through `on_roam_peer_status` / `on_roam_sessions`. Its chats are in
+/// the Chats section above (the core's `all_sessions()` already carries the `roam:` ids);
+/// this row is the connection itself — status, a new chat, and a way to close it.
+struct PeerRow: View {
+    @EnvironmentObject private var bridge: CoreBridge
+    let peer: PeerState
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(peer.status.hasPrefix("ready") ? Color.green
+                      : peer.status.hasPrefix("error") ? Color.red : Color.secondary)
+                .frame(width: 7, height: 7)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(peer.label).lineLimit(1)
+                Text("\(peer.status) · \(peer.sessionCount) chats")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .contextMenu {
+            Button("New Chat Here") { bridge.newChat(peer: peer.label) }
+            Button("Disconnect Peer") { bridge.disconnectPeer(label: peer.label) }
+        }
+    }
+}
+
+/// A connection card is a capability: paste it here, give the peer a label, and let the
+/// core own the card and the iroh identity from then on.
+struct PeerConnectSheet: View {
+    @EnvironmentObject private var bridge: CoreBridge
+    @Environment(\.dismiss) private var dismiss
+    @State private var label = ""
+    @State private var card = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Connect to a roam peer").font(.headline)
+            TextField("Peer label (e.g. home)", text: $label)
+            Text("Connection card from `goose serve --roam`")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextEditor(text: $card)
+                .font(.caption.monospaced())
+                .frame(height: 110)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(.quaternary))
+            if bridge.status.contains("peer") {
+                Text(bridge.status).font(.caption).foregroundStyle(.secondary)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Connect") {
+                    bridge.connectPeer(label: label, card: card)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(label.trimmingCharacters(in: .whitespaces).isEmpty
+                          || card.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(18)
+        .frame(width: 440)
     }
 }
 

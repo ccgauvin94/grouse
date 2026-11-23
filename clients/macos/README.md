@@ -13,7 +13,7 @@ Everything protocol-side is already in `core/` (transport, TLS, roam/iroh, the s
 pipeline, transcript windowing, cache policy, permissions, recipes, tasks, the advisor).
 None of it is written on the Mac side yet — `clients/macos` did not exist — so the first
 question is not "how big is the UI", it is **does the binding boundary work on Darwin at
-all**: does uniffi's Swift output compile against this interface, do the 23 listener
+all**: does uniffi's Swift output compile against this interface, do the listener
 callbacks arrive, do the async intents round-trip, does a real TLS WebSocket come up.
 
 The spike answers that in an afternoon instead of a month into a UI. It is a CLI on
@@ -61,7 +61,7 @@ Flags: `--no-send` stops before prompting. Env: `GROUSE_TLS=0` for a plain-ws de
   `strip = true`, which removes the uniffi metadata sections bindgen reads — the Android
   script already documents this for Kotlin (`scripts/build-android-libs.sh`), and it bites
   the Swift path identically. Only the `.a` that gets linked is a release build.
-- **`CoreListener` has 23 requirements and no defaults.** Every conformance would have to
+- **`CoreListener` has one requirement per event and no defaults.** Every conformance would have to
   stub all of them, and each new listener event the core gains breaks that conformance.
   `Sources/GrouseCore/ListenerDefaults.swift` supplies no-op defaults via a protocol
   extension — one file, and a conformance then implements only what it uses.
@@ -102,7 +102,11 @@ that makes it pleasant:
 - **advisor** card above the composer, driven by the global Dev switch
 - a status line with the wire state, the context count and replay progress
 
-Deliberately NOT yet: Markdown as real block views, images and attachments, roam peers,
+The sidebar also lists roam peers from the core's roam callbacks and their chats from
+`allSessions()`; opening one asks `sessionOwner` which wire owns it. Server-shared files get
+a Download/Open action driven by `FileEvent`, and Stop is driven by `onActiveRun`.
+
+Deliberately NOT yet: Markdown as real block views, inline image rendering, full roam configuration,
 provider/model pickers, recipes/schedules/skills/extensions, My Day, threads, MCP Apps,
 notifications, speech, and the two scroll/windowing refinements. Each is a known, sized
 piece rather than a surprise.

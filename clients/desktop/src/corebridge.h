@@ -127,6 +127,10 @@ public:
         int (*grouse_run_summaries)(void *h);
         char *(*grouse_active_session_id)(void *h);
         char *(*grouse_sessions)(void *h);
+        /// Which wire owns a display id: JSON `{"kind":"main"|"roam","label":"..."}`.
+        char *(*grouse_session_owner)(void *h, const char *session_id);
+        /// Every known session (main + roam peers) as a JSON `SessionSummary` array.
+        char *(*grouse_all_sessions)(void *h);
         char *(*grouse_transcript)(void *h);
         // rich item model (docs/TRANSCRIPT_MODEL.md)
         char *(*grouse_transcript_rich)(void *h);
@@ -346,5 +350,9 @@ struct GrouseCoreListener {
     void (*on_sensitivity)(void *, const char *);
     // The dev advisor's review of a turn: (session_id, text). Appended last; ABI 16.
     void (*on_advisor_report)(void *, const char *, const char *);
+    // A session opened successfully and is now bound/displayed: (session_id).
+    // The positive counterpart of on_session_open_failed; a paint or a Window is
+    // NOT an open answer (background fills send those too). Appended last; ABI 18.
+    void (*on_session_opened)(void *, const char *);
 };
 }

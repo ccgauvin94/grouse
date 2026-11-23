@@ -423,13 +423,19 @@ Kirigami.Page {
     // real user scrolls (drag/flick), never on the programmatic ListView reset
     // that follows each messagesChanged — so a reset can't silently unpin us.
     property bool pinnedToEnd: true
-    // Shared-file downloads, keyed by the SERVER-side path (the same value the
-    // core keys its `on_file` events on). `{state, received, total, localPath,
-    // failure}`; absent means idle. A reopened chat starts empty on purpose: the
-    // core's cache is the record, and the first tap reports `saved` instantly.
+    // Shared-file downloads, keyed by the OWNING session's display id AND the
+    // server-side path — both come from the core's `FileEvent` now. A path alone
+    // crossed wires: two chats (or two peers) fetching `/srv/report.pdf` shared
+    // one progress card and the last event painted the wrong chat. `{state,
+    // received, total, localPath, failure}`; absent means idle. A reopened chat
+    // starts empty on purpose: the core's cache is the record, and the first tap
+    // reports `saved` instantly.
     property var fileDownloads: ({})
+    function fileKey(sessionId, path) {
+        return Mgr.fileCardKey(sessionId || "", path || "")
+    }
     function fileState(path) {
-        return page.fileDownloads[path] || ({})
+        return page.fileDownloads[fileKey(Mgr.currentSessionId, path)] || ({})
     }
     function fileCardInfo(path, name, mime, bytes) {
         // One source for icon/kind/size formatting (the same helper the composer
@@ -461,9 +467,14 @@ Kirigami.Page {
         return page.inlineImageExts.indexOf(ext) >= 0
     }
     function downloadFile(row, path, name, mime, sha) {
-        page.fileDownloads[path] = { state: "downloading", received: 0, total: 0 }
+        const owner = Mgr.currentSessionId
+        // Capture the owner at the TAP: a switch mid-download must not re-key the
+        // card, and the event the core sends carries this same display id.
+        page.fileDownloads[fileKey(owner, path)] = {
+            state: "downloading", received: 0, total: 0
+        }
         page.fileDownloads = Object.assign({}, page.fileDownloads)
-        Mgr.fetchFile(Mgr.currentSessionId, path, name, mime, sha || "")
+        Mgr.fetchFile(owner, path, name, mime, sha || "")
     }
 
     Connections {
@@ -497,7 +508,11 @@ Kirigami.Page {
             var ev = null
             try { ev = JSON.parse(json) } catch (e) { return }
             if (!ev || !ev.path) return
-            var now = page.fileDownloads[ev.path] || ({})
+            // Manager adds `key` from the event's session_id + path (and normalizes
+            // an older raw peer id). The fallback only matters for an event that
+            // predates that field; the row lookup uses the same helper either way.
+            const key = ev.key || page.fileKey(ev.session_id || "", ev.path)
+            var now = page.fileDownloads[key] || ({})
             var next = Object.assign({}, now)
             if (ev.Progress !== undefined) {
                 next.state = "downloading"
@@ -515,7 +530,7 @@ Kirigami.Page {
             } else {
                 return
             }
-            page.fileDownloads[ev.path] = next
+            page.fileDownloads[key] = next
             page.fileDownloads = Object.assign({}, page.fileDownloads)
         }
         // Entering a thread chat re-reads the task lists: the panel above the

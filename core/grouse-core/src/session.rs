@@ -55,6 +55,17 @@ pub(crate) fn display_id(label: Option<&str>, wire: &str) -> String {
     }
 }
 
+/// Announce one successful session bind on any transport (audit §3).
+///
+/// The peer/spine bind sites hold a listener but not a `Core`, so this is the
+/// shared exit for `on_session_opened`: call it only AFTER the store is painted
+/// and BEFORE Ready, with the DISPLAY id (prefix included for roam). A rejected
+/// load or a bind-only load must stay silent — that is the whole point of the
+/// event, so the client no longer infers open success from Ready/watchdogs.
+pub(crate) fn emit_session_opened(listener: &dyn crate::CoreListener, display_id: &str) {
+    listener.on_session_opened(display_id.to_string());
+}
+
 // ---------------------------------------------------------------------------
 // ACP parameters
 // ---------------------------------------------------------------------------
@@ -2197,6 +2208,12 @@ mod tests {
         fn on_active_run(&self, _: String, _: String) {}
         fn on_commands(&self, _: Vec<String>) {}
         fn on_session_open_failed(&self, _: String, _: String) {}
+        fn on_session_opened(&self, session_id: String) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("opened {session_id}"));
+        }
         fn on_tasks(&self, _: String) {}
         fn on_thread_ready(&self, _: String, _: String) {}
         fn on_replay_progress(&self, _: String, _: i64, _: i64, _: bool) {}
@@ -3648,6 +3665,7 @@ impl SessionHub {
 pub(crate) struct NullListener;
 
 impl crate::CoreListener for NullListener {
+    fn on_session_opened(&self, _: String) {}
     fn on_file(&self, _: crate::attachments::FileEvent) {}
     fn on_advisor_report(&self, _session_id: String, _text: String) {}
 
@@ -3764,6 +3782,11 @@ impl crate::CoreListener for SessionGate {
     }
     fn on_session_open_failed(&self, session_id: String, message: String) {
         self.inner.on_session_open_failed(session_id, message);
+    }
+    fn on_session_opened(&self, session_id: String) {
+        // Not a paint: it is the ANSWER to an open intent, so a background
+        // session's successful bind must still reach the client that asked.
+        self.inner.on_session_opened(session_id);
     }
     fn on_tasks(&self, tasks: String) {
         self.inner.on_tasks(tasks);
