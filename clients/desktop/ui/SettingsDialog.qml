@@ -127,10 +127,10 @@ Controls.Dialog {
                     text: qsTr("Use TLS (wss)")
                     Kirigami.FormData.label: qsTr("Transport:")
                 }
-                // WebPKI verification is the default in the core. This opt-out
-                // exists only for self-signed tailnet hosts — turn it on and any
-                // certificate for this host is accepted, so a network attacker
-                // able to redirect the connection can read the secret key.
+                // WebPKI verification is the default (core, Android, desktop).
+                // This opt-out exists only for self-signed tailnet hosts: with it
+                // on, ANY certificate is accepted, so an attacker on the network
+                // path can impersonate the server and read the X-Secret-Key.
                 Controls.CheckBox {
                     id: insecureTlsBox
                     text: qsTr("Skip TLS certificate verification (insecure)")
@@ -138,6 +138,16 @@ Controls.Dialog {
                     Kirigami.FormData.label: qsTr("Certificate:")
                     Controls.ToolTip.visible: hovered
                     Controls.ToolTip.text: qsTr("Only for self-signed servers on a trusted private network.")
+                }
+                Controls.Label {
+                    visible: tlsBox.checked
+                    text: insecureTlsBox.checked
+                          ? qsTr("WARNING: certificate verification is OFF. An attacker on the network path can impersonate the server and steal your X-Secret-Key.")
+                          : qsTr("WebPKI verification is ON. Enable the opt-out only for a self-signed server on a trusted private network.")
+                    color: insecureTlsBox.checked ? Kirigami.Theme.negativeTextColor
+                                                  : Kirigami.Theme.disabledTextColor
+                    wrapMode: Text.Wrap
+                    Kirigami.FormData.label: ""
                 }
                 Controls.TextField {
                     id: keyField

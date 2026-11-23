@@ -331,6 +331,8 @@ QString Manager::secretKey() const { return m_store.value("secret", "").toString
 bool Manager::useTls() const { return m_store.value("wss", true).toBool(); }
 bool Manager::acceptInvalidCerts() const
 {
+    // A missing key used to mean trust-all; it now means WebPKI verification.
+    // Self-signed hosts need the explicit opt-in from Settings once.
     return m_store.value("accept_invalid_certs", DEFAULT_ACCEPT_INVALID_CERTS).toBool();
 }
 bool Manager::autoConnectEnabled() const { return m_store.value("auto_connect", true).toBool(); }

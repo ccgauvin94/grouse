@@ -1,6 +1,8 @@
 #include <QtTest/QtTest>
 #include <QMetaMethod>
+#include <QSettings>
 #include <QSignalSpy>
+#include <QTemporaryDir>
 
 #include "corebridge.h"
 #include "manager.h"
@@ -586,24 +588,39 @@ void TstManager::mainWireReadyOnlyClearsItsOwnTurns()
     QVERIFY(!Manager::mainWireOwnsTurnState(QStringLiteral("Phaethon")));
 }
 
-/** TLS verification is a user decision now, with one compile-time default. */
+/** TLS verification is on by default; trust-all must be an explicit opt-in. */
 void TstManager::tlsVerificationOptOutIsPersistedAndConfigurable()
 {
-    Manager mgr;
-    const bool original = mgr.acceptInvalidCerts();
-    const QString config = mgr.serverConfigJson();
-    QVERIFY2(config.contains(QStringLiteral("\"accept_invalid_certs\"")), qPrintable(config));
-    QCOMPARE(config.contains(QStringLiteral("\"accept_invalid_certs\":true")), original);
+    // Isolate QSettings so "no stored value" really means no value, and so the
+    // suite never reads or rewrites a developer install's TLS opt-in.
+    const QString originalPath = QSettings::path(QSettings::NativeFormat, QSettings::UserScope);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, dir.path());
+    struct RestorePath {
+        explicit RestorePath(const QString &p) : path(p) {}
+        ~RestorePath() { QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, path); }
+        QString path;
+    } restore(originalPath);
 
-    mgr.setAcceptInvalidCerts(!original);
-    QCOMPARE(mgr.acceptInvalidCerts(), !original);
-    QVERIFY(mgr.serverConfigJson().contains(
-        original ? QStringLiteral("\"accept_invalid_certs\":false")
-                 : QStringLiteral("\"accept_invalid_certs\":true")));
+    QCOMPARE(Manager::DEFAULT_ACCEPT_INVALID_CERTS, false);
+    {
+        Manager mgr;
+        // Fresh install: WebPKI verification, and the wire config says so.
+        QVERIFY(!mgr.acceptInvalidCerts());
+        const QString config = mgr.serverConfigJson();
+        QVERIFY2(config.contains(QStringLiteral("\"accept_invalid_certs\"")), qPrintable(config));
+        QVERIFY2(config.contains(QStringLiteral("\"accept_invalid_certs\":false")), qPrintable(config));
 
-    Manager other;
-    QCOMPARE(other.acceptInvalidCerts(), !original);   // persisted in QSettings
-    mgr.setAcceptInvalidCerts(original);                // leave the user's setting alone
+        // An explicit stored true still round-trips to a fresh Manager and the core.
+        mgr.setAcceptInvalidCerts(true);
+        QVERIFY(mgr.acceptInvalidCerts());
+        const QString optedOut = mgr.serverConfigJson();
+        QVERIFY2(optedOut.contains(QStringLiteral("\"accept_invalid_certs\":true")), qPrintable(optedOut));
+        Manager other;
+        QVERIFY(other.acceptInvalidCerts());   // persisted in QSettings
+        QVERIFY(other.serverConfigJson().contains(QStringLiteral("\"accept_invalid_certs\":true")));
+    }
 }
 
 QTEST_MAIN(TstManager)

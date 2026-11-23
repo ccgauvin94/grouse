@@ -1862,7 +1862,9 @@ impl Core {
     ///
     /// If any upload fails, NOTHING is sent and the failure is raised as an
     /// alert. A prompt that silently lost its attachments is the failure this
-    /// path exists to remove.
+    /// path exists to remove. The upload runs on the owner of the prompt's
+    /// display session (a roam peer for a roam chat), never hardwired to the
+    /// main wire.
     /// Fetch a file the server shared, into this client's file cache.
     ///
     /// The other half of `ItemKind::File`: the row carries a reference, this
@@ -1919,12 +1921,23 @@ impl Core {
             self.send_prompt(prompt, expect);
             return;
         }
+        // The upload belongs to the chat the prompt targets, not necessarily
+        // the main wire: a file attached in a roam chat lives on that peer.
+        // `expect.session_id` is a DISPLAY id, which is what `owner_for` needs.
+        let Some(target) = upload_target(&expect, self.active_session_id().as_deref()) else {
+            self.alert("no chat is open for those files — the message was NOT sent");
+            return;
+        };
+        let Some(owner) = self.owner_for(&target) else {
+            self.alert("no connection owns that chat — the message was NOT sent");
+            return;
+        };
         let this = self.clone();
         crate::roam::runtime().spawn(async move {
             let mut uploaded = Vec::with_capacity(files.len());
             for file in files {
                 let name = file.name();
-                match this.upload_one(file).await {
+                match this.upload_one(&owner, file).await {
                     Ok(done) => uploaded.push(done),
                     Err(message) => {
                         this.alert(format!(
@@ -3026,12 +3039,12 @@ impl Core {
             .clone()
             .map(|c| c.cwd)
             .unwrap_or_default();
-        let reply = match owner
-            .request(
-                "session/new",
-                crate::tasks::new_session_params(&cwd),
-            )
-            .await
+        let reply = match crate::session::request(
+            owner.as_ref(),
+            "session/new",
+            crate::tasks::new_session_params(&cwd),
+        )
+        .await
         {
             Ok(reply) => reply,
             Err(error) => {
@@ -3047,12 +3060,12 @@ impl Core {
             self.hidden_failed(&purpose);
             return Err("session/new returned no session id".to_string());
         };
-        if let Err(error) = owner
-            .request(
-                "session/set_mode",
-                crate::tasks::set_mode_params(&wire, "auto"),
-            )
-            .await
+        if let Err(error) = crate::session::request(
+            owner.as_ref(),
+            "session/set_mode",
+            crate::tasks::set_mode_params(&wire, "auto"),
+        )
+        .await
         {
             self.hidden_failed(&purpose);
             return Err(error.to_string());
@@ -3157,28 +3170,41 @@ impl Core {
 
     // -- File ingest plumbing (`attachments.rs` holds the pure half) --------
 
-    /// One deterministic attachments tool call, on the same hidden `auto`-mode
-    /// session the My Day calls use. Reusing it is deliberate: that session is
-    /// already created, already in auto (goose refuses app tool calls in any
-    /// other mode) and is never prompted, so it costs nothing to share.
-    async fn attachment_call<F: Fn(&str) -> Value>(&self, build: F) -> Result<Value, String> {
-        let (conn, wire) = self.tasks_wire().await?;
+    /// One deterministic attachments tool call on `owner`'s hidden `auto`
+    /// session. Uploads and downloads share this seam: a roam chat's bytes live
+    /// on its peer, so the call must never fall back to the main wire.
+    async fn attachment_call<F: Fn(&str) -> Value>(
+        &self,
+        owner: &Arc<dyn crate::session::ChatEndpoint>,
+        build: F,
+    ) -> Result<Value, String> {
+        let drop_wire = || {
+            self.inner
+                .file_sessions
+                .lock()
+                .remove(&owner.label().unwrap_or_default());
+        };
+        let wire = match self.file_wire(owner).await {
+            Ok(wire) => wire,
+            Err(e) => {
+                drop_wire();
+                return Err(e);
+            }
+        };
         let reply =
-            crate::session::request(conn.as_ref(), "_goose/unstable/tools/call", build(&wire))
+            crate::session::request(owner.as_ref(), "_goose/unstable/tools/call", build(&wire))
                 .await;
         match reply {
             Ok(reply) => {
                 if crate::tasks::is_error(&reply) {
-                    *self.inner.tasks_session.lock() = None;
-                    self.hidden_failed("tasks");
+                    drop_wire();
                     Err(crate::tasks::content_text(&reply))
                 } else {
                     Ok(reply)
                 }
             }
             Err(e) => {
-                *self.inner.tasks_session.lock() = None;
-                self.hidden_failed("tasks");
+                drop_wire();
                 Err(e.to_string())
             }
         }
@@ -3197,10 +3223,18 @@ impl Core {
         sha256: &str,
     ) -> Result<(PathBuf, u64), String> {
         let local = self.local_file_path(display, path, name, sha256);
+        if !path_within_files(self.inner.cache.dir(), &local) {
+            return Err("refusing a file path outside the cache".to_string());
+        }
         // A finished copy is the whole answer: the name is content-addressed, so
-        // an existing file IS this file.
-        if let Ok(meta) = local.metadata() {
+        // an existing file IS this file -- but only if its bytes still hash to
+        // the digest that named it.
+        if let Ok(meta) = std::fs::symlink_metadata(&local) {
+            if meta.file_type().is_symlink() {
+                return Err("refusing a cached symlink".to_string());
+            }
             if meta.len() > 0 {
+                verify_cached_digest(&local, sha256)?;
                 return Ok((local, meta.len()));
             }
         }
@@ -3219,9 +3253,6 @@ impl Core {
                 return Err(e);
             }
         };
-        if let Some(parent) = local.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("cache dir: {e}"))?;
-        }
         let mut data: Vec<u8> = Vec::new();
         loop {
             let params = crate::attachments::read_params(
@@ -3230,10 +3261,13 @@ impl Core {
                 data.len() as u64,
                 crate::attachments::DOWNLOAD_CHUNK,
             );
-            let reply = owner
-                .request("_goose/unstable/tools/call", params)
-                .await
-                .map_err(|e| e.to_string())?;
+            // The shared 30 s control-call policy: a peer that stalls after one
+            // chunk must fail (and emit FileEvent::Failed) instead of parking
+            // this task forever.
+            let reply =
+                crate::session::request(owner.as_ref(), "_goose/unstable/tools/call", params)
+                    .await
+                    .map_err(|e| e.to_string())?;
             if crate::tasks::is_error(&reply) {
                 // The hidden session is the usual casualty of a server restart or
                 // an evicted session: drop it so the next tap rebuilds it.
@@ -3274,37 +3308,23 @@ impl Core {
                 break;
             }
         }
-        // Written to a temp name then renamed: a half-written file that EXISTS
-        // would be reported as a finished download on the next tap.
-        let temp = local.with_extension("part");
-        std::fs::write(&temp, &data).map_err(|e| format!("write: {e}"))?;
-        std::fs::rename(&temp, &local).map_err(|e| format!("land: {e}"))?;
+        // Verify the digest and land atomically. A mismatch returns Err here,
+        // which `fetch_file` turns into FileEvent::Failed with no file on disk.
+        let local = land_download(self.inner.cache.dir(), display, path, name, sha256, &data)?;
         let bytes = data.len() as u64;
         Ok((local, bytes))
     }
 
-    /// Where a fetched file lives: content-addressed by digest when the item
-    /// knows it, else by the server path, plus the safe name.
+    /// Where a fetched file lives: content-addressed by a CANONICAL digest
+    /// when the item knows one, else by the hashed display+path key.
     fn local_file_path(&self, display: &str, path: &str, name: &str, sha256: &str) -> PathBuf {
-        use std::hash::{Hash, Hasher};
-        let key = if sha256.len() >= 16 {
-            sha256[..16].to_string()
-        } else {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            display.hash(&mut hasher);
-            path.hash(&mut hasher);
-            format!("{:016x}", hasher.finish())
-        };
-        self.inner
-            .cache
-            .dir()
-            .join("files")
-            .join(format!("{key}-{}", crate::attachments::safe_file_name(name)))
+        file_cache_path(self.inner.cache.dir(), display, path, name, sha256)
     }
 
     /// Upload one file: begin, chunk, commit. Returns where the server put it.
     async fn upload_one(
         &self,
+        owner: &Arc<dyn crate::session::ChatEndpoint>,
         file: Arc<dyn FileSource>,
     ) -> Result<crate::attachments::UploadedFile, String> {
         use base64::Engine as _;
@@ -3324,7 +3344,9 @@ impl Core {
         }
 
         let begun = self
-            .attachment_call(|wire| crate::attachments::begin_params(wire, &name, &mime, size))
+            .attachment_call(owner, |wire| {
+                crate::attachments::begin_params(wire, &name, &mime, size)
+            })
             .await?;
         let upload_id = tool_json_field(&begun, "uploadId")
             .ok_or_else(|| "the server returned no uploadId".to_string())?;
@@ -3343,14 +3365,16 @@ impl Core {
                 ));
             }
             let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            self.attachment_call(|wire| {
+            self.attachment_call(owner, |wire| {
                 crate::attachments::chunk_params(wire, &upload_id, offset, &data)
             })
             .await?;
         }
 
         let committed = self
-            .attachment_call(|wire| crate::attachments::commit_params(wire, &upload_id))
+            .attachment_call(owner, |wire| {
+                crate::attachments::commit_params(wire, &upload_id)
+            })
             .await?;
         let blob = tool_json_payload(&committed)
             .ok_or_else(|| "the server returned no commit result".to_string())?;
@@ -5573,23 +5597,25 @@ impl Core {
     fn roam_identity(&self) -> String {
         let dir = self.inner.cache.dir();
         let path = dir.join("roam_identity");
-        if let Ok(existing) = std::fs::read_to_string(&path) {
-            let existing = existing.trim();
-            if !existing.is_empty() {
-                // A pre-existing (pre-fix) 0644 identity is still world-readable;
-                // tighten it even on the read path.
-                #[cfg(unix)]
-                crate::cache::make_private(&path);
-                return existing.to_string();
+        // Never follow a planted symlink into someone else's file, and tighten
+        // a pre-existing (pre-fix) 0644 identity BEFORE its contents are read.
+        let regular = std::fs::symlink_metadata(&path)
+            .map(|meta| !meta.file_type().is_symlink())
+            .unwrap_or(false);
+        if regular {
+            #[cfg(unix)]
+            crate::cache::make_private(&path);
+            if let Ok(existing) = std::fs::read_to_string(&path) {
+                let existing = existing.trim();
+                if !existing.is_empty() {
+                    return existing.to_string();
+                }
             }
         }
         let secret = grouse_roam_core::identity_generate();
-        // Atomic write (S-RC-5): a crash mid-write must not leave a truncated
-        // identity that would re-roll the secret on next launch.
-        let _ = crate::cache::atomic_write(&path, secret.as_bytes());
-        // The identity is an iroh secret — never world-readable.
-        #[cfg(unix)]
-        crate::cache::make_private(&path);
+        // Atomic, 0600 from creation, unguessable temp name: a crash mid-write
+        // must not leave a truncated identity that would re-roll the secret.
+        let _ = write_secret_file(&path, &secret);
         secret
     }
 
@@ -5605,10 +5631,333 @@ impl Core {
         }
         let dir = self.inner.cache.dir();
         let path = dir.join("roam_identity");
-        let _ = crate::cache::atomic_write(&path, s.as_bytes());
-        #[cfg(unix)]
-        crate::cache::make_private(&path);
+        // A rename over an existing path replaces the inode: the imported key
+        // is never written through a predictable temp file or logged.
+        let _ = write_secret_file(&path, s);
     }
+}
+
+// ---------------------------------------------------------------------------
+// File-cache safety helpers (the pure half of `fetch_file` / `upload_one`)
+// ---------------------------------------------------------------------------
+
+/// SHA-256 for the downloaded-bytes check, implemented here because the crate
+/// has no direct `sha2` dependency and the coordinator owns `Cargo.toml`. A
+/// hash mismatch must refuse to land a file, so it cannot depend on a crate
+/// that only happens to be in the lockfile transitively.
+mod file_digest {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    pub(super) fn hex(bytes: &[u8]) -> String {
+        let mut h: [u32; 8] = [
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+            0x5be0cd19,
+        ];
+        let mut padded = bytes.to_vec();
+        padded.push(0x80);
+        while padded.len() % 64 != 56 {
+            padded.push(0);
+        }
+        padded.extend_from_slice(&((bytes.len() as u64).wrapping_mul(8)).to_be_bytes());
+
+        for block in padded.chunks_exact(64) {
+            let mut w = [0u32; 64];
+            for (slot, word) in w.iter_mut().take(16).enumerate() {
+                let b = &block[slot * 4..slot * 4 + 4];
+                *word = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+            }
+            for i in 16..64 {
+                let x = w[i - 15];
+                let y = w[i - 2];
+                let s0 = x.rotate_right(7) ^ x.rotate_right(18) ^ (x >> 3);
+                let s1 = y.rotate_right(17) ^ y.rotate_right(19) ^ (y >> 10);
+                w[i] = w[i - 16]
+                    .wrapping_add(s0)
+                    .wrapping_add(w[i - 7])
+                    .wrapping_add(s1);
+            }
+            let (mut a, mut b, mut c, mut d) = (h[0], h[1], h[2], h[3]);
+            let (mut e, mut f, mut g, mut hh) = (h[4], h[5], h[6], h[7]);
+            for i in 0..64 {
+                let big_s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+                let ch = (e & f) ^ ((!e) & g);
+                let t1 = hh
+                    .wrapping_add(big_s1)
+                    .wrapping_add(ch)
+                    .wrapping_add(K[i])
+                    .wrapping_add(w[i]);
+                let big_s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+                let maj = (a & b) ^ (a & c) ^ (b & c);
+                let t2 = big_s0.wrapping_add(maj);
+                hh = g;
+                g = f;
+                f = e;
+                e = d.wrapping_add(t1);
+                d = c;
+                c = b;
+                b = a;
+                a = t1.wrapping_add(t2);
+            }
+            h[0] = h[0].wrapping_add(a);
+            h[1] = h[1].wrapping_add(b);
+            h[2] = h[2].wrapping_add(c);
+            h[3] = h[3].wrapping_add(d);
+            h[4] = h[4].wrapping_add(e);
+            h[5] = h[5].wrapping_add(f);
+            h[6] = h[6].wrapping_add(g);
+            h[7] = h[7].wrapping_add(hh);
+        }
+        let mut out = String::with_capacity(64);
+        for word in h {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{word:08x}");
+        }
+        out
+    }
+}
+
+/// Only a canonical 64-character lowercase hex digest is trusted as a path
+/// component. Byte-wise validation never slices a `str` on a UTF-8 boundary,
+/// and rejects traversal, uppercase, NULs and every other non-hex byte.
+fn canonical_digest(sha256: &str) -> Option<&str> {
+    let bytes = sha256.as_bytes();
+    (bytes.len() == 64
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+    .then_some(sha256)
+}
+
+/// Pure path builder. A hostile digest falls back to the hashed display+path
+/// key instead of ever becoming a path component; the file name is run through
+/// `attachments::safe_file_name`, which rejects separators.
+fn file_cache_path(
+    root: &std::path::Path,
+    display: &str,
+    path: &str,
+    name: &str,
+    sha256: &str,
+) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let key = match canonical_digest(sha256) {
+        // Validation guarantees 64 ASCII bytes, so 16 bytes is a char boundary.
+        Some(digest) => digest[..16].to_string(),
+        None => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            display.hash(&mut hasher);
+            path.hash(&mut hasher);
+            format!("{:016x}", hasher.finish())
+        }
+    };
+    root.join("files").join(format!(
+        "{key}-{}",
+        crate::attachments::safe_file_name(name)
+    ))
+}
+
+/// Lexical containment: the file must be exactly one child of `<cache>/files`,
+/// with no parent/root components or separators hiding in the leaf name.
+fn path_within_files(root: &std::path::Path, candidate: &std::path::Path) -> bool {
+    use std::path::Component;
+    let files = root.join("files");
+    if candidate.parent() != Some(files.as_path()) {
+        return false;
+    }
+    let Some(leaf) = candidate.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if leaf.is_empty() || leaf == "." || leaf == ".." || leaf.contains('/') || leaf.contains('\\') {
+        return false;
+    }
+    !candidate
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+}
+
+/// Write all bytes and flush before the rename: a short write must never be
+/// mistaken for a complete file just because the rename succeeded.
+fn write_and_sync(file: &mut std::fs::File, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    file.write_all(data)?;
+    file.sync_all()
+}
+
+/// A fresh, unguessable sibling name for the `.part` write. `create_new`
+/// below keeps a hostile pre-existing symlink from being followed.
+fn download_temp_path(final_path: &std::path::Path) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let leaf = final_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("download");
+    final_path.with_file_name(format!(
+        ".{leaf}.part-{}-{nanos}-{seq:08x}",
+        std::process::id()
+    ))
+}
+
+/// Assemble-and-land, entirely offline so hostile server fields can be tested
+/// without a wire. A canonical digest is verified against the BYTES; on any
+/// failure nothing is renamed into the cache.
+fn land_download(
+    root: &std::path::Path,
+    display: &str,
+    path: &str,
+    name: &str,
+    sha256: &str,
+    data: &[u8],
+) -> Result<PathBuf, String> {
+    let local = file_cache_path(root, display, path, name, sha256);
+    if !path_within_files(root, &local) {
+        return Err("refusing a file path outside the cache".to_string());
+    }
+    let files = root.join("files");
+    std::fs::create_dir_all(&files).map_err(|e| format!("cache dir: {e}"))?;
+    // Canonical as well as lexical: a symlinked `files` directory must not
+    // redirect the write outside the cache either.
+    let real_files = std::fs::canonicalize(&files).map_err(|e| format!("cache dir: {e}"))?;
+    let parent = local.parent().unwrap_or(files.as_path());
+    let real_parent = std::fs::canonicalize(parent).map_err(|e| format!("cache dir: {e}"))?;
+    if real_parent != real_files {
+        return Err("refusing a file path outside the cache".to_string());
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(&local) {
+        if meta.file_type().is_symlink() {
+            return Err("refusing to land over a symlink".to_string());
+        }
+    }
+    if let Some(expected) = canonical_digest(sha256) {
+        let actual = file_digest::hex(data);
+        if actual != expected {
+            return Err(format!(
+                "digest mismatch: expected {expected}, downloaded {actual}"
+            ));
+        }
+    }
+    let temp = download_temp_path(&local);
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp).map_err(|e| format!("write: {e}"))?;
+        if let Err(e) = write_and_sync(&mut file, data) {
+            drop(file);
+            let _ = std::fs::remove_file(&temp);
+            return Err(format!("write: {e}"));
+        }
+    }
+    if let Err(e) = std::fs::rename(&temp, &local) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("land: {e}"));
+    }
+    Ok(local)
+}
+
+/// Verify a copy already on disk before calling it a finished download: a
+/// file named after a digest is only trustworthy if its bytes hash to it.
+fn verify_cached_digest(path: &std::path::Path, sha256: &str) -> Result<(), String> {
+    let Some(expected) = canonical_digest(sha256) else {
+        return Ok(());
+    };
+    let bytes = std::fs::read(path).map_err(|e| format!("read cached file: {e}"))?;
+    let actual = file_digest::hex(&bytes);
+    if actual != expected {
+        return Err(format!(
+            "cached file failed digest check: expected {expected}, found {actual}"
+        ));
+    }
+    Ok(())
+}
+
+/// Write a secret (the roam identity) atomically, private from the FIRST byte:
+/// a predictable temp name + chmod-after-rename leaves a window where the iroh
+/// key is world-readable, and a planted symlink at the temp path would redirect
+/// the write. `create_new` + a fresh name + `mode(0o600)` close both. The value
+/// is never logged, on success or failure.
+fn write_secret_file(path: &std::path::Path, value: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let leaf = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("secret");
+    for attempt in 0..8 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temp = path.with_file_name(format!(
+            ".{leaf}.tmp-{}-{nanos}-{seq:08x}-{attempt}",
+            std::process::id()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = match options.open(&temp) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        if let Err(e) = write_and_sync(&mut file, value.as_bytes()) {
+            drop(file);
+            let _ = std::fs::remove_file(&temp);
+            return Err(e);
+        }
+        drop(file);
+        if let Err(e) = std::fs::rename(&temp, path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e);
+        }
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a private temporary file",
+    ))
+}
+
+/// The display id an upload is routed by. The prompt's declared chat wins --
+/// a queue drain may send to a chat other than the displayed one -- and the
+/// display id is what `owner_for` needs to find a roam peer.
+fn upload_target(expect: &Option<SendExpect>, active: Option<&str>) -> Option<String> {
+    expect
+        .as_ref()
+        .map(|e| e.session_id.as_str())
+        .filter(|id| !id.is_empty())
+        .or(active)
+        .map(str::to_string)
 }
 
 // ---------------------------------------------------------------------------
@@ -6613,6 +6962,139 @@ mod tests {
         assert_eq!(got["cached"], json!(true), "the tab can still say 'refreshing'");
         assert_eq!(got["open"][0]["id"], "itm_1");
         assert_eq!(got["tasks"], json!([]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_digest_matches_known_vectors() {
+        assert_eq!(
+            file_digest::hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            file_digest::hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn hostile_sha256_never_becomes_a_path() {
+        let root = std::path::Path::new("/tmp/grouse-cache-under-test");
+        let hostile: Vec<String> = vec![
+            "../../../../tmp/AAAAAAAAA".into(),          // traversal
+            "abcd".into(),                               // short
+            "A".repeat(64),                              // uppercase
+            "€".repeat(10),                              // multibyte: byte 16 is NOT a boundary
+            format!("{}\0", "a".repeat(63)),             // NUL
+            format!("{}/leaf", "a".repeat(64)),          // 64 hex + a separator
+        ];
+        for digest in &hostile {
+            assert!(
+                canonical_digest(digest).is_none(),
+                "a hostile digest was accepted: {digest:?}"
+            );
+            let path = file_cache_path(root, "roam:nas:s1", "/etc/passwd", "report.pdf", digest);
+            assert!(path_within_files(root, &path), "escaped the cache: {path:?}");
+            assert!(path.starts_with(root.join("files")), "{path:?}");
+            assert!(!path.to_string_lossy().contains("tmp/AAAA"), "{path:?}");
+        }
+        let canonical = "a".repeat(64);
+        assert_eq!(canonical_digest(&canonical), Some(canonical.as_str()));
+        let path = file_cache_path(root, "s1", "/p", "a.pdf", &canonical);
+        assert!(path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(&canonical[..16])));
+    }
+
+    #[test]
+    fn digest_mismatch_fails_without_landing_a_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "grouse-digest-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let expected = "a".repeat(64);
+        let error = land_download(
+            &dir,
+            "s1",
+            "/server/a.pdf",
+            "a.pdf",
+            &expected,
+            b"wrong bytes",
+        )
+        .unwrap_err();
+        assert!(error.contains("digest mismatch"), "{error}");
+        let files = dir.join("files");
+        let left: Vec<_> = std::fs::read_dir(&files)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            left.is_empty(),
+            "a failed download left files behind: {left:?}"
+        );
+
+        // The verified path lands normally, once the bytes match the digest.
+        let data = b"the real bytes";
+        let actual = file_digest::hex(data);
+        let landed = land_download(&dir, "s1", "/server/a.pdf", "a.pdf", &actual, data).unwrap();
+        assert_eq!(std::fs::read(&landed).unwrap(), data);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upload_target_prefers_the_prompts_chat_over_the_displayed_one() {
+        let roam = Some(SendExpect {
+            session_id: "roam:nas:s1".to_string(),
+        });
+        assert_eq!(
+            upload_target(&roam, Some("main-session")),
+            Some("roam:nas:s1".to_string())
+        );
+        let empty = Some(SendExpect {
+            session_id: String::new(),
+        });
+        assert_eq!(
+            upload_target(&empty, Some("main-session")),
+            Some("main-session".to_string())
+        );
+        assert_eq!(
+            upload_target(&None, Some("main-session")),
+            Some("main-session".to_string())
+        );
+        assert_eq!(upload_target(&None, None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_file_is_private_from_creation() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!(
+            "grouse-secret-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("roam_identity");
+        write_secret_file(&path, "super-secret-value").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "super-secret-value"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let temps: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(temps.is_empty(), "a secret temp file survived: {temps:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

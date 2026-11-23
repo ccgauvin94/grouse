@@ -1774,7 +1774,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_core_disconnect() and 0xFFFF) != 29396) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_core_fetch_file() and 0xFFFF) != 6068) {
+    if ((lib.uniffi_grouse_core_checksum_method_core_fetch_file() and 0xFFFF) != 39749) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_core_flush_caches() and 0xFFFF) != 885) {
@@ -2830,7 +2830,9 @@ public interface CoreInterface {
      *
      * If any upload fails, NOTHING is sent and the failure is raised as an
      * alert. A prompt that silently lost its attachments is the failure this
-     * path exists to remove.
+     * path exists to remove. The upload runs on the owner of the prompt's
+     * display session (a roam peer for a roam chat), never hardwired to the
+     * main wire.
      * Fetch a file the server shared, into this client's file cache.
      *
      * The other half of `ItemKind::File`: the row carries a reference, this
@@ -3631,7 +3633,9 @@ open class Core: Disposable, AutoCloseable, CoreInterface
      *
      * If any upload fails, NOTHING is sent and the failure is raised as an
      * alert. A prompt that silently lost its attachments is the failure this
-     * path exists to remove.
+     * path exists to remove. The upload runs on the owner of the prompt's
+     * display session (a roam peer for a roam chat), never hardwired to the
+     * main wire.
      * Fetch a file the server shared, into this client's file cache.
      *
      * The other half of `ItemKind::File`: the row carries a reference, this

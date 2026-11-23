@@ -20,6 +20,8 @@ class ReplyReceiver : BroadcastReceiver() {
                     // The alert's chat travels in the PendingIntent: the current screen may
                     // have changed since the notification was posted (or the app may have
                     // been killed), so it is not the reply's destination.
+                    // No lock policy here: sendWhenReady is the same path the chat composer
+                    // uses, and ConnectionManager's single gate rejects it while locked.
                     ConnectionManager.get(context)
                         .sendWhenReady(text, intent.getStringExtra(Notifier.EXTRA_SESSION_ID))
                 }

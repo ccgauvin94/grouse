@@ -63,6 +63,26 @@ enum class VoiceState { IDLE, LISTENING, TRANSCRIBING, SPEAKING }
  *  loud. Warm turns answer in well under this; the filler is for the cold/slow ones. */
 private const val THINKING_FILLER_MS = 900L
 
+/** The agent-facing intents the biometric lock protects. Kept as an enum (not a String) so
+ *  every call site names what it is asking for and a JVM test can enumerate the whole surface. */
+internal enum class AgentIntent {
+    CONNECT,            // socket dial / attach (the stored key rides on this)
+    RECONNECT,          // foreground / service-restart / retry-loop redials
+    OPEN_SESSION,       // bind a chat, on this wire or a peer's
+    NEW_SESSION,        // session/new, including recipes and assistant-thread creation
+    SEND,               // prompt, steer, /compact, /clear — anything that starts a turn
+    ANSWER_PERMISSION,  // tool approval
+    ANSWER_ELICITATION, // forms and recipe parameters
+    RELOAD,             // session/load replay of the chat on screen
+    ROAM_CONNECT,       // iroh peer dial
+    ROAM_SESSION,       // session/new or open on a peer
+    THREAD,             // open_thread / reset of the privileged assistant thread
+}
+
+/** The ONE lock policy: while the screen is locked, no agent intent is allowed. Pure so the
+ *  rule (every intent, both states) can be checked without an Activity or a core. */
+internal fun lockPermits(unlocked: Boolean, intent: AgentIntent): Boolean = unlocked
+
 /**
  * Process-scoped owner of the grouse-core connection + chat state. A singleton (not a
  * ViewModel) so it survives navigation/config changes and can later be shared with a
@@ -81,6 +101,27 @@ class ConnectionManager private constructor(context: Context) {
     private val appContext = context.applicationContext
     private val notifier = Notifier(context)
     private var appForeground = true
+
+    // The biometric gate's state, mirrored from MainActivity's Compose flag. A cold start with
+    // a stored key and the lock enabled starts LOCKED: nothing may dial or bind before the
+    // prompt has actually succeeded. With the lock off (the default) this is always true.
+    @Volatile private var unlocked: Boolean = !store.biometricLock || !store.hasKey()
+
+    /** MainActivity reports the biometric outcome here on every change. Setting true is a no-op
+     *  beyond the flag: the REJECT policy drops intents at the door, it does not replay them. */
+    fun setUnlocked(value: Boolean) { unlocked = value }
+
+    /** THE lock gate. Every intent that can open a session, send a prompt or answer a server
+     *  request goes through here. POLICY: REJECT while locked — drop it, do not queue it for a
+     *  later unlock, and do not open a socket with the stored key. The one deferred action is
+     *  the CONNECT the UI re-issues after a successful unlock (connectHome); a queued prompt or
+     *  deferred open that predates the lock is never drained while locked either (see the
+     *  Ready handler). */
+    private fun permitted(intent: AgentIntent): Boolean {
+        val ok = lockPermits(unlocked, intent)
+        if (!ok) noteApp("app: locked — rejected $intent")
+        return ok
+    }
 
     // The last finished turn this app announced. Both delivery paths can see the same turn
     // end — the live connection here, and the operator's sender pushing for it moments
@@ -1304,6 +1345,7 @@ class ConnectionManager private constructor(context: Context) {
      *  a chat when a PEER owns the screen either — that would bind a main chat and paint it
      *  over the peer's transcript (see `resumeTarget`); it attaches instead. */
     fun connectSaved() {
+        if (!permitted(AgentIntent.CONNECT)) return
         if (!store.hasKey()) return
         endRetry(MAIN_RETRY_KEY)   // an explicit connect gets the whole schedule back
         linkFailed.value = false
@@ -1370,7 +1412,8 @@ class ConnectionManager private constructor(context: Context) {
         // failed endpoint looked like an endless retry. Recovery is explicit (the
         // card's Retry) or the foreground return's one fresh attempt.
         roamPeers.forEach { peer ->
-            if (peer.name !in explicitRoamOff && roamStatus[peer.name] == null) {
+            if (peer.name !in explicitRoamOff && roamStatus[peer.name] == null &&
+                permitted(AgentIntent.ROAM_CONNECT)) {
                 connectRoam(peer.name)
             }
         }
@@ -1445,6 +1488,7 @@ class ConnectionManager private constructor(context: Context) {
      *  `mode` is `dev` for a dev session, null for a plain chat: the tag is written by
      *  THAT peer's goose and cannot be changed afterwards, so it is chosen here. */
     fun newRoamSession(name: String, mode: String? = null) {
+        if (!permitted(AgentIntent.ROAM_SESSION)) return
         if (mode == null || mode.isBlank()) {
             core.roamNewSession(name)
         } else {
@@ -1457,6 +1501,7 @@ class ConnectionManager private constructor(context: Context) {
      *  natively honors the cwd on session/new (a `serve --roam` host defaults
      *  to $HOME otherwise); blank falls back to the config cwd. */
     fun newRoamSessionIn(name: String, cwd: String) {
+        if (!permitted(AgentIntent.ROAM_SESSION)) return
         core.roamNewSessionIn(name, cwd)
     }
 
@@ -1493,6 +1538,7 @@ class ConnectionManager private constructor(context: Context) {
      *  out the MAIN connection's entire ready path (onCoreReady), so the main session never
      *  got repointed, tools never listed, sessions never re-listed. Dialing is not owning. */
     fun connectRoam(name: String) {
+        if (!permitted(AgentIntent.ROAM_CONNECT)) return
         val peer = roamPeers.firstOrNull { it.name == name } ?: return
         // A manual connect IS the user reconnecting: lift the explicit-off mark
         // so future drops get supervised re-dials again.
@@ -1529,8 +1575,10 @@ class ConnectionManager private constructor(context: Context) {
      *  `session/list`, projects and My Day with no session at all; the first tap opens.
      *
      *  Returns true only for the first call of this process (the launch), so the shell can put
-     *  the landing page up without fighting a later re-entry from the lock screen. */
+     *  the landing page up without fighting a later re-entry from the lock screen. While locked
+     *  it returns false WITHOUT consuming that first call: the UI re-issues it on unlock. */
     fun connectHome(): Boolean {
+        if (!permitted(AgentIntent.CONNECT)) return false
         if (!store.hasKey()) return false
         if (homeOpened) return false
         homeOpened = true
@@ -1546,6 +1594,7 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Save new credentials and connect fresh (from the Connect screen). */
     fun connect(host: String, port: String, key: String, workingDir: String) {
+        if (!permitted(AgentIntent.CONNECT)) return
         val (h, p) = normalizeHostPort(host, port)
         store.host = h; store.port = p; store.secretKey = key
         store.workingDir = workingDir
@@ -1601,6 +1650,7 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Answer a pending elicitation form and drop it from the queue. */
     fun answerElicitation(e: AcpEvent.Elicitation, values: Map<String, JsonPrimitive>?, cancelled: Boolean = false) {
+        if (!permitted(AgentIntent.ANSWER_ELICITATION)) return
         io {
             if (e.recipeParams) {
                 // Recipe-params answers ride the same UI but a different wire shape:
@@ -1651,6 +1701,7 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     fun openSession(sessionId: String, knownKind: SessionKind? = null) {
+        if (!permitted(AgentIntent.OPEN_SESSION)) return
         noteApp("app: openSession $sessionId (was ${currentSession.value})")
         // Opening a chat is a user action, so it re-arms the retry schedule even out of a
         // red dot: the tap IS the "try again".
@@ -1719,6 +1770,7 @@ class ConnectionManager private constructor(context: Context) {
     private var reloadSeq = 0
 
     private fun reloadCurrent(full: Boolean) {
+        if (!permitted(AgentIntent.RELOAD)) return
         val sid = currentSession.value ?: return
         // ONE reload at a time is the CORE's rule: `refresh_session(Full)` returns
         // without clearing anything while `replaying` holds this session, so a
@@ -1771,6 +1823,7 @@ class ConnectionManager private constructor(context: Context) {
         projectId: String? = null,
         mode: String? = null,
     ) {
+        if (!permitted(AgentIntent.NEW_SESSION)) return
         pendingOpenAssistant = false      // same as openSession: an explicit choice cancels it
         pendingAssistantRename = false
         launchQuiet = false               // a new chat is an explicit choice too
@@ -1949,6 +2002,7 @@ class ConnectionManager private constructor(context: Context) {
     /** Open the privileged assistant thread; if the session list isn't loaded yet, refresh it and
      *  open as soon as it arrives (see the Sessions handler). */
     fun openAssistant() {
+        if (!permitted(AgentIntent.OPEN_SESSION)) return
         val id = assistantSessionId()
         if (id != null) { openSession(id, knownKind = SessionKind.ASSISTANT); return }
         // No id yet: defer until a session list arrives -- but only if one can actually arrive.
@@ -1972,6 +2026,7 @@ class ConnectionManager private constructor(context: Context) {
      *  (unlike /compact, which summarises it), the id survives, and no cache anywhere needs
      *  updating. If the thread does not exist yet there is nothing to clear -- create it. */
     fun resetAssistant() {
+        if (!permitted(AgentIntent.THREAD)) return
         val id = store.assistantSessionId ?: assistantSessionId()
         if (id == null) { beginAssistantThread(); return }
         openSession(id, knownKind = SessionKind.ASSISTANT)
@@ -2018,6 +2073,7 @@ class ConnectionManager private constructor(context: Context) {
      *  id one round trip later, and waiting meant a chat that sat on "Loading…" while
      *  the panel showed a conversation nobody had opened. */
     fun openThreadChat(label: String) {
+        if (!permitted(AgentIntent.THREAD)) return
         // ALWAYS through the core, even when the id is already known — this used to
         // `openSession(known)` directly on the known path, which skipped
         // `Core::open_thread` and with it the notes offer. The consequence was invisible
@@ -2101,6 +2157,7 @@ class ConnectionManager private constructor(context: Context) {
      *  the on-screen chat, so the thread has to be current first; a prompt that cannot go
      *  out yet is parked by `dispatch` and flushed on Ready, so this is safe mid-connect. */
     fun askAssistant(text: String) {
+        if (!permitted(AgentIntent.SEND)) return
         if (text.isBlank()) return
         val id = assistantSessionId() ?: run { openAssistant(); return }  // no thread yet: create it
         if (!onAssistant) openAssistant()
@@ -2238,6 +2295,7 @@ class ConnectionManager private constructor(context: Context) {
     }
 
     fun send(text: String, images: List<ImageBlock> = emptyList(), files: List<FileBlock> = emptyList()) {
+        if (!permitted(AgentIntent.SEND)) return
         // A review is about the turn that is over: starting the next one retires it.
         dismissAdvisorReport()
         // The core echoes the prompt into the transcript itself: the wire carries
@@ -2315,6 +2373,8 @@ class ConnectionManager private constructor(context: Context) {
     /** Build a Prompt and hand it to the core. The core rejects a send whose `expect` session
      *  mismatches its bound session — silently, so the mismatch is surfaced here instead. */
     private fun sendPromptBlocks(text: String, images: List<ImageBlock>, files: List<FileBlock> = emptyList(), expect: String?) {
+        // Last funnel before core.sendPrompt: covers queued drains, /clear and /compact too.
+        if (!permitted(AgentIntent.SEND)) return
         noteApp("app: send expect=$expect current=${currentSession.value}")
         val blocks = mutableListOf<PromptBlock>()
         if (text.isNotBlank()) blocks.add(PromptBlock.Text(text))
@@ -2372,6 +2432,9 @@ class ConnectionManager private constructor(context: Context) {
      * and open the chat; that chat's Ready — main or peer — is the drain that sends it.
      */
     fun sendWhenReady(text: String, sessionId: String? = null) {
+        // Notification replies enter here (ReplyReceiver). One policy only: the same gate
+        // send()/openSession() use — a locked phone neither sends nor parks a reply.
+        if (!permitted(AgentIntent.SEND)) return
         val target = sessionId?.takeIf { it.isNotBlank() }
         if (target == null || target == currentSession.value) {
             send(text)
@@ -2392,6 +2455,7 @@ class ConnectionManager private constructor(context: Context) {
      * one outcome this queue exists to prevent.
      */
     fun steerQueued(id: Long) {
+        if (!permitted(AgentIntent.SEND)) return
         val sid = currentSession.value ?: return
         val run = activeRunId ?: return
         val i = pendingSends.indexOfFirst { it.id == id && it.sessionId == sid }
@@ -2533,6 +2597,7 @@ class ConnectionManager private constructor(context: Context) {
      *  freshness rules apply), or the screen belongs to a peer / to no chat at all (attach —
      *  the wire for `session/list` and My Day, bound to nothing, so nothing is displayed). */
     private fun reconnectMain() {
+        if (!permitted(AgentIntent.RECONNECT)) return
         val target = resumeTarget()
         if (target != null) open(resume = target) else open(attachOnly = true)
     }
@@ -2545,6 +2610,9 @@ class ConnectionManager private constructor(context: Context) {
      *  unreachable — the app would retry forever behind a dot that never admits it is stuck.
      *  A foreground return, a service restart or an explicit connect clears the flag. */
     private fun autoReconnectMain() {
+        // A locked screen has no business dialing with the stored key — not on a foreground
+        // return, a status drop, or a service restart. Unlock re-issues connectHome().
+        if (!permitted(AgentIntent.RECONNECT)) return
         if (!store.hasKey()) return
         if (online.value || connecting) return
         if (linkFailed.value) return
@@ -2564,6 +2632,7 @@ class ConnectionManager private constructor(context: Context) {
      *  will run — this is the only thing that brings the wires back. Same
      *  re-pokes the foreground return does, no-ops when already live. */
     fun rekindleOnServiceStart() {
+        if (!permitted(AgentIntent.RECONNECT)) return
         main.post {
             linkFailed.value = false
             autoReconnectMain()
@@ -2577,6 +2646,7 @@ class ConnectionManager private constructor(context: Context) {
      *  its own budget, and a loop would overwrite the visible error with
      *  "connecting" indefinitely. */
     private fun redialFallenRoamPeers() {
+        if (!permitted(AgentIntent.ROAM_CONNECT)) return
         for (peer in roamPeers.toList()) {
             val st = roamStatus[peer.name]
             if (st?.startsWith("error") == true && peer.name !in explicitRoamOff) {
@@ -2728,6 +2798,7 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Compact the conversation history to reclaim context (goose /compact command). */
     fun compact() {
+        if (!permitted(AgentIntent.SEND)) return
         busy.value = true
         compacting.value = true   // client-initiated: don't wait for the server's own status echo
         compactionStatus.value = "Compacting…"
@@ -2778,6 +2849,7 @@ class ConnectionManager private constructor(context: Context) {
 
     /** Answer the given approval request; null optionId denies (cancelled). */
     fun answerPermission(p: AcpEvent.Permission, optionId: String?) {
+        if (!permitted(AgentIntent.ANSWER_PERMISSION)) return
         core.respondPermission(p.toolCallId,
             if (optionId != null) PermissionOutcome.Selected(optionId) else PermissionOutcome.Cancelled)
         permissions.remove(p)
@@ -2872,6 +2944,13 @@ class ConnectionManager private constructor(context: Context) {
         endRetry(MAIN_RETRY_KEY)
         autoRetrying.value = false
         linkFailed.value = false
+        // A Ready that lands after the screen locked must not bind/adopt a session, consume a
+        // deferred open, send /clear, or drain a parked prompt (all below). The wire's status
+        // stays accurate; the drawer can still read its session list behind the lock screen.
+        if (!permitted(AgentIntent.OPEN_SESSION)) {
+            refreshSidebar()
+            return
+        }
         // Consume a deferred open BEFORE the active-session check: a first connect whose
         // `connectResume` failed (or a transient session that never bound) reaches Ready
         // with no active id, and returning first would drop the tap the user made while
@@ -4003,6 +4082,9 @@ class ConnectionManager private constructor(context: Context) {
         kind: SessionKind? = null,
         attachOnly: Boolean = false,
     ) {
+        // CHOKE POINT: every main-wire connect/resume/new session ends up here. Nothing below
+        // (including connectResume with the stored secret key) runs while the screen is locked.
+        if (!permitted(AgentIntent.CONNECT)) return
         // A fresh intent is a fresh chance to repair a superseded open (see onCoreReady).
         reopenAttemptedFor = null
         // If a reset/create-assistant is pending but THIS open isn't the one that scheduled

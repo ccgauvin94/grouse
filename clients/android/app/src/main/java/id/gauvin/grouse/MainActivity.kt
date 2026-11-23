@@ -126,6 +126,10 @@ fun AppRoot(activity: FragmentActivity, cm: ConnectionManager) {
     // and let the app reopen without a prompt. Any recreation must re-lock.
     var unlocked by remember { mutableStateOf(!needsLock) }
     var error by remember { mutableStateOf<String?>(null) }
+    // The Compose flag gates the overlay; the manager's flag gates the CORE intents. Report
+    // every change (declared before the child tree's effects run) so a lock can never leave a
+    // socket dial, a session open or a prompt firing behind the lock screen.
+    LaunchedEffect(unlocked) { cm.setUnlocked(unlocked) }
     // True while a prompt is on screen, so a device-credential screen (which stops our activity)
     // doesn't trigger a re-lock / re-prompt loop.
     var authenticating by remember { mutableStateOf(false) }
@@ -186,31 +190,35 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
 
     val nav = rememberNavController()
     // Fresh start connects but opens NOTHING (ConnectionManager.connectHome): no Assistant
-    // landing, no resumed chat.
-    LaunchedEffect(Unit) {
+    // landing, no resumed chat. A locked first composition is REJECTED at the manager gate
+    // without consuming the launch, so the same effect re-issues it on unlock — that is the
+    // only deferred action; no session is opened by it.
+    LaunchedEffect(unlocked) {
         // …and the launch surface is the landing page. The nav controller restores the last
         // route after a process death, so without this a relaunch dropped the reader straight
         // back into a conversation they never asked to open. Runs BEFORE the intent effects
         // below, so a notification or shortcut still wins. A later re-entry from the lock
         // screen is not a launch (connectHome returns false) and leaves the stack alone.
-        if (cm.connectHome() && cm.configured) {
+        if (unlocked && cm.configured && !cm.online.value && cm.connectHome()) {
             nav.navigate("landing") {
                 popUpTo(0) { inclusive = true }
                 launchSingleTop = true
             }
         }
     }
-    // "New chat" from a shortcut/tile: start fresh and land on the chat screen.
-    LaunchedEffect(cm.pendingNewChat.value) {
-        if (cm.pendingNewChat.value && cm.configured) {
+    // "New chat" from a shortcut/tile: start fresh and land on the chat screen. While locked
+    // the one-shot intent stays parked in state; the gate would reject it anyway, and dropping
+    // a tap on unlock is worse than re-running this effect when unlocked flips.
+    LaunchedEffect(unlocked, cm.pendingNewChat.value) {
+        if (unlocked && cm.pendingNewChat.value && cm.configured) {
             cm.pendingNewChat.value = false
             cm.newSession()
             nav.navigate("chat") { popUpTo("chat") { inclusive = true } }
         }
     }
     // A finished-turn notification tap: open that session and land on the chat screen.
-    LaunchedEffect(cm.pendingOpenMyDay.value) {
-        if (cm.pendingOpenMyDay.value) {
+    LaunchedEffect(unlocked, cm.pendingOpenMyDay.value) {
+        if (unlocked && cm.pendingOpenMyDay.value) {
             if (cm.configured) {
                 cm.pendingOpenMyDay.value = false
                 // Land on the tab and ask it to re-read: the push is the news, the tab
@@ -222,8 +230,8 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
         }
     }
 
-    LaunchedEffect(cm.pendingOpenSession.value) {
-        cm.pendingOpenSession.value?.let { sid ->
+    LaunchedEffect(unlocked, cm.pendingOpenSession.value) {
+        if (unlocked) cm.pendingOpenSession.value?.let { sid ->
             if (cm.configured) {
                 cm.pendingOpenSession.value = null
                 cm.openSession(sid)

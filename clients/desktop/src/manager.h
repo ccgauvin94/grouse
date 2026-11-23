@@ -143,11 +143,11 @@ class Manager : public QObject
     Q_PROPERTY(QVariant pendingForm READ pendingForm NOTIFY pendingFormChanged)
 
 public:
-    /** The ONE place the TLS trust-all default lives. true keeps historical
-     *  self-signed tailnet installs working (the user can turn it off in
-     *  Settings); flip to false to make verification the default for new and
-     *  existing installs that have never touched the toggle. */
-    static constexpr bool DEFAULT_ACCEPT_INVALID_CERTS = true;
+    /** The ONE place the TLS trust-all default lives. Off means WebPKI
+     *  verification, matching the core and Android. MIGRATION: installs with no
+     *  stored value now verify; users of self-signed hosts must tick Settings >
+     *  Skip TLS certificate verification once. An explicit stored true is kept. */
+    static constexpr bool DEFAULT_ACCEPT_INVALID_CERTS = false;
 
     /** The peer a `roam:<label>:<id>` display id belongs to (empty for a local id). */
     static QString roamPeerForSession(const QString &sessionId);

@@ -115,12 +115,16 @@ class SecureStore(context: Context) {
         get() = cfg.getBoolean("dynamic_color", true)
         set(v) = cfg.edit().putBoolean("dynamic_color", v).apply()
 
-    /** Gate app open / stored-key reconnect behind a biometric prompt bound to an
-     *  AndroidKeyStore key (CryptoObject). Default OFF — the transport is tailnet-only and the
-     *  lock is friction most users don't want; opt in from Settings › Security. Only takes
+    /** Preference for the biometric app lock. Default OFF — the transport is tailnet-only and
+     *  the lock is friction most users don't want; opt in from Settings › Security. Only takes
      *  effect when the device actually has a strong biometric enrolled (Biometric.available);
      *  a PIN/pattern-only device is not gated, because a CryptoObject cannot be combined with
-     *  device-credential auth. */
+     *  device-credential auth.
+     *
+     *  This flag does NOT itself gate stored-key reuse. MainActivity prompts (with a Keystore
+     *  CryptoObject) and reports the result to ConnectionManager.setUnlocked; the manager's
+     *  lock gate is the enforcement point that rejects agent intents and prevents a reconnect
+     *  with the stored key while the screen is locked. */
     var biometricLock: Boolean
         get() = cfg.getBoolean("biometric_lock", false)
         set(v) = cfg.edit().putBoolean("biometric_lock", v).apply()
