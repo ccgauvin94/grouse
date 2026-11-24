@@ -58,6 +58,15 @@ done
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# The committed .so must be byte-identical when the pinned toolchain rebuilds it
+# anywhere, not just in the developer's Android image. Rust embeds absolute
+# source paths in panic/tracing strings even in a stripped release cdylib, so
+# without remapping, a build under /home/dev/.cargo differs from CI's
+# /home/runner/.cargo and the freshness gate can never pass. Remap both the
+# cargo home (crate sources) and the checkout root to stable placeholders.
+CARGO_HOME_DIR="${CARGO_HOME:-${HOME}/.cargo}"
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=${CARGO_HOME_DIR}=/cargo --remap-path-prefix=${ROOT}=/grouse"
+
 AAR="$ROOT/clients/android/grouse-core-aar/src/main"
 BINDINGS="$ROOT/core/grouse-core/bindings/kotlin"
 if [[ -n "$OUT_DIR" ]]; then
