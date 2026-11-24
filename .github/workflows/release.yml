@@ -113,9 +113,12 @@ jobs:
           set -euo pipefail
           APK="$(ls clients/android/app/build/outputs/apk/release/*.apk | head -1)"
           BT="$(ls -d "${ANDROID_SDK_ROOT:-$ANDROID_HOME}"/build-tools/* | sort -V | tail -1)"
-          GOT="$("$BT/apksigner" verify --print-certs "$APK" \
-            | awk -F': ' '/^Signer #1 certificate SHA-256 digest/{print $2; exit}' \
-            | tr -d ':' | tr 'A-F' 'a-f')"
+          # Build-tools differ in whether there is a space after `digest:`;
+          # parse by whitespace and keep stderr so a verifier failure is visible.
+          CERTS="$("$BT/apksigner" verify --print-certs "$APK" 2>&1 || true)"
+          printf '%s\n' "$CERTS"
+          GOT="$(printf '%s\n' "$CERTS" | tr -d '\r:' | tr 'A-F' 'a-f' \
+            | awk '/certificate SHA-256 digest/{print $NF; exit}')"
           if [[ "$GOT" != "$GROUSE_RELEASE_SIGNER_SHA256" ]]; then
             echo "::error::APK signer ${GOT:-<none>} is not the pinned release key"
             exit 1
