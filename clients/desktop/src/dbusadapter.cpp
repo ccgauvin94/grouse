@@ -5,10 +5,12 @@
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
 #include <QDBusError>
+#include <QDBusReply>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QVariantMap>
 
 #include <unistd.h>
 
@@ -65,14 +67,20 @@ bool DbusAdapter::callerAuthorized() const
     QDBusConnectionInterface *iface = bus.interface();
     if (!iface)
         return false;
-    // Credentials come from the bus driver, not from the caller's message.
-    const QDBusCredentials creds = iface->serviceCredentials(sender);
-    if (creds.isNull() || creds.pid() <= 0 || creds.uid() != ::getuid())
+    // Credentials come from the bus driver, not from the caller's message. Qt 6
+    // reports them as a QVariantMap (`pid`/`uid`) rather than QDBusCredentials.
+    const QDBusReply<QVariantMap> reply = iface->serviceCredentials(sender);
+    if (!reply.isValid())
+        return false;
+    const QVariantMap creds = reply.value();
+    const qint64 pid = creds.value(QStringLiteral("pid")).toLongLong();
+    const qint64 uid = creds.value(QStringLiteral("uid")).toLongLong();
+    if (pid <= 0 || uid != static_cast<qint64>(::getuid()))
         return false;
 
     const QByteArray ownSession = qgetenv("XDG_SESSION_ID");
     if (!ownSession.isEmpty()) {
-        const QByteArray peerSession = sessionIdOf(creds.pid());
+        const QByteArray peerSession = sessionIdOf(pid);
         if (!peerSession.isEmpty() && peerSession != ownSession)
             return false;
     }

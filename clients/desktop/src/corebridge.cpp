@@ -238,38 +238,38 @@ bool CoreBridge::resolve()
                   "AimsApi gained a symbol: add it to the resolve + REQUIRE lists");
     QStringList missing;
 #define REQUIRE(name) do { if (!a.name) missing << QStringLiteral(#name); } while (0)
-    REQUIRE(grouse_abi_version) REQUIRE(grouse_core_create) REQUIRE(grouse_core_free) REQUIRE(grouse_string_free);
-    REQUIRE(grouse_push_parse) REQUIRE(grouse_push_decide) REQUIRE(grouse_push_decide_run) REQUIRE(grouse_connect);
-    REQUIRE(grouse_connect_attach) REQUIRE(grouse_disconnect) REQUIRE(grouse_new_session) REQUIRE(grouse_new_session_with_mode);
-    REQUIRE(grouse_open_session) REQUIRE(grouse_refresh_session) REQUIRE(grouse_list_sessions) REQUIRE(grouse_load_cached_transcript);
-    REQUIRE(grouse_flush_caches) REQUIRE(grouse_send_prompt) REQUIRE(grouse_send_prompt_with_paths) REQUIRE(grouse_fetch_file);
-    REQUIRE(grouse_cancel) REQUIRE(grouse_set_config_option) REQUIRE(grouse_rename_session) REQUIRE(grouse_open_thread);
-    REQUIRE(grouse_current_thread_label) REQUIRE(grouse_archive_session) REQUIRE(grouse_unarchive_session) REQUIRE(grouse_delete_session);
-    REQUIRE(grouse_respond_permission) REQUIRE(grouse_status) REQUIRE(grouse_ready) REQUIRE(grouse_connected);
-    REQUIRE(grouse_set_run_summaries) REQUIRE(grouse_set_image_rescale) REQUIRE(grouse_image_rescale) REQUIRE(grouse_tasks_refresh);
-    REQUIRE(grouse_activity) REQUIRE(grouse_tasks_paint) REQUIRE(grouse_task_close) REQUIRE(grouse_task_snooze);
-    REQUIRE(grouse_task_react) REQUIRE(grouse_assistant_project) REQUIRE(grouse_run_summaries) REQUIRE(grouse_active_session_id);
-    REQUIRE(grouse_sessions) REQUIRE(grouse_session_owner) REQUIRE(grouse_all_sessions) REQUIRE(grouse_transcript);
-    REQUIRE(grouse_transcript_rich) REQUIRE(grouse_item);
-    REQUIRE(grouse_window) REQUIRE(grouse_load_older) REQUIRE(grouse_config) REQUIRE(grouse_turn_log);
-    REQUIRE(grouse_turn_diag) REQUIRE(grouse_roam_connect) REQUIRE(grouse_roam_disconnect) REQUIRE(grouse_roam_open_session);
-    REQUIRE(grouse_roam_new_session) REQUIRE(grouse_roam_new_session_cwd) REQUIRE(grouse_roam_new_session_with_mode) REQUIRE(grouse_identity_generate);
-    REQUIRE(grouse_identity_public_key) REQUIRE(grouse_card_fingerprint) REQUIRE(grouse_set_roam_identity);
-    REQUIRE(grouse_roam_card_pin) REQUIRE(grouse_roam_card_pins) REQUIRE(grouse_roam_card_pin_enroll)
-    REQUIRE(grouse_roam_card_pin_clear) REQUIRE(grouse_unstable_steer);
-    REQUIRE(grouse_unstable_export_session) REQUIRE(grouse_unstable_session_info) REQUIRE(grouse_unstable_session_project) REQUIRE(grouse_unstable_list_tools);
-    REQUIRE(grouse_unstable_session_extensions_list) REQUIRE(grouse_unstable_session_extensions_add) REQUIRE(grouse_unstable_session_extensions_remove) REQUIRE(grouse_unstable_list_global_extensions);
-    REQUIRE(grouse_unstable_extension_catalog) REQUIRE(grouse_unstable_set_extension_enabled) REQUIRE(grouse_unstable_add_extension) REQUIRE(grouse_unstable_sources_list);
-    REQUIRE(grouse_unstable_sources_create) REQUIRE(grouse_unstable_sources_delete) REQUIRE(grouse_unstable_sources_update) REQUIRE(grouse_unstable_config_read);
+    REQUIRE(grouse_abi_version); REQUIRE(grouse_core_create); REQUIRE(grouse_core_free); REQUIRE(grouse_string_free);
+    REQUIRE(grouse_push_parse); REQUIRE(grouse_push_decide); REQUIRE(grouse_push_decide_run); REQUIRE(grouse_connect);
+    REQUIRE(grouse_connect_attach); REQUIRE(grouse_disconnect); REQUIRE(grouse_new_session); REQUIRE(grouse_new_session_with_mode);
+    REQUIRE(grouse_open_session); REQUIRE(grouse_refresh_session); REQUIRE(grouse_list_sessions); REQUIRE(grouse_load_cached_transcript);
+    REQUIRE(grouse_flush_caches); REQUIRE(grouse_send_prompt); REQUIRE(grouse_send_prompt_with_paths); REQUIRE(grouse_fetch_file);
+    REQUIRE(grouse_cancel); REQUIRE(grouse_set_config_option); REQUIRE(grouse_rename_session); REQUIRE(grouse_open_thread);
+    REQUIRE(grouse_current_thread_label); REQUIRE(grouse_archive_session); REQUIRE(grouse_unarchive_session); REQUIRE(grouse_delete_session);
+    REQUIRE(grouse_respond_permission); REQUIRE(grouse_status); REQUIRE(grouse_ready); REQUIRE(grouse_connected);
+    REQUIRE(grouse_set_run_summaries); REQUIRE(grouse_set_image_rescale); REQUIRE(grouse_image_rescale); REQUIRE(grouse_tasks_refresh);
+    REQUIRE(grouse_activity); REQUIRE(grouse_tasks_paint); REQUIRE(grouse_task_close); REQUIRE(grouse_task_snooze);
+    REQUIRE(grouse_task_react); REQUIRE(grouse_assistant_project); REQUIRE(grouse_run_summaries); REQUIRE(grouse_active_session_id);
+    REQUIRE(grouse_sessions); REQUIRE(grouse_session_owner); REQUIRE(grouse_all_sessions); REQUIRE(grouse_transcript);
+    REQUIRE(grouse_transcript_rich); REQUIRE(grouse_item);
+    REQUIRE(grouse_window); REQUIRE(grouse_load_older); REQUIRE(grouse_config); REQUIRE(grouse_turn_log);
+    REQUIRE(grouse_turn_diag); REQUIRE(grouse_roam_connect); REQUIRE(grouse_roam_disconnect); REQUIRE(grouse_roam_open_session);
+    REQUIRE(grouse_roam_new_session); REQUIRE(grouse_roam_new_session_cwd); REQUIRE(grouse_roam_new_session_with_mode); REQUIRE(grouse_identity_generate);
+    REQUIRE(grouse_identity_public_key); REQUIRE(grouse_card_fingerprint); REQUIRE(grouse_set_roam_identity);
+    REQUIRE(grouse_roam_card_pin); REQUIRE(grouse_roam_card_pins); REQUIRE(grouse_roam_card_pin_enroll);
+    REQUIRE(grouse_roam_card_pin_clear); REQUIRE(grouse_unstable_steer);
+    REQUIRE(grouse_unstable_export_session); REQUIRE(grouse_unstable_session_info); REQUIRE(grouse_unstable_session_project); REQUIRE(grouse_unstable_list_tools);
+    REQUIRE(grouse_unstable_session_extensions_list); REQUIRE(grouse_unstable_session_extensions_add); REQUIRE(grouse_unstable_session_extensions_remove); REQUIRE(grouse_unstable_list_global_extensions);
+    REQUIRE(grouse_unstable_extension_catalog); REQUIRE(grouse_unstable_set_extension_enabled); REQUIRE(grouse_unstable_add_extension); REQUIRE(grouse_unstable_sources_list);
+    REQUIRE(grouse_unstable_sources_create); REQUIRE(grouse_unstable_sources_delete); REQUIRE(grouse_unstable_sources_update); REQUIRE(grouse_unstable_config_read);
     REQUIRE(grouse_unstable_config_upsert); REQUIRE(grouse_unstable_config_read_all);
     REQUIRE(grouse_unstable_config_read_ex); REQUIRE(grouse_unstable_config_upsert_ex);
     REQUIRE(grouse_unstable_config_remove);
-    REQUIRE(grouse_unstable_supported_models) REQUIRE(grouse_unstable_providers_list) REQUIRE(grouse_unstable_recipes_list);
-    REQUIRE(grouse_unstable_recipes_schedule) REQUIRE(grouse_unstable_recipes_save) REQUIRE(grouse_unstable_recipes_delete) REQUIRE(grouse_unstable_schedules_list);
-    REQUIRE(grouse_unstable_schedules_pause) REQUIRE(grouse_unstable_schedules_unpause) REQUIRE(grouse_unstable_schedules_run_now) REQUIRE(grouse_unstable_schedules_delete);
-    REQUIRE(grouse_unstable_schedules_update) REQUIRE(grouse_unstable_working_dir_update) REQUIRE(grouse_unstable_tools_call) REQUIRE(grouse_unstable_tools_call_named);
-    REQUIRE(grouse_unstable_resources_read) REQUIRE(grouse_unstable_respond_recipe_params) REQUIRE(grouse_unstable_respond_elicitation) REQUIRE(grouse_unstable_context_report);
-    REQUIRE(grouse_set_advisor) REQUIRE(grouse_advisor);
+    REQUIRE(grouse_unstable_supported_models); REQUIRE(grouse_unstable_providers_list); REQUIRE(grouse_unstable_recipes_list);
+    REQUIRE(grouse_unstable_recipes_schedule); REQUIRE(grouse_unstable_recipes_save); REQUIRE(grouse_unstable_recipes_delete); REQUIRE(grouse_unstable_schedules_list);
+    REQUIRE(grouse_unstable_schedules_pause); REQUIRE(grouse_unstable_schedules_unpause); REQUIRE(grouse_unstable_schedules_run_now); REQUIRE(grouse_unstable_schedules_delete);
+    REQUIRE(grouse_unstable_schedules_update); REQUIRE(grouse_unstable_working_dir_update); REQUIRE(grouse_unstable_tools_call); REQUIRE(grouse_unstable_tools_call_named);
+    REQUIRE(grouse_unstable_resources_read); REQUIRE(grouse_unstable_respond_recipe_params); REQUIRE(grouse_unstable_respond_elicitation); REQUIRE(grouse_unstable_context_report);
+    REQUIRE(grouse_set_advisor); REQUIRE(grouse_advisor);
 #undef REQUIRE
     if (!missing.isEmpty()) {
         qWarning() << "CoreBridge: core library is missing required grouse_* symbols:"

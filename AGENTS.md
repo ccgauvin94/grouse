@@ -25,7 +25,7 @@ the same invariant in five).
 | Normative — platform | `clients/desktop/AGENTS.md`, `clients/macos/README.md` | toolkit-specific rules |
 | Rationale / design | `docs/TRANSCRIPT_MODEL.md` | why the transcript is an item stream; historical sections are marked ARCHIVE |
 | Ledger | `docs/PARITY.md` + `scripts/check-parity.py` | per-client dispositions for every core surface |
-| Historical record | `docs/CACHE_OPEN_AUDIT.md`, `docs/QUALITY_AUDIT_2026-11-22.md`, `CHANGELOG.md` | what was found, fixed and shipped; never a claim about today's code without a status note |
+| Historical record | `docs/CACHE_OPEN_AUDIT.md`, `docs/QUALITY_AUDIT_2026-11-22.md`, `docs/VOICE_AUDIT_2026-11-24.md`, `CHANGELOG.md` | what was found, fixed and shipped; never a claim about today's code without a status note |
 | Front door / process | `README.md`, `CONTRIBUTING.md` | claims a newcomer can check, and how to work |
 
 The workflow files under `.github/workflows/` own CI's jobs, triggers and required
@@ -454,8 +454,8 @@ That directory currently holds `core.yml`, `android.yml`, `parity.yml`,
 in those workflows; QML lint and the `xvfb-run` page-load check remain manual, and
 `macos.yml` guards the Swift bindings without compiling Swift.
 
-**Releases** are cut by pushing a version tag (`git tag v0.69 && git push origin
-v0.69`). `release.yml` then builds the signed `assembleRelease` APK and the
+**Releases** are cut by pushing a version tag (`git tag v0.3 && git push origin
+v0.3`). `release.yml` then builds the signed `assembleRelease` APK and the
 Flatpak bundle and publishes them on the GitHub Release. Android signing reads
 the same env vars as local builds (`GROUSE_KEYSTORE` + the three passwords); CI
 prefers `GROUSE_KEYSTORE_BASE64` (+ the three password secrets) and falls back

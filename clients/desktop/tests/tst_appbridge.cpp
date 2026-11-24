@@ -42,7 +42,7 @@ QByteArray request(quint16 port, const QByteArray &line, const QByteArray &body 
     if (s.state() != QAbstractSocket::ConnectedState)
         return {};
     QByteArray out = line + "\r\nHost: " + host + "\r\n";
-    if (!body.isEmpty() && !extra.contains("content-type:", Qt::CaseInsensitive))
+    if (!body.isEmpty() && !extra.toLower().contains("content-type:"))
         out += "Content-Type: application/json\r\n";
     if (!extra.isEmpty())
         out += extra;

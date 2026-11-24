@@ -4,7 +4,16 @@ All notable changes to Grouse are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3] - 2026-11-24
+
+### Fixed — the desktop builds and tests again on current Qt 6/KF6
+
+- **The 2026-11-22 god-file split had left dangling state references.** `ChatController` still wrote extension/tool/peek state and the transcript index that now live on `Manager`, `TranscriptProjection` used a file-card helper left behind in the old file, `CatalogController` lost its normalized `onSessionExtensions` body, and `Manager::pushDecideRun` had no declaration. The Qt 6 headers had also removed `QJsonObject::toVariant`, `QJsonDocument::isString/string`, `QChar::isControl`, `QFileInfo::isSymlink`, `QSettings::path` and the two-argument `QByteArray::contains`; `QDBusCredentials` is now a `QVariantMap`. All of it is fixed, the `REQUIRE(...)` validation list has its missing semicolons, and the desktop build is green instead of failing with 276 compiler errors.
+- **Verification:** desktop `cmake` build + `ctest` 8/8, `qmllint` with no errors, and an `xvfb-run` page-load check (clean log, killed only by the timeout). The one stale test expectation for background-task ordering was corrected to the documented newest-first grouping.
+
+### Added — a voice audit record, with known limitations called out
+
+- **Voice was audited end to end and the findings are now written down** in [`docs/VOICE_AUDIT_2026-11-24.md`](docs/VOICE_AUDIT_2026-11-24.md). The core's sentence-sized TTS stream and the dictation RPC payloads are sound on the happy path, but voice remains Android-only with known lifecycle, request-correlation, TTS-race, error-visibility, permission and parity gaps. Those are deliberately NOT fixed in 0.3; the document names the safety pass and the file references for whoever takes it next.
 
 ### Changed — chat rows now say what kind of chat they are
 
@@ -475,7 +484,7 @@ Four read-only investigations plus a re-read of the code; the full findings are 
 > **Release-note cut-off.** The bare `grouse 0.2.x (versionCode N).` lines in this file
 > were trailers: each named the version the section ABOVE it shipped in. The five most
 > recent are promoted to the dated headings below; older ones are kept verbatim in the
-> archive section. Per-release notes stop at 0.2.118 here — later shipped versions are
+> archive section. Per-release notes resume at 0.3; the 0.2.119–0.2.x gap is
 > recorded in git history, not in this file.
 
 ## [0.2.118] - 2026-11-19

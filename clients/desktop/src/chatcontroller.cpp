@@ -101,6 +101,7 @@ bool ChatController::roamEnabled() const { return m_manager.roamEnabled(); }
 QString ChatController::workingDir() const { return m_manager.workingDir(); }
 bool ChatController::mainWireOwnsTurnState(const QString &label) const { return Manager::mainWireOwnsTurnState(label); }
 void ChatController::timingLog(const QString &line) { CoreApi::timingLog(line); }
+QString ChatController::sessionPeerLabel(const QString &sid) const { return m_manager.sessionPeerLabel(sid); }
 void ChatController::setStatus(const QString &s) { m_manager.setStatus(s); }
 void ChatController::setOnline(bool o) { m_manager.setOnline(o); }
 void ChatController::setMyDayVisible(bool v) { m_manager.setMyDayVisible(v); }
@@ -430,12 +431,12 @@ void ChatController::openRoamSession(const QString &label, const QString &sessio
     // the window shows that instead of the transport handle it opened by.
     m_currentSessionTitle = m_roamTitles.value(sessionId);
     m_tools.clear();
-    m_extDefs.clear();
-    m_catalogDefs.clear();
-    m_sessionExts.clear();
-    m_sessionRestricted.clear();
-    m_peekQueue.clear();
-    m_peekFailed.clear();
+    m_manager.m_extDefs.clear();
+    m_manager.m_catalogDefs.clear();
+    m_manager.m_sessionExts.clear();
+    m_manager.m_sessionRestricted.clear();
+    m_manager.m_peekQueue.clear();
+    m_manager.m_peekFailed.clear();
     loadToolCache(sessionId);   // best-effort memory of last run's catalogues
     publishToolGroups();
     emit m_manager.currentSessionChanged();
@@ -460,8 +461,8 @@ void ChatController::openRoamSession(const QString &label, const QString &sessio
         QElapsedTimer clock;
         clock.start();
         api.grouse_roam_open_session(h, l.constData(), sid.constData());
-        timingLog(QStringLiteral("roam open %1 worker %2ms")
-                      .arg(QString::fromUtf8(sid)).arg(clock.elapsed()));
+        CoreApi::timingLog(QStringLiteral("roam open %1 worker %2ms")
+                               .arg(QString::fromUtf8(sid)).arg(clock.elapsed()));
     });
 }
 
@@ -475,15 +476,15 @@ void ChatController::newRoamSession(const QString &label)
     m_currentSessionId.clear();
     m_currentSessionTitle.clear();
     m_tools.clear();
-    m_extDefs.clear();
-    m_catalogDefs.clear();
-    m_sessionExts.clear();
-    m_sessionRestricted.clear();
-    m_peekQueue.clear();
-    m_peekFailed.clear();
+    m_manager.m_extDefs.clear();
+    m_manager.m_catalogDefs.clear();
+    m_manager.m_sessionExts.clear();
+    m_manager.m_sessionRestricted.clear();
+    m_manager.m_peekQueue.clear();
+    m_manager.m_peekFailed.clear();
     publishToolGroups();
     m_messageModel->clear();
-    m_currentIndex = -1;
+    m_manager.m_currentIndex = -1;
     emit m_manager.currentSessionChanged();
     emit m_manager.pinnedAppsChanged();
     emit m_manager.toolsChanged();
@@ -509,15 +510,15 @@ void ChatController::newRoamSessionWithMode(const QString &label, const QString 
     m_currentSessionId.clear();
     m_currentSessionTitle.clear();
     m_tools.clear();
-    m_extDefs.clear();
-    m_catalogDefs.clear();
-    m_sessionExts.clear();
-    m_sessionRestricted.clear();
-    m_peekQueue.clear();
-    m_peekFailed.clear();
+    m_manager.m_extDefs.clear();
+    m_manager.m_catalogDefs.clear();
+    m_manager.m_sessionExts.clear();
+    m_manager.m_sessionRestricted.clear();
+    m_manager.m_peekQueue.clear();
+    m_manager.m_peekFailed.clear();
     publishToolGroups();
     m_messageModel->clear();
-    m_currentIndex = -1;
+    m_manager.m_currentIndex = -1;
     emit m_manager.currentSessionChanged();
     emit m_manager.pinnedAppsChanged();
     emit m_manager.toolsChanged();
@@ -646,16 +647,16 @@ void ChatController::openSession(const QString &sessionId)
         }
     }
     m_tools.clear();
-    m_extDefs.clear();
-    m_catalogDefs.clear();
-    m_sessionExts.clear();
-    m_sessionRestricted.clear();
-    m_peekQueue.clear();
-    m_peekFailed.clear();
+    m_manager.m_extDefs.clear();
+    m_manager.m_catalogDefs.clear();
+    m_manager.m_sessionExts.clear();
+    m_manager.m_sessionRestricted.clear();
+    m_manager.m_peekQueue.clear();
+    m_manager.m_peekFailed.clear();
     loadToolCache(sessionId);
     publishToolGroups();
     m_messageModel->clear();
-    m_currentIndex = -1;
+    m_manager.m_currentIndex = -1;
     emit m_manager.currentSessionChanged();
     emit m_manager.pinnedAppsChanged();
     emit m_manager.toolsChanged();
@@ -689,8 +690,8 @@ void ChatController::openSession(const QString &sessionId)
         // Reported HERE, not handed to the Window: the core emits its paint DURING
         // the call, so a value posted after it reaches the main thread too late and
         // the paint line read zeros (measured: "worker 0ms: open 0, cache 0").
-        timingLog(QStringLiteral("open %1 worker %2ms")
-                      .arg(QString::fromUtf8(sid)).arg(clock.elapsed()));
+        CoreApi::timingLog(QStringLiteral("open %1 worker %2ms")
+                               .arg(QString::fromUtf8(sid)).arg(clock.elapsed()));
     });
 }
 
@@ -726,7 +727,7 @@ void ChatController::reloadSessionFromStart()
     // ONE at a time: a second press while the replay is in flight would clear
     // the transcript again mid-rebuild and restart the bar. The core refuses the
     // repeat as well; refusing here keeps the button honest.
-    if (m_reloading)
+    if (m_manager.m_reloading)
         return;
     setStatus(QStringLiteral("reloading from the start…"));
     refreshSessionWith(1);
@@ -765,14 +766,14 @@ void ChatController::newChatInMode(const QString &mode)
     m_currentSessionId.clear();
     m_currentSessionTitle.clear();
     m_tools.clear();
-    m_extDefs.clear();
-    m_catalogDefs.clear();
-    m_sessionExts.clear();
-    m_sessionRestricted.clear();
-    m_peekQueue.clear();
-    m_peekFailed.clear();
+    m_manager.m_extDefs.clear();
+    m_manager.m_catalogDefs.clear();
+    m_manager.m_sessionExts.clear();
+    m_manager.m_sessionRestricted.clear();
+    m_manager.m_peekQueue.clear();
+    m_manager.m_peekFailed.clear();
     m_messageModel->clear();
-    m_currentIndex = -1;
+    m_manager.m_currentIndex = -1;
     publishToolGroups();
     emit m_manager.currentSessionChanged();
     emit m_manager.pinnedAppsChanged();
@@ -1264,113 +1265,6 @@ QStringList ChatController::attachmentPaths(const QVariantList &paths)
     }
     return out;
 }
-
-/// The kind of a file, for the second line of an attachment card. MIME first
-/// (authoritative), the name's suffix second — the stub recovered from a replay
-/// carries a name only. Must agree with the Android client's mapping, which is
-/// why it is a table rather than a per-call decision.
-namespace {
-QString attachmentKind(const QString &mime, const QString &name)
-{
-    const QString m = mime.toLower();
-    const QString ext = name.section(QLatin1Char('.'), -1).toLower();
-    if (m == QLatin1String("application/pdf") || ext == QLatin1String("pdf"))
-        return QStringLiteral("PDF");
-    if (m.contains(QLatin1String("wordprocessingml")) || m == QLatin1String("application/msword")
-        || m.contains(QLatin1String("opendocument.text"))
-        || QStringList{"doc", "docx", "odt", "rtf", "pages"}.contains(ext))
-        return QStringLiteral("Document");
-    if (m.contains(QLatin1String("spreadsheetml")) || m == QLatin1String("application/vnd.ms-excel")
-        || m.contains(QLatin1String("opendocument.spreadsheet")) || m == QLatin1String("text/csv")
-        || QStringList{"xls", "xlsx", "ods", "csv", "numbers"}.contains(ext))
-        return QStringLiteral("Spreadsheet");
-    if (m.contains(QLatin1String("presentationml")) || m == QLatin1String("application/vnd.ms-powerpoint")
-        || m.contains(QLatin1String("opendocument.presentation"))
-        || QStringList{"ppt", "pptx", "odp", "key"}.contains(ext))
-        return QStringLiteral("Presentation");
-    if (m.startsWith(QLatin1String("image/")))
-        return QStringLiteral("Image");
-    if (m.startsWith(QLatin1String("audio/")))
-        return QStringLiteral("Audio");
-    if (m.startsWith(QLatin1String("video/")))
-        return QStringLiteral("Video");
-    if (m.contains(QLatin1String("zip")) || m.contains(QLatin1String("gzip"))
-        || m.contains(QLatin1String("tar"))
-        || QStringList{"zip", "gz", "tar", "7z", "rar", "bz2", "xz"}.contains(ext))
-        return QStringLiteral("Archive");
-    if (m.contains(QLatin1String("json")) || m.contains(QLatin1String("javascript"))
-        || m.contains(QLatin1String("xml")) || m.contains(QLatin1String("html"))
-        || QStringList{"json", "js", "ts", "xml", "html", "css", "py", "rs", "cpp", "sh", "yaml", "yml"}.contains(ext))
-        return QStringLiteral("Code");
-    if (m.startsWith(QLatin1String("text/")) || QStringList{"txt", "md", "log"}.contains(ext))
-        return QStringLiteral("Text");
-    return QStringLiteral("File");
-}
-
-/// The Freedesktop icon for the same classification (Kirigami.Icon takes theme names).
-QString attachmentIcon(const QString &mime, const QString &name)
-{
-    const QString kind = attachmentKind(mime, name);
-    if (kind == QLatin1String("PDF"))
-        return QStringLiteral("application-pdf");
-    if (kind == QLatin1String("Document"))
-        return QStringLiteral("x-office-document");
-    if (kind == QLatin1String("Spreadsheet"))
-        return QStringLiteral("x-office-spreadsheet");
-    if (kind == QLatin1String("Presentation"))
-        return QStringLiteral("x-office-presentation");
-    if (kind == QLatin1String("Image"))
-        return QStringLiteral("image-x-generic");
-    if (kind == QLatin1String("Audio"))
-        return QStringLiteral("audio-x-generic");
-    if (kind == QLatin1String("Video"))
-        return QStringLiteral("video-x-generic");
-    if (kind == QLatin1String("Archive"))
-        return QStringLiteral("application-x-archive");
-    if (kind == QLatin1String("Code"))
-        return QStringLiteral("text-x-script");
-    if (kind == QLatin1String("Text"))
-        return QStringLiteral("text-x-generic");
-    return QStringLiteral("application-octet-stream");
-}
-
-/// "812 B" / "106 KB" / "25.3 MB", rounding the way the phone does: one decimal
-/// only while it says something. `<= 0` is "unknown" — a replayed stub knows no
-/// size, and a card that prints 0 B for a 26 MB deck is worse than one that
-/// prints nothing.
-QString humanBytes(qint64 bytes)
-{
-    if (bytes <= 0)
-        return QString();
-    if (bytes < 1024)
-        return QStringLiteral("%1 B").arg(bytes);
-    static const char *units[] = {"KB", "MB", "GB", "TB"};
-    double value = bytes / 1024.0;
-    int unit = 0;
-    while (value >= 1024.0 && unit < 3) {
-        value /= 1024.0;
-        unit++;
-    }
-    const bool whole = qFuzzyCompare(value, std::floor(value));
-    const QString number = (value >= 100.0 || whole) ? QString::number(value, 'f', 0)
-                                                     : QString::number(value, 'f', 1);
-    return QStringLiteral("%1 %2").arg(number, QString::fromLatin1(units[unit]));
-}
-
-/// One file as the card needs it: name, kind, icon and size label.
-QVariantMap fileCard(const QString &name, const QString &mime, qint64 bytes)
-{
-    const QString kind = attachmentKind(mime, name);
-    const QString size = humanBytes(bytes);
-    return QVariantMap{{"name", name},
-                       {"kind", kind},
-                       {"icon", attachmentIcon(mime, name)},
-                       {"size", size},
-                       // "PDF · 106 KB", or the kind alone when the size is unknown
-                       {"subtitle", size.isEmpty() ? kind : QStringLiteral("%1 · %2").arg(kind, size)}};
-}
-
-} // namespace
 
 void ChatController::cancelTurn()
 {

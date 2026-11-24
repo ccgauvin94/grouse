@@ -2084,7 +2084,7 @@ QVariant ownerFromWire(const QString &raw)
     if (s.isEmpty())
         return {};
     if (s.startsWith(QLatin1Char('{'))) {
-        const QVariant v = QJsonDocument::fromJson(s.toUtf8()).object().toVariant();
+        const QVariant v = QJsonDocument::fromJson(s.toUtf8()).toVariant();
         if (!v.toMap().isEmpty())
             return v;
     }
@@ -2635,7 +2635,7 @@ bool Manager::openLocalFile(const QString &localPath)
     if (localPath.isEmpty())
         return false;
     const QFileInfo info(localPath);
-    if (!info.isAbsolute() || !info.isFile() || info.isSymlink())
+    if (!info.isAbsolute() || !info.isFile() || info.isSymLink())
         return false;
     const QString canonical = info.canonicalFilePath();
     if (canonical.isEmpty() || !QFileInfo(canonical).isFile())
@@ -2859,7 +2859,7 @@ void Manager::onTools(const QVariantList &tools)
 }
 QList<Manager::ExtDef> Manager::parseExtDefs(const QString &json)
 {
-    return m_catalog.parseExtDefs(json);
+    return CatalogController::parseExtDefs(json);
 }
 void Manager::onExtensions(const QVariantList &extensions)
 {

@@ -53,13 +53,14 @@ QVariantMap CoreApi::pinMapFromJson(const QString &raw)
     if (raw.trimmed().isEmpty())
         return {};
     const QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8());
-    if (doc.isObject())
-        return doc.object().toVariant().toMap();
+    const QVariant root = doc.toVariant();
+    if (root.userType() == QMetaType::QVariantMap)
+        return root.toMap();
     // lib.rs's roam_card_pins() already returns a JSON string; some C ABI
     // spellings hand that string back as a JSON string value rather than an
     // object. Unwrap once, never parse a peer-supplied value.
-    if (doc.isString())
-        return pinMapFromJson(doc.string());
+    if (root.userType() == QMetaType::QString)
+        return pinMapFromJson(root.toString());
     return {};
 }
 
@@ -68,7 +69,10 @@ QString CoreApi::pinStringFromJson(const QString &raw)
     if (raw.trimmed().isEmpty() || raw.trimmed() == QLatin1String("null"))
         return QString();
     const QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8());
-    return doc.isString() ? doc.string() : (doc.isObject() ? QString() : raw.trimmed());
+    const QVariant root = doc.toVariant();
+    if (root.userType() == QMetaType::QString)
+        return root.toString();
+    return root.userType() == QMetaType::QVariantMap ? QString() : raw.trimmed();
 }
 
 QVariantMap CoreApi::parsePermissionRequest(const QString &json)
@@ -83,7 +87,7 @@ QVariantMap CoreApi::parsePermissionRequest(const QString &json)
     QVariant owner = req.value("owner").toVariant();
     // Some C ABI spellings pass SessionOwner as a JSON *string*, not an object.
     if (owner.userType() == QMetaType::QString && owner.toString().trimmed().startsWith(QLatin1Char('{')))
-        owner = QJsonDocument::fromJson(owner.toString().trimmed().toUtf8()).object().toVariant();
+        owner = QJsonDocument::fromJson(owner.toString().trimmed().toUtf8()).toVariant();
 
     QVariantList options;
     for (const auto &opt : req.value("options").toArray()) {

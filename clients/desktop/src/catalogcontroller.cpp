@@ -830,45 +830,66 @@ void CatalogController::saveToolCache(const QString &sessionId) const
     }
 }
 
-void CatalogController::onSessionExtensions(const QString &sid, const QString &json)
+void CatalogController::onSessionExtensions(const QStringList &names, const QSet<QString> &restricted)
 {
-    // Stale replies from a session the user already left must not clobber the
-    // current sheet's switch state (Android's onSessionExtensions guards the same).
-    if (!m_currentSessionId.isEmpty() && sid != m_currentSessionId)
-        return;
-    QStringList names;
-    QSet<QString> restricted;
-    for (const auto &el : parseArr(json)) {
-        if (el.isObject()) {
-            // Current goose WRAPS each entry: {"extension": {...}, "extensionKey": "..."}.
-            // Older servers sent the extension object bare. Resolve the KEY either way
-            // (extensionKey > extension.name > server.name) — remove is keyed by it, and
-            // display names ("Extension Manager") do not match the tool prefixes
-            // ("extensionmanager__…") that the catalog/pool grouping needs.
-            const QVariantMap m = el.toObject().toVariantMap();
-            QVariantMap inner = m.value("extension").toMap();
-            if (inner.isEmpty())
-                inner = m;
-            QString key = m.value("extensionKey").toString();
-            if (key.isEmpty())
-                key = inner.value("name").toString();
-            if (key.isEmpty())
-                key = inner.value("server").toMap().value("name").toString();
-            if (!key.isEmpty()) {
-                names << key;
-                // A non-empty session allowlist means the ACTIVE prefix is not the
-                // whole list. Without one an attached extension runs unfiltered,
-                // so its active tools ARE the catalogue (see toolGroups).
-                if (!inner.value("available_tools").toList().isEmpty())
-                    restricted.insert(key);
+    m_sessionExts = names;
+    m_sessionRestricted = restricted;
+    // Deferred peek commit (see onTools): the re-list that always follows a
+    // session/extensions/add decides whether the peeked row really attached.
+    if (!m_discoveringExt.isEmpty()) {
+        const QString target = m_discoveringExt;
+        const bool attachedNow = names.contains(target);
+        const bool wasAttached = m_discoveringAttached;
+        m_discoveringExt.clear();
+        m_peekQueue.removeAll(target);       // this row is handled (or was repaired)
+        if (!m_peekQueue.isEmpty())
+            m_peekTimer->start(400);
+        if (attachedNow) {
+            m_toolCatalog[target] = m_discoveringFull;
+            if (wasAttached) {
+                // Put the session's real restriction back (empty allowlist = all).
+                const ExtDef *d = extDef(target);
+                const QStringList allowed = d ? d->availableTools : QStringList();
+                setSessionTools(target, allowed.isEmpty() ? m_discoveringFull : allowed);
+            } else {
+                // It was detached before the peek — detach it again; its tool
+                // list is now known without having paid the context cost.
+                m_sessionExts.removeAll(target);
+                m_sessionRestricted.remove(target);
+                if (m_bridge && m_bridge->isAvailable()) {
+                    const QByteArray sid = m_currentSessionId.toUtf8();
+                    m_bridge->api().grouse_unstable_session_extensions_remove(
+                        m_bridge->handle(), sid.constData(), target.toUtf8().constData());
+                    // The peek's tools reply left the unfiltered set in m_tools
+                    // and remove re-lists nothing — re-pull the truth.
+                    m_bridge->api().grouse_unstable_list_tools(m_bridge->handle(), sid.constData());
+                }
             }
-        } else {
-            const QString s = el.toString();
-            if (!s.isEmpty())
-                names << s;
+        } else if (wasAttached) {
+            // The peek's add failed (extension won't start here) but the peek
+            // had to remove it first — repair by re-adding the real profile.
+            const ExtDef *d = extDef(target);
+            if (d && m_bridge && m_bridge->isAvailable()) {
+                const QByteArray sid = m_currentSessionId.toUtf8();
+                m_bridge->api().grouse_unstable_session_extensions_add(
+                    m_bridge->handle(), sid.constData(),
+                    QJsonDocument(d->raw).toJson(QJsonDocument::Compact).constData());
+            }
         }
+        if (!attachedNow) {
+            // A peek that never attached means the extension would not start —
+            // stop THIS session's sweep from re-dialing a dead endpoint every
+            // pass (one failed client-init per chat was the error-bubble bug).
+            // Manual clicks bypass the memo; a fresh chat gets one retry.
+            m_peekFailed.insert(target);
+        }
+        m_discoveringFull.clear();
+        m_discoveringAttached = false;
+        persistCatalogs();
     }
-    onSessionExtensions(names, restricted);
+    buildPeekQueue();
+    publishToolGroups();
+    saveToolCache(m_currentSessionId);
 }
 
 void CatalogController::buildPeekQueue()

@@ -14,7 +14,7 @@ bool markdownUrlAllowed(const QString &url)
     // No embedded whitespace/controls (a "java\nscript:" trick must not parse
     // as javascript:) and no backslash separator tricks either.
     for (const QChar &c : url) {
-        if (c.isSpace() || c.isControl() || c == u'\\')
+        if (c.isSpace() || c.category() == QChar::Other_Control || c == u'\\')
             return false;
     }
     const QUrl parsed(url);

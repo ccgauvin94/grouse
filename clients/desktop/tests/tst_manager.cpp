@@ -673,16 +673,12 @@ void TstManager::mainWireReadyOnlyClearsItsOwnTurns()
 void TstManager::tlsVerificationOptOutIsPersistedAndConfigurable()
 {
     // Isolate QSettings so "no stored value" really means no value, and so the
-    // suite never reads or rewrites a developer install's TLS opt-in.
-    const QString originalPath = QSettings::path(QSettings::NativeFormat, QSettings::UserScope);
-    QTemporaryDir dir;
+    // suite never reads or rewrites a developer install's TLS opt-in. Qt 6
+    // removed the path getter, but setPath still works; keep the temp dir alive
+    // for the rest of the process so later Managers see the same empty store.
+    static QTemporaryDir dir;
     QVERIFY(dir.isValid());
     QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, dir.path());
-    struct RestorePath {
-        explicit RestorePath(const QString &p) : path(p) {}
-        ~RestorePath() { QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, path); }
-        QString path;
-    } restore(originalPath);
 
     QCOMPARE(Manager::DEFAULT_ACCEPT_INVALID_CERTS, false);
     {
@@ -941,8 +937,10 @@ void TstManager::activityLanesAreGroupedNewestFirst()
         QCOMPARE(row.value(QStringLiteral("finished")).toBool(),
                  row.value(QStringLiteral("section")).toString() == QStringLiteral("finished"));
     }
+    // Both groups read newest first: the core emits lanes oldest first, so the
+    // finished tail is done-2, stale, done-1 — not the raw snapshot order.
     const QStringList expectedIds{QStringLiteral("live-2"), QStringLiteral("live-1"),
-                                  QStringLiteral("stale"), QStringLiteral("done-2"),
+                                  QStringLiteral("done-2"), QStringLiteral("stale"),
                                   QStringLiteral("done-1")};
     const QStringList expectedSections{QStringLiteral("running"), QStringLiteral("running"),
                                        QStringLiteral("finished"), QStringLiteral("finished"),

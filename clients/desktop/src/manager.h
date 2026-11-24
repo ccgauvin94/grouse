@@ -70,6 +70,8 @@ class Manager : public QObject
     friend class TranscriptProjection;
     friend class CatalogController;
     friend class ChatController;
+    friend class PushClient;
+    friend class TstManager;
     Q_PROPERTY(QString host READ host WRITE setHost NOTIFY settingsChanged)
     Q_PROPERTY(QString port READ port WRITE setPort NOTIFY settingsChanged)
     Q_PROPERTY(QString secretKey READ secretKey WRITE setSecretKey NOTIFY settingsChanged)
@@ -472,6 +474,10 @@ public:
     Q_INVOKABLE QString pushParse(const QString &raw) const;
     Q_INVOKABLE QString pushDecide(const QString &envelopeJson,
                                    const QString &contextJson) const;
+    /** Same core policy with the run id the live path already announced, so the
+     *  push that arrives seconds later can be suppressed. */
+    QString pushDecideRun(const QString &envelopeJson, const QString &contextJson,
+                          const QString &announcedRunId) const;
     // --- debug surface (behind `debugTools`, default OFF) ---------------------
     /** The core's turn log: one line per lifecycle event, newest last, panics
      *  appended. Plain text — display it verbatim, never as HTML. */

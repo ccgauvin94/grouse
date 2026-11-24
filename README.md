@@ -97,7 +97,7 @@ does **not** compile Swift. See `clients/macos/README.md`.
 ## Releasing
 
 ```sh
-git tag v0.2.0 && git push origin v0.2.0
+git tag v0.3 && git push origin v0.3
 ```
 
 The tag runs the release workflow, which builds the signed Android APK and the
