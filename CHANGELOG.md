@@ -21,9 +21,10 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ### Fixed — the desktop Settings dialog no longer collapses to a sliver
 
-- **Settings now has explicit dimensions.** QQC2 dialogs do not infer a usable width from a
-  `FormLayout`; the dialog was squeezed to its Close button and every field was clipped. It now
-  opens at a readable width with a window-capped height, while the form itself still scrolls.
+- **Settings auto-sizes again, with bounds.** QQC2 dialogs do not infer a usable width from a
+  `FormLayout`; the dialog was squeezed to its Close button and every field was clipped. The form
+  now reports its natural width, and the dialog uses that implicit size clamped to 90% of the
+  window width, with a window-capped height and scrolling.
 
 ### Fixed — a backgrounded phone no longer lets the wire die mid-turn
 

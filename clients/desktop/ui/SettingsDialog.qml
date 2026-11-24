@@ -12,12 +12,22 @@ Controls.Dialog {
     modal: true
     standardButtons: Controls.Dialog.Close
     closePolicy: Controls.Popup.CloseOnEscape
-    // QQC2 dialogs do not derive a usable width from a FormLayout: without an
-    // explicit size this collapses to the Close button and clips every field.
-    width: Kirigami.Units.gridUnit * 34
-    height: Math.min(Kirigami.Units.gridUnit * 44,
-                     parent && parent.Window.window ? parent.Window.window.height * 0.85
-                                                    : Kirigami.Units.gridUnit * 44)
+    // QQC2 Dialog does not infer a usable width from the embedded FormLayout/
+    // ScrollView; the form's own implicit size is exposed here and then bounded
+    // by the window. This keeps long labels readable on a 4K screen without
+    // letting the dialog outgrow a laptop display.
+    implicitWidth: Math.min(Kirigami.Units.gridUnit * 42,
+                            Math.max(Kirigami.Units.gridUnit * 30,
+                                     contentItem.implicitWidth + leftPadding + rightPadding))
+    implicitHeight: Math.min(Kirigami.Units.gridUnit * 44,
+                             parent && parent.Window.window
+                                 ? parent.Window.window.height * 0.85
+                                 : Kirigami.Units.gridUnit * 44)
+    width: Math.min(implicitWidth,
+                    parent && parent.Window.window
+                        ? parent.Window.window.width * 0.9
+                        : implicitWidth)
+    height: implicitHeight
 
     signal openGlobalTools()
     signal openTurnLog()
@@ -93,7 +103,9 @@ Controls.Dialog {
 
     contentItem: ColumnLayout {
         spacing: Kirigami.Units.smallSpacing
-        implicitWidth: 520
+        // The form reports its own natural width; the dialog adds padding and
+        // clamps it. The old literal 520 clipped newly added long labels.
+        implicitWidth: form.implicitWidth + Kirigami.Units.gridUnit * 2
 
         Controls.ScrollView {
             id: scroll
