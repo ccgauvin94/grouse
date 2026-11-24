@@ -168,7 +168,13 @@ jobs:
           [[ -n "$SDK" && -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]] || {
             echo "::error::runner Android SDK cmdline-tools not found"; exit 1; }
           if [[ ! -d "$SDK/ndk/$NDK_VERSION" ]]; then
+            # `yes` gets SIGPIPE once sdkmanager has read enough licenses. With
+            # pipefail on, that benign exit 1 failed the whole gate before NDK
+            # installation even started; turn it off for this one pipeline and
+            # keep sdkmanager's own status as the result.
+            set +o pipefail
             yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+            set -o pipefail
             "$SDK/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION"
           fi
           echo "ANDROID_NDK_HOME=$SDK/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
