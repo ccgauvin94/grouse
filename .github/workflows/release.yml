@@ -117,8 +117,9 @@ jobs:
           # parse by whitespace and keep stderr so a verifier failure is visible.
           CERTS="$("$BT/apksigner" verify --print-certs "$APK" 2>&1 || true)"
           printf '%s\n' "$CERTS"
-          GOT="$(printf '%s\n' "$CERTS" | tr -d '\r:' | tr 'A-F' 'a-f' \
-            | awk '/certificate SHA-256 digest/{print $NF; exit}')"
+          GOT="$(printf '%s\n' "$CERTS" \
+            | awk '/certificate SHA-256 digest/{print $NF; exit}' \
+            | tr -d ':' | tr 'A-F' 'a-f')"
           if [[ "$GOT" != "$GROUSE_RELEASE_SIGNER_SHA256" ]]; then
             echo "::error::APK signer ${GOT:-<none>} is not the pinned release key"
             exit 1
