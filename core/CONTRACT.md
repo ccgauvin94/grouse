@@ -836,6 +836,17 @@ Separate `GrouseUnstable` interface, clearly marked for retirement. Methods
 - `list_global_extensions()`, `set_extension_enabled(config_key, enabled)`, `add_extension(…)` — `set_extension_enabled` takes the global list's `configKey` (goose renamed the wire param from `name` and rejects it now)
 - `sources_list/create/delete/update` (projects + skills) — `sourcesCreate(type, name, description, content)` creates a GLOBAL source; project-scoped skills were removed (goose is migrating sources CRUD out of the server — grouse#5)
 - `config_read(key)`, `config_upsert(key, value)`, `supported_models(provider)`
+- ACP-only global config surface: `config_read_all()` emits `on_config_value(key, value)` for
+  every NON-SECRET config.yaml entry goose returns via `_goose/unstable/config/read-all`,
+  sorted by key (no client-side file/env access and no invented values). `config_read_ex(key,
+  is_secret)` and `config_upsert_ex(key, value, is_secret)` add goose's `isSecret` field; a
+  an explicit read is emitted as `on_config_value("secret:<key>", masked_value)` or
+  `on_config_value("config:<key>", value)` so an ordinary key and a secret of the same name
+  cannot be conflated (the callback has no `isSecret` argument). Bare keys from `read-all`
+  and legacy `config_read` remain ordinary.
+  `config_remove(key, is_secret)` calls `_goose/unstable/config/remove`; the caller re-reads to
+  confirm. Secrets are NOT enumerable through goose's ACP surface — a client can only name one
+  it already knows. Changes made here apply to new sessions; process env still overrides config.
 - `resources_read(session_id, uri, extension)` → app html
 - `recipes_list/schedule/save/delete`, `schedules_list/pause/unpause/run_now/delete/update`
 - `working_dir_update(session_id, dir)`; `tools_call(session_id, name, args)` is

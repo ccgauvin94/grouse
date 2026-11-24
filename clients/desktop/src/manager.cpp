@@ -48,6 +48,23 @@
 
 
 
+namespace {
+// The editor NEVER receives a secret's wire value (masked or otherwise): the
+// only thing QML needs to know is "this row is secret, replacing is the only
+// write". Keeping the mask here means one spelling across the property and the
+// on_config_value fold.
+QString secretConfigMask()
+{
+    return QStringLiteral("\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022");
+}
+
+// config_read_ex(key, true) answers on_config_value with this prefix: the
+// callback has no is_secret field, and goose may hold an ordinary key and a
+// secret of the same name. Strip the transport marker before touching the map.
+constexpr QLatin1String kSecretConfigPrefix("secret:");
+constexpr QLatin1String kPlainConfigPrefix("config:");
+} // namespace
+
 // ---------------------------------------------------------------------------
 // Implementation notes
 //
@@ -1228,6 +1245,49 @@ void Manager::readServerConfig(const QString &key)
 {
     m_catalog.readServerConfig(key);
 }
+
+void Manager::refreshGooseConfig()
+{
+    m_catalog.refreshGooseConfig();
+}
+
+void Manager::readGooseConfig(const QString &key, bool isSecret)
+{
+    m_catalog.readGooseConfig(key, isSecret);
+}
+
+void Manager::setGooseConfig(const QString &key, const QString &value, bool isSecret)
+{
+    m_catalog.setGooseConfig(key, value, isSecret);
+}
+
+void Manager::removeGooseConfig(const QString &key, bool isSecret)
+{
+    m_catalog.removeGooseConfig(key, isSecret);
+}
+
+QVariantList Manager::gooseConfigRows() const
+{
+    QStringList keys = m_serverConfig.keys();
+    // A secret key is absent from read-all. Keep the row visible while this
+    // process knows about it, so the user can overwrite or delete it.
+    for (const QString &key : m_gooseSecretKeys) {
+        if (!keys.contains(key))
+            keys.append(key);
+    }
+    keys.sort(Qt::CaseInsensitive);
+
+    QVariantList rows;
+    rows.reserve(keys.size());
+    for (const QString &key : keys) {
+        const bool secret = m_gooseSecretKeys.contains(key);
+        rows << QVariantMap{{QStringLiteral("key"), key},
+                            {QStringLiteral("value"),
+                             secret ? secretConfigMask() : m_serverConfig.value(key).toString()},
+                            {QStringLiteral("secret"), secret}};
+    }
+    return rows;
+}
 void Manager::refreshSupportedModels(const QString &providerId)
 {
     m_catalog.refreshSupportedModels(providerId);
@@ -2334,7 +2394,22 @@ void Manager::coreOnSessionExtensions(const QString &sid, const QString &json)
 
 void Manager::coreOnConfigValue(const QString &key, const QString &value)
 {
-    onServerConfigValue(key, value);
+    const bool secretReply = key.startsWith(kSecretConfigPrefix);
+    const bool plainReply = key.startsWith(kPlainConfigPrefix);
+    const QString bare = secretReply ? key.mid(kSecretConfigPrefix.size())
+                          : plainReply ? key.mid(kPlainConfigPrefix.size())
+                                       : key;
+    if (secretReply)
+        m_gooseSecretKeys.insert(bare);
+    if (secretReply) {
+        // The core's read_ex reply is masked, but trusting that shape is how a
+        // future core spelling (or a plain read on the same key) leaks a secret
+        // into a QML property. Store the mask, never the value.
+        m_serverConfig[bare] = secretConfigMask();
+        emit serverConfigChanged();
+        return;
+    }
+    onServerConfigValue(bare, value);
 }
 
 void Manager::coreOnSupportedModels(const QString &provider, const QString &json)

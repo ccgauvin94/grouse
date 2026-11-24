@@ -18,8 +18,8 @@ use async_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, 
 use async_tungstenite::tungstenite::Message as WsMessage;
 use futures::stream::StreamExt;
 use grouse_core::{
-    ConfigOption, ConnectionStatus, Core, CoreListener, PermissionRequest, ProjectSummary,
-    SessionSummary, TranscriptOp,
+    ConfigOption, ConnectionStatus, Core, CoreListener, GrouseUnstable, GrouseUnstableListener,
+    PermissionRequest, ProjectSummary, SessionSummary, TranscriptOp,
 };
 pub(crate) use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -123,6 +123,87 @@ impl CoreListener for RecordingListener {
     }
 }
 
+/// Events from the independently constructed unstable shim. Kept separate from
+/// `Ev` (the Core's listener): the shim has its own callback interface, and the
+/// wire test needs to tell its config replies apart from Core paint events.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum UEv {
+    ConfigValue(String, String),
+    Error(String, String),
+}
+
+struct UnstableRecorder {
+    tx: Sender<UEv>,
+}
+
+impl UnstableRecorder {
+    fn new(tx: Sender<UEv>) -> Self {
+        Self { tx }
+    }
+}
+
+macro_rules! ignored_unstable_callbacks {
+    ($($method:ident($($arg:ident: $ty:ty),*)),* $(,)?) => {
+        $(
+            fn $method(&self, $($arg: $ty),*) {}
+        )*
+    };
+}
+
+impl GrouseUnstableListener for UnstableRecorder {
+    ignored_unstable_callbacks! {
+        on_export(_data: String),
+        on_recipe_params(_owner: grouse_core::SessionOwner, _request_id: String, _parameters: String),
+        on_elicitation(_owner: grouse_core::SessionOwner, _request_id: String, _schema: String),
+        on_compaction_status(_message: String),
+        on_usage(_used: i64, _size: i64, _cost: f64),
+        on_message_usage(_output_tokens: u64, _elapsed_ms: u64, _time_to_first_token_ms: u64, _cost: f64),
+        on_app_resource(_key: String, _html: String),
+        on_recipes(_recipes: String),
+        on_schedules(_schedules: String),
+        on_projects(_projects: String),
+        on_skills(_skills: String),
+        on_tools(_session_id: String, _tools: String),
+        on_extensions(_extensions: String),
+        on_session_extensions(_session_id: String, _extensions: String),
+        on_extension_catalog(_session_id: String, _extensions: String),
+        on_supported_models(_provider: String, _models: String),
+        on_providers(_providers: String),
+        on_session_probe(_session_id: String, _updated_at: String, _message_count: i64),
+        on_context_report(_session_id: String, _report: String),
+        on_tool_result(_text: String, _is_error: bool),
+        on_dictation_config(_providers: String),
+        on_transcript(_text: String),
+    }
+
+    fn on_config_value(&self, key: String, value: String) {
+        let _ = self.tx.send(UEv::ConfigValue(key, value));
+    }
+
+    fn on_error(&self, method: String, message: String) {
+        let _ = self.tx.send(UEv::Error(method, message));
+    }
+}
+
+/// Wait for a shim event matching `pred`, skipping unrelated traffic.
+pub(crate) fn wait_for_unstable<F: Fn(&UEv) -> bool>(
+    rx: &Receiver<UEv>,
+    pred: F,
+    what: &str,
+) -> UEv {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(ev) if pred(&ev) => return ev,
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => panic!("shim listener dropped while waiting for {what}"),
+        }
+    }
+    panic!("timed out waiting for {what}");
+}
+
 /// A rich cache-seed item (the cache is the item list now).
 pub(crate) fn item(id: &str, kind: grouse_core::ItemKind, text: &str) -> grouse_core::Item {
     grouse_core::Item {
@@ -185,6 +266,13 @@ pub(crate) fn wait_for_frames(server: &FakeServer, method: &str, count: usize, w
 
 static HARNESS_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// `spine::current_conn()` is process-global, and the unstable shim resolves it on
+/// EVERY call. Two wires connecting concurrently can therefore send an intent to
+/// the wrong fake server (which flags it as a protocol violation). Wire tests hold
+/// this for their whole lifetime — their own cache dir stays private, only the
+/// connection registry is shared.
+static WIRE_SEQUENCE: Mutex<()> = Mutex::new(());
+
 /// RAII cache directory. Removed on drop even when a test panics, so a failed
 /// wire test leaves no state behind for the next one.
 struct UniqueDir(PathBuf);
@@ -196,6 +284,7 @@ impl Drop for UniqueDir {
 }
 
 pub(crate) struct SpineHarness {
+    _wire_sequence: parking_lot::MutexGuard<'static, ()>,
     _dir: UniqueDir,
     /// Protocol-oracle findings from the fake server. Any entry fails the test
     /// at harness drop: a misspelled method/param can no longer be answered
@@ -228,6 +317,14 @@ impl SpineHarness {
         )
     }
 
+    /// The unstable shim is constructed independently of `Core` (it resolves the live
+    /// connection through the spine registry per call), so tests build it the same way
+    /// the C ABI does, with their own recorder.
+    pub(crate) fn unstable(&self) -> (Arc<GrouseUnstable>, Receiver<UEv>) {
+        let (tx, rx) = mpsc::channel();
+        (GrouseUnstable::new(Box::new(UnstableRecorder::new(tx))), rx)
+    }
+
     pub(crate) fn server(&self) -> (Arc<FakeServer>, u16) {
         let (port_tx, port_rx) = mpsc::channel();
         let server = FakeServer::spawn(port_tx, self.violations.clone());
@@ -256,11 +353,13 @@ impl Drop for SpineHarness {
 }
 
 pub(crate) fn spine_harness() -> SpineHarness {
+    let wire_sequence = WIRE_SEQUENCE.lock();
     let seq = HARNESS_SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("grouse-spine-{}-{seq}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create private harness dir");
     SpineHarness {
+        _wire_sequence: wire_sequence,
         _dir: UniqueDir(dir),
         violations: Arc::new(Mutex::new(Vec::new())),
     }
@@ -461,6 +560,10 @@ pub(crate) fn check_request(method: &str, params: &Value) -> Result<(), String> 
         "session/set_mode" => &["sessionId", "modeId"],
         "_goose/unstable/session/info" => &["sessionId"],
         "_goose/unstable/session/conversation/truncate" => &["sessionId", "truncateFrom"],
+        "_goose/unstable/config/read-all" => &[],
+        "_goose/unstable/config/read" => &["key", "isSecret"],
+        "_goose/unstable/config/upsert" => &["key", "value", "isSecret"],
+        "_goose/unstable/config/remove" => &["key", "isSecret"],
         other => return Err(format!("unknown RPC method {other:?} — script it in the fake")),
     };
     for key in required {
@@ -906,6 +1009,24 @@ async fn serve_connection(server: Arc<FakeServer>, stream: tokio::net::TcpStream
                 "modeId": params.get("modeId").cloned().unwrap_or(Value::Null)
             }),
             "_goose/unstable/session/conversation/truncate" => json!({}),
+            // Goose's ConfigReadAllResponse: a HashMap of NON-SECRET values. Key
+            // order is deliberately not the wire's — the shim must sort before
+            // emitting so the UI paints deterministically.
+            "_goose/unstable/config/read-all" => json!({
+                "config": {
+                    "max_turns": 200,
+                    "GOOSE_MODE": "auto",
+                    "verbose": true
+                }
+            }),
+            // Derived from the REQUEST: a typo in key/isSecret cannot hide behind
+            // a canned answer, and the test can tell which key was emitted.
+            "_goose/unstable/config/read" => {
+                let key = params.get("key").and_then(Value::as_str).unwrap_or("");
+                let secret = params.get("isSecret").and_then(Value::as_bool).unwrap_or(false);
+                json!({"value": if secret { format!("secret-{key}") } else { format!("value-{key}") }})
+            }
+            "_goose/unstable/config/upsert" | "_goose/unstable/config/remove" => json!({}),
             // The oracle above already rejected this; keep the arm explicit so
             // a future refactor cannot quietly reinstate `{}` for typos.
             other => {

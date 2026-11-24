@@ -154,8 +154,12 @@ unstable_intents! {
     ("sources_delete", |g: &grouse_core::GrouseUnstable| g.sources_delete("project".into(), "p".into())),
     ("sources_update", |g: &grouse_core::GrouseUnstable| g.sources_update("project".into(), "p".into(), "n".into(), "d".into(), "c".into())),
     // Config & models.
+    ("config_read_all", |g: &grouse_core::GrouseUnstable| g.config_read_all()),
     ("config_read", |g: &grouse_core::GrouseUnstable| g.config_read("model".into())),
+    ("config_read_ex", |g: &grouse_core::GrouseUnstable| g.config_read_ex("token".into(), true)),
     ("config_upsert", |g: &grouse_core::GrouseUnstable| g.config_upsert("mode".into(), "auto".into())),
+    ("config_upsert_ex", |g: &grouse_core::GrouseUnstable| g.config_upsert_ex("token".into(), "new".into(), true)),
+    ("config_remove", |g: &grouse_core::GrouseUnstable| g.config_remove("token".into(), true)),
     ("supported_models", |g: &grouse_core::GrouseUnstable| g.supported_models("openai".into())),
     ("providers_list", |g: &grouse_core::GrouseUnstable| g.providers_list()),
     // MCP-App resources.
@@ -330,7 +334,7 @@ mod tests {
     fn manifest_covers_every_public_intent() {
         assert_eq!(
             UNSTABLE_INTENTS.len(),
-            39,
+            43,
             "grouse-core gained or lost an unstable intent; update the inventory macro"
         );
     }

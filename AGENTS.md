@@ -192,7 +192,8 @@ keep them when extending the core.
   `session/extensions/list|add|remove`, `tools/list|call`,
   `sources/list|create|update|delete` (`type: project|skill`),
   `recipes/list|save|delete|schedule`, `schedules/list|update|pause|run-now`,
-  `config/read|upsert`, `config/extensions/list|set-enabled|add`,
+  `config/read|upsert|read-all|remove` (`isSecret` on the read/upsert/remove variants; explicit reads are emitted as `config:<key>` or `secret:<key>` so the two stores cannot collide),
+  `config/extensions/list|set-enabled|add`,
   `providers/list`, `providers/config/read`, `providers/supported-models/list`,
   `resources/read`, `dictation/config|transcribe`. `session/delete` is the one
   plain (non-`_goose`) method the clients use for deletion.

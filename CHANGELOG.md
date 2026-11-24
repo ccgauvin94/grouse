@@ -6,6 +6,19 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Added — Goose config is editable from both clients over ACP
+
+- **Settings now has a Goose config screen.** It lists every non-secret `config.yaml` value
+  returned by goose's `_goose/unstable/config/read-all`, with search, add-by-key, edit, and
+  delete. Reads, writes and deletes all go through ACP; Grouse does not open the server's files
+  or environment. Secret keys can be named explicitly and are replace/delete-only — goose does
+  not expose a way to enumerate them, and their masked reads are never copied into an editor.
+- **The core owns the config wire contract.** `GrouseUnstable` gained `config_read_all`,
+  `config_read_ex`, `config_upsert_ex` and `config_remove`; the last three carry goose's
+  `isSecret` flag. Secret reads are namespaced as `secret:<key>` on the existing callback so a
+  plain key and a secret of the same name cannot collide. The C ABI is version 21 with four new
+  symbols, and both clients are gated to that version.
+
 ### Fixed — a backgrounded phone no longer lets the wire die mid-turn
 
 - **A live turn now holds a partial wake lock.** The foreground service kept the process

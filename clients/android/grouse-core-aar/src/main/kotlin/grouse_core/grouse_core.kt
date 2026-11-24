@@ -1181,7 +1181,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_config_read(
     ): Int
+    external fun uniffi_grouse_core_checksum_method_grouseunstable_config_read_all(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_grouseunstable_config_read_ex(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_grouseunstable_config_remove(
+    ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_config_upsert(
+    ): Int
+    external fun uniffi_grouse_core_checksum_method_grouseunstable_config_upsert_ex(
     ): Int
     external fun uniffi_grouse_core_checksum_method_grouseunstable_context_report(
     ): Int
@@ -1536,7 +1544,15 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_config_read(`ptr`: Long,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_grouse_core_fn_method_grouseunstable_config_read_all(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_grouseunstable_config_read_ex(`ptr`: Long,`key`: RustBuffer.ByValue,`isSecret`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_grouseunstable_config_remove(`ptr`: Long,`key`: RustBuffer.ByValue,`isSecret`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_config_upsert(`ptr`: Long,`key`: RustBuffer.ByValue,`value`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_grouse_core_fn_method_grouseunstable_config_upsert_ex(`ptr`: Long,`key`: RustBuffer.ByValue,`value`: RustBuffer.ByValue,`isSecret`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_grouse_core_fn_method_grouseunstable_context_report(`ptr`: Long,`sessionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1958,10 +1974,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_add_extension() and 0xFFFF) != 24761) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_read() and 0xFFFF) != 60159) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_read() and 0xFFFF) != 26360) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_upsert() and 0xFFFF) != 60061) {
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_read_all() and 0xFFFF) != 11875) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_read_ex() and 0xFFFF) != 36256) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_remove() and 0xFFFF) != 14041) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_upsert() and 0xFFFF) != 9108) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_config_upsert_ex() and 0xFFFF) != 21224) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_grouse_core_checksum_method_grouseunstable_context_report() and 0xFFFF) != 23567) {
@@ -5281,20 +5309,42 @@ public interface GrouseUnstableInterface {
      */
     fun `addExtension`(`extension`: kotlin.String, `enabled`: kotlin.Boolean)
     
+    fun `configRead`(`key`: kotlin.String)
+    
+    /**
+     * Read all non-secret global config.yaml values; one `on_config_value(key, value)` per
+     * entry. Goose's `ConfigReadAllResponse` is `{config: {key: value}}`; every key and
+     * value comes from the server, in key order for a stable UI paint. A reply without an
+     * object `config` yields no events — nothing is inferred or invented locally.
+     */
+    fun `configReadAll`()
+    
     /**
      * Read one global config.yaml value; surfaces as `on_config_value(key, value)`.
      *
      * Goose's `ConfigReadResponse` carries ONLY `value` — there is no `key` to
      * read back. The requested key is the one the UI matched against, so it is
      * echoed unchanged; a reply that tried to name a key is not authoritative.
+     * `is_secret` asks goose for the secret store; it returns a masked value.
+     * The explicit variant namespaces the emitted key (`config:` / `secret:`)
+     * because the callback has no secret flag. Legacy `config_read` keeps the
+     * BARE key: provider pickers have matched on it since the first release.
      */
-    fun `configRead`(`key`: kotlin.String)
+    fun `configReadEx`(`key`: kotlin.String, `isSecret`: kotlin.Boolean)
+    
+    /**
+     * Remove one global config.yaml value. The reply is empty; the caller re-reads if it
+     * wants confirmation.
+     */
+    fun `configRemove`(`key`: kotlin.String, `isSecret`: kotlin.Boolean)
+    
+    fun `configUpsert`(`key`: kotlin.String, `value`: kotlin.String)
     
     /**
      * Upsert one global config.yaml value (new sessions only). The reply is empty; nothing
      * to reflect — the caller re-reads if it wants confirmation (desktop behavior).
      */
-    fun `configUpsert`(`key`: kotlin.String, `value`: kotlin.String)
+    fun `configUpsertEx`(`key`: kotlin.String, `value`: kotlin.String, `isSecret`: kotlin.Boolean)
     
     /**
      * What fills this chat's context window if it were prompted right now
@@ -5676,14 +5726,7 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
     
     
 
-    
-    /**
-     * Read one global config.yaml value; surfaces as `on_config_value(key, value)`.
-     *
-     * Goose's `ConfigReadResponse` carries ONLY `value` — there is no `key` to
-     * read back. The requested key is the one the UI matched against, so it is
-     * echoed unchanged; a reply that tried to name a key is not authoritative.
-     */override fun `configRead`(`key`: kotlin.String)
+    override fun `configRead`(`key`: kotlin.String)
         = 
     callWithHandle {
     uniffiRustCall() { _status ->
@@ -5698,9 +5741,66 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
 
     
     /**
-     * Upsert one global config.yaml value (new sessions only). The reply is empty; nothing
-     * to reflect — the caller re-reads if it wants confirmation (desktop behavior).
-     */override fun `configUpsert`(`key`: kotlin.String, `value`: kotlin.String)
+     * Read all non-secret global config.yaml values; one `on_config_value(key, value)` per
+     * entry. Goose's `ConfigReadAllResponse` is `{config: {key: value}}`; every key and
+     * value comes from the server, in key order for a stable UI paint. A reply without an
+     * object `config` yields no events — nothing is inferred or invented locally.
+     */override fun `configReadAll`()
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_grouseunstable_config_read_all(
+        it,
+        _status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Read one global config.yaml value; surfaces as `on_config_value(key, value)`.
+     *
+     * Goose's `ConfigReadResponse` carries ONLY `value` — there is no `key` to
+     * read back. The requested key is the one the UI matched against, so it is
+     * echoed unchanged; a reply that tried to name a key is not authoritative.
+     * `is_secret` asks goose for the secret store; it returns a masked value.
+     * The explicit variant namespaces the emitted key (`config:` / `secret:`)
+     * because the callback has no secret flag. Legacy `config_read` keeps the
+     * BARE key: provider pickers have matched on it since the first release.
+     */override fun `configReadEx`(`key`: kotlin.String, `isSecret`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_grouseunstable_config_read_ex(
+        it,
+        
+        FfiConverterString.lower(`key`),
+        FfiConverterBoolean.lower(`isSecret`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Remove one global config.yaml value. The reply is empty; the caller re-reads if it
+     * wants confirmation.
+     */override fun `configRemove`(`key`: kotlin.String, `isSecret`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_grouseunstable_config_remove(
+        it,
+        
+        FfiConverterString.lower(`key`),
+        FfiConverterBoolean.lower(`isSecret`),_status)
+}
+    }
+    
+    
+
+    override fun `configUpsert`(`key`: kotlin.String, `value`: kotlin.String)
         = 
     callWithHandle {
     uniffiRustCall() { _status ->
@@ -5709,6 +5809,25 @@ open class GrouseUnstable: Disposable, AutoCloseable, GrouseUnstableInterface
         
         FfiConverterString.lower(`key`),
         FfiConverterString.lower(`value`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Upsert one global config.yaml value (new sessions only). The reply is empty; nothing
+     * to reflect — the caller re-reads if it wants confirmation (desktop behavior).
+     */override fun `configUpsertEx`(`key`: kotlin.String, `value`: kotlin.String, `isSecret`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_grouse_core_fn_method_grouseunstable_config_upsert_ex(
+        it,
+        
+        FfiConverterString.lower(`key`),
+        FfiConverterString.lower(`value`),
+        FfiConverterBoolean.lower(`isSecret`),_status)
 }
     }
     

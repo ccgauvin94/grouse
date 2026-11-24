@@ -114,6 +114,27 @@
     <string name="always_on_assistant">Your always-on assistant</string>
     <string name="assistant_actions_note">Briefings, alerts, and voice all land here. Let it act on your behalf in Settings › Assistant › Assistant actions.</string>
 
+    <!-- GooseConfigScreens -->
+    <string name="goose_config">Goose config</string>
+    <string name="goose_config_subtitle">Keys in goose\'s global config.yaml and secrets</string>
+    <string name="goose_config_search">Search keys</string>
+    <string name="goose_config_empty">No config keys yet — check the connection and refresh.</string>
+    <string name="goose_config_add_key">Add key</string>
+    <string name="goose_config_new_key">Key</string>
+    <string name="goose_config_new_key_hint">e.g. GOOSE_CONTEXT_LIMIT</string>
+    <string name="goose_config_secret_checkbox">Secret (goose\'s secrets section)</string>
+    <string name="goose_config_add_note">You enter the value on the next screen.</string>
+    <string name="goose_config_secret_label">Secret</string>
+    <string name="goose_config_plain_label">Config value</string>
+    <string name="goose_config_value">Value</string>
+    <string name="goose_config_secret_value_hint">Replacement secret value</string>
+    <string name="goose_config_secret_replace_note">Secrets are replace-only. The saved value is masked and is never copied into the editor.</string>
+    <string name="goose_config_current">Current value</string>
+    <string name="goose_config_not_set">not set</string>
+    <string name="goose_config_apply_note">Environment variables override config values. Changes apply to new sessions.</string>
+    <string name="goose_config_delete_title">Delete %1$s?</string>
+    <string name="goose_config_delete_body">Removes the key from goose\'s global config (or secrets). New sessions will no longer see it.</string>
+
     <!-- Dropdowns -->
     <string name="model">model</string>
     <string name="custom_model_menu">Custom model…</string>

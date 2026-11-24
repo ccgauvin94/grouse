@@ -1864,3 +1864,58 @@ fn a_verification_downgrade_does_not_duplicate_the_replayed_tail() {
 
     core.disconnect();
 }
+
+// ---------------------------------------------------------------------------
+// ACP-only config surface: the four new unstable intents must go over the real
+// wire with goose's exact params, and only server-owned values may be emitted.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unstable_config_methods_round_trip_over_the_wire() {
+    let h = spine_harness();
+    let (server, port) = h.server();
+
+    let (ev_tx, ev_rx) = h.listener();
+    let core = h.core(ev_tx);
+    core.connect(server_config(port));
+    wait_for(&ev_rx, |ev| matches!(ev, Ev::Status(ConnectionStatus::Ready)), "config test ready");
+
+    // No Core accessor exists: the C ABI constructs the shim independently of
+    // Core, so the wire test does the same and records its callbacks directly.
+    let (unstable, uev_rx) = h.unstable();
+    unstable.config_read_all();
+    unstable.config_read_ex("token".to_string(), true);
+    unstable.config_upsert_ex("token".to_string(), "new-token".to_string(), true);
+    unstable.config_remove("token".to_string(), true);
+
+    let frames = wait_for_frames(&server, "_goose/unstable/config/read-all", 1, "read-all");
+    assert_eq!(frames[0].get("params"), Some(&json!({})));
+    let frames = wait_for_frames(&server, "_goose/unstable/config/read", 1, "read_ex");
+    assert_eq!(frames[0].get("params"), Some(&json!({"key": "token", "isSecret": true})));
+    let frames = wait_for_frames(&server, "_goose/unstable/config/upsert", 1, "upsert_ex");
+    assert_eq!(
+        frames[0].get("params"),
+        Some(&json!({"key": "token", "value": "new-token", "isSecret": true}))
+    );
+    let frames = wait_for_frames(&server, "_goose/unstable/config/remove", 1, "remove");
+    assert_eq!(frames[0].get("params"), Some(&json!({"key": "token", "isSecret": true})));
+
+    let mut emitted = vec![wait_for_unstable(&uev_rx, |_| true, "the first config value")];
+    for _ in 0..3 {
+        emitted.push(
+            uev_rx.recv_timeout(Duration::from_secs(15)).expect("four config values"),
+        );
+    }
+    assert_eq!(
+        emitted,
+        vec![
+            UEv::ConfigValue("GOOSE_MODE".to_string(), "auto".to_string()),
+            UEv::ConfigValue("max_turns".to_string(), "200".to_string()),
+            UEv::ConfigValue("verbose".to_string(), "true".to_string()),
+            UEv::ConfigValue("secret:token".to_string(), "secret-token".to_string()),
+        ]
+    );
+    assert_eq!(uev_rx.try_iter().count(), 0, "no extra events or errors");
+
+    core.disconnect();
+}

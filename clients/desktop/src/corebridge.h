@@ -193,6 +193,14 @@ public:
                                                const char *content);
         void (*grouse_unstable_config_read)(void *h, const char *key);
         void (*grouse_unstable_config_upsert)(void *h, const char *key, const char *value);
+        // ABI 21: the config editor needs read-all, secret-aware reads/writes and a
+        // remove intent. Replies still arrive on `on_config_value`; read-all lists
+        // NON-secret keys only, so a secret key is only ever named by the caller.
+        void (*grouse_unstable_config_read_all)(void *h);
+        void (*grouse_unstable_config_read_ex)(void *h, const char *key, int is_secret);
+        void (*grouse_unstable_config_upsert_ex)(void *h, const char *key,
+                                                 const char *value, int is_secret);
+        void (*grouse_unstable_config_remove)(void *h, const char *key, int is_secret);
         void (*grouse_unstable_supported_models)(void *h, const char *provider_id);
         void (*grouse_unstable_providers_list)(void *h);
         void (*grouse_unstable_recipes_list)(void *h);

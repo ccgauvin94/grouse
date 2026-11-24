@@ -39,6 +39,7 @@ CatalogController::CatalogController(Manager &manager)
     , m_skills(manager.m_skills)
     , m_supportedModels(manager.m_supportedModels)
     , m_serverConfig(manager.m_serverConfig)
+    , m_gooseSecretKeys(manager.m_gooseSecretKeys)
     , m_extDefs(manager.m_extDefs)
     , m_catalogDefs(manager.m_catalogDefs)
     , m_sessionExts(manager.m_sessionExts)
@@ -281,6 +282,65 @@ void CatalogController::readServerConfig(const QString &key)
         return;
     const QByteArray k = key.toUtf8();
     m_bridge->api().grouse_unstable_config_read(m_bridge->handle(), k.constData());
+}
+
+void CatalogController::refreshGooseConfig()
+{
+    // read-all emits one on_config_value per NON-secret key. Clear first: a
+    // removed key must disappear from the editor instead of lingering as a row
+    // nothing on the server supports any more.
+    m_serverConfig.clear();
+    emit m_manager.serverConfigChanged();
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_unstable_config_read_all)
+        return;
+    m_bridge->api().grouse_unstable_config_read_all(m_bridge->handle());
+}
+
+void CatalogController::readGooseConfig(const QString &key, bool isSecret)
+{
+    if (key.isEmpty())
+        return;
+    if (isSecret)
+        m_gooseSecretKeys.insert(key);
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_unstable_config_read_ex)
+        return;
+    const QByteArray k = key.toUtf8();
+    m_bridge->api().grouse_unstable_config_read_ex(m_bridge->handle(), k.constData(),
+                                                   isSecret ? 1 : 0);
+}
+
+void CatalogController::setGooseConfig(const QString &key, const QString &value, bool isSecret)
+{
+    if (key.isEmpty())
+        return;
+    // The flag is recorded before the intent so the read-back (which arrives on
+    // on_config_value with no secret marker) can be masked immediately.
+    if (isSecret)
+        m_gooseSecretKeys.insert(key);
+    else
+        m_gooseSecretKeys.remove(key);
+    if (!m_bridge || !m_bridge->isAvailable() || !m_bridge->api().grouse_unstable_config_upsert_ex)
+        return;
+    const QByteArray k = key.toUtf8();
+    const QByteArray v = value.toUtf8();
+    m_bridge->api().grouse_unstable_config_upsert_ex(m_bridge->handle(), k.constData(),
+                                                     v.constData(), isSecret ? 1 : 0);
+    readGooseConfig(key, isSecret);
+}
+
+void CatalogController::removeGooseConfig(const QString &key, bool isSecret)
+{
+    if (key.isEmpty())
+        return;
+    if (m_bridge && m_bridge->isAvailable() && m_bridge->api().grouse_unstable_config_remove) {
+        const QByteArray k = key.toUtf8();
+        m_bridge->api().grouse_unstable_config_remove(m_bridge->handle(), k.constData(),
+                                                      isSecret ? 1 : 0);
+    }
+    // Deleted secrets must not come back as a masked row that can never be
+    // re-read by read-all. A non-secret key is forgotten by the refresh too.
+    m_gooseSecretKeys.remove(key);
+    refreshGooseConfig();
 }
 
 void CatalogController::refreshSupportedModels(const QString &providerId)

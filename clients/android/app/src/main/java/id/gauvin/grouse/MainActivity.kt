@@ -436,6 +436,12 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
             }
             composable("extensions") { ExtensionsScreen(cm, nav) }
             composable("instance") { InstanceScreen(cm, nav) }
+            composable("goose_config") { GooseConfigScreen(cm, nav) }
+            composable("goose_config_detail/{key}/{secret}") { back ->
+                val key = Uri.decode(back.arguments?.getString("key") ?: "")
+                val secret = back.arguments?.getString("secret") == "1"
+                GooseConfigDetailScreen(cm, nav, key, secret)
+            }
             composable("recipes") {
                 RecipesScreen(cm, nav, onOpenChat = {
                     nav.navigate("chat") { launchSingleTop = true; popUpTo("chat") { inclusive = true } }

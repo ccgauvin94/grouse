@@ -51,6 +51,15 @@ public:
     void refreshProviders();
     void setServerConfig(const QString &key, const QString &value);
     void readServerConfig(const QString &key);
+    // --- the raw config editor (GooseConfigDialog) ---------------------------
+    // These share m_serverConfig / serverConfigChanged with the legacy
+    // config/read intents: the map is already the raw key -> value cache.
+    // Secret keys are remembered client-side ONLY as a flag — read-all lists
+    // non-secret config, so there is no other way to know a row must be masked.
+    void refreshGooseConfig();
+    void readGooseConfig(const QString &key, bool isSecret);
+    void setGooseConfig(const QString &key, const QString &value, bool isSecret);
+    void removeGooseConfig(const QString &key, bool isSecret);
     void refreshSupportedModels(const QString &providerId);
     static QStringList configuredProvidersFromJson(const QString &json);
     static QVariantList filterProviders(const QVariantList &choices,
@@ -116,6 +125,7 @@ private:
     QVariantList &m_skills;
     QVariantList &m_supportedModels;
     QVariantMap &m_serverConfig;
+    QSet<QString> &m_gooseSecretKeys;
     QList<ExtDef> &m_extDefs;
     QList<ExtDef> &m_catalogDefs;
     QStringList &m_sessionExts;

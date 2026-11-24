@@ -153,6 +153,10 @@ class Manager : public QObject
     Q_PROPERTY(int contextSize READ contextSize NOTIFY contextChanged)
     Q_PROPERTY(QVariant availableCommands READ availableCommands NOTIFY commandsChanged)
     Q_PROPERTY(QVariant serverConfig READ serverConfig NOTIFY serverConfigChanged)
+    /** The raw config editor's rows: [{key, value, secret}], sorted by key.
+     *  A secret's `value` is ALWAYS a fixed mask, never the wire value, so the
+     *  editor can render it without ever holding a secret it did not just type. */
+    Q_PROPERTY(QVariantList gooseConfig READ gooseConfigRows NOTIFY serverConfigChanged)
     Q_PROPERTY(QVariant supportedModels READ supportedModels NOTIFY supportedModelsChanged)
     Q_PROPERTY(QVariant skills READ skills NOTIFY skillsChanged)
     /** The FIRST pending structured-input form (MCP elicitation, ACP form mode,
@@ -444,6 +448,14 @@ public:
                                  const QString &description, const QString &content);
     // --- server config (providers) --------------------------------------------
     Q_INVOKABLE void setServerConfig(const QString &key, const QString &value);
+    // Raw goose config.yaml editor (Settings > Goose config). The map is shared
+    // with serverConfig; is_secret is a client-side flag because read-all only
+    // lists non-secret keys and on_config_value carries no secret marker.
+    Q_INVOKABLE void refreshGooseConfig();
+    Q_INVOKABLE void readGooseConfig(const QString &key, bool isSecret);
+    Q_INVOKABLE void setGooseConfig(const QString &key, const QString &value, bool isSecret);
+    Q_INVOKABLE void removeGooseConfig(const QString &key, bool isSecret);
+    Q_INVOKABLE QVariantList gooseConfigRows() const;
     /** Write this client's UnifiedPush endpoint where an operator's own sender can find
      *  it. Deliberately outside the client contract: nothing in Grouse assumes a server
      *  sender exists, and a stock goose server never pushes (docs/NOTIFICATIONS.md). */
@@ -1167,7 +1179,10 @@ private:
     QString m_compactionStatus;
     int m_contextUsed = 0, m_contextSize = 0;
     QVariantList m_availableCommands;
-    QVariantMap m_serverConfig;             // global config.yaml values (providers)
+    QVariantMap m_serverConfig;             // global config.yaml values (providers + raw editor)
+    /// Keys the config editor has seen with is_secret=1. Read-all never names
+    /// them, so without this flag a masked reply could be mistaken for a value.
+    QSet<QString> m_gooseSecretKeys;
     QVariantList m_supportedModels;
     QVariantList m_skills;
     /// My Day's last `on_tasks` document, verbatim (see `tasksJson()`).

@@ -62,6 +62,7 @@ private slots:
     void formQueueKeepsEachRequestAndOwner();
     void cardPinStatusIsFormattedAndActionable();
     void activityLanesAreGroupedNewestFirst();
+    void gooseConfigInvokablesMaskSecretsWithoutCore();
 };
 
 /**
@@ -949,6 +950,66 @@ void TstManager::activityLanesAreGroupedNewestFirst()
     QCOMPARE(ids, expectedIds);
     QCOMPARE(sections, expectedSections);
     QCOMPARE(raw.size(), 6);   // the snapshot handed over by the core is not reordered
+}
+
+/** The config editor is a thin facade: four intents over the C ABI, with the
+ *  secret flag kept client-side because read-all lists only non-secret keys and
+ *  on_config_value carries no marker. This pins the QML surface AND the rule
+ *  that a secret reply is never exposed as a value — without needing a core. */
+void TstManager::gooseConfigInvokablesMaskSecretsWithoutCore()
+{
+    Manager mgr;
+    const QMetaObject *mo = mgr.metaObject();
+    QVERIFY(mo->indexOfMethod("refreshGooseConfig()") >= 0);
+    QVERIFY(mo->indexOfMethod("readGooseConfig(QString,bool)") >= 0);
+    QVERIFY(mo->indexOfMethod("setGooseConfig(QString,QString,bool)") >= 0);
+    QVERIFY(mo->indexOfMethod("removeGooseConfig(QString,bool)") >= 0);
+    QVERIFY(mo->indexOfProperty("gooseConfig") >= 0);
+
+    QVERIFY(QMetaObject::invokeMethod(&mgr, "refreshGooseConfig", Qt::DirectConnection));
+    QVERIFY(QMetaObject::invokeMethod(&mgr, "readGooseConfig", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("GOOSE_MODEL")),
+                                      Q_ARG(bool, false)));
+    QVERIFY(QMetaObject::invokeMethod(&mgr, "setGooseConfig", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("GOOGLE_API_KEY")),
+                                      Q_ARG(QString, QStringLiteral("topsecret")),
+                                      Q_ARG(bool, true)));
+    QVERIFY(QMetaObject::invokeMethod(&mgr, "removeGooseConfig", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("gone")),
+                                      Q_ARG(bool, false)));
+
+    // Simulate an explicit plain read and a secret read. The plain one is
+    // namespaced by the core; read-all's bare replies are handled by the same
+    // ordinary path (checked after refresh below).
+    mgr.coreOnConfigValue(QStringLiteral("config:GOOSE_MODEL"), QStringLiteral("deepseek"));
+    // A secret read_ex reply is namespaced by the core; the editor strips the
+    // marker before it reaches the shared config map.
+    mgr.coreOnConfigValue(QStringLiteral("secret:GOOGLE_API_KEY"), QStringLiteral("topsecret"));
+
+    const QVariantMap raw = mgr.serverConfig().toMap();
+    QCOMPARE(raw.value(QStringLiteral("GOOSE_MODEL")).toString(), QStringLiteral("deepseek"));
+    QVERIFY2(raw.value(QStringLiteral("GOOGLE_API_KEY")).toString() != QStringLiteral("topsecret"),
+             "a secret's wire value must never land in the QML config map");
+
+    const QVariantList rows = mgr.gooseConfigRows();
+    QCOMPARE(rows.size(), 2);
+    const QVariantMap secretRow = rows.at(0).toMap();
+    QCOMPARE(secretRow.value(QStringLiteral("key")).toString(), QStringLiteral("GOOGLE_API_KEY"));
+    QVERIFY(secretRow.value(QStringLiteral("secret")).toBool());
+    QVERIFY2(secretRow.value(QStringLiteral("value")).toString() != QStringLiteral("topsecret"),
+             "the editor must never prefill a secret with a value");
+    const QVariantMap plainRow = rows.at(1).toMap();
+    QCOMPARE(plainRow.value(QStringLiteral("key")).toString(), QStringLiteral("GOOSE_MODEL"));
+    QVERIFY(!plainRow.value(QStringLiteral("secret")).toBool());
+    QCOMPARE(plainRow.value(QStringLiteral("value")).toString(), QStringLiteral("deepseek"));
+
+    // A refresh clears the cache before read_all; the remembered secret flag
+    // keeps its (masked) row addressable, since read-all won't name it again.
+    QVERIFY(QMetaObject::invokeMethod(&mgr, "refreshGooseConfig", Qt::DirectConnection));
+    QVERIFY(mgr.serverConfig().toMap().isEmpty());
+    const QVariantList after = mgr.gooseConfigRows();
+    QCOMPARE(after.size(), 1);
+    QVERIFY(after.at(0).toMap().value(QStringLiteral("secret")).toBool());
 }
 
 QTEST_MAIN(TstManager)

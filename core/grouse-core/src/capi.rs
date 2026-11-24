@@ -92,7 +92,16 @@ use crate::{
 /// so the ABI gate must change with the core.
 /// COORDINATOR: bump `kExpectedAbiVersion` in `clients/desktop/src/corebridge.cpp`
 /// to 20 and land the desktop's owner/request-id handlers with this library.
-pub const GROUSE_ABI_VERSION: u32 = 20;
+///
+/// 21: four new unstable config symbols — `grouse_unstable_config_read_all`,
+/// `grouse_unstable_config_read_ex`, `grouse_unstable_config_upsert_ex` and
+/// `grouse_unstable_config_remove` — expose goose's config RPCs from the ACP-only
+/// surface (no filesystem/db/env access in the core). No listener slot or existing
+/// signature changed, but a desktop built for 21 calls these unconditionally, so an
+/// older `.so` must be refused at load.
+/// COORDINATOR: bump `kExpectedAbiVersion` in `clients/desktop/src/corebridge.cpp`
+/// to 21 with the client-side declarations.
+pub const GROUSE_ABI_VERSION: u32 = 21;
 
 /// The C ABI version this library implements (see [`GROUSE_ABI_VERSION`]).
 #[no_mangle]
@@ -1790,6 +1799,17 @@ pub extern "C" fn grouse_unstable_config_read(h: *mut c_void, key: *const c_char
 }
 
 #[no_mangle]
+pub extern "C" fn grouse_unstable_config_read_all(h: *mut c_void) {
+    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.config_read_all())).ok();
+}
+
+#[no_mangle]
+pub extern "C" fn grouse_unstable_config_read_ex(h: *mut c_void, key: *const c_char, is_secret: i32) {
+    let Some(key) = (unsafe { c_param(key) }).map(str::to_owned) else { return };
+    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.config_read_ex(key, is_secret != 0))).ok();
+}
+
+#[no_mangle]
 pub extern "C" fn grouse_unstable_config_upsert(h: *mut c_void, key: *const c_char, value: *const c_char) {
     let (Some(key), Some(value)) = (
         (unsafe { c_param(key) }).map(str::to_owned),
@@ -1798,6 +1818,23 @@ pub extern "C" fn grouse_unstable_config_upsert(h: *mut c_void, key: *const c_ch
         return;
     };
     catch_unwind(AssertUnwindSafe(|| handle(h).unstable.config_upsert(key, value))).ok();
+}
+
+#[no_mangle]
+pub extern "C" fn grouse_unstable_config_upsert_ex(h: *mut c_void, key: *const c_char, value: *const c_char, is_secret: i32) {
+    let (Some(key), Some(value)) = (
+        (unsafe { c_param(key) }).map(str::to_owned),
+        (unsafe { c_param(value) }).map(str::to_owned),
+    ) else {
+        return;
+    };
+    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.config_upsert_ex(key, value, is_secret != 0))).ok();
+}
+
+#[no_mangle]
+pub extern "C" fn grouse_unstable_config_remove(h: *mut c_void, key: *const c_char, is_secret: i32) {
+    let Some(key) = (unsafe { c_param(key) }).map(str::to_owned) else { return };
+    catch_unwind(AssertUnwindSafe(|| handle(h).unstable.config_remove(key, is_secret != 0))).ok();
 }
 
 #[no_mangle]

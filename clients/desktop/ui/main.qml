@@ -968,6 +968,7 @@ Controls.ApplicationWindow {
         id: settingsDialog
         onOpenGlobalTools: globalExtensionsDialog.open()
         onOpenTurnLog: if (Mgr.debugTools) turnLogDialog.open()
+        onOpenGooseConfig: gooseConfigDialog.open()
     }
 
     SkillsDialog {
@@ -980,6 +981,10 @@ Controls.ApplicationWindow {
 
     GlobalExtensionsDialog {
         id: globalExtensionsDialog
+    }
+
+    GooseConfigDialog {
+        id: gooseConfigDialog
     }
 
     // Closing an item from My Day. The outcome line is REQUIRED even though the tool

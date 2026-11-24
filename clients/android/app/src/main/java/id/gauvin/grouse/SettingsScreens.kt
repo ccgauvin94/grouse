@@ -281,6 +281,10 @@ fun SettingsScreen(cm: ConnectionManager, nav: NavController, onOpenDrawer: () -
                 SettingsNavRow("Tools", "Extensions and the tools they expose") {
                     nav.navigate("extensions")
                 }
+                SettingsNavRow(stringResource(R.string.goose_config),
+                    stringResource(R.string.goose_config_subtitle)) {
+                    nav.navigate("goose_config")
+                }
             }
 
             // Picker noise control. The inventory (and the configured flag) comes from the

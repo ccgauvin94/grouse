@@ -15,6 +15,7 @@ Controls.Dialog {
 
     signal openGlobalTools()
     signal openTurnLog()
+    signal openGooseConfig()
 
     Component.onCompleted: reload()
     function reload() {
@@ -330,6 +331,14 @@ Controls.Dialog {
                     icon.name: "configure"
                     Kirigami.FormData.label: ""
                     onClicked: { dialog.close(); dialog.openGlobalTools() }
+                }
+                // The raw config editor sits beside Global tools: both are
+                // server-owned settings, and neither belongs in a chat.
+                Controls.Button {
+                    text: qsTr("Goose config…")
+                    icon.name: "document-edit"
+                    Kirigami.FormData.label: ""
+                    onClicked: { dialog.close(); dialog.openGooseConfig() }
                 }
             }
         }

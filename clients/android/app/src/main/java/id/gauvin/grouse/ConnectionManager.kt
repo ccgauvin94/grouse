@@ -2395,8 +2395,19 @@ class ConnectionManager private constructor(context: Context) {
     val serverContextLimit = mutableStateOf("")
     val serverFastModel = mutableStateOf("")
     /** Generic mirror of config/read replies, keyed by config key — the phone-writable
-     *  server settings channel (schedule times, etc.). */
+     *  server settings channel (schedule times, etc.). Left as-is for the provider pickers. */
     val serverConfig = mutableStateMapOf<String, String>()
+
+    // --- Goose config settings (global config.yaml + secrets), edited from Settings ---
+    /** Full key/value mirror backing the Goose config list. Secret keys carry the app-side
+     *  `secret:` prefix so an ordinary key and a secret of the same name stay distinct;
+     *  the prefix is stripped before any call into core. */
+    val gooseConfig = mutableStateMapOf<String, String>()
+    /** One flag for the config screens (list/detail), including writes and confirming reads. */
+    val configBusy = mutableStateOf(false)
+    /** Secret keys this client has learned. read-all cannot enumerate them, so refresh
+     *  re-reads the ones we know; the core's response is namespaced and needs no hint here. */
+    private val knownSecretConfigKeys = mutableSetOf<String>()
 
     /** Observable master switch (mirrors SecureStore.assistantEnabled for the drawer). */
     val assistantEnabled = mutableStateOf(store.assistantEnabled)
@@ -2431,6 +2442,54 @@ class ConnectionManager private constructor(context: Context) {
             unstable.configUpsert(key, value)
             unstable.configRead(key)
         }
+    }
+
+    /** Reload the whole config surface. Clear first so a key removed from another client does
+     *  not linger as if it were still set; the callbacks repopulate it on the main looper.
+     *  read-all covers ORDINARY keys only (core contract), so re-read the secrets we know about
+     *  rather than letting them disappear from the list on every refresh. */
+    fun refreshGooseConfig() {
+        val secrets = knownSecretConfigKeys.toList()
+        gooseConfig.clear()
+        configBusy.value = true
+        io {
+            unstable.configReadAll()
+            secrets.forEach { unstable.configReadEx(it, true) }
+        }
+    }
+
+    /** Read one key from either config.yaml or its `secrets:` section. The core echoes the
+     *  answer through on_config_value; remember the secret-ness while the read is in flight. */
+    fun readGooseConfigKey(key: String, isSecret: Boolean) {
+        val bare = key.trim()
+        if (bare.isEmpty()) return
+        configBusy.value = true
+        io { unstable.configReadEx(bare, isSecret) }
+    }
+
+    /** Write one value, then re-read it: the read is the only confirmation that the server
+     *  accepted the upsert (config/upsert itself has no reply worth displaying). */
+    fun setGooseConfigValue(key: String, value: String, isSecret: Boolean) {
+        val bare = key.trim()
+        if (bare.isEmpty()) return
+        if (isSecret) knownSecretConfigKeys.add(bare)
+        if (!isSecret) gooseConfig[gooseConfigEntryKey(bare, false)] = value   // optimistic, like writeServerConfig
+        configBusy.value = true
+        io {
+            unstable.configUpsertEx(bare, value, isSecret)
+            unstable.configReadEx(bare, isSecret)
+        }
+    }
+
+    /** Delete a key, then refresh the whole mirror (a remove has no value callback of its own).
+     *  The single-threaded `io` executor makes the remove land before the read-all is queued. */
+    fun removeGooseConfigValue(key: String, isSecret: Boolean) {
+        val bare = key.trim()
+        if (bare.isEmpty()) return
+        configBusy.value = true
+        if (isSecret) knownSecretConfigKeys.remove(bare)
+        io { unstable.configRemove(bare, isSecret) }
+        refreshGooseConfig()
     }
 
     fun setOption(configId: String, value: String) {
@@ -4093,6 +4152,9 @@ class ConnectionManager private constructor(context: Context) {
         if (method == "_goose/unstable/sources/update") pendingSkillError = message
         if (method.startsWith("_goose/unstable/tools/list")) discovering = null
         if (method.startsWith("_goose/unstable/config/extensions/list")) extensionsBusy.value = false
+        // A failed config RPC leaves the screen spinner spinning forever — including the
+        // confirm/read after a write — even though the failure is already reported below.
+        if (method.startsWith("_goose/unstable/config")) configBusy.value = false
         // Automatic probes (fired at connect / on screen open) are background traffic —
         // only user-initiated calls; a dead probe (e.g. supported-models against a
         // provider the box can't reach) must not greet the user with an alarm at login.
@@ -4207,6 +4269,21 @@ class ConnectionManager private constructor(context: Context) {
         // picked — goose's read for a key it doesn't recognize returns "". Without this,
         // a just-selected provider would flash back to a blank row on the confirming read.
         if (value.isNotBlank() || serverConfig[key].isNullOrBlank()) serverConfig[key] = value
+
+        // The explicit read_ex variants namespace their key (`config:` / `secret:`) because
+        // the callback has no is_secret flag. read-all replies are bare and ordinary — a
+        // fallback "is this a known secret?" would misclassify an ordinary key that shares a
+        // name with one in goose's secret store.
+        val (bare, isSecret) = when {
+            key.startsWith(GOOSE_SECRET_KEY_PREFIX) ->
+                key.removePrefix(GOOSE_SECRET_KEY_PREFIX).trim() to true
+            key.startsWith(GOOSE_PLAIN_KEY_PREFIX) ->
+                key.removePrefix(GOOSE_PLAIN_KEY_PREFIX).trim() to false
+            else -> key.trim() to false
+        }
+        if (isSecret) knownSecretConfigKeys.add(bare)
+        gooseConfig[gooseConfigEntryKey(bare, isSecret)] = value
+        configBusy.value = false
     }
 
     private fun onSupportedModels(provider: String, modelsJson: String) {

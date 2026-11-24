@@ -420,15 +420,52 @@ impl GrouseUnstable {
     // Config & models
     // -----------------------------------------------------------------------
 
+    /// Read all non-secret global config.yaml values; one `on_config_value(key, value)` per
+    /// entry. Goose's `ConfigReadAllResponse` is `{config: {key: value}}`; every key and
+    /// value comes from the server, in key order for a stable UI paint. A reply without an
+    /// object `config` yields no events — nothing is inferred or invented locally.
+    pub fn config_read_all(&self) {
+        let Some(conn) = spine::current_conn() else { return };
+        if let Some(result) = self.call(&*conn, "_goose/unstable/config/read-all", json!({})) {
+            let Some(config) = result.get("config").and_then(Value::as_object) else { return };
+            let mut keys: Vec<_> = config.keys().collect();
+            keys.sort();
+            for key in keys {
+                self.listener.on_config_value(key.clone(), config_value_string(config.get(key)));
+            }
+        }
+    }
+
     /// Read one global config.yaml value; surfaces as `on_config_value(key, value)`.
     ///
     /// Goose's `ConfigReadResponse` carries ONLY `value` — there is no `key` to
     /// read back. The requested key is the one the UI matched against, so it is
     /// echoed unchanged; a reply that tried to name a key is not authoritative.
+    /// `is_secret` asks goose for the secret store; it returns a masked value.
+    /// The explicit variant namespaces the emitted key (`config:` / `secret:`)
+    /// because the callback has no secret flag. Legacy `config_read` keeps the
+    /// BARE key: provider pickers have matched on it since the first release.
+    pub fn config_read_ex(&self, key: String, is_secret: bool) {
+        let Some(conn) = spine::current_conn() else { return };
+        if let Some(result) = self.call(
+            &*conn,
+            "_goose/unstable/config/read",
+            json!({"key": key.clone(), "isSecret": is_secret}),
+        ) {
+            let value = config_value_string(result.get("value"));
+            let emitted = if is_secret {
+                format!("secret:{key}")
+            } else {
+                format!("config:{key}")
+            };
+            self.listener.on_config_value(emitted, value);
+        }
+    }
+
     pub fn config_read(&self, key: String) {
         let Some(conn) = spine::current_conn() else { return };
         if let Some(result) =
-            self.call(&*conn, "_goose/unstable/config/read", json!({"key": key.clone()}))
+            self.call(&*conn, "_goose/unstable/config/read", json!({"key": key.clone(), "isSecret": false}))
         {
             let value = config_value_string(result.get("value"));
             self.listener.on_config_value(key, value);
@@ -437,12 +474,27 @@ impl GrouseUnstable {
 
     /// Upsert one global config.yaml value (new sessions only). The reply is empty; nothing
     /// to reflect — the caller re-reads if it wants confirmation (desktop behavior).
-    pub fn config_upsert(&self, key: String, value: String) {
+    pub fn config_upsert_ex(&self, key: String, value: String, is_secret: bool) {
         let Some(conn) = spine::current_conn() else { return };
         self.call(
             &*conn,
             "_goose/unstable/config/upsert",
-            json!({"key": key, "value": value}),
+            json!({"key": key, "value": value, "isSecret": is_secret}),
+        );
+    }
+
+    pub fn config_upsert(&self, key: String, value: String) {
+        self.config_upsert_ex(key, value, false);
+    }
+
+    /// Remove one global config.yaml value. The reply is empty; the caller re-reads if it
+    /// wants confirmation.
+    pub fn config_remove(&self, key: String, is_secret: bool) {
+        let Some(conn) = spine::current_conn() else { return };
+        self.call(
+            &*conn,
+            "_goose/unstable/config/remove",
+            json!({"key": key, "isSecret": is_secret}),
         );
     }
 
@@ -1658,8 +1710,8 @@ mod tests {
         assert_calls(
             &stub,
             &[
-                ("_goose/unstable/config/read", json!({"key": "model"})),
-                ("_goose/unstable/config/upsert", json!({"key": "mode", "value": "auto"})),
+                ("_goose/unstable/config/read", json!({"key": "model", "isSecret": false})),
+                ("_goose/unstable/config/upsert", json!({"key": "mode", "value": "auto", "isSecret": false})),
             ],
         );
     }
@@ -1686,6 +1738,76 @@ mod tests {
                 Ev::ConfigValue("verbose".to_string(), "true".to_string()),
                 Ev::ConfigValue("unset".to_string(), String::new()),
             ]
+        );
+    }
+
+    #[test]
+    fn config_read_all_emits_only_server_entries_in_key_order() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        stub.script(vec![Ok(json!({"config": {
+            "max_turns": 200,
+            "GOOSE_MODE": "auto",
+            "verbose": true,
+            "unset": null,
+        }}))]);
+        let (g, rec) = harness(stub.clone());
+
+        g.config_read_all();
+
+        assert_eq!(rec.events(), vec![
+            Ev::ConfigValue("GOOSE_MODE".to_string(), "auto".to_string()),
+            Ev::ConfigValue("max_turns".to_string(), "200".to_string()),
+            Ev::ConfigValue("unset".to_string(), String::new()),
+            Ev::ConfigValue("verbose".to_string(), "true".to_string()),
+        ]);
+        assert_calls(&stub, &[("_goose/unstable/config/read-all", json!({}))]);
+    }
+
+    #[test]
+    fn config_read_all_without_an_object_config_emits_nothing() {
+        let _guard = TEST_LOCK.lock();
+        for reply in [json!({}), json!({"config": null}), json!({"config": []})] {
+            let stub = StubConn::new();
+            stub.script(vec![Ok(reply.clone())]);
+            let (g, rec) = harness(stub.clone());
+
+            g.config_read_all();
+
+            assert!(rec.events().is_empty(), "reply {reply}: {:?}", rec.events());
+            assert_calls(&stub, &[("_goose/unstable/config/read-all", json!({}))]);
+        }
+    }
+
+    #[test]
+    fn config_ex_methods_send_is_secret_and_remove_is_silent() {
+        let _guard = TEST_LOCK.lock();
+        let stub = StubConn::new();
+        stub.script(vec![
+            Ok(json!({"value": "masked-token"})),
+            Ok(json!({"value": "plain"})),
+            Ok(Value::Null), // upsert reply
+            Ok(Value::Null), // remove reply
+        ]);
+        let (g, rec) = harness(stub.clone());
+
+        g.config_read_ex("token".to_string(), true);
+        g.config_read_ex("token".to_string(), false);
+        g.config_upsert_ex("token".to_string(), "new-token".to_string(), true);
+        g.config_remove("token".to_string(), true);
+
+        assert_eq!(rec.events(), vec![
+            Ev::ConfigValue("secret:token".to_string(), "masked-token".to_string()),
+            Ev::ConfigValue("config:token".to_string(), "plain".to_string()),
+        ]);
+        assert_calls(
+            &stub,
+            &[
+                ("_goose/unstable/config/read", json!({"key": "token", "isSecret": true})),
+                ("_goose/unstable/config/read", json!({"key": "token", "isSecret": false})),
+                ("_goose/unstable/config/upsert", json!({"key": "token", "value": "new-token", "isSecret": true})),
+                ("_goose/unstable/config/remove", json!({"key": "token", "isSecret": true})),
+            ],
         );
     }
 

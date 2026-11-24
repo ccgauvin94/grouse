@@ -182,6 +182,10 @@ bool CoreBridge::resolve()
     RESOLVE(grouse_unstable_sources_update);
     RESOLVE(grouse_unstable_config_read);
     RESOLVE(grouse_unstable_config_upsert);
+    RESOLVE(grouse_unstable_config_read_all);
+    RESOLVE(grouse_unstable_config_read_ex);
+    RESOLVE(grouse_unstable_config_upsert_ex);
+    RESOLVE(grouse_unstable_config_remove);
     RESOLVE(grouse_unstable_supported_models);
     RESOLVE(grouse_unstable_providers_list);
     RESOLVE(grouse_unstable_recipes_list);
@@ -214,7 +218,9 @@ bool CoreBridge::resolve()
     // decisions have no verified Reply target. PushClient reads `reply_session`.
     // ABI 20 appends two request-correlated form slots and four card-pin
     // symbols, and changes both respond_* signatures to take a request id.
-    static constexpr unsigned kExpectedAbiVersion = 20;
+    // ABI 21 adds four config-editor intents (read-all, read/upsert/remove with
+    // a secret flag); the on_config_value listener slot is unchanged.
+    static constexpr unsigned kExpectedAbiVersion = 21;
     if (!a.grouse_abi_version) {
         qWarning() << "CoreBridge: core library predates the ABI version symbol; refusing it";
         return false;
@@ -224,11 +230,11 @@ bool CoreBridge::resolve()
                    << kExpectedAbiVersion << "; refusing it";
         return false;
     }
-    // EVERY symbol in AimsApi is required by ABI 20. Checking only a handful
+    // EVERY symbol in AimsApi is required by ABI 21. Checking only a handful
     // left an otherwise accepted .so one NULL call away from a crash (the first
     // user of an unchecked Q_INVOKABLE). The size assertion makes a future
     // member without a REQUIRE line a build error instead of a runtime gap.
-    static_assert(sizeof(AimsApi) / sizeof(void (*)()) == 108,
+    static_assert(sizeof(AimsApi) / sizeof(void (*)()) == 112,
                   "AimsApi gained a symbol: add it to the resolve + REQUIRE lists");
     QStringList missing;
 #define REQUIRE(name) do { if (!a.name) missing << QStringLiteral(#name); } while (0)
@@ -255,7 +261,10 @@ bool CoreBridge::resolve()
     REQUIRE(grouse_unstable_session_extensions_list) REQUIRE(grouse_unstable_session_extensions_add) REQUIRE(grouse_unstable_session_extensions_remove) REQUIRE(grouse_unstable_list_global_extensions);
     REQUIRE(grouse_unstable_extension_catalog) REQUIRE(grouse_unstable_set_extension_enabled) REQUIRE(grouse_unstable_add_extension) REQUIRE(grouse_unstable_sources_list);
     REQUIRE(grouse_unstable_sources_create) REQUIRE(grouse_unstable_sources_delete) REQUIRE(grouse_unstable_sources_update) REQUIRE(grouse_unstable_config_read);
-    REQUIRE(grouse_unstable_config_upsert) REQUIRE(grouse_unstable_supported_models) REQUIRE(grouse_unstable_providers_list) REQUIRE(grouse_unstable_recipes_list);
+    REQUIRE(grouse_unstable_config_upsert); REQUIRE(grouse_unstable_config_read_all);
+    REQUIRE(grouse_unstable_config_read_ex); REQUIRE(grouse_unstable_config_upsert_ex);
+    REQUIRE(grouse_unstable_config_remove);
+    REQUIRE(grouse_unstable_supported_models) REQUIRE(grouse_unstable_providers_list) REQUIRE(grouse_unstable_recipes_list);
     REQUIRE(grouse_unstable_recipes_schedule) REQUIRE(grouse_unstable_recipes_save) REQUIRE(grouse_unstable_recipes_delete) REQUIRE(grouse_unstable_schedules_list);
     REQUIRE(grouse_unstable_schedules_pause) REQUIRE(grouse_unstable_schedules_unpause) REQUIRE(grouse_unstable_schedules_run_now) REQUIRE(grouse_unstable_schedules_delete);
     REQUIRE(grouse_unstable_schedules_update) REQUIRE(grouse_unstable_working_dir_update) REQUIRE(grouse_unstable_tools_call) REQUIRE(grouse_unstable_tools_call_named);
