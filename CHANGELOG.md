@@ -6,6 +6,13 @@ All notable changes to Grouse are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed — chat rows now say what kind of chat they are
+
+- **Normal chats get a chat-bubble marker.** Dev chats already carried the `</>` glyph; ordinary
+  chats were visually silent. Both clients now show a bubble beside normal chats — in the main
+  list, project/roam session rows, and "New chat" menu entries — so the two kinds can be told
+  apart without opening them.
+
 ### Added — Goose config is editable from both clients over ACP
 
 - **Settings now has a Goose config screen.** It lists every non-secret `config.yaml` value

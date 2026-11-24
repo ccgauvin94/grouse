@@ -212,6 +212,7 @@ excluded = 26
 | `ui.fileInlineImage` | yes: Files.kt#fun isInlineImage | yes: ui/ImageCard.qml#objectName: "cardImage" |
 | `ui.chat-attachment-card` | yes: Files.kt#AttachmentCard | yes: ui/AttachmentCard.qml#objectName: "cardName" |
 | `ui.my-day` | yes: MyDayScreen.kt#MyDayScreen | yes: ui/MyDayPage.qml#objectName: "myDayCardBody" |
+| `ui.chat-kind-icon` | yes: Drawer.kt#contentDescription = "chat session" | yes: ui/main.qml#qrc:/icons/chat-symbolic.svg |
 | `ui.chat-work-panel` | yes: ChatScreen.kt#fun ActivitySheet | yes: ui/ChatSidePanel.qml#objectName: "workList" |
 | `ui.chat-work-count` | yes: ChatScreen.kt#fun BackgroundTasksCount | yes: ui/ChatSidePanel.qml#property int count |
 | `ui.context-breakdown` | yes: ChatScreen.kt#fun ContextBreakdown | yes: ui/ContextBreakdown.qml#function categoryLabel |

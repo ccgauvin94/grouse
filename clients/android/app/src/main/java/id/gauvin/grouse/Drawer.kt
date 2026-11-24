@@ -207,14 +207,19 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
             verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // "</>" marks a dev session. A readout, not a toggle: the mode is a tag
-                    // written at creation and our goose cannot change one afterwards.
+                    // "</>" marks a dev session; the bubble marks a normal chat. A readout,
+                    // not a toggle: the mode is a tag written at creation and goose cannot
+                    // change one afterwards.
                     if (s.isDev) {
                         Icon(painterResource(R.drawable.ic_dev_mode), contentDescription = "dev session",
                             modifier = Modifier.size(14.dp),
                             tint = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.width(4.dp))
+                    } else {
+                        Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = "chat session",
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.outline)
                     }
+                    Spacer(Modifier.width(4.dp))
                     Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.bodyLarge,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -350,6 +355,11 @@ fun DrawerChats(cm: ConnectionManager, onOpen: () -> Unit, onOpenProject: (Strin
                 addRow("New chat", indent = false) { showNewChat = true }
                 DropdownMenu(expanded = showNewChat, onDismissRequest = { showNewChat = false }) {
                     DropdownMenuItem(
+                        leadingIcon = {
+                            Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.outline)
+                        },
                         text = { Text("New chat") },
                         onClick = { showNewChat = false; cm.newSession(); onOpen() },
                     )
@@ -398,8 +408,12 @@ private fun ProjectSessionRow(s: SessionInfo, onOpen: () -> Unit, onLongPress: (
                     Icon(painterResource(R.drawable.ic_dev_mode), contentDescription = "dev session",
                         modifier = Modifier.size(14.dp),
                         tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(4.dp))
+                } else {
+                    Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = "chat session",
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.outline)
                 }
+                Spacer(Modifier.width(4.dp))
                 Text(s.title.ifBlank { "Untitled chat" }, style = MaterialTheme.typography.bodyLarge,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }

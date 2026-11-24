@@ -345,6 +345,13 @@ Controls.ApplicationWindow {
                                     implicitWidth: Kirigami.Units.iconSizes.small
                                     implicitHeight: Kirigami.Units.iconSizes.small
                                 }
+                                Kirigami.Icon {
+                                    visible: dev !== true
+                                    source: "qrc:/icons/chat-symbolic.svg"
+                                    color: Kirigami.Theme.disabledTextColor
+                                    implicitWidth: Kirigami.Units.iconSizes.small
+                                    implicitHeight: Kirigami.Units.iconSizes.small
+                                }
                                 Controls.Label {
                                     text: title
                                     textFormat: Text.PlainText
@@ -597,6 +604,7 @@ Controls.ApplicationWindow {
                                                 y: roamNewButton.height
                                                 Controls.MenuItem {
                                                     text: qsTr("New chat")
+                                                    icon.source: "qrc:/icons/chat-symbolic.svg"
                                                     onTriggered: Mgr.newRoamSession(label)
                                                 }
                                                 Controls.MenuItem {
@@ -660,6 +668,13 @@ Controls.ApplicationWindow {
                                                 visible: dev === true
                                                 source: "qrc:/icons/dev-mode-symbolic.svg"
                                                 color: Kirigami.Theme.highlightColor
+                                                implicitWidth: Kirigami.Units.iconSizes.small
+                                                implicitHeight: Kirigami.Units.iconSizes.small
+                                            }
+                                            Kirigami.Icon {
+                                                visible: dev !== true
+                                                source: "qrc:/icons/chat-symbolic.svg"
+                                                color: Kirigami.Theme.disabledTextColor
                                                 implicitWidth: Kirigami.Units.iconSizes.small
                                                 implicitHeight: Kirigami.Units.iconSizes.small
                                             }
@@ -761,6 +776,7 @@ Controls.ApplicationWindow {
                             y: parent.height
                             Controls.MenuItem {
                                 text: qsTr("New chat")
+                                icon.source: "qrc:/icons/chat-symbolic.svg"
                                 onTriggered: Mgr.newChatInMode("")
                             }
                             Controls.MenuItem {

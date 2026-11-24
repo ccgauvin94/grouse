@@ -103,6 +103,7 @@ qt_add_resources(grouse-desktop "app"
         ui/ContextBreakdown.qml
         ui/ContextRing.qml
         ui/icons/dev-mode-symbolic.svg
+        ui/icons/chat-symbolic.svg
         ui/ChartBubble.qml
         ui/AttachmentCard.qml
         ui/FileCard.qml

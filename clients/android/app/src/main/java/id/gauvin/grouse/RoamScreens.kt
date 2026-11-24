@@ -92,6 +92,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.res.painterResource
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -660,9 +661,21 @@ fun RoamEndpointScreen(cm: ConnectionManager, nav: NavController, label: String)
                             .padding(vertical = 9.dp),
                             verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
-                                Text(s.title.ifBlank { "Untitled chat" },
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (s.isDev) {
+                                        Icon(painterResource(R.drawable.ic_dev_mode), contentDescription = "dev session",
+                                            modifier = Modifier.size(14.dp),
+                                            tint = MaterialTheme.colorScheme.primary)
+                                    } else {
+                                        Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = "chat session",
+                                            modifier = Modifier.size(14.dp),
+                                            tint = MaterialTheme.colorScheme.outline)
+                                    }
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(s.title.ifBlank { "Untitled chat" },
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
                                 if (s.snippet.isNotBlank())
                                     Text(s.snippet, style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.outline,

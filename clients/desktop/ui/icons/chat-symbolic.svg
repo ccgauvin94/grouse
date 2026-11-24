@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The normal-chat marker: a speech bubble paired with the dev "</>" glyph so
+     a sidebar row says what KIND of chat it is without reading a tooltip.
+     Symbolic on purpose: Kirigami.Icon recolours a *-symbolic.svg by its color. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <g fill="none" stroke="#000000" stroke-width="1.5"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M2.2 3.2h11.6v7.1H6.7L3.4 13v-2.7H2.2z"/>
+    <path d="M5.2 6.6h5.6"/>
+  </g>
+</svg>
