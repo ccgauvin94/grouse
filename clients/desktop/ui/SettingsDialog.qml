@@ -12,6 +12,12 @@ Controls.Dialog {
     modal: true
     standardButtons: Controls.Dialog.Close
     closePolicy: Controls.Popup.CloseOnEscape
+    // QQC2 dialogs do not derive a usable width from a FormLayout: without an
+    // explicit size this collapses to the Close button and clips every field.
+    width: Kirigami.Units.gridUnit * 34
+    height: Math.min(Kirigami.Units.gridUnit * 44,
+                     parent && parent.Window.window ? parent.Window.window.height * 0.85
+                                                    : Kirigami.Units.gridUnit * 44)
 
     signal openGlobalTools()
     signal openTurnLog()

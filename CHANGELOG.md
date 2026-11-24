@@ -19,6 +19,12 @@ All notable changes to Grouse are recorded here. The format is based on
   plain key and a secret of the same name cannot collide. The C ABI is version 21 with four new
   symbols, and both clients are gated to that version.
 
+### Fixed — the desktop Settings dialog no longer collapses to a sliver
+
+- **Settings now has explicit dimensions.** QQC2 dialogs do not infer a usable width from a
+  `FormLayout`; the dialog was squeezed to its Close button and every field was clipped. It now
+  opens at a readable width with a window-capped height, while the form itself still scrolls.
+
 ### Fixed — a backgrounded phone no longer lets the wire die mid-turn
 
 - **A live turn now holds a partial wake lock.** The foreground service kept the process
