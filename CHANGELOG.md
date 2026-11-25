@@ -4,6 +4,15 @@ All notable changes to Grouse are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed — voice now stops and speaks within a single generation
+
+- **Conversation mode has one cleanup path.** Lock, background, wire loss, permission denial, Stop and leaving the mic all run through `stopVoice`: the recorder is released, queued/spoken TTS is invalidated, the one-shot transcription request is discarded, and the bounded voice wake owner is released immediately. Starting voice now requires unlocked + foreground + microphone permission instead of failing silently inside `AudioRecord`.
+- **Spoken replies can no longer outlive the turn that produced them.** The Android `Speaker` tags every utterance with a monotonic generation and ignores callbacks from an invalidated generation; Stop, barge-in, chat switch, send, lock/background and wire loss all bump it. A posted `on_speak` chunk captured before the bump is dropped instead of being spoken into another screen.
+- **Dictation has one pending request.** A retake, timeout, error, Stop or wire drop supersedes the older request. The callback still carries no id — strict wire-level correlation would need a core contract change — so the residual ambiguity is recorded in [`docs/VOICE_AUDIT_2026-11-24.md`](docs/VOICE_AUDIT_2026-11-24.md). Empty transcripts and permission denials now show a visible notice while the voice UI is active.
+- **Parity:** new `ui.voice-conversation` row records Android as the voice client and desktop as an explicit exclusion; the exclusion pin moves 26 → 27. No core surface, C ABI or uniffi binding changed.
+
 ## [0.3] - 2026-11-24
 
 ### Fixed — the desktop builds and tests again on current Qt 6/KF6

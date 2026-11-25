@@ -282,32 +282,41 @@ internal fun ChatComposer(
                         val vState = cm.voiceState.value
                         val vNotice = cm.voiceNotice.value
                         if (vState != VoiceState.IDLE || vNotice != null) {
-                            Row(Modifier.fillMaxWidth().padding(bottom = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically) {
-                                when (vState) {
-                                    VoiceState.LISTENING -> {
-                                        LevelBar(cm.voiceLevel.value)
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("Listening…", style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.primary)
+                            Column(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+                                if (vState != VoiceState.IDLE) {
+                                    Row(Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically) {
+                                        when (vState) {
+                                            VoiceState.LISTENING -> {
+                                                LevelBar(cm.voiceLevel.value)
+                                                Spacer(Modifier.width(8.dp))
+                                                Text("Listening…", style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.primary)
+                                            }
+                                            VoiceState.TRANSCRIBING -> {
+                                                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                                                Spacer(Modifier.width(8.dp))
+                                                Text("Transcribing…", style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            }
+                                            VoiceState.SPEAKING -> {
+                                                Icon(Icons.Filled.Mic, contentDescription = null,
+                                                    modifier = Modifier.size(14.dp),
+                                                    tint = MaterialTheme.colorScheme.primary)
+                                                Spacer(Modifier.width(8.dp))
+                                                Text("Speaking… talk over me to interrupt",
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.primary)
+                                            }
+                                            else -> {}
+                                        }
                                     }
-                                    VoiceState.TRANSCRIBING -> {
-                                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("Transcribing…", style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    }
-                                    VoiceState.SPEAKING -> {
-                                        Icon(Icons.Filled.Mic, contentDescription = null,
-                                            modifier = Modifier.size(14.dp),
-                                            tint = MaterialTheme.colorScheme.primary)
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("Speaking… talk over me to interrupt",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.primary)
-                                    }
-                                    else -> Text(vNotice ?: "",
-                                        style = MaterialTheme.typography.labelMedium,
+                                }
+                                // An error must stay visible WHILE the loop is
+                                // listening/transcribing/speaking; the old `else`
+                                // branch only drew it once the state was IDLE.
+                                if (vNotice != null) {
+                                    Text(vNotice!!, style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.error)
                                 }
                             }

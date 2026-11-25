@@ -23,6 +23,14 @@ class TurnWakeKeyTest {
     }
 
     @Test
+    fun `owner kind is a separate field`() {
+        val voice = wakeOwnerKey("voice", "roam:office:20261123_1", "42")
+        assertTrue(wakeOwnerHasKind(voice, "voice"))
+        assertFalse(wakeOwnerHasKind(voice, "send"))
+        assertFalse(wakeOwnerHasKind("voice:20261123_1:42", "voice"))
+    }
+
+    @Test
     fun `malformed key never matches`() {
         assertFalse(wakeOwnerMatchesSession("run\u001f20261123_1", "20261123_1"))
         assertFalse(wakeOwnerMatchesSession("run:20261123_1:abc", "20261123_1"))

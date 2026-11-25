@@ -180,7 +180,11 @@ private fun MainApp(activity: FragmentActivity, cm: ConnectionManager, unlocked:
 
     // Ask for mic up front: push-to-talk needs it, and the assistant VoiceInteractionSession
     // can't request runtime permissions itself — so the app must obtain it through the Activity.
-    val micPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    val micPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        // A silent denial left the mic button looking ready and every start
+        // failing inside AudioRecord. Say why once, and keep the button tappable.
+        if (!granted) cm.voicePermissionDenied()
+    }
     LaunchedEffect(unlocked) {
         if (unlocked && ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) {

@@ -22,6 +22,12 @@ internal fun wakeOwnerMatchesSession(key: String, sessionId: String): Boolean {
     return fields.size == 3 && fields[1] == sessionId
 }
 
+/** True when [key] belongs to the given owner kind (turn send, voice, ...). */
+internal fun wakeOwnerHasKind(key: String, kind: String): Boolean {
+    val fields = key.split(WAKE_FIELD, limit = 3)
+    return fields.size == 3 && fields[0] == kind
+}
+
 /**
  * Keeps a partial wake lock held only while a turn has an owner.
  *
@@ -125,6 +131,17 @@ internal class TurnWakeLock(
             val before = owners.size
             owners.removeAll { wakeOwnerMatchesSession(it, sessionId) }
             if (owners.size != before) log("wake: release session=$sessionId reason=$reason")
+            settle(reason, immediate)
+        }
+    }
+
+    /** Release every owner except a protected kind. Barge-in cancels the ACP
+     *  turn but leaves the still-open microphone holding its bounded lock. */
+    fun releaseExceptKind(kind: String, reason: String, immediate: Boolean = false) {
+        synchronized(this) {
+            val before = owners.size
+            owners.removeAll { !wakeOwnerHasKind(it, kind) }
+            if (owners.size != before) log("wake: release except kind=$kind reason=$reason")
             settle(reason, immediate)
         }
     }

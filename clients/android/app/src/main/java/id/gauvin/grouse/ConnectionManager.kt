@@ -2,13 +2,16 @@
 
 package id.gauvin.grouse
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import java.util.UUID
 import kotlin.concurrent.thread
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -188,7 +191,13 @@ class ConnectionManager private constructor(context: Context) {
 
     /** MainActivity reports the biometric outcome here on every change. Setting true is a no-op
      *  beyond the flag: the REJECT policy drops intents at the door, it does not replay them. */
-    fun setUnlocked(value: Boolean) { unlocked = value }
+    fun setUnlocked(value: Boolean) {
+        unlocked = value
+        // A lock screen is a hard stop for the microphone and spoken replies, not
+        // merely a gate on new core intents. Posted: `main` may not be initialized
+        // when this is first called, and Compose can call it off the main thread.
+        if (!value) main.post { stopVoice("locked") }
+    }
 
     /** THE lock gate. Every intent that can open a session, send a prompt or answer a server
      *  request goes through here. POLICY: REJECT while locked — drop it, do not queue it for a
@@ -430,7 +439,7 @@ class ConnectionManager private constructor(context: Context) {
      *  instant the reply speaks, so it never delays the real answer. */
     private val thinkingFiller = Runnable {
         if (voiceState.value == VoiceState.IDLE || replyStarted) return@Runnable
-        speaker.speak("Let me think for a moment.")
+        speaker.speak("Let me think for a moment.", voiceGeneration)
     }
     private var voiceLoop: VoiceLoop? = null
     /** Conversation mode: IDLE (off), LISTENING, TRANSCRIBING, SPEAKING. */
@@ -439,6 +448,15 @@ class ConnectionManager private constructor(context: Context) {
     val voiceLevel = mutableStateOf(0f)
     /** A one-line voice message for the composer ("didn't catch that", a failure). */
     val voiceNotice = mutableStateOf<String?>(null)
+    /** Epoch for spoken audio and posted speak callbacks. Bumped by Stop, barge-in,
+     *  chat switch, lock/background and wire loss so a chunk from a superseded turn
+     *  can never be spoken after the user has moved on. */
+    private var voiceGeneration = 0L
+    /** The one dictation request currently in flight. The core's callback has no
+     *  id, so we accept exactly one reply and invalidate it on timeout/cancel. */
+    private var voiceRequestId: String? = null
+    private var voiceTimeout: Runnable? = null
+    private var voiceWakeOwner: String? = null
     /** Raw JSON of goose's dictation provider status (backs an eventual STT picker). */
     val dictationProviders = mutableStateOf("")
     // The core owns the socket, reconnect/backoff, the transcript, and the caches. `unstable`
@@ -475,7 +493,13 @@ class ConnectionManager private constructor(context: Context) {
         // conversation mode: with the mic off a reply is read, not heard.
         override fun onSpeak(text: String) {
             if (voiceState.value == VoiceState.IDLE) return
+            // Capture the epoch on the core thread. A Stop/chat switch/lock/wire
+            // drop posted before this lambda runs bumps it, and the chunk is then
+            // discarded instead of being spoken into the wrong screen.
+            val observed = voiceGeneration
             main.post {
+                if (!voiceGenerationCurrent(voiceGeneration, observed)) return@post
+                if (!voicePermits(unlocked, appForeground, microphoneGranted())) return@post
                 if (!replyStarted) {
                     replyStarted = true
                     main.removeCallbacks(thinkingFiller)
@@ -484,7 +508,7 @@ class ConnectionManager private constructor(context: Context) {
                     speaker.stop()
                 }
                 if (voiceState.value != VoiceState.SPEAKING) voiceState.value = VoiceState.SPEAKING
-                speaker.speak(text)
+                speaker.speak(text, voiceGeneration)
             }
         }
         override fun onConfig(options: List<CoreConfigOption>) { main.post { onCoreConfig(options) } }
@@ -1857,6 +1881,7 @@ class ConnectionManager private constructor(context: Context) {
         // turn still running in the chat you left is neither steered nor cleared.
         resetTurnRouting(sessionId)
         messages.clear(); lastSessionId = sessionId; currentSession.value = sessionId
+        voiceChatChanged()
         resetContextUsage()
         // A new tap supersedes any earlier failure notice.
         openFailed.value = null
@@ -1974,6 +1999,7 @@ class ConnectionManager private constructor(context: Context) {
         // the chat screen, and that screen's slot is reused when this replaces a live chat).
         freshChatSeq.value += 1
         messages.clear(); lastSessionId = null; currentSession.value = null; config.value = emptyList()
+        voiceChatChanged()
         resetContextUsage()
         // A new chat always leaves any peer-owned session (the core clears its own routing too).
         currentRoamPeer = null
@@ -2597,7 +2623,10 @@ class ConnectionManager private constructor(context: Context) {
         // Hold the CPU from the moment the prompt leaves the app, not from the
         // first activeRun callback: the screen can be off before goose replies.
         wake.acquire(expect ?: "<none>", "send", "1")
-        speaker.stop()   // a new prompt supersedes any reply still being spoken
+        // A new prompt supersedes any reply still being spoken. In conversation mode
+        // bump the epoch so the FIRST chunk of this new turn is the first one we
+        // speak; outside it, a plain stop is enough.
+        if (voiceState.value != VoiceState.IDLE) nextVoiceGeneration() else speaker.stop()
         // The next bubble to stream is a NEW one; the reply on screen is finished.
         streamingRowId.value = null
         // Conversation mode: the model's first word is a second or more away, so arm
@@ -2709,6 +2738,8 @@ class ConnectionManager private constructor(context: Context) {
             redialFallenRoamPeers()
             if (!store.persistentConnection && !busy.value) stopService()
         } else {
+            // The microphone and spoken replies must never outlive the visible app.
+            main.post { if (voiceState.value != VoiceState.IDLE) stopVoice("background") }
             // Leaving the foreground is the last reliable moment before Android
             // may reclaim the process. The core saves the main session on ready
             // and at the end of a turn, and a peer saves when its session closes
@@ -2929,8 +2960,17 @@ class ConnectionManager private constructor(context: Context) {
      *  dropped rather than deferred. A parked prompt in another chat is a different turn's
      *  business and survives. */
     fun cancel() {
+        if (voiceState.value != VoiceState.IDLE) stopVoice("stop")
+        cancelCoreTurn()
+    }
+
+    /** Cancel the ACP turn without changing conversation mode (used by barge-in). */
+    private fun cancelCoreTurn() {
         core.cancel()
-        wake.releaseAll("stop", immediate = true)
+        // Barge-in reaches here with the mic still open: never release the voice
+        // owner along with the turn owners. A full Stop has already left voice
+        // through stopVoice(), so the protected kind is absent then.
+        wake.releaseExceptKind("voice", "stop", immediate = true)
         main.removeCallbacks(thinkingFiller)
         speaker.stop()   // Stop means stop — spoken replies included
         currentSession.value?.let { sid ->
@@ -2951,6 +2991,67 @@ class ConnectionManager private constructor(context: Context) {
     // spoken, and the mic is already listening again. Talking over the reply stops
     // it (barge-in) and starts a new utterance.
 
+    private fun microphoneGranted(): Boolean =
+        appContext.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    private fun voiceAllowed(): Boolean = voicePermits(unlocked, appForeground, microphoneGranted())
+
+    /** Bump the spoken-audio epoch. All voice state lives on `main`; this method
+     *  is called only from main-posted lambdas or direct UI callbacks. */
+    private fun nextVoiceGeneration(): Long {
+        voiceGeneration += 1
+        main.removeCallbacks(thinkingFiller)
+        speaker.stop()
+        replyStarted = false
+        return voiceGeneration
+    }
+
+    private fun clearVoiceRequest() {
+        voiceRequestId = null
+        voiceTimeout?.let { main.removeCallbacks(it) }
+        voiceTimeout = null
+    }
+
+    private fun acquireVoiceWake(generation: Long) {
+        val session = currentSession.value ?: "<voice>"
+        val owner = wakeOwnerKey("voice", session, generation.toString())
+        voiceWakeOwner = owner
+        wake.acquire(session, "voice", generation.toString())
+    }
+
+    private fun releaseVoiceWake(reason: String) {
+        voiceWakeOwner?.let { wake.release(it, "voice-$reason", immediate = true) }
+        voiceWakeOwner = null
+    }
+
+    /** A chat switch invalidates any speech already queued for the old chat, but
+     *  conversation mode itself keeps listening in the new one. */
+    private fun voiceChatChanged() {
+        if (voiceState.value == VoiceState.IDLE) return
+        clearVoiceRequest()
+        releaseVoiceWake("chat")
+        val generation = nextVoiceGeneration()
+        acquireVoiceWake(generation)
+    }
+
+    /** One cleanup path for every reason conversation mode can end. No core call:
+     *  stopping the mic is local; an ACP turn still running is stopped separately. */
+    private fun stopVoice(reason: String) {
+        if (voiceLoop == null && voiceState.value == VoiceState.IDLE && voiceNotice.value == null)
+            return
+        clearVoiceRequest()
+        voiceLoop?.stop()
+        voiceLoop = null
+        nextVoiceGeneration()
+        releaseVoiceWake(reason)
+        voiceState.value = VoiceState.IDLE
+        voiceLevel.value = 0f
+        voiceNoticeFor(reason)?.let { voiceNotice.value = it }
+    }
+
+    /** MainActivity's mic-permission launcher reports denial here. */
+    fun voicePermissionDenied() { main.post { stopVoice("permission-denied") } }
+
     /** The mic button: one tap in, one tap out. */
     fun toggleConversation() {
         if (voiceState.value == VoiceState.IDLE) startConversation() else stopConversation()
@@ -2958,7 +3059,11 @@ class ConnectionManager private constructor(context: Context) {
 
     fun startConversation() {
         if (voiceLoop != null) return
-        speaker.stop()
+        if (!voiceAllowed()) {
+            voiceNotice.value = voiceNoticeFor(if (microphoneGranted()) "gated" else "permission-denied")
+            return
+        }
+        val generation = nextVoiceGeneration()
         voiceNotice.value = null
         val loop = VoiceLoop(
             onUtterance = { wav -> onVoiceUtterance(wav) },
@@ -2967,34 +3072,41 @@ class ConnectionManager private constructor(context: Context) {
             isSpeaking = { speaker.speaking },
         )
         if (!loop.start()) {
-            voiceNotice.value = "Couldn't start the microphone — check the permission"
+            voiceNotice.value = voiceNoticeFor("microphone")
             return
         }
         voiceLoop = loop
         voiceState.value = VoiceState.LISTENING
+        // Bounded: the wake lock has a 10-minute per-acquire cap and renews only
+        // while this owner exists. It is released on every stop reason below.
+        acquireVoiceWake(generation)
     }
 
-    fun stopConversation() {
-        voiceLoop?.stop()
-        voiceLoop = null
-        main.removeCallbacks(thinkingFiller)
-        speaker.stop()
-        voiceState.value = VoiceState.IDLE
-        voiceLevel.value = 0f
-    }
+    fun stopConversation() { stopVoice("stop") }
 
     /** A VAD-cut utterance: transcribe it. The text returns on `onTranscript`. */
     private fun onVoiceUtterance(wav: ByteArray) {
-        if (voiceState.value == VoiceState.IDLE) return
+        if (voiceState.value == VoiceState.IDLE || !voiceAllowed()) return
+        // One pending request only. The core's callback cannot carry an id yet, so
+        // a retake supersedes the older request rather than accepting its late reply.
+        clearVoiceRequest()
+        val request = UUID.randomUUID().toString()
+        val observed = voiceGeneration
+        voiceRequestId = request
         voiceState.value = VoiceState.TRANSCRIBING
         val b64 = android.util.Base64.encodeToString(wav, android.util.Base64.NO_WRAP)
-        // A wedged server must not leave the loop stuck out of listening.
-        main.postDelayed({
-            if (voiceState.value == VoiceState.TRANSCRIBING) {
-                voiceNotice.value = "Transcription timed out"
-                voiceState.value = VoiceState.LISTENING
-            }
-        }, 20_000)
+        // A wedged server must not leave the loop stuck out of listening. The
+        // captured id/generation make an old timer harmless after a retake or Stop.
+        val timeout = Runnable {
+            if (!voiceRequestAccepts(voiceRequestId, request)) return@Runnable
+            if (!voiceGenerationCurrent(voiceGeneration, observed)) return@Runnable
+            voiceRequestId = null
+            voiceTimeout = null
+            voiceNotice.value = voiceNoticeFor("timeout")
+            voiceState.value = VoiceState.LISTENING
+        }
+        voiceTimeout = timeout
+        main.postDelayed(timeout, 20_000)
         io { unstable.dictationTranscribe(b64, "audio/wav", store.dictationProvider) }
     }
 
@@ -3002,10 +3114,13 @@ class ConnectionManager private constructor(context: Context) {
      *  including the local echo, which is the ONLY way the utterance reaches the chat (the
      *  live wire carries no user_message_chunk; it appears only in the next session/load
      *  replay), and the same queue/steer rules a typed message gets. */
-    fun onVoiceTranscript(text: String) {
+    fun onVoiceTranscript(text: String, requestId: String? = null) {
         if (voiceState.value == VoiceState.IDLE) return   // mode was switched off mid-flight
+        if (!voiceRequestAccepts(voiceRequestId, requestId)) return
+        clearVoiceRequest()
         val t = text.trim()
         if (t.isEmpty()) {
+            voiceNotice.value = voiceNoticeFor("empty")
             voiceState.value = VoiceState.LISTENING
             return
         }
@@ -3014,11 +3129,12 @@ class ConnectionManager private constructor(context: Context) {
         send(t)
     }
 
-    /** The user spoke over the reply: stop the audio and abort the turn. */
+    /** The user spoke over the reply: stop the audio and abort the turn, but keep
+     *  listening — barge-in must not exit conversation mode. */
     private fun onVoiceBargeIn() {
-        main.removeCallbacks(thinkingFiller)
-        speaker.stop()
-        if (busy.value) cancel()
+        clearVoiceRequest()
+        nextVoiceGeneration()
+        if (busy.value) cancelCoreTurn()
         if (voiceState.value == VoiceState.SPEAKING) voiceState.value = VoiceState.LISTENING
     }
 
@@ -3133,6 +3249,7 @@ class ConnectionManager private constructor(context: Context) {
                 live = false; connecting = false; online.value = false
                 replayActive.value = false
                 status.value = "not connected"
+                if (voiceState.value != VoiceState.IDLE) stopVoice("wire-lost")
                 // The turn may belong to a chat the reader already switched away from;
                 // the recorded owner wins over the screen (both are main-wire ids here).
                 if (currentRoamPeer == null) {
@@ -3148,6 +3265,7 @@ class ConnectionManager private constructor(context: Context) {
                 live = false; connecting = false; online.value = false
                 replayActive.value = false
                 status.value = friendlyConnectError(st.message)
+                if (voiceState.value != VoiceState.IDLE) stopVoice("wire-lost")
                 if (currentRoamPeer == null) {
                     (turnInFlightSession ?: currentSession.value)
                         ?.takeIf { peerOf(it) == null }?.let { releaseTurnForLostWire(it) }
@@ -4138,6 +4256,7 @@ class ConnectionManager private constructor(context: Context) {
         // A dead dictation call must clear "Transcribing…" and say why, without
         // dropping out of conversation mode (the loop is still listening).
         if (method.startsWith("_goose/unstable/dictation")) {
+            clearVoiceRequest()
             voiceNotice.value = message
             if (voiceState.value == VoiceState.TRANSCRIBING) voiceState.value = VoiceState.LISTENING
         }

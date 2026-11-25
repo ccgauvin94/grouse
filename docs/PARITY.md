@@ -85,7 +85,7 @@ the notification records and the roam card-pin getters are not macro-enumerated
 fields. It is still user-visible, so it is ratcheted here as free-form `ui.*` rows
 with the same evidence and exclusion rules as any other row.
 
-excluded = 26
+excluded = 27
 
 | surface | android | desktop |
 |---|---|---|
@@ -228,3 +228,4 @@ excluded = 26
 | `ui.push-armed-owner` | excluded: the phone accepts a turn target only when it is a known session and the exact id it armed (validatedPushSession), so no sender-chosen roam label can become a destination | excluded: a single-client desktop announces live turns and never routes a push id to a wire, so no roam owner declaration is used |
 | `ui.roam-card-pin` | excluded: the core pins the saved card on every dial; the phone shows the computed fingerprint but has no pin-view or re-enroll UI, so the getter/enroll/clear calls have no consumer | excluded: ABI 20 exports `grouse_roam_card_pin`/`_pins`/`_enroll`/`_clear` and the desktop resolves all four, but there is still no pin-view or re-enroll screen; the core's dial-time check remains the only enforcement |
 | `ui.goose-config` | yes: GooseConfigScreens.kt#fun GooseConfigScreen+ConnectionManager.kt#fun refreshGooseConfig | yes: ui/GooseConfigDialog.qml#function refreshGooseConfig()+src/manager.cpp#void Manager::refreshGooseConfig |
+| `ui.voice-conversation` | yes: Voice.kt#class VoiceLoop+ConnectionManager.kt#fun startConversation | excluded: desktop has no microphone capture, dictation intent or TTS engine; voice stays a phone-only surface and the C ABI slots remain no-ops |

@@ -12,7 +12,9 @@ import android.speech.tts.UtteranceProgressListener
 import java.io.ByteArrayOutputStream
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 import kotlin.math.sqrt
 
@@ -182,11 +184,21 @@ class VoiceLoop(
  * demand a longer onset before treating the user's voice as an interruption.
  */
 class Speaker(context: Context, private val onIdle: () -> Unit = {}) {
+    private data class PendingSpeech(val text: String, val generation: Long)
+
     private var tts: TextToSpeech? = null
     private var ready = false
-    private val pending = ArrayDeque<String>()
+    private val pending = ArrayDeque<PendingSpeech>()
     private val outstanding = AtomicInteger(0)
+    // A monotonic epoch makes an utterance from a cancelled turn indistinguishable
+    // from a fresh one for TextToSpeech, but NOT for us: every id carries the epoch
+    // it was issued in, and callbacks from an older epoch are ignored. Stop, barge-in,
+    // chat switch, wire loss and lock/background all bump it.
+    private val generation = AtomicLong(0)
+    private val sequence = AtomicLong(0)
+    private val liveUtterances = ConcurrentHashMap<String, Long>()
 
+    val currentGeneration: Long get() = generation.get()
     val speaking: Boolean get() = outstanding.get() > 0
 
     init {
@@ -196,42 +208,55 @@ class Speaker(context: Context, private val onIdle: () -> Unit = {}) {
                 tts?.language = Locale.getDefault()
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {}
-                    override fun onDone(utteranceId: String?) { done() }
+                    override fun onDone(utteranceId: String?) { done(utteranceId) }
                     @Deprecated("Deprecated in Java")
-                    override fun onError(utteranceId: String?) { done() }
+                    override fun onError(utteranceId: String?) { done(utteranceId) }
                 })
-                while (pending.isNotEmpty()) speak(pending.removeFirst())
+                while (pending.isNotEmpty()) {
+                    val next = pending.removeFirst()
+                    speak(next.text, next.generation)
+                }
             }
         }
     }
 
-    private fun done() {
+    private fun done(utteranceId: String?) {
+        if (utteranceId == null) return
+        val issuedIn = liveUtterances.remove(utteranceId) ?: return
+        if (issuedIn != generation.get()) return
         if (outstanding.decrementAndGet() <= 0) {
             outstanding.set(0)
             onIdle()
         }
     }
 
-    fun speak(text: String) {
+    /** Queue [text] only while [generation] is still the current epoch. */
+    fun speak(text: String, generation: Long = currentGeneration): Boolean {
         val t = text.trim()
-        if (t.isEmpty()) return
-        val engine = tts ?: return
+        if (t.isEmpty() || generation != currentGeneration) return false
+        val engine = tts ?: return false
         if (!ready) {
-            pending.addLast(t)
-            return
+            pending.addLast(PendingSpeech(t, generation))
+            return true
         }
+        val id = "$generation:${sequence.incrementAndGet()}:${UUID.randomUUID()}"
+        liveUtterances[id] = generation
         outstanding.incrementAndGet()
-        engine.speak(t, TextToSpeech.QUEUE_ADD, null, UUID.randomUUID().toString())
+        engine.speak(t, TextToSpeech.QUEUE_ADD, null, id)
+        return true
     }
 
-    /** Drop anything queued or playing (a new turn, or the user talking over it). */
+    /** Drop anything queued or playing and invalidate its callbacks. */
     fun stop() {
+        generation.incrementAndGet()
         pending.clear()
+        liveUtterances.clear()
         outstanding.set(0)
         tts?.stop()
     }
 
     fun shutdown() {
+        stop()
         tts?.shutdown()
         tts = null
         ready = false
